@@ -1,0 +1,329 @@
+# =============================================================================
+# Logic Chains Configuration
+# =============================================================================
+# Define multi-step judgment chains for hard-case event categories.
+# Each chain is a sequence of steps that may involve:
+#   - vlm_call:  Call VLM with specific prompt and images
+#   - compute:   Mathematical/logical computation on local vars
+#   - condition: Branch based on expression result
+#   - cv_fusion: Integrate external CV track data
+#   - loop:      Iterate over a collection
+#   - aggregate: Combine multiple intermediate results
+#
+# Variables are stored in local_vars and referenced via ${key} syntax.
+# =============================================================================
+
+logic_chains:
+  # ---------------------------------------------------------------------------
+  # Chain: direction_analysis
+  # Purpose: Multi-step direction determination using dedicated VLM prompt.
+  # Strategy: Single VLM call with structured 6-step prompt, then aggregate
+  #           the result into a DirectionAnalysis object.
+  # ---------------------------------------------------------------------------
+  - chain_id: "direction_analysis"
+    name: "Direction Analysis Chain"
+    name_zh: "方向分析链"
+    description: "Dedicated multi-step direction analysis to reliably determine traffic flow direction per road."
+    target_event_id: -1
+    precondition: "scene_understanding is not None"
+    required_context_keys:
+      - "keyframes"
+      - "scene_understanding"
+    output_schema:
+      direction_analysis: "DirectionAnalysis"
+    steps:
+      - step_id: "DA1"
+        step_type: "vlm_call"
+        name: "Direction Analysis VLM Call"
+        description: "Call VLM with the 6-step direction analysis prompt."
+        prompt_template_id: "direction_analysis"
+        input_images: ["${keyframes.coarse_frames}"]
+        context_vars_mapping:
+          road_count: "${scene_understanding.road_count}"
+          pre_directions: "${scene_understanding.roads}"
+        output_key: "direction_analysis_raw"
+        response_schema:
+          type: "object"
+          required: ["direction_analysis"]
+          properties:
+            direction_analysis:
+              type: "object"
+              required: ["anchor_points", "vehicle_motions", "head_orientations", "consistency_check", "perspective_check", "conclusions"]
+              properties:
+                anchor_points:
+                  type: "array"
+                  items:
+                    type: "object"
+                    properties:
+                      name: { type: "string" }
+                      position: { type: "string" }
+                      type: { type: "string" }
+                vehicle_motions:
+                  type: "array"
+                  items:
+                    type: "object"
+                    properties:
+                      vehicle_id: { type: "string" }
+                      description: { type: "string" }
+                      displacement: { type: "string" }
+                      movement_direction: { type: "string", enum: ["toward_top", "toward_bottom", "toward_left", "toward_right", "stationary", "unknown"] }
+                      road_id: { type: "integer" }
+                head_orientations:
+                  type: "array"
+                  items:
+                    type: "object"
+                    properties:
+                      vehicle_id: { type: "string" }
+                      head_orientation: { type: "string", enum: ["toward_top", "toward_bottom", "toward_left", "toward_right", "unknown"] }
+                      evidence: { type: "string" }
+                consistency_check:
+                  type: "array"
+                  items:
+                    type: "object"
+                    properties:
+                      vehicle_id: { type: "string" }
+                      movement: { type: "string", enum: ["toward_top", "toward_bottom", "toward_left", "toward_right", "stationary", "unknown"] }
+                      head_orientation: { type: "string", enum: ["toward_top", "toward_bottom", "toward_left", "toward_right", "unknown"] }
+                      consistent: { type: "boolean" }
+                      anomaly: { type: "boolean" }
+                perspective_check:
+                  type: "array"
+                  items:
+                    type: "object"
+                    properties:
+                      vehicle_id: { type: "string" }
+                      size_change: { type: "string" }
+                      matches_direction: { type: "boolean" }
+                      trajectory_parallel_to_lanes: { type: "boolean" }
+                conclusions:
+                  type: "array"
+                  items:
+                    type: "object"
+                    properties:
+                      road_id: { type: "integer" }
+                      name: { type: "string" }
+                      normal_direction: { type: "string", enum: ["toward_top", "toward_bottom", "toward_left", "toward_right", "unknown"] }
+                      confidence: { type: "number" }
+                      evidence_summary: { type: "string" }
+
+      - step_id: "DA2"
+        step_type: "aggregate"
+        name: "Build DirectionAnalysis Result"
+        description: "Construct DirectionAnalysis from VLM raw output."
+        output_key: "direction_analysis"
+        context_vars_mapping:
+          anchor_points: "${direction_analysis_raw.direction_analysis.anchor_points}"
+          vehicle_motions: "${direction_analysis_raw.direction_analysis.vehicle_motions}"
+          head_orientations: "${direction_analysis_raw.direction_analysis.head_orientations}"
+          consistency_check: "${direction_analysis_raw.direction_analysis.consistency_check}"
+          perspective_check: "${direction_analysis_raw.direction_analysis.perspective_check}"
+          conclusions: "${direction_analysis_raw.direction_analysis.conclusions}"
+
+  # ---------------------------------------------------------------------------
+  # Chain: vehicle_reversing
+  # Purpose: Detect vehicles reversing or driving against normal traffic flow.
+  # Strategy: Use a single direct VLM call comparing first/last frames.
+  #   Fewer calls = fewer parse errors + directly catches slow reversing.
+  # ---------------------------------------------------------------------------
+  - chain_id: "vehicle_reversing"
+    name: "Vehicle Reversing Detection Chain"
+    name_zh: "车辆逆行/倒车检测"
+    description: "Direct detection of reversing/逆行 vehicles. Only runs when parking or emergency lane events are detected."
+    target_event_id: 7
+    precondition: "event_results.get(0, {}).get('detected', False) or event_results.get(1, {}).get('detected', False) or scene_tags.get('停车', '').startswith('有') or scene_tags.get('应急车道车辆', '').startswith('有')"
+    required_context_keys:
+      - "keyframes"
+      - "scene_understanding"
+    output_schema:
+      detected: "bool"
+      instances: "List[EventInstance]"
+      confidence: "float"
+    steps:
+      - step_id: "S1"
+        step_type: "vlm_call"
+        name: "Direct Reversing Detection"
+        description: "One-shot VLM call to detect reversing/wrong-way vehicles by comparing first and last frames."
+        prompt_template_id: "direct_reversing_detection"
+        input_images: ["${keyframes.coarse_frames}"]
+        context_vars_mapping:
+          road_count: "${scene_understanding.road_count}"
+          road_directions: "${scene_understanding.roads}"
+        output_key: "reversing_result"
+        response_schema:
+          type: "object"
+          required: ["vehicles", "detected", "confidence", "reasoning"]
+          properties:
+            vehicles:
+              type: "array"
+              items:
+                type: "object"
+                properties:
+                  vehicle_id: { type: "string" }
+                  road_id: { type: "integer" }
+                  behavior: { type: "string", enum: ["reversing", "wrong_way"] }
+                  start_time_sec: { type: "number" }
+                  end_time_sec: { type: "number" }
+                  confidence: { type: "number" }
+                  description: { type: "string" }
+                  reasoning: { type: "string" }
+            detected: { type: "boolean" }
+            confidence: { type: "number" }
+            reasoning: { type: "string" }
+
+      - step_id: "S2"
+        step_type: "condition"
+        name: "Check Detection"
+        description: "If reversing detected, proceed to build result."
+        condition_expression: "reversing_result.get('detected', False)"
+        true_next_step: "S3"
+        false_next_step: "S3"
+
+      - step_id: "S3"
+        step_type: "aggregate"
+        name: "Build Event Result"
+        description: "Construct final EventResult from reversing_result."
+        context_vars_mapping:
+          detected: "${reversing_result.detected}"
+          instances: "${reversing_result.vehicles}"
+          confidence: "${reversing_result.confidence}"
+          reasoning: "${reversing_result.reasoning}"
+        output_key: "event_result"
+
+  # ---------------------------------------------------------------------------
+  # Chain: emergency_lane_occupancy
+  # Purpose: Detect vehicles in emergency lanes.
+  # ---------------------------------------------------------------------------
+  - chain_id: "emergency_lane_occupancy"
+    name: "Emergency Lane Occupancy Detection"
+    name_zh: "应急车道占用检测"
+    description: "Detect vehicles occupying emergency lanes."
+    target_event_id: 1
+    steps:
+      - step_id: "EL1"
+        step_type: "vlm_call"
+        name: "Locate Emergency Lanes"
+        description: "Identify emergency lane positions in the video."
+        prompt_template_id: "emergency_lane_location"
+        input_images: ["${keyframes.coarse_frames}"]
+        output_key: "emergency_lane_regions"
+
+      - step_id: "EL2"
+        step_type: "vlm_call"
+        name: "Track Vehicles in Emergency Lanes"
+        description: "Find all vehicles that enter or occupy emergency lanes."
+        prompt_template_id: "emergency_lane_vehicle_tracking"
+        input_images: ["${keyframes.coarse_frames}"]
+        context_vars_mapping:
+          emergency_lane_regions: "${emergency_lane_regions}"
+        output_key: "emergency_vehicles"
+
+      - step_id: "EL3"
+        step_type: "condition"
+        name: "Check if Any Found"
+        condition_expression: "len(emergency_vehicles.get('vehicles', [])) > 0"
+        true_next_step: "EL4"
+        false_next_step: "EL5"
+
+      - step_id: "EL4"
+        step_type: "compute"
+        name: "Build Detected Result"
+        compute_expression: |
+          {
+            "detected": True,
+            "instances": emergency_vehicles.get("vehicles", []),
+            "confidence": emergency_vehicles.get("confidence", 0.85),
+            "summary": "检测到应急车道占用"
+          }
+        output_key: "event_result"
+
+      - step_id: "EL5"
+        step_type: "compute"
+        name: "Build Empty Result"
+        compute_expression: |
+          {
+            "detected": False,
+            "instances": [],
+            "confidence": 0.0,
+            "summary": "未检测到应急车道占用"
+          }
+        output_key: "event_result"
+
+  # ---------------------------------------------------------------------------
+  # Chain: lane_change_solid
+  # Purpose: Detect lane changes across solid lines.
+  # ---------------------------------------------------------------------------
+  - chain_id: "lane_change_solid"
+    name: "Lane Change over Solid Line Detection"
+    name_zh: "实线变道检测"
+    description: "Detect vehicles crossing solid lane lines."
+    target_event_id: 9
+    steps:
+      - step_id: "LC1"
+        step_type: "vlm_call"
+        name: "Identify Lane Markings"
+        description: "Map all lane markings, distinguishing solid vs dashed lines."
+        prompt_template_id: "lane_marking_identification"
+        input_images: ["${keyframes.coarse_frames}"]
+        output_key: "lane_markings"
+        response_schema:
+          type: "object"
+          properties:
+            lane_markings:
+              type: "array"
+              items:
+                type: "object"
+                properties:
+                  line_id: { type: "integer" }
+                  type: { type: "string", enum: ["solid", "dashed"] }
+                  bbox: { type: "array", items: { type: "number" } }
+                  confidence: { type: "number" }
+
+      - step_id: "LC2"
+        step_type: "vlm_call"
+        name: "Track Lane Changes"
+        description: "Track vehicles and identify lane change maneuvers."
+        prompt_template_id: "lane_change_tracking"
+        input_images: ["${keyframes.precision_frames}"]
+        context_vars_mapping:
+          lane_markings: "${lane_markings}"
+        output_key: "lane_changes"
+        response_schema:
+          type: "object"
+          properties:
+            lane_changes:
+              type: "array"
+              items:
+                type: "object"
+                properties:
+                  vehicle_id: { type: "string" }
+                  from_lane: { type: "integer" }
+                  to_lane: { type: "integer" }
+                  cross_position: { type: "array", items: { type: "number" } }
+                  time_sec: { type: "number" }
+                  confidence: { type: "number" }
+
+      - step_id: "LC3"
+        step_type: "compute"
+        name: "Filter Solid Line Violations"
+        description: "Keep only lane changes that cross solid lines."
+        compute_expression: |
+          def filter_solid():
+              changes = lane_changes.get("lane_changes", [])
+              markings = lane_markings.get("lane_markings", [])
+              solid_violations = []
+              for change in changes:
+                  cx = change.get("cross_position", [0, 0])
+                  crossed = next((m for m in markings if m.get("type") == "solid"), None)
+                  if crossed:
+                      solid_violations.append(change)
+              return solid_violations
+        output_key: "violations"
+
+      - step_id: "LC4"
+        step_type: "aggregate"
+        name: "Build Result"
+        output_key: "event_result"
+        context_vars_mapping:
+          detected: "${len(violations) > 0}"
+          instances: "${violations}"
+          confidence: "${0.8 if len(violations) > 0 else 0.0}"

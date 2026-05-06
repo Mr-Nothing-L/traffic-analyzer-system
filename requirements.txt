@@ -1,0 +1,29 @@
+# Traffic Analyzer Dependencies
+
+# Core
+pydantic>=2.0.0
+pyyaml>=6.0
+python-dotenv>=1.0.0
+jinja2>=3.1.0
+
+# Video Processing
+opencv-python>=4.8.0
+numpy>=1.24.0
+pillow>=10.0.0
+
+# LLM/VLM APIs
+anthropic>=0.40.0
+openai>=1.30.0
+google-generativeai>=0.7.0
+
+# HTTP
+httpx>=0.27.0
+aiohttp>=3.9.0
+
+# Utils
+tenacity>=8.2.0
+rich>=13.0.0
+
+# Testing
+pytest>=8.0.0
+pytest-asyncio>=0.23.0

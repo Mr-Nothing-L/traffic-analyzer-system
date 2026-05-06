@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c \"import cv2; print\\(cv2.__version__\\)\")",
+      "Bash(python3 -c \"from PIL import Image; print\\(Image.__version__\\)\")",
+      "Bash(python3 -c \"import numpy; print\\(numpy.__version__\\)\")",
+      "Bash(python3 -c \"import pydantic; print\\(pydantic.__version__\\)\")",
+      "Bash(pip install *)",
+      "Bash(pip list *)",
+      "Bash(python3 -c \"import anthropic; print\\('anthropic', anthropic.__version__\\)\")",
+      "Bash(python3 -c \"import openai; print\\('openai', openai.__version__\\)\")",
+      "Bash(python3 -c \"import google.generativeai; print\\('google.generativeai ok'\\)\")",
+      "Bash(python3 -c \"import tenacity; print\\('tenacity ok'\\)\")",
+      "Bash(python3 -c \"import jinja2; print\\('jinja2 ok'\\)\")",
+      "Bash(python *)",
+      "Bash(python3 *)",
+      "Bash(pip3 install *)"
+    ]
+  }
+}

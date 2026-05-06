@@ -1,0 +1,241 @@
+{
+  "video_info": {
+    "file_path": "/media/wanji/Elements/大模型应用/11.64.37.48_ch1_20260401_142812/08_ch1_20260401_142812_6.mp4",
+    "file_name": "08_ch1_20260401_142812_6.mp4",
+    "duration_sec": 22.866666666666667,
+    "fps": 15.0,
+    "total_frames": 343,
+    "width": 1920,
+    "height": 1080,
+    "codec": "",
+    "bitrate": 0,
+    "record_time": null,
+    "camera_id": null
+  },
+  "scene_summary": {
+    "road_count": 2,
+    "roads": [
+      {
+        "road_id": 0,
+        "name": "左侧道路，车辆从画面底部向顶部行驶（从近到远）",
+        "pixel_bounds": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "normal_direction": "up",
+        "direction_confidence": 0.0,
+        "lane_count": 3,
+        "has_emergency_lane": true
+      },
+      {
+        "road_id": 1,
+        "name": "右侧道路，车辆从画面顶部向底部行驶（从远到近）",
+        "pixel_bounds": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "normal_direction": "down",
+        "direction_confidence": 0.0,
+        "lane_count": 3,
+        "has_emergency_lane": true
+      }
+    ],
+    "weather": "clear",
+    "lighting": "day",
+    "traffic_density": "light",
+    "total_vehicles_estimate": 8,
+    "scene_description": "G3京台高速公路双向六车道场景，中间设有绿色防眩板隔离带。左侧道路车辆由近及远向画面顶部行驶，右侧道路车辆由远及近向画面底部行驶。天气晴朗，光照充足，车流量较小，可见多辆小轿车及一辆货车通行，路面状况良好。",
+    "confidence": 0.92
+  },
+  "overall_traffic_description": "G3京台高速公路双向六车道场景，中间设有绿色防眩板隔离带。左侧道路车辆由近及远向画面顶部行驶，右侧道路车辆由远及近向画面底部行驶。天气晴朗，光照充足，车流量较小，可见多辆小轿车及一辆货车通行，路面状况良好。检测到 3 类交通事件（违法停车、应急车道占用检测、车辆逆行/倒车检测），需关注后续处置建议。",
+  "event_results": [
+    {
+      "event_id": 0,
+      "event_name": "违法停车",
+      "detected": true,
+      "instances": [
+        {
+          "event_id": 0,
+          "event_name": "违法停车",
+          "vehicle_id": null,
+          "road_id": null,
+          "start_time_sec": 0.0,
+          "end_time_sec": 5.0,
+          "confidence": 0.92,
+          "confidence_level": "low",
+          "evidence_frames": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "description": "一辆白色小轿车持续停靠在高速公路左侧应急车道/路肩上，后备箱处于打开状态，周围未见警示标志、双闪灯或救援人员。",
+          "reasoning": "该白色车辆在北京G3京台高速的应急车道上静止停留超过5秒（覆盖全部6帧画面），且后备箱开启。根据中国高速公路法规，应急车道仅供紧急情况使用，且必须有明显紧急救援迹象（如双闪灯、警示牌、救援人员在岗）。该车未见任何上述合法紧急停靠特征，符合违法停车定义。其他车辆均在正常行驶车道通行，无异常。",
+          "disposal_suggestion": ""
+        }
+      ],
+      "summary": "视频中检测到一起违法停车事件：一辆白色小轿车在北京G3京台高速K3+303路段的应急车道上长时间停留，后备箱开启但无任何紧急救援迹象，构成高速公路应急车道违法停车。",
+      "confidence": 0.92,
+      "analysis_process": []
+    },
+    {
+      "event_id": 1,
+      "event_name": "应急车道占用检测",
+      "detected": true,
+      "instances": [
+        {
+          "event_id": 1,
+          "event_name": "应急车道占用检测",
+          "vehicle_id": null,
+          "road_id": null,
+          "start_time_sec": 0.0,
+          "end_time_sec": 5.0,
+          "confidence": 0.8280000000000001,
+          "confidence_level": "low",
+          "evidence_frames": [],
+          "description": "车辆在应急车道/路肩区域停放（源自一辆白色小轿车持续停靠在高速公路左侧应急车道/路肩上，后备箱处于打开状态，周围未见警示标志、双闪灯或救援人员。）",
+          "reasoning": "违法停车事件检测到车辆在应急车道/路肩区域停放，符合应急车道占用定义。",
+          "disposal_suggestion": ""
+        }
+      ],
+      "summary": "应急车道占用（由违法停车结果推断，共 1 个实例）",
+      "confidence": 0.8280000000000001,
+      "analysis_process": [
+        "Step EL1 (VLM): success=True, tokens=277, model=claude-sonnet-4-6",
+        "Step EL2 (VLM): success=True, tokens=225, model=claude-sonnet-4-6",
+        "Step EL5 (Compute): result type=dict"
+      ]
+    },
+    {
+      "event_id": 2,
+      "event_name": "交通事故",
+      "detected": false,
+      "instances": [],
+      "summary": "未在视频中检测到交通事故。视频显示北京G3京台高速正常交通流，车辆有序行驶，无碰撞、无车辆损坏、无烟雾火灾、无道路障碍物、无车辆翻覆等交通事故迹象。",
+      "confidence": 0.0,
+      "analysis_process": []
+    },
+    {
+      "event_id": 3,
+      "event_name": "高速公路行人出现",
+      "detected": false,
+      "instances": [],
+      "summary": "未在视频中检测到高速公路行人出现事件。所有帧中仅观察到正常行驶的车辆，包括白色小轿车、灰色轿车、货车等，未发现任何人员位于高速公路车道、路肩或中央隔离带区域。白色车辆虽停靠在路肩且后备箱开启，但未见驾驶员或乘客下车活动。",
+      "confidence": 0.0,
+      "analysis_process": []
+    },
+    {
+      "event_id": 4,
+      "event_name": "摩托车出现",
+      "detected": false,
+      "instances": [],
+      "summary": "未在视频中检测到摩托车出现。所有帧中仅观察到四轮机动车（白色小轿车、灰色小轿车、黑色SUV、白色货车/卡车），未出现符合摩托车特征的两轮车辆。",
+      "confidence": 0.0,
+      "analysis_process": []
+    },
+    {
+      "event_id": 5,
+      "event_name": "严重拥堵",
+      "detected": false,
+      "instances": [],
+      "summary": "未在视频中检测到严重拥堵。视频中G3京台高速双向车道均保持畅通状态，车辆数量稀少，各车道之间间距较大，车辆行驶速度正常，未出现高密度车流、排队或走走停停等拥堵特征。",
+      "confidence": 0.0,
+      "analysis_process": []
+    },
+    {
+      "event_id": 6,
+      "event_name": "道路施工",
+      "detected": false,
+      "instances": [],
+      "summary": "未在视频中检测到道路施工。所有帧均显示正常的高速公路通行状态，路面完好，车道标线清晰，无施工区域、无施工车辆、无交通锥桶或施工标志、无穿着反光背心的工作人员。",
+      "confidence": 0.0,
+      "analysis_process": []
+    },
+    {
+      "event_id": 7,
+      "event_name": "车辆逆行/倒车检测",
+      "detected": true,
+      "instances": [
+        {
+          "event_id": 7,
+          "event_name": "车辆逆行/倒车检测",
+          "vehicle_id": "vehicle_1",
+          "road_id": 0,
+          "start_time_sec": 0.0,
+          "end_time_sec": 22.0,
+          "confidence": 0.95,
+          "confidence_level": "low",
+          "evidence_frames": [],
+          "description": "白色SUV在左侧应急车道上倒车，车头朝向下方（画面下方），但车身向画面上方移动",
+          "reasoning": "通过对比第一帧和第四帧，白色SUV在应急车道上的位置明显变化：第一帧中该车位于画面左上方靠近路灯杆位置，第四帧中已移动到更靠近画面顶部（更远处）。该车车头始终朝向画面下方（朝向镜头方向），而正常车流（如黑色轿车、出租车、货车）均向画面下方行驶。该车车头朝向与移动方向相反——车头朝下但车身向上方（逆着正常车流方向）移动，符合倒车特征。使用左侧护栏和路面标线作为固定参考点，确认该车确实在向后移动。",
+          "disposal_suggestion": ""
+        }
+      ],
+      "summary": "检测到 车辆逆行/倒车检测 (1 个实例)",
+      "confidence": 0.95,
+      "analysis_process": [
+        "Step S1 (VLM): success=True, tokens=11553, model=claude-sonnet-4-6",
+        "Step S3 (Aggregate): mapped 3 keys"
+      ]
+    },
+    {
+      "event_id": 8,
+      "event_name": "抛洒物",
+      "detected": false,
+      "instances": [],
+      "summary": "未在视频中检测到抛洒物。所有帧显示路面干净整洁，仅有正常行驶的车辆，未发现任何异物、碎片或空中飞行物体。",
+      "confidence": 0.0,
+      "analysis_process": []
+    },
+    {
+      "event_id": 9,
+      "event_name": "实线变道检测",
+      "detected": false,
+      "instances": [],
+      "summary": "未检测到 实线变道检测 (0 个实例)",
+      "confidence": 0.0,
+      "analysis_process": [
+        "Step LC1 (VLM): success=False, tokens=100, model=claude-sonnet-4-6",
+        "Step LC2 (VLM): success=False, tokens=475, model=claude-sonnet-4-6",
+        "Step LC3 (Compute): result type=list",
+        "Step LC4 (Aggregate): mapped 0 keys"
+      ]
+    }
+  ],
+  "binary_encoding": {
+    "encoding_string": "1_1_0_0_0_0_0_1_0_0",
+    "event_count": 3,
+    "detected_events": [
+      0,
+      1,
+      7
+    ]
+  },
+  "final_classification": "根据二进制编码 `{1_1_0_0_0_0_0_1_0_0}`，共识别出 3 类交通事件，建议结合视频复核并启动相应处置流程。",
+  "disposal_recommendations": [
+    "【违法停车】已触发，建议人工复核并记录。",
+    "【应急车道占用检测】已触发，建议人工复核并记录。",
+    "【车辆逆行/倒车检测】已触发，建议人工复核并记录。"
+  ],
+  "verification_results": {},
+  "llm_usage_stats": {
+    "provider": "anthropic",
+    "model": "claude-sonnet-4-6",
+    "total_calls": 13,
+    "failed_calls": 2,
+    "total_prompt_tokens": 61594,
+    "total_completion_tokens": 1825,
+    "total_tokens": 63419,
+    "total_latency_ms": 185762.82,
+    "total_retries": 0,
+    "average_latency_ms": 14289.45
+  },
+  "analysis_duration_sec": 202.27,
+  "generated_at": "2026-04-30T14:38:45.429689"
+}

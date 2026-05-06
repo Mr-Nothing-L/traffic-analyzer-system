@@ -1,0 +1,336 @@
+"""
+ConfigManager module for the traffic analyzer framework.
+
+Loads, validates, and hot-reloads YAML configuration files and .env settings,
+exposing them as strongly typed Pydantic models.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import yaml
+from dotenv import load_dotenv
+
+from traffic_analyzer.models.schemas import (
+    EventCategory,
+    LLMProviderConfig,
+    LogicChain,
+    PromptTemplate,
+    SamplingConfig,
+    SystemConfig,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class ConfigManager:
+    """Manages loading, validation, and hot-reloading of framework configuration.
+
+    The manager reads YAML files from a designated config directory and overlays
+    LLM provider settings from a ``.env`` file (via ``python-dotenv``). All data
+    is exposed as Pydantic v2 models for type-safe consumption across the system.
+
+    Attributes:
+        config_dir: Directory containing YAML configuration files.
+        _system_config: Cached ``SystemConfig`` instance.
+        _event_categories: Mapping of event_id -> ``EventCategory``.
+        _logic_chains: Mapping of chain_id -> ``LogicChain``.
+        _prompt_templates: Mapping of template_id -> ``PromptTemplate``.
+    """
+
+    _YAML_FILES = {
+        "event_categories": "event_categories.yaml",
+        "logic_chains": "logic_chains.yaml",
+        "prompt_templates": "prompt_templates.yaml",
+    }
+
+    def __init__(self, config_dir: str) -> None:
+        """Initialise the manager with a configuration directory.
+
+        Args:
+            config_dir: Absolute or relative path to the directory that holds
+                the YAML configs and optionally a ``.env`` file.
+        """
+        self.config_dir = Path(config_dir).resolve()
+        self._system_config: Optional[SystemConfig] = None
+        self._event_categories: Dict[int, EventCategory] = {}
+        self._logic_chains: Dict[str, LogicChain] = {}
+        self._prompt_templates: Dict[str, PromptTemplate] = {}
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def load_all(self, config_dir: Optional[str] = None) -> SystemConfig:
+        """Load all configuration sources and return a ``SystemConfig``.
+
+        This method reads the three YAML files, parses the ``.env`` file for
+        LLM provider overrides, and assembles a fully populated
+        ``SystemConfig`` model. The result is cached internally.
+
+        Args:
+            config_dir: If provided, updates ``self.config_dir`` before loading.
+
+        Returns:
+            A validated ``SystemConfig`` instance.
+
+        Raises:
+            FileNotFoundError: If a required YAML file is missing.
+            ValueError: If YAML content cannot be parsed into the expected shape.
+        """
+        if config_dir is not None:
+            self.config_dir = Path(config_dir).resolve()
+
+        raw_event_categories = self._load_yaml("event_categories")
+        raw_logic_chains = self._load_yaml("logic_chains")
+        raw_prompt_templates = self._load_yaml("prompt_templates")
+
+        # Parse .env for LLM settings
+        llm_config = self._load_env_llm_config()
+
+        # Build lookup tables
+        self._event_categories = {
+            cat["event_id"]: EventCategory.model_validate(cat)
+            for cat in raw_event_categories.get("event_categories", [])
+        }
+
+        self._logic_chains = {
+            chain["chain_id"]: LogicChain.model_validate(chain)
+            for chain in raw_logic_chains.get("logic_chains", [])
+        }
+
+        self._prompt_templates = {
+            tmpl["template_id"]: PromptTemplate.model_validate(tmpl)
+            for tmpl in raw_prompt_templates.get("prompt_templates", [])
+        }
+
+        self._system_config = SystemConfig(
+            llm_provider=llm_config,
+            sampling=SamplingConfig(),  # defaults; could be extended via YAML later
+        )
+
+        logger.info(
+            "Config loaded: %d categories, %d logic chains, %d prompt templates",
+            len(self._event_categories),
+            len(self._logic_chains),
+            len(self._prompt_templates),
+        )
+
+        return self._system_config
+
+    def get_event_categories(self) -> List[EventCategory]:
+        """Return all configured event categories, ordered by ``event_id``."""
+        if self._system_config is None:
+            raise RuntimeError("Configuration has not been loaded. Call load_all() first.")
+        return [self._event_categories[k] for k in sorted(self._event_categories)]
+
+    def get_logic_chain(self, chain_id: str) -> Optional[LogicChain]:
+        """Fetch a logic chain by its unique identifier.
+
+        Args:
+            chain_id: The ``chain_id`` field of the desired ``LogicChain``.
+
+        Returns:
+            The matching ``LogicChain`` or ``None`` if not found.
+        """
+        if self._system_config is None:
+            raise RuntimeError("Configuration has not been loaded. Call load_all() first.")
+        return self._logic_chains.get(chain_id)
+
+    def get_prompt_template(self, template_id: str) -> PromptTemplate:
+        """Fetch a prompt template by its unique identifier.
+
+        Args:
+            template_id: The ``template_id`` field of the desired ``PromptTemplate``.
+
+        Returns:
+            The matching ``PromptTemplate``.
+
+        Raises:
+            KeyError: If no template with the given ID exists.
+        """
+        if self._system_config is None:
+            raise RuntimeError("Configuration has not been loaded. Call load_all() first.")
+        if template_id not in self._prompt_templates:
+            raise KeyError(f"Prompt template '{template_id}' not found.")
+        return self._prompt_templates[template_id]
+
+    def validate_config(self) -> List[str]:
+        """Validate cross-references and consistency across config files.
+
+        Checks performed:
+        1. Every ``EventCategory`` with ``detection_mode == LOGIC_CHAIN`` references
+           an existing ``LogicChain``.
+        2. Every ``logic_chain_id`` referenced inside a ``LogicStep`` (``loop_body_chain_id``)
+           points to an existing chain.
+        3. Every ``prompt_template_id`` referenced by any ``LogicStep`` exists.
+        4. Step ``output_key`` values are non-empty for steps that produce data.
+        5. ``true_next_step`` / ``false_next_step`` references point to existing step IDs
+           within the same chain.
+
+        Returns:
+            A list of human-readable error messages. An empty list indicates a
+            fully valid configuration.
+        """
+        if self._system_config is None:
+            raise RuntimeError("Configuration has not been loaded. Call load_all() first.")
+
+        errors: List[str] = []
+
+        # 1. EventCategory -> LogicChain references
+        for cat in self._event_categories.values():
+            if cat.detection_mode.value == "logic_chain":
+                if not cat.logic_chain_id:
+                    errors.append(
+                        f"EventCategory '{cat.name}' (id={cat.event_id}) uses "
+                        f"detection_mode=logic_chain but has no logic_chain_id."
+                    )
+                elif cat.logic_chain_id not in self._logic_chains:
+                    errors.append(
+                        f"EventCategory '{cat.name}' (id={cat.event_id}) references "
+                        f"unknown logic_chain_id '{cat.logic_chain_id}'."
+                    )
+
+        # Build a set of all valid template IDs
+        valid_template_ids = set(self._prompt_templates.keys())
+
+        for chain in self._logic_chains.values():
+            step_ids = {step.step_id for step in chain.steps}
+
+            for step in chain.steps:
+                # 2. Loop body chain references
+                if step.loop_body_chain_id and step.loop_body_chain_id not in self._logic_chains:
+                    errors.append(
+                        f"LogicChain '{chain.chain_id}' step '{step.step_id}' "
+                        f"references unknown loop_body_chain_id '{step.loop_body_chain_id}'."
+                    )
+
+                # 3. Prompt template references
+                if step.prompt_template_id and step.prompt_template_id not in valid_template_ids:
+                    errors.append(
+                        f"LogicChain '{chain.chain_id}' step '{step.step_id}' "
+                        f"references unknown prompt_template_id '{step.prompt_template_id}'."
+                    )
+
+                # 4. Output key presence for producing steps
+                if step.step_type.value in ("vlm_call", "compute", "cv_fusion", "loop"):
+                    if not step.output_key:
+                        errors.append(
+                            f"LogicChain '{chain.chain_id}' step '{step.step_id}' "
+                            f"(type={step.step_type.value}) must define an output_key."
+                        )
+
+                # 5. Branch target validation
+                for branch_attr in ("true_next_step", "false_next_step"):
+                    target = getattr(step, branch_attr, None)
+                    if target and target not in step_ids:
+                        errors.append(
+                            f"LogicChain '{chain.chain_id}' step '{step.step_id}' "
+                            f"{branch_attr} points to unknown step '{target}'."
+                        )
+
+        return errors
+
+    def reload(self) -> SystemConfig:
+        """Hot-reload all configuration files from disk.
+
+        Returns:
+            A freshly loaded and validated ``SystemConfig``.
+        """
+        logger.info("Hot-reloading configuration from %s", self.config_dir)
+        return self.load_all()
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _load_yaml(self, key: str) -> Dict[str, Any]:
+        """Load a single YAML file by its logical key.
+
+        Args:
+            key: One of the keys in ``_YAML_FILES``.
+
+        Returns:
+            The parsed YAML content as a Python dict.
+        """
+        filename = self._YAML_FILES[key]
+        path = self.config_dir / filename
+        if not path.exists():
+            raise FileNotFoundError(f"Required config file not found: {path}")
+        with path.open("r", encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        if data is None:
+            return {}
+        if not isinstance(data, dict):
+            raise ValueError(f"Top-level of {path} must be a mapping, got {type(data).__name__}")
+        return data
+
+    def _load_env_llm_config(self) -> LLMProviderConfig:
+        """Parse ``.env`` (if present) and return an ``LLMProviderConfig``.
+
+        Recognised environment variables (all optional):
+
+        * ``LLM_PROVIDER`` -> ``provider``
+        * ``LLM_API_KEY`` -> ``api_key``
+        * ``LLM_BASE_URL`` -> ``base_url``
+        * ``LLM_MODEL`` -> ``model``
+        * ``LLM_MAX_TOKENS`` -> ``max_tokens``
+        * ``LLM_TEMPERATURE`` -> ``temperature``
+        * ``LLM_TIMEOUT`` -> ``timeout``
+        * ``LLM_MAX_RETRIES`` -> ``max_retries``
+
+        Returns:
+            An ``LLMProviderConfig`` with values overridden by the environment.
+        """
+        env_path = self.config_dir / ".env"
+        if env_path.exists():
+            load_dotenv(dotenv_path=str(env_path), override=True)
+            logger.debug("Loaded environment variables from %s", env_path)
+        else:
+            load_dotenv(override=True)  # fall back to CWD / process env
+
+        kwargs: Dict[str, Any] = {}
+
+        # Support both VLM_PROVIDER (used in .env template) and LLM_PROVIDER
+        provider = os.getenv("VLM_PROVIDER") or os.getenv("LLM_PROVIDER")
+        if provider:
+            kwargs["provider"] = provider
+
+        # Provider-specific API key overrides generic LLM_API_KEY
+        if provider:
+            specific_api_key = os.getenv(f"{provider.upper()}_API_KEY")
+            if specific_api_key:
+                kwargs["api_key"] = specific_api_key
+
+        if api_key := os.getenv("LLM_API_KEY"):
+            kwargs.setdefault("api_key", api_key)
+        if base_url := os.getenv("LLM_BASE_URL"):
+            kwargs["base_url"] = base_url
+
+        # Provider-specific base_url overrides the generic one
+        provider = kwargs.get("provider") or os.getenv("LLM_PROVIDER", "")
+        if provider:
+            specific_base_url = os.getenv(f"{provider.upper()}_BASE_URL")
+            if specific_base_url:
+                kwargs["base_url"] = specific_base_url
+
+        if model := os.getenv("LLM_MODEL"):
+            kwargs["model"] = model
+
+        for env_name, attr_name, cast in (
+            ("LLM_MAX_TOKENS", "max_tokens", int),
+            ("LLM_TEMPERATURE", "temperature", float),
+            ("LLM_TIMEOUT", "timeout", float),
+            ("LLM_MAX_RETRIES", "max_retries", int),
+        ):
+            if (val := os.getenv(env_name)) is not None:
+                try:
+                    kwargs[attr_name] = cast(val)
+                except (ValueError, TypeError) as exc:
+                    logger.warning("Invalid %s value '%s': %s", env_name, val, exc)
+
+        return LLMProviderConfig(**kwargs)

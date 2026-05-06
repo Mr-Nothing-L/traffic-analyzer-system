@@ -1,0 +1,230 @@
+{
+  "video_info": {
+    "file_path": "/media/wanji/Elements/大模型应用/11.64.37.48_ch1_20260401_142812/08_ch1_20260401_142812_6.mp4",
+    "file_name": "08_ch1_20260401_142812_6.mp4",
+    "duration_sec": 22.866666666666667,
+    "fps": 15.0,
+    "total_frames": 343,
+    "width": 1920,
+    "height": 1080,
+    "codec": "",
+    "bitrate": 0,
+    "record_time": null,
+    "camera_id": null
+  },
+  "scene_summary": {
+    "road_count": 2,
+    "roads": [
+      {
+        "road_id": 0,
+        "name": "left main road (southbound)",
+        "pixel_bounds": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "normal_direction": "down",
+        "direction_confidence": 0.0,
+        "lane_count": 3,
+        "has_emergency_lane": true
+      },
+      {
+        "road_id": 1,
+        "name": "right main road (northbound)",
+        "pixel_bounds": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "normal_direction": "up",
+        "direction_confidence": 0.0,
+        "lane_count": 3,
+        "has_emergency_lane": true
+      }
+    ],
+    "weather": "clear",
+    "lighting": "day",
+    "traffic_density": "light",
+    "total_vehicles_estimate": 8,
+    "scene_description": "G3 Jingtai Expressway in Beijing, camera facing south. Two-way divided highway with 3 lanes each direction separated by green anti-glare barriers. A white vehicle with trunk open is stopped on the left emergency lane. Light traffic with several cars and one truck visible. Clear sunny afternoon conditions.",
+    "confidence": 0.92
+  },
+  "overall_traffic_description": "G3 Jingtai Expressway in Beijing, camera facing south. Two-way divided highway with 3 lanes each direction separated by green anti-glare barriers. A white vehicle with trunk open is stopped on the left emergency lane. Light traffic with several cars and one truck visible. Clear sunny afternoon conditions.检测到 2 类交通事件（Illegal Parking、Traffic Accident），需关注后续处置建议。",
+  "event_results": [
+    {
+      "event_id": 0,
+      "event_name": "Illegal Parking",
+      "detected": true,
+      "instances": [
+        {
+          "event_id": 0,
+          "event_name": "Illegal Parking",
+          "vehicle_id": null,
+          "road_id": null,
+          "start_time_sec": 0.0,
+          "end_time_sec": 5.0,
+          "confidence": 0.6,
+          "confidence_level": "low",
+          "evidence_frames": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "description": "White vehicle with trunk open and hazard lights on stopped on left shoulder adjacent to concrete barrier for entire observed duration. Vehicle is stationary while other traffic flows normally.",
+          "reasoning": "Vehicle is stopped on highway shoulder in non-designated emergency area for extended period with no visible emergency services or clear mechanical distress. While hazard lights are activated, the position on the narrow left shoulder and lack of apparent emergency creates reasonable suspicion of illegal stopping/parking. However, uncertainty about potential mechanical issues warrants conservative confidence rating.",
+          "disposal_suggestion": ""
+        }
+      ],
+      "summary": "One instance of suspected illegal parking detected: white vehicle stopped on left highway shoulder with trunk open for approximately 5 seconds. Vehicle displays hazard lights but appears to be in non-emergency stopping situation.",
+      "confidence": 0.6,
+      "analysis_process": []
+    },
+    {
+      "event_id": 1,
+      "event_name": "Emergency Lane Occupancy Detection",
+      "detected": false,
+      "instances": [],
+      "summary": "No Emergency Lane Occupancy Detection (0 instance(s))",
+      "confidence": 0.0,
+      "analysis_process": [
+        "Step EL1 (VLM): success=True, tokens=80, model=claude-sonnet-4-6",
+        "Step EL2 (VLM): success=True, tokens=505, model=claude-sonnet-4-6",
+        "Step EL5 (Aggregate): mapped 0 keys"
+      ]
+    },
+    {
+      "event_id": 2,
+      "event_name": "Traffic Accident",
+      "detected": true,
+      "instances": [
+        {
+          "event_id": 2,
+          "event_name": "Traffic Accident",
+          "vehicle_id": null,
+          "road_id": null,
+          "start_time_sec": 0.0,
+          "end_time_sec": 5.0,
+          "confidence": 0.6,
+          "confidence_level": "low",
+          "evidence_frames": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "description": "White vehicle with trunk open stationary on emergency shoulder for extended duration, consistent with vehicle breakdown/stall",
+          "reasoning": "The white car is stopped on the emergency shoulder with its trunk open across all observed frames (6+ seconds). No other vehicles are stopped nearby, and there are no signs of collision damage. The trunk being open suggests the driver may be addressing a mechanical issue or retrieving equipment. This matches the definition of 'vehicle breakdowns or stalled vehicles' under traffic incidents. Confidence is moderate because we cannot definitively confirm mechanical failure versus a brief intentional stop, but the duration and trunk-open posture strongly suggest a breakdown scenario.",
+          "disposal_suggestion": ""
+        }
+      ],
+      "summary": "Detected a likely vehicle breakdown/stall: white car with trunk open stationary on emergency shoulder for extended period. No collision, smoke, fire, or overturned vehicles observed.",
+      "confidence": 0.6,
+      "analysis_process": []
+    },
+    {
+      "event_id": 3,
+      "event_name": "Person Presence in Highway",
+      "detected": false,
+      "instances": [],
+      "summary": "No Person Presence in Highway detected in the video. A white car with its trunk open is stationary on the left shoulder, which could indicate a potential stranded motorist situation, but no actual human figure is visible outside any vehicle on the highway lanes, shoulder, or median in any of the provided frames.",
+      "confidence": 0.0,
+      "analysis_process": []
+    },
+    {
+      "event_id": 4,
+      "event_name": "Motorcycle Presence",
+      "detected": false,
+      "instances": [],
+      "summary": "No Motorcycle Presence detected in the video.",
+      "confidence": 0.0,
+      "analysis_process": []
+    },
+    {
+      "event_id": 5,
+      "event_name": "Heavy Congestion",
+      "detected": false,
+      "instances": [],
+      "summary": "No Heavy Congestion detected in the video. The G3 Jingtai Expressway shows extremely light traffic conditions with only 2-4 vehicles visible per frame, large spacing between vehicles, and free-flowing movement across all lanes. Lane occupancy is minimal (well below capacity) with no queuing, stop-and-go patterns, or high-density clustering observed throughout the 5-second observation period.",
+      "confidence": 0.0,
+      "analysis_process": []
+    },
+    {
+      "event_id": 6,
+      "event_name": "Road Construction",
+      "detected": false,
+      "instances": [],
+      "summary": "No Road Construction detected in the video. The video shows normal highway traffic flow on the G3 Jingtai Expressway. A white car with its trunk open is stopped on the shoulder, which appears to be a disabled vehicle rather than construction activity. No construction equipment, workers, cones, barriers, or signage are visible in any frame.",
+      "confidence": 0.0,
+      "analysis_process": []
+    },
+    {
+      "event_id": 7,
+      "event_name": "Vehicle Reversing Detection Chain",
+      "detected": false,
+      "instances": [],
+      "summary": "No Vehicle Reversing Detection Chain (0 instance(s))",
+      "confidence": 0.0,
+      "analysis_process": [
+        "Step S1 (VLM): success=True, tokens=408, model=claude-sonnet-4-6",
+        "Step S3 (Aggregate): mapped 3 keys"
+      ]
+    },
+    {
+      "event_id": 8,
+      "event_name": "Thrown Objects",
+      "detected": false,
+      "instances": [],
+      "summary": "No Thrown Objects detected in the video.",
+      "confidence": 0.0,
+      "analysis_process": []
+    },
+    {
+      "event_id": 9,
+      "event_name": "Lane Change over Solid Line Detection",
+      "detected": false,
+      "instances": [],
+      "summary": "No Lane Change over Solid Line Detection (0 instance(s))",
+      "confidence": 0.0,
+      "analysis_process": [
+        "Step LC1 (VLM): success=False, tokens=91, model=claude-sonnet-4-6",
+        "Step LC2 (VLM): success=False, tokens=422, model=claude-sonnet-4-6",
+        "Step LC3 (Compute): result type=list",
+        "Step LC4 (Aggregate): mapped 0 keys"
+      ]
+    }
+  ],
+  "binary_encoding": {
+    "encoding_string": "1_0_1_0_0_0_0_0_0_0",
+    "event_count": 2,
+    "detected_events": [
+      0,
+      2
+    ]
+  },
+  "final_classification": "根据二进制编码 `{1_0_1_0_0_0_0_0_0_0}`，共识别出 2 类交通事件，建议结合视频复核并启动相应处置流程。",
+  "disposal_recommendations": [
+    "【Illegal Parking】已触发，建议人工复核并记录。",
+    "【Traffic Accident】已触发，建议人工复核并记录。"
+  ],
+  "verification_results": {},
+  "llm_usage_stats": {
+    "provider": "anthropic",
+    "model": "claude-sonnet-4-6",
+    "total_calls": 13,
+    "failed_calls": 2,
+    "total_prompt_tokens": 836,
+    "total_completion_tokens": 4444,
+    "total_tokens": 5280,
+    "total_latency_ms": 190097.02,
+    "total_retries": 0,
+    "average_latency_ms": 14622.85
+  },
+  "generated_at": "2026-04-30T13:24:05.283130"
+}

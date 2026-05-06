@@ -1,0 +1,227 @@
+# =============================================================================
+# Traffic Event Categories Configuration
+# =============================================================================
+# Based on wanji_grpo_train.py event definitions.
+# Users can add new categories by appending to this file.
+# Each category maps to a bit position in the binary encoding output.
+#
+# Binary encoding format: {bit_0_bit_1_..._bit_n}
+# Example: {1_0_1_0_0_0_0_0_1_0} means event 0, 2, and 8 are detected.
+# =============================================================================
+
+event_categories:
+  - event_id: 0
+    event_code: "A"
+    name: "Illegal Parking"
+    name_zh: "违法停车"
+    description: "Vehicles stopped on main travel lanes, blocking regular lanes or access points, or parked in no-stopping zones."
+    detection_mode: "direct_vlm"
+    definition: |
+      Illegal Parking has the following key visual indicators:
+      - Vehicles stopped on the main travel lanes
+      - Vehicles blocking regular lanes or access points
+      - Vehicles stopped in areas with "No Stopping" or "No Parking" signage
+      - Vehicles parked on shoulders or emergency lanes WITHOUT clear emergency rescue signs, flashing lights, or personnel in safety vests. A vehicle with trunk/hood open on the shoulder for an extended time counts as illegal parking unless there is active emergency assistance visible.
+      - NOTE: On Chinese expressways, emergency lanes are for emergency use ONLY. A stopped vehicle on the emergency shoulder is illegal parking unless it is clearly receiving emergency assistance or has hazard lights on with personnel present.
+    visual_indicators:
+      - "Stationary vehicle on traffic lane"
+      - "Vehicle blocking lane for extended time"
+      - "No stopping sign violation"
+    confidence_threshold: 0.7
+    is_active: true
+
+  - event_id: 1
+    event_code: "B"
+    name: "Emergency Lane Occupancy"
+    name_zh: "应急车道占用"
+    description: "Vehicles entering, stopping, occupying, or traveling within the emergency lane."
+    detection_mode: "logic_chain"
+    logic_chain_id: "emergency_lane_occupancy"
+    definition: |
+      Emergency lanes typically have the following characteristics:
+      - Located on the far left or far right edge of the roadway
+      - Often marked with different colored pavement (red, yellow, or distinct asphalt)
+      - May have different line markings (solid white lines, hatched markings, or thicker boundary lines)
+      - Usually narrower than standard traffic lanes
+      - May contain signage indicating "Emergency Lane", "No Stopping Except Emergency"
+      - Often have a different surface texture or material
+      - Typically free of regular traffic flow
+      - May be separated by rumble strips or raised pavement markers
+    visual_indicators:
+      - "Vehicle in emergency lane area"
+      - "Different pavement color/texture"
+      - "Emergency lane signage"
+    confidence_threshold: 0.7
+    is_active: true
+
+  - event_id: 2
+    event_code: "C"
+    name: "Traffic Accident"
+    name_zh: "交通事故"
+    description: "Vehicle collisions, breakdowns, debris, overturned vehicles, fire or smoke from vehicles."
+    detection_mode: "direct_vlm"
+    definition: |
+      Traffic Incidents on highways include but are not limited to:
+      - Vehicle collisions (rear-end, side-impact, multi-vehicle)
+      - Vehicle breakdowns or stalled vehicles
+      - Debris or obstacles on the roadway
+      - Overturned or rolled vehicles
+      - Fire or smoke from vehicles
+      - Animals on the roadway
+    visual_indicators:
+      - "Damaged vehicles"
+      - "Smoke or fire"
+      - "Debris on road"
+      - "Overturned vehicle"
+    confidence_threshold: 0.7
+    is_active: true
+
+  - event_id: 3
+    event_code: "D"
+    name: "Person Presence in Highway"
+    name_zh: "高速公路行人出现"
+    description: "Pedestrians, stranded motorists, or individuals crossing restricted highway areas."
+    detection_mode: "direct_vlm"
+    definition: |
+      Person presence in highway indicators include:
+      - Highways are restricted areas where pedestrian access poses serious safety risks
+      - Highway intrusions typically involve pedestrians, stranded motorists who have exited vehicles
+      - Common false positives include roadside signs, bridge shadows, overpasses, vegetation
+      - Detection confidence should account for partial occlusions, motion blur, and perspective distortion
+    visual_indicators:
+      - "Human figure on highway lanes"
+      - "Person on shoulder or median"
+      - "Stranded motorist outside vehicle"
+    confidence_threshold: 0.7
+    is_active: true
+
+  - event_id: 4
+    event_code: "E"
+    name: "Motorcycle Presence"
+    name_zh: "摩托车出现"
+    description: "Motorcycles present on the highway."
+    detection_mode: "direct_vlm"
+    definition: |
+      Motorcycle Presence has the following key visual indicators:
+      - Two-wheeled configuration with visible wheels aligned front-to-back
+      - Smaller profile compared to cars and trucks
+      - Single rider or passenger positioned in tandem
+      - Visible handlebars and exposed engine components
+      - Often positioned between lanes or in standard traffic lanes
+      - Riders typically wear helmets and protective gear
+    visual_indicators:
+      - "Two-wheeled vehicle"
+      - "Rider with helmet"
+      - "Smaller vehicle profile"
+    confidence_threshold: 0.7
+    is_active: true
+
+  - event_id: 5
+    event_code: "F"
+    name: "Heavy Congestion"
+    name_zh: "严重拥堵"
+    description: "Severe traffic congestion with reduced speeds and high vehicle density."
+    detection_mode: "direct_vlm"
+    definition: |
+      Traffic Congestion on highways is typically characterized by:
+      - Reduced vehicle speeds compared to typical highway flow
+      - High vehicle density with minimal spacing between vehicles
+      - Stop-and-go traffic patterns
+      - Lane occupancy rates exceeding normal capacity
+      - Reduced average vehicle velocity across multiple lanes
+      - Extended queuing or backup of vehicles
+    visual_indicators:
+      - "High vehicle density"
+      - "Minimal spacing between vehicles"
+      - "Stop-and-go pattern"
+      - "Vehicle queue extending far"
+    confidence_threshold: 0.7
+    is_active: true
+
+  - event_id: 6
+    event_code: "G"
+    name: "Road Construction"
+    name_zh: "道路施工"
+    description: "Road construction zones with equipment, workers, and temporary signage."
+    detection_mode: "direct_vlm"
+    definition: |
+      Road construction indicators include:
+      - Orange traffic cones, barrels, or barriers creating work zones
+      - Construction vehicles (asphalt pavers, rollers, cement mixers, dump trucks, excavators)
+      - Workers in high-visibility clothing (orange, yellow, or lime green vests)
+      - Lane closures or narrowed lanes with temporary markings
+      - Construction equipment actively operating or parked in work zones
+      - Temporary signage indicating construction ahead or lane shifts
+      - Fresh asphalt (darker surface), concrete work, or exposed roadbed
+      - Reduced speed limit signs specific to work zones
+      - Flashing warning lights on construction vehicles or arrow boards
+    visual_indicators:
+      - "Orange cones/barrels"
+      - "Construction vehicles"
+      - "Workers in safety vests"
+      - "Lane closure signs"
+    confidence_threshold: 0.7
+    is_active: true
+
+  - event_id: 7
+    event_code: "H"
+    name: "Vehicle Reversing"
+    name_zh: "车辆逆行/倒车"
+    description: "Vehicle moving opposite to the flow of traffic, including reversing or backing up."
+    detection_mode: "logic_chain"
+    logic_chain_id: "vehicle_reversing"
+    definition: |
+      Vehicle reversing has the following key visual indicators:
+      - White reverse lights/backup lights illuminated on the vehicle
+      - Vehicle moving opposite to the flow of traffic
+      - Decreasing distance between the vehicle and fixed reference points behind it
+      - Vehicle moving backward relative to lane markings or road features
+
+      IMPORTANT: Reversing/Backing up is classified as a form of wrong-way driving (逆行).
+      The core determination is whether the vehicle's MOVEMENT DIRECTION is opposite to
+      the normal flow direction of its lane.
+    visual_indicators:
+      - "Vehicle moving against traffic flow"
+      - "Backup lights illuminated"
+      - "Decreasing distance to rear reference points"
+    confidence_threshold: 0.8
+    is_active: true
+
+  - event_id: 8
+    event_code: "J"
+    name: "Thrown Objects"
+    name_zh: "抛洒物"
+    description: "Objects on the highway roadway, either stationary or moving."
+    detection_mode: "direct_vlm"
+    definition: |
+      Thrown objects on highways can include:
+      - Objects may be stationary on the road surface or moving through the air
+      - Plastic bags, bottles, papers, clothing items, small debris, etc.
+      - Objects may blend with road surface colors or be highly contrasting
+    visual_indicators:
+      - "Foreign object on roadway"
+      - "Debris in traffic lane"
+      - "Flying object near vehicles"
+    confidence_threshold: 0.7
+    is_active: true
+
+  - event_id: 9
+    event_code: "K"
+    name: "Lane Change over Solid Line"
+    name_zh: "实线变道"
+    description: "Vehicle crossing solid lane lines to change lanes."
+    detection_mode: "logic_chain"
+    logic_chain_id: "lane_change_solid"
+    definition: |
+      Lane changes across solid lane lines can include:
+      - Solid white or yellow lines indicate areas where lane changes are prohibited
+      - Dashed/broken lane lines indicate areas where lane changes are permitted when safe
+      - A lane change violation occurs when a vehicle's path crosses over a solid line
+      - Vehicle positioning should be tracked relative to lane markings throughout
+      - Brief tire contact during normal driving is different from active lane change across the line
+    visual_indicators:
+      - "Vehicle crossing solid white/yellow line"
+      - "Lane change in no-change zone"
+      - "Solid line violation"
+    confidence_threshold: 0.7
+    is_active: true
