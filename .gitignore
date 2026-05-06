@@ -45,9 +45,12 @@ Thumbs.db
 # Error logs
 error/
 
-# Output files outside traffic_analyzer package
+# Root-level output files (only root dir, not subdirs)
 /*.json
 /*.md
+/*.py
 
-# Keep README.md
+# Keep these root-level files
 !README.md
+!requirements.txt
+!analyze.sh
