@@ -38,3 +38,16 @@ output/
 # OS
 .DS_Store
 Thumbs.db
+
+# Claude workspace
+.claude/
+
+# Error logs
+error/
+
+# Output files outside traffic_analyzer package
+/*.json
+/*.md
+
+# Keep README.md
+!README.md
