@@ -1,126 +1,173 @@
-# Traffic Analyzer
+# Traffic Analyzer / 交通事件分析系统
 
-A video-based traffic event detection system powered by Vision-Language Models (VLM). The system analyzes video clips to detect traffic incidents across multiple event categories using a configurable multi-stage pipeline.
+基于多模态大模型（VLM）的高速公路监控视频交通事件检测框架，支持 **10 类事件识别**，输出二进制编码结果。所有事件检测模式、模板、推断规则均通过 YAML 配置，新增事件无需修改代码。
 
-## Supported Events
+---
 
-| ID | Event Name | Detection Mode |
-|---|---|---|
-| 0 | 违法停车 (Illegal Parking) | `direct_vlm` |
-| 1 | 应急车道占用 (Emergency Lane Occupancy) | `logic_chain` |
-| 2 | 交通事故 (Traffic Accident) | `logic_chain` |
-| 3 | 高速公路行人出现 (Pedestrian on Highway) | `scene_tag` |
-| 4 | 摩托车出现 (Motorcycle on Highway) | `scene_tag` |
-| 5 | 严重拥堵 (Severe Congestion) | `direct_vlm` |
-| 6 | 道路施工 (Road Construction) | `direct_vlm` |
-| 7 | 车辆逆行/倒车 (Reversing/Wrong-Way Driving) | `logic_chain` |
-| 8 | 抛洒物 (Thrown Object on Road) | `direct_vlm` |
-| 9 | 实线变道 (Solid Line Lane Change) | `logic_chain` |
+## 支持的事件
 
-## Three Detection Modes
+| ID | 事件名称 | 检测模式 | 说明 |
+|---|---|---|---|
+| 0 | 违法停车 | `direct_vlm` | 单次 VLM 调用直接检测 |
+| 1 | 应急车道占用 | `scene_tag` | 从场景描述标签推断，零 VLM 调用 |
+| 2 | 交通事故 | `logic_chain` | 多步逻辑链，基于场景标签解析 |
+| 3 | 高速公路行人出现 | `scene_tag` | 从 `pedestrian_present` 布尔字段推断 |
+| 4 | 摩托车出现 | `scene_tag` | 从 `non_motor_vehicle_present` 布尔字段推断 |
+| 5 | 严重拥堵 | `direct_vlm` | 单次 VLM 调用直接检测 |
+| 6 | 道路施工 | `direct_vlm` | 单次 VLM 调用直接检测 |
+| 7 | 车辆逆行/倒车 | `logic_chain` | 多步逻辑链，帧对比分析 |
+| 8 | 抛洒物 | `direct_vlm` | 单次 VLM 调用直接检测 |
+| 9 | 实线变道 | `logic_chain` | 多步逻辑链，车道线识别+变道追踪 |
 
-### 1. `direct_vlm` — Direct VLM Detection
+---
 
-**Events:** 违法停车 (0), 严重拥堵 (5), 道路施工 (6), 抛洒物 (8)
+## 三种检测模式
 
-A single direct VLM call is made with the event definition and visual indicators. The VLM examines the video frames and returns whether the event is present.
+### 1. `direct_vlm` — 直接 VLM 检测
 
-- **Pros:** Simple, one-shot detection
-- **Cons:** Can misinterpret scene elements (e.g., construction vehicles as accident scenes), prone to false positives
+为每个事件配置专用 Prompt 模板，单次 VLM 调用完成检测。适合需要直接视觉判断的事件。
 
-### 2. `logic_chain` — Multi-Step Logic Chain Detection
+- **配置项**: `prompt_template_id` — 引用 `prompt_templates.yaml` 中的模板
+- **优点**: 简单直接
+- **缺点**: 可能误判（如将工程车误判为事故）
 
-**Events:** 应急车道占用 (1), 交通事故 (2), 车辆逆行/倒车 (7), 实线变道 (9)
+### 2. `logic_chain` — 多步逻辑链检测
 
-A configurable YAML-defined logic chain with multiple steps (`vlm_call`, `compute`, `condition`, `aggregate`). The chain may call the VLM multiple times for different sub-tasks.
+通过 YAML 定义多步骤检测流程（`vlm_call` → `compute` → `condition` → `aggregate`）。适合需要多步推理的复杂事件。
 
-- **Example:** Reversing detection uses a 3-step chain (VLM call → condition check → aggregate result)
-- **Pros:** Structured reasoning, can incorporate prior knowledge, multi-step verification
-- **Cons:** More VLM calls = higher latency, potential for parse errors at each step
+- **配置项**: `logic_chain_id` — 引用 `logic_chains.yaml` 中的逻辑链
+- **示例**: 逆行检测使用 3 步链（VLM 帧对比 → 条件判断 → 结果聚合）
+- **优点**: 结构化推理，可融入先验知识
+- **缺点**: 更多 VLM 调用，延迟更高
 
-### 3. `scene_tag` — Scene Tag Inference (No VLM Call)
+### 3. `scene_tag` — 场景标签推断（零 VLM 调用）
 
-**Events:** 高速公路行人出现 (3), 摩托车出现 (4)
+完全不调用 VLM，直接从 `scene_understanding` 的结构化输出推断结果。
 
-No VLM call is made at all. The result is determined entirely from the `scene_understanding` output, specifically:
+- **配置项**:
+  - `scene_boolean_field` — `SceneInfo` 布尔字段名（如 `pedestrian_present`）
+  - `scene_tag_key` — `scene_description` 中的标签键（如 `应急车道车辆`）
+- **优点**: 零额外 VLM 调用，最快，最可靠
+- **缺点**: 仅适用于可从场景整体分析确定的事件
 
-- Structured boolean fields: `pedestrian_present`, `non_motor_vehicle_present`, `thrown_object_present`
-- Structured tags in `scene_description`: e.g., `{行人：无}`, `{非机动车：有}`, `{交通事故：无}`
+---
 
-The `scene_understanding` step has already spent significant tokens analyzing the scene comprehensively, so these structured fields are highly reliable.
+## 配置化设计
 
-- **Pros:** Zero additional VLM calls, fastest, most reliable for clear presence/absence events
-- **Cons:** Only works for events that can be determined from overall scene analysis
+### 事件配置 (`event_categories.yaml`)
 
-## Mode Selection Guide
-
-| Scenario | Recommended Mode |
-|---|---|
-| Unambiguous presence/absence events (pedestrian, motorcycle, thrown objects, accident yes/no) | `scene_tag` |
-| Events requiring multi-step reasoning or spatial tracking (reversing, lane change, emergency lane occupancy) | `logic_chain` |
-| Events requiring direct visual evidence evaluation (illegal parking, congestion, construction) | `direct_vlm` |
-
-## Configuration
-
-Detection mode is set per event category in `traffic_analyzer/config/event_categories.yaml`:
+每个事件可独立配置检测模式和相关参数：
 
 ```yaml
-detection_mode: "direct_vlm"  # or "logic_chain" or "scene_tag"
+- event_id: 1
+  name: "Emergency Lane Occupancy"
+  name_zh: "应急车道占用"
+  detection_mode: "scene_tag"
+  scene_tag_key: "应急车道车辆"  # 从 scene_description 标签推断
 ```
 
-For `logic_chain` mode, also specify `logic_chain_id` referencing a chain defined in `traffic_analyzer/config/logic_chains.yaml`.
+### 跨事件推断规则 (`cross_event_inference_rules`)
 
-## Architecture Overview
+支持在 YAML 中配置跨事件推断，无需改代码：
 
-The pipeline consists of five stages:
-
-```
-Video Input
-    |
-    v
-1. Video Preprocessing
-   - Coarse frame extraction (uniform sampling)
-   - Precision frame extraction (adaptive sampling for key moments)
-    |
-    v
-2. Scene Understanding
-   - Single comprehensive VLM call
-   - Extracts structured tags: pedestrian_present, non_motor_vehicle_present,
-     thrown_object_present, and scene_description tags
-    |
-    v
-3. Event Detection (per category)
-   - direct_vlm: One-shot VLM call with event-specific prompt
-   - logic_chain: Multi-step chain from logic_chains.yaml
-   - scene_tag: Direct inference from scene_understanding output
-    |
-    v
-4. Post-Processing
-   - Scene tag inference as fallback/refinement
-   - Confidence scoring and result consolidation
-    |
-    v
-5. Report Generation
-   - Markdown report (human-readable)
-   - JSON report (machine-readable)
+```yaml
+cross_event_inference_rules:
+  - rule_id: "parking_to_emergency"
+    target_event_id: 1      # 推断目标：应急车道占用
+    source_event_id: 0      # 源事件：违法停车
+    source_description_keywords: ["shoulder", "emergency", "路肩", "应急"]
+    confidence_multiplier: 0.9
 ```
 
-## Project Structure
+### Prompt 模板 (`prompt_templates.yaml`)
+
+所有 VLM 调用的 Prompt 集中管理，支持 Jinja2 变量替换。`direct_vlm` 事件通过 `prompt_template_id` 引用模板。
+
+---
+
+## 分析流程
+
+```
+视频输入
+    |
+    v
+1. 视频预处理
+   - 场景理解帧提取：从整个视频均匀选取 30 帧
+   - 精确帧提取：自适应采样关键时刻（4 FPS）
+    |
+    v
+2. 场景理解 (scene_understanding)
+   - 单次综合 VLM 调用，输入 30 帧均匀分布帧
+   - 输出结构化信息：道路结构、车流方向、天气、
+     pedestrian_present、non_motor_vehicle_present、
+     scene_description 标签（{类别：状态}格式）
+    |
+    v
+3. 事件检测（按事件类别）
+   - direct_vlm: 使用事件专用模板单次 VLM 调用
+   - logic_chain: 执行配置的多步逻辑链
+   - scene_tag: 直接从场景理解输出推断
+    |
+    v
+4. 后处理
+   - 跨事件推断（配置的推断规则）
+   - 布尔字段推断（scene_tag 事件）
+   - 结构化标签推断（scene_tag 事件）
+    |
+    v
+5. 报告生成
+   - Markdown 报告（人工可读）
+   - 二进制编码 {bit_0_bit_1_..._bit_n}
+```
+
+---
+
+## 项目结构
 
 ```
 traffic_analyzer/
 ├── config/
-│   ├── event_categories.yaml   # Event definitions and detection modes
-│   └── logic_chains.yaml       # Multi-step logic chain definitions
+│   ├── event_categories.yaml      # 事件定义、检测模式、推断配置
+│   ├── logic_chains.yaml          # 多步逻辑链定义
+│   └── prompt_templates.yaml      # VLM Prompt 模板库
 ├── core/
-│   ├── preprocessing.py        # Frame extraction
-│   ├── scene_understanding.py  # Comprehensive scene analysis
-│   ├── detection/
-│   │   ├── direct_vlm.py       # Direct VLM detection
-│   │   ├── logic_chain.py      # Multi-step logic chain engine
-│   │   └── scene_tag.py        # Scene tag inference
-│   └── post_processing.py      # Result refinement
-└── reports/
-    ├── markdown_generator.py   # Markdown report generation
-    └── json_generator.py       # JSON report generation
+│   ├── config_manager.py          # 配置加载、验证、热重载
+│   ├── logic_engine.py            # 逻辑链执行引擎
+│   ├── report_generator.py        # 报告生成
+│   ├── video_preprocessor.py      # 视频帧提取（coarse + precision）
+│   └── vlm_engine.py              # VLM 调用封装（支持多提供商）
+├── models/
+│   └── schemas.py                 # Pydantic 数据模型
+├── orchestrator/
+│   └── analysis_orchestrator.py   # 分析流程编排器
+└── config/
+    └── .env                       # LLM 提供商配置（API Key 等）
 ```
+
+---
+
+## 快速开始
+
+```bash
+# 配置 LLM 提供商
+cp traffic_analyzer/config/.env.example traffic_analyzer/config/.env
+# 编辑 .env，设置 API Key 和模型
+
+# 运行分析
+python3 -c "
+from traffic_analyzer.orchestrator.analysis_orchestrator import AnalysisOrchestrator
+orch = AnalysisOrchestrator.from_config_dir('traffic_analyzer/config')
+report = orch.analyze('path/to/video.mp4')
+print(report.binary_encoding.encoding_string)
+"
+```
+
+---
+
+## 支持的 VLM 提供商
+
+- **Anthropic** (Claude) — 默认推荐
+- **Google** (Gemini)
+- **Aliyun** (通义千问)
+
+在 `.env` 中配置提供商和 API Key。
