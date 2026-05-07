@@ -120,12 +120,19 @@ prompt_templates:
       List all static reference objects (road markings, barriers, signs, stationary vehicles). Establish the directional coordinate system. Record each anchor point with: name, type, position description.
 
       【Step 2: 运动向量】
-      For each moving vehicle on each road, extract displacement vectors between frames. Read the surveillance timestamp on each frame (top-right or top-left corner). For EVERY vehicle motion record:
-      - vehicle_id
-      - description
-      - displacement: cite ACTUAL timestamps from the frame watermarks, e.g. "14:59:40: 画面底部中央 → 14:59:42: 画面中部"
-      - movement_direction
-      - road_id
+      For each moving vehicle on each road, extract displacement vectors between CONSECUTIVE frames (1-second interval). The frames are provided at 1-second intervals, so compare frame N with frame N+1 (e.g., 14:59:40 vs 14:59:41).
+
+      CRITICAL RULES for motion extraction:
+      1. ALWAYS use adjacent frames (time difference = 1 second). Do NOT skip frames.
+      2. If a vehicle is visible in frame N but NOT in frame N+1 (left the frame), discard that vehicle and pick another one that is visible in BOTH consecutive frames.
+      3. If a vehicle enters the frame in frame N+1 but was not in frame N, do NOT use it — you need the vehicle to be visible in BOTH frames.
+      4. Read the surveillance timestamp on each frame (top-right or top-left corner). For EVERY vehicle motion record:
+         - vehicle_id
+         - description
+         - displacement: cite ACTUAL timestamps from the frame watermarks, e.g. "14:59:40: 画面底部中央 → 14:59:41: 画面中部偏上"
+         - movement_direction
+         - road_id
+      5. Collect at least 3-5 valid vehicle motions per road. If a vehicle disappears after 1 second, it is normal — just pick another visible vehicle.
       Group by road/lane and summarize trends.
 
       【Step 3: 车头朝向】
