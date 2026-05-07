@@ -449,6 +449,23 @@ class LogicEngine:
             else:
                 images = [resolved_images]
 
+        # Uniformly select max_frames if needed (before extracting actual image data)
+        max_frames = 10
+        if (
+            self.config_manager is not None
+            and self.config_manager._system_config is not None
+            and self.config_manager._system_config.vlm_max_frames > 0
+        ):
+            max_frames = self.config_manager._system_config.vlm_max_frames
+        if len(images) > max_frames:
+            logger.info(
+                "Uniformly selecting %d of %d frames for VLM call (vlm_max_frames)",
+                max_frames,
+                len(images),
+            )
+            indices = [int(i * (len(images) - 1) / (max_frames - 1)) for i in range(max_frames)]
+            images = [images[i] for i in indices]
+
         # Filter to actual image data (Keyframe objects have image_data or image_path)
         actual_images: List[Any] = []
         for img in images:
@@ -458,22 +475,6 @@ class LogicEngine:
                 actual_images.append(img.image_path)
             elif isinstance(img, (str, bytes)):
                 actual_images.append(img)
-
-        # Limit max frames per VLM call to control latency
-        max_frames = 10
-        if (
-            self.config_manager is not None
-            and self.config_manager._system_config is not None
-            and self.config_manager._system_config.vlm_max_frames > 0
-        ):
-            max_frames = self.config_manager._system_config.vlm_max_frames
-        if len(actual_images) > max_frames:
-            logger.info(
-                "Limiting VLM input from %d to %d frames (vlm_max_frames)",
-                len(actual_images),
-                max_frames,
-            )
-            actual_images = actual_images[:max_frames]
 
         # Make VLM call
         response: LLMResponse = self.vlm_engine.call(

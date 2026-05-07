@@ -691,7 +691,13 @@ class AnalysisOrchestrator:
                 and self.config_manager._system_config.vlm_max_frames > 0
             ):
                 max_frames = self.config_manager._system_config.vlm_max_frames
-            images = [kf.image_data or kf.image_path for kf in context.keyframes.coarse_frames[:max_frames]]
+            coarse = context.keyframes.coarse_frames
+            if len(coarse) > max_frames:
+                indices = [int(i * (len(coarse) - 1) / (max_frames - 1)) for i in range(max_frames)]
+                selected = [coarse[i] for i in indices]
+            else:
+                selected = coarse
+            images = [kf.image_data or kf.image_path for kf in selected]
             images = [img for img in images if img is not None]
 
         response = self.vlm_engine.call(
