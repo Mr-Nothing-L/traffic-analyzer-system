@@ -17,12 +17,10 @@ prompt_templates:
     user_prompt: |
       Analyze these video frames from a highway surveillance camera.
 
-      CRITICAL — Frame temporal order:
-      The frames are provided in STRICT CHRONOLOGICAL ORDER.
-      - The FIRST frame (第1帧) is the EARLIEST moment in the video.
-      - The LAST frame (最后一帧) is the LATEST moment in the video.
-      - Each frame has a timestamp (t=XX.Xs) showing its position in the video timeline.
-      - When tracking vehicle movement, ALWAYS compare an EARLIER frame against a LATER frame.
+      CRITICAL — Use on-frame timestamps for temporal order:
+      Each frame has a surveillance timestamp watermark in one of the corners (usually top-left or top-right).
+      You MUST read these timestamps to determine which frame is earlier and which is later.
+      - When describing vehicle movement, ALWAYS cite the ACTUAL timestamps, e.g. "14:59:40 → 15:00:09".
       - A vehicle moving from the top of the frame to the bottom is moving toward the camera (getting larger).
       - A vehicle moving from the bottom of the frame to the top is moving away from the camera (getting smaller).
 
@@ -39,9 +37,9 @@ prompt_templates:
               {
                 "vehicle": "<brief description, e.g. 白色轿车>",
                 "movement": "<toward_top|toward_bottom|toward_left|toward_right|stationary>",
-                "location_earlier": "<where vehicle was in earlier frame, e.g. frame-bottom, frame-top-left, center>",
-                "location_later": "<where vehicle was in later frame, e.g. frame-top, frame-bottom-right, center>",
-                "frames_compared": "<e.g. Frame 1 → Frame 2>"
+                "location_earlier": "<where vehicle was in the earlier-timestamp frame, e.g. frame-bottom, frame-top-left, center>",
+                "location_later": "<where vehicle was in the later-timestamp frame, e.g. frame-top, frame-bottom-right, center>",
+                "frames_compared": "<actual timestamp strings from the frame watermarks, e.g. 14:59:40 → 15:00:09>"
               }
             ],
             "lane_count": <number of lanes>,
@@ -112,9 +110,9 @@ prompt_templates:
          - "从远到近" means vehicles move from the background (smaller/less detailed) toward the foreground (larger/more detailed), i.e. toward the camera.
          - "从近到远" means vehicles move away from the camera toward the background.
       3. DIRECTION DETERMINATION PROCEDURE (mandatory):
-         a. EACH image has a label burned into the top-left corner showing its frame number and timestamp (e.g. "FRAME 1/4 t=0.00s [OLDEST]"). The images are provided in CHRONOLOGICAL ORDER from OLDEST to NEWEST.
+         a. READ the surveillance timestamp watermark on each frame (usually in the top-left or top-right corner, format like "2025-06-08 23:59:23" or "14:59:40"). Use these timestamps to determine chronological order — the frame with the EARLIER timestamp is the earlier frame. DO NOT rely on frame labels burned into the image.
          b. For EACH road, identify at least 5 vehicles on the MAIN travel lanes (ignore emergency lane / shoulder vehicles).
-         c. For EACH vehicle, compare its position in an EARLIER frame (lower frame number, smaller timestamp) against a LATER frame (higher frame number, larger timestamp). Use ONLY ADJACENT frames (e.g. Frame 1 vs Frame 2, or Frame 2 vs Frame 3) — do NOT compare Frame 1 with Frame 4 because the same vehicle may have left the scene. Record the MOVEMENT direction using NATURAL-LANGUAGE directions:
+         c. For EACH vehicle, compare its position in an EARLIER-timestamp frame against a LATER-timestamp frame. Use frames that are close in time (preferably adjacent in the provided set) so the same vehicle is likely still visible. Cite the ACTUAL timestamps in your evidence (e.g. "14:59:40 → 14:59:42"). Record the MOVEMENT direction using NATURAL-LANGUAGE directions:
             - "toward_top"    = vehicle moves closer to the TOP edge of the frame (its y-coordinate DECREASES from earlier to later frame)
             - "toward_bottom" = vehicle moves closer to the BOTTOM edge of the frame (its y-coordinate INCREASES from earlier to later frame)
             - "toward_left"   = vehicle moves closer to the LEFT edge of the frame (its x-coordinate DECREASES from earlier to later frame)
@@ -142,7 +140,7 @@ prompt_templates:
       List all static reference objects (road markings, barriers, signs, stationary vehicles). Establish the directional coordinate system. Record each anchor point with: name, type, position description.
 
       【Step 2: 运动向量】
-      For each moving vehicle on each road, extract displacement vectors between adjacent frames. Record: vehicle description, position in earlier frame, position in later frame, movement direction. Group by road/lane and summarize trends.
+      For each moving vehicle on each road, read the surveillance timestamp on the frame (top-left or top-right corner) and extract displacement vectors between frames with close timestamps. Record: vehicle description, timestamp of earlier frame, position in earlier frame, timestamp of later frame, position in later frame, movement direction. ALWAYS cite actual timestamps (e.g. "白色轿车在14:59:40位于画面底部中央，到14:59:42移动到画面中部"). Group by road/lane and summarize trends.
 
       【Step 3: 车头朝向】
       For each vehicle, determine head orientation (front-facing direction). Identify front features (headlights, grille) vs rear features (taillights, license plate). Record: vehicle_id, head_orientation, evidence.
