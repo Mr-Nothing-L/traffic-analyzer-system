@@ -22,7 +22,6 @@ from jinja2 import Template, UndefinedError, StrictUndefined
 
 # Import SDKs at top level so tests can patch them via the module namespace.
 import anthropic
-import google.generativeai as genai
 import httpx
 import openai
 
@@ -475,6 +474,7 @@ class VLMInferenceEngine:
                 kwargs["base_url"] = self.config.base_url
             self._client = anthropic.Anthropic(**kwargs)
         elif self.provider == "google":
+            import google.generativeai as genai
             genai.configure(api_key=self.config.api_key)
             self._client = genai
         elif self.provider == "aliyun":
