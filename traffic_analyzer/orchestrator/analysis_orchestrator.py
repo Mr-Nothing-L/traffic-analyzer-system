@@ -61,6 +61,9 @@ def _annotate_frame(image: Any, label: str) -> bytes:
 
     img = img.convert("RGB")
 
+    # Resize to 720p max to reduce VLM payload and avoid API timeouts
+    img.thumbnail((1280, 720), Image.LANCZOS)
+
     # Try to load a TrueType font; fall back to default bitmap font
     font: ImageFont.FreeTypeFont | ImageFont.ImageFont
     try:
