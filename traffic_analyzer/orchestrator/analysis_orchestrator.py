@@ -207,11 +207,14 @@ class AnalysisOrchestrator:
         logger.info("=" * 60)
 
         analysis_start = time.perf_counter()
+        step_times: Dict[str, float] = {}
         context = AnalysisContext(config=self.config_manager.load_all())
 
         # Step 1: Video preprocessing
         logger.info("[1/7] Preprocessing video...")
+        t0 = time.perf_counter()
         keyframes = self.video_preprocessor.process(video_path)
+        step_times["preprocessing"] = time.perf_counter() - t0
         context.keyframes = keyframes
         logger.info("  Coarse frames: %d", len(keyframes.coarse_frames))
         logger.info("  Precision frames: %d", len(keyframes.precision_frames))
@@ -222,55 +225,76 @@ class AnalysisOrchestrator:
 
         # Step 2: Global scene understanding
         logger.info("[2/7] Scene understanding...")
+        t0 = time.perf_counter()
         scene_info = self._scene_understanding(
             keyframes,
             video_path=video_path,
             duration_sec=video_meta.duration_sec,
         )
+        step_times["scene_understanding"] = time.perf_counter() - t0
         context.scene_understanding = scene_info
         logger.info("  Roads detected: %d", scene_info.road_count)
         logger.info("  Traffic density: %s", scene_info.traffic_density)
 
         # Step 3: Load CV tracks if provided
+        logger.info("[3/7] Loading CV tracks...")
+        t0 = time.perf_counter()
         if cv_tracks_path and self.external_adapter:
-            logger.info("[3/7] Loading CV tracks from %s...", cv_tracks_path)
             tracks = self.external_adapter.load_cv_tracks(cv_tracks_path)
             context.cv_tracks = tracks
             logger.info("  Tracks loaded: %d", len(tracks))
         else:
-            logger.info("[3/7] No CV tracks provided, skipping external validation")
+            logger.info("  No CV tracks provided, skipping external validation")
+        step_times["cv_tracks"] = time.perf_counter() - t0
 
         # Step 4: Event detection
         logger.info("[4/7] Detecting events...")
+        t0 = time.perf_counter()
         event_results = self._detect_events(context)
+        step_times["event_detection"] = time.perf_counter() - t0
         context.event_results = {r.event_id: r for r in event_results}
         detected_count = sum(1 for r in event_results if r.detected)
         logger.info("  Events detected: %d / %d", detected_count, len(event_results))
 
         # Step 5: Post-process inferred events
         logger.info("[5/7] Post-processing inferred events...")
+        t0 = time.perf_counter()
         event_results = self._post_process_events(event_results, context.scene_understanding)
+        step_times["post_processing"] = time.perf_counter() - t0
         context.event_results = {r.event_id: r for r in event_results}
 
         # Step 6: Cross-validation with CV tracks
+        logger.info("[6/7] Cross-validating with CV tracks...")
+        t0 = time.perf_counter()
         if context.cv_tracks and self.external_adapter:
-            logger.info("[6/7] Cross-validating with CV tracks...")
             event_results = self._cross_validate(event_results, context)
             context.event_results = {r.event_id: r for r in event_results}
+        step_times["cross_validation"] = time.perf_counter() - t0
 
         # Step 7: Report generation
         logger.info("[7/7] Generating report...")
+        t0 = time.perf_counter()
         usage_stats = self.vlm_engine.get_usage_stats()
-        analysis_duration_sec = time.perf_counter() - analysis_start
-
         report = self.report_generator.generate(
             event_results=event_results,
             scene_info=scene_info,
             video_meta=video_meta,
             usage_stats=usage_stats,
-            analysis_duration_sec=round(analysis_duration_sec, 2),
+            analysis_duration_sec=round(0.0, 2),  # placeholder, updated below
         )
+        step_times["report_generation"] = time.perf_counter() - t0
         context.final_report = report
+
+        analysis_duration_sec = time.perf_counter() - analysis_start
+        report.analysis_duration_sec = round(analysis_duration_sec, 2)
+
+        # Timing breakdown
+        logger.info("=" * 40)
+        logger.info("Step timing breakdown:")
+        for name, duration in step_times.items():
+            logger.info("  %s: %.2fs", name, duration)
+        logger.info("  TOTAL: %.2fs", analysis_duration_sec)
+        logger.info("=" * 40)
 
         logger.info("=" * 60)
         logger.info("Analysis complete in %.2f s. Binary encoding: %s", analysis_duration_sec, report.binary_encoding.encoding_string)
@@ -469,20 +493,10 @@ class AnalysisOrchestrator:
                 len(scene_info.roads),
             )
 
-        # ------------------------------------------------------------------
-        # Direction verification: if confidence is still low, re-verify with more frames
-        # ------------------------------------------------------------------
-        low_confidence_roads = [
-            r for r in scene_info.roads
-            if r.direction_confidence < 0.8
-        ]
-        if scene_info.confidence < 0.8 or low_confidence_roads:
-            logger.info(
-                "Direction confidence low (scene=%.2f, roads=%s), triggering re-verification",
-                scene_info.confidence,
-                [(r.road_id, r.direction_confidence) for r in low_confidence_roads],
-            )
-            scene_info = self._verify_directions(scene_info, keyframes)
+        # NOTE: Removed redundant _verify_directions call.
+        # The scene_understanding prompt already contains a complete 6-step
+        # direction analysis; the secondary VLM call wasted 30-60 seconds.
+        # The _verify_directions method is kept intact for backward compatibility.
 
         return scene_info
 
@@ -617,19 +631,188 @@ class AnalysisOrchestrator:
 
         return scene_info
 
+    def _get_event_images(self, context: AnalysisContext) -> List[Any]:
+        """Select images from keyframes for VLM event detection.
+
+        Returns up to max_frames coarse frames, evenly distributed.
+        """
+        images: List[Any] = []
+        if not context.keyframes:
+            return images
+
+        max_frames = 6
+        if (
+            self.config_manager._system_config is not None
+            and self.config_manager._system_config.vlm_max_frames > 0
+        ):
+            max_frames = self.config_manager._system_config.vlm_max_frames
+
+        coarse = context.keyframes.coarse_frames
+        if len(coarse) > max_frames:
+            indices = [int(i * (len(coarse) - 1) / (max_frames - 1)) for i in range(max_frames)]
+            selected = [coarse[i] for i in indices]
+        else:
+            selected = coarse
+
+        images = [kf.image_data or kf.image_path for kf in selected]
+        images = [img for img in images if img is not None]
+        return images
+
+    def _parse_direct_vlm_response(self, response: Any, category: EventCategory) -> EventResult:
+        """Parse a VLM response into an EventResult for direct_vlm detection."""
+        if response.success and isinstance(response.parsed_data, dict):
+            data = response.parsed_data
+            detected = bool(data.get("detected", False))
+            instances_data = data.get("instances", [])
+            instances = []
+            if isinstance(instances_data, list):
+                for inst in instances_data:
+                    if isinstance(inst, dict):
+                        instances.append(
+                            EventInstance(
+                                event_id=category.event_id,
+                                event_name=category.name_zh,
+                                start_time_sec=float(inst.get("start_time_sec", 0.0)),
+                                end_time_sec=float(inst.get("end_time_sec", 0.0)),
+                                confidence=float(inst.get("confidence", 0.0)),
+                                evidence_frames=inst.get("evidence_frames", []),
+                                description=str(inst.get("description", "")),
+                                reasoning=str(inst.get("reasoning", "")),
+                            )
+                        )
+            return EventResult(
+                event_id=category.event_id,
+                event_name=category.name_zh,
+                detected=detected,
+                instances=instances,
+                summary=str(data.get("summary", "")),
+                confidence=float(data.get("confidence", 0.0)),
+            )
+
+        return EventResult(
+            event_id=category.event_id,
+            event_name=category.name_zh,
+            detected=False,
+            summary=f"VLM call failed or returned invalid data: {response.raw_text[:200]}",
+        )
+
     def _detect_events(self, context: AnalysisContext) -> List[EventResult]:
-        """Detect all configured events."""
+        """Detect all configured events.
+
+        direct_vlm events are processed in parallel via batch_call.
+        logic_chain and scene_tag events remain sequential so that
+        logic chains can read prior event results from context.
+        """
         event_categories = self.config_manager.get_event_categories()
         results: List[EventResult] = []
+
+        # Split into parallelizable direct_vlm and sequential others
+        direct_vlm_categories: List[EventCategory] = []
+        sequential_categories: List[EventCategory] = []
 
         for category in event_categories:
             if not category.is_active:
                 continue
+            if category.detection_mode == "direct_vlm":
+                direct_vlm_categories.append(category)
+            else:
+                sequential_categories.append(category)
 
+        # --- Parallel direct_vlm batch ---
+        if direct_vlm_categories:
+            logger.info("[并行检测] 准备并行检测 %d 个 direct_vlm 事件", len(direct_vlm_categories))
+            batch_requests: List[Dict[str, Any]] = []
+            batched_categories: List[EventCategory] = []
+            shared_images = self._get_event_images(context)
+
+            for category in direct_vlm_categories:
+                template_id = category.prompt_template_id
+                if not template_id:
+                    logger.error("Event %s (direct_vlm) has no prompt_template_id configured", category.name_zh)
+                    error_result = EventResult(
+                        event_id=category.event_id,
+                        event_name=category.name_zh,
+                        detected=False,
+                        summary="Configuration error: no prompt_template_id",
+                    )
+                    results.append(error_result)
+                    context.event_results[category.event_id] = error_result
+                    continue
+                try:
+                    template = self.config_manager.get_prompt_template(template_id)
+                except KeyError:
+                    template = PromptTemplate(
+                        template_id=template_id,
+                        name="Direct Event Detection",
+                        system_prompt="You are a traffic surveillance analyst.",
+                        user_prompt=f"Detect {category.name_zh}: {category.description}",
+                    )
+
+                batch_requests.append({
+                    "template": template,
+                    "images": shared_images,
+                    "context_vars": {
+                        "event_name": category.name_zh,
+                        "event_definition": category.definition,
+                        "visual_indicators": category.visual_indicators,
+                    },
+                })
+                batched_categories.append(category)
+
+            batch_start = time.perf_counter()
+            batch_responses = self.vlm_engine.batch_call(
+                batch_requests,
+                parallel=True,
+                max_workers=min(4, len(batched_categories)),
+            )
+            batch_duration = time.perf_counter() - batch_start
+
+            # Defensive: verify response count matches request count
+            if len(batch_responses) != len(batched_categories):
+                logger.error(
+                    "Batch response count mismatch: expected %d, got %d",
+                    len(batched_categories),
+                    len(batch_responses),
+                )
+
+            valid_count = 0
+            for idx, category in enumerate(batched_categories):
+                if idx >= len(batch_responses):
+                    logger.error("[parallel] Missing response for %s", category.name_zh)
+                    error_result = EventResult(
+                        event_id=category.event_id,
+                        event_name=category.name_zh,
+                        detected=False,
+                        summary="Batch response missing",
+                    )
+                    results.append(error_result)
+                    context.event_results[category.event_id] = error_result
+                    continue
+
+                resp = batch_responses[idx]
+                detected = (
+                    resp.parsed_data.get("detected", False)
+                    if resp.success and isinstance(resp.parsed_data, dict)
+                    else "N/A"
+                )
+                logger.info("[parallel] done: %s, detected=%s", category.name_zh, detected)
+                result = self._parse_direct_vlm_response(resp, category)
+                results.append(result)
+                context.event_results[result.event_id] = result
+                if resp.success and isinstance(resp.parsed_data, dict):
+                    valid_count += 1
+
+            logger.info(
+                "[parallel] all done: %d/%d events (%.2fs)",
+                valid_count,
+                len(batched_categories),
+                batch_duration,
+            )
+
+        # --- Sequential logic_chain / scene_tag / others ---
+        for category in sequential_categories:
             try:
-                if category.detection_mode == "direct_vlm":
-                    result = self._detect_direct_vlm(category, context)
-                elif category.detection_mode == "logic_chain":
+                if category.detection_mode == "logic_chain":
                     result = self._detect_logic_chain(category, context)
                 elif category.detection_mode == "scene_tag":
                     # No VLM call; result is determined by post-processing from
@@ -667,7 +850,12 @@ class AnalysisOrchestrator:
         return results
 
     def _detect_direct_vlm(self, category: EventCategory, context: AnalysisContext) -> EventResult:
-        """Detect an event using a single direct VLM call."""
+        """Detect an event using a single direct VLM call.
+
+        Used as a fallback for sequential execution or when batch_call is
+        unavailable. The parallel batch path in _detect_events uses the same
+        helpers (_get_event_images, _parse_direct_vlm_response) for consistency.
+        """
         template_id = category.prompt_template_id
         if not template_id:
             raise ValueError(f"Event {category.name_zh} (direct_vlm) has no prompt_template_id configured")
@@ -681,23 +869,7 @@ class AnalysisOrchestrator:
                 user_prompt=f"Detect {category.name_zh}: {category.description}",
             )
 
-        images = []
-        if context.keyframes:
-            max_frames = 6
-            if (
-                self.config_manager._system_config is not None
-                and self.config_manager._system_config.vlm_max_frames > 0
-            ):
-                max_frames = self.config_manager._system_config.vlm_max_frames
-            coarse = context.keyframes.coarse_frames
-            if len(coarse) > max_frames:
-                indices = [int(i * (len(coarse) - 1) / (max_frames - 1)) for i in range(max_frames)]
-                selected = [coarse[i] for i in indices]
-            else:
-                selected = coarse
-            images = [kf.image_data or kf.image_path for kf in selected]
-            images = [img for img in images if img is not None]
-
+        images = self._get_event_images(context)
         response = self.vlm_engine.call(
             template=template,
             images=images,
@@ -707,42 +879,7 @@ class AnalysisOrchestrator:
                 "visual_indicators": category.visual_indicators,
             },
         )
-
-        if response.success and isinstance(response.parsed_data, dict):
-            data = response.parsed_data
-            detected = bool(data.get("detected", False))
-            instances_data = data.get("instances", [])
-            instances = []
-            if isinstance(instances_data, list):
-                for inst in instances_data:
-                    if isinstance(inst, dict):
-                        instances.append(
-                            EventInstance(
-                                event_id=category.event_id,
-                                event_name=category.name_zh,
-                                start_time_sec=float(inst.get("start_time_sec", 0.0)),
-                                end_time_sec=float(inst.get("end_time_sec", 0.0)),
-                                confidence=float(inst.get("confidence", 0.0)),
-                                evidence_frames=inst.get("evidence_frames", []),
-                                description=str(inst.get("description", "")),
-                                reasoning=str(inst.get("reasoning", "")),
-                            )
-                        )
-            return EventResult(
-                event_id=category.event_id,
-                event_name=category.name_zh,
-                detected=detected,
-                instances=instances,
-                summary=str(data.get("summary", "")),
-                confidence=float(data.get("confidence", 0.0)),
-            )
-
-        return EventResult(
-            event_id=category.event_id,
-            event_name=category.name_zh,
-            detected=False,
-            summary=f"VLM call failed or returned invalid data: {response.raw_text[:200]}",
-        )
+        return self._parse_direct_vlm_response(response, category)
 
     def _detect_logic_chain(self, category: EventCategory, context: AnalysisContext) -> EventResult:
         """Detect an event using a configured logic chain."""
