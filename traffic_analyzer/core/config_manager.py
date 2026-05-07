@@ -16,6 +16,7 @@ import yaml
 from dotenv import load_dotenv
 
 from traffic_analyzer.models.schemas import (
+    CrossEventInferenceRule,
     EventCategory,
     LLMProviderConfig,
     LogicChain,
@@ -60,6 +61,7 @@ class ConfigManager:
         self._event_categories: Dict[int, EventCategory] = {}
         self._logic_chains: Dict[str, LogicChain] = {}
         self._prompt_templates: Dict[str, PromptTemplate] = {}
+        self._inference_rules: Dict[str, CrossEventInferenceRule] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -98,6 +100,12 @@ class ConfigManager:
             for cat in raw_event_categories.get("event_categories", [])
         }
 
+        # Load cross-event inference rules
+        self._inference_rules = {
+            rule["rule_id"]: CrossEventInferenceRule.model_validate(rule)
+            for rule in raw_event_categories.get("cross_event_inference_rules", [])
+        }
+
         self._logic_chains = {
             chain["chain_id"]: LogicChain.model_validate(chain)
             for chain in raw_logic_chains.get("logic_chains", [])
@@ -114,8 +122,9 @@ class ConfigManager:
         )
 
         logger.info(
-            "Config loaded: %d categories, %d logic chains, %d prompt templates",
+            "Config loaded: %d categories, %d inference rules, %d logic chains, %d prompt templates",
             len(self._event_categories),
+            len(self._inference_rules),
             len(self._logic_chains),
             len(self._prompt_templates),
         )
@@ -158,6 +167,12 @@ class ConfigManager:
         if template_id not in self._prompt_templates:
             raise KeyError(f"Prompt template '{template_id}' not found.")
         return self._prompt_templates[template_id]
+
+    def get_inference_rules(self) -> List[CrossEventInferenceRule]:
+        """Return all configured cross-event inference rules."""
+        if self._system_config is None:
+            raise RuntimeError("Configuration has not been loaded. Call load_all() first.")
+        return list(self._inference_rules.values())
 
     def validate_config(self) -> List[str]:
         """Validate cross-references and consistency across config files.
@@ -232,6 +247,49 @@ class ConfigManager:
                             f"LogicChain '{chain.chain_id}' step '{step.step_id}' "
                             f"{branch_attr} points to unknown step '{target}'."
                         )
+
+        # 6. direct_vlm events must have prompt_template_id
+        for cat in self._event_categories.values():
+            if cat.detection_mode.value == "direct_vlm":
+                if not cat.prompt_template_id:
+                    errors.append(
+                        f"EventCategory '{cat.name}' (id={cat.event_id}) uses "
+                        f"detection_mode=direct_vlm but has no prompt_template_id."
+                    )
+                elif cat.prompt_template_id not in valid_template_ids:
+                    errors.append(
+                        f"EventCategory '{cat.name}' (id={cat.event_id}) references "
+                        f"unknown prompt_template_id '{cat.prompt_template_id}'."
+                    )
+
+        # 7. scene_tag events must have at least one inference source
+        for cat in self._event_categories.values():
+            if cat.detection_mode.value == "scene_tag":
+                if not cat.scene_boolean_field and not cat.scene_tag_key:
+                    errors.append(
+                        f"EventCategory '{cat.name}' (id={cat.event_id}) uses "
+                        f"detection_mode=scene_tag but has neither scene_boolean_field nor scene_tag_key."
+                    )
+
+        # 8. Cross-event inference rule validation
+        valid_event_ids = set(self._event_categories.keys())
+        for rule in self._inference_rules.values():
+            if rule.target_event_id not in valid_event_ids:
+                errors.append(
+                    f"Inference rule '{rule.rule_id}' references unknown target_event_id {rule.target_event_id}."
+                )
+            if rule.source_event_id not in valid_event_ids:
+                errors.append(
+                    f"Inference rule '{rule.rule_id}' references unknown source_event_id {rule.source_event_id}."
+                )
+            if rule.target_event_id == rule.source_event_id:
+                errors.append(
+                    f"Inference rule '{rule.rule_id}' target and source are the same event."
+                )
+            if not rule.source_description_keywords:
+                errors.append(
+                    f"Inference rule '{rule.rule_id}' has empty source_description_keywords."
+                )
 
         return errors
 
