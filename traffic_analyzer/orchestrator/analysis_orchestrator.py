@@ -301,7 +301,10 @@ class AnalysisOrchestrator:
             )
 
         # ------------------------------------------------------------------
-        # Frame selection: uniformly distributed across entire video
+        # Frame selection: take the FIRST N seconds of coarse frames.
+        # With coarse_fps=1.0, this gives 1-second intervals, keeping
+        # vehicle displacement small enough that most vehicles are still
+        # visible across consecutive frames.
         # ------------------------------------------------------------------
         coarse_frames = keyframes.coarse_frames
         total_coarse = len(coarse_frames)
@@ -314,18 +317,10 @@ class AnalysisOrchestrator:
         ):
             min_frames = self.config_manager._system_config.scene_understanding_min_frames
 
-        target_count = min_frames
-        # But cannot exceed available coarse frames
-        target_count = min(target_count, total_coarse)
+        target_count = min(min_frames, total_coarse)
+        raw_frames = coarse_frames[:target_count]
 
-        if total_coarse >= min_frames:
-            # Uniformly select target_count frames from coarse_frames
-            if target_count >= total_coarse:
-                raw_frames = coarse_frames[:]
-            else:
-                indices = [int(i * (total_coarse - 1) / (target_count - 1)) for i in range(target_count)]
-                raw_frames = [coarse_frames[i] for i in indices]
-        else:
+        if total_coarse < min_frames:
             # Not enough coarse frames — supplement from video file
             logger.info(
                 "Coarse frames insufficient (%d < %d), supplementing from video",
