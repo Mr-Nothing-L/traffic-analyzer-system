@@ -351,17 +351,10 @@ class AnalysisOrchestrator:
             annotated = _annotate_frame(img, label)
             images.append(annotated)
 
-        # Build frame timestamp list for the prompt so VLM does not need to
-        # read tiny watermarks on scaled-down frames.
-        frame_timestamps = [
-            f"Frame {i + 1}: t={kf.timestamp_sec:.1f}s"
-            for i, kf in enumerate(raw_frames)
-        ]
-
         response = self.vlm_engine.call(
             template=template,
             images=images,
-            context_vars={"frame_timestamps": frame_timestamps},
+            context_vars={},
         )
 
         if not response.success or not isinstance(response.parsed_data, dict):

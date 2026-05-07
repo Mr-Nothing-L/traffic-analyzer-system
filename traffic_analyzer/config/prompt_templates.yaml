@@ -17,12 +17,10 @@ prompt_templates:
     user_prompt: |
       Analyze these video frames from a highway surveillance camera.
 
-      Frame timestamps (chronological order — use these exact values when describing vehicle movement):
-      {% for ts in frame_timestamps %}
-      - {{ ts }}
-      {% endfor %}
+      The images are provided in chronological order from earliest to latest.
+      Each frame has a surveillance timestamp watermark in the top-right or top-left corner (e.g. "2025-06-08 23:59:23" or "14:59:40"). READ these timestamps to determine chronological order.
 
-      When describing vehicle movement, ALWAYS cite the frame timestamps above, e.g. "Frame 1 (t=0.0s) → Frame 3 (t=2.0s)".
+      When describing vehicle movement, ALWAYS cite the ACTUAL timestamps from the frame watermarks, e.g. "14:59:40 → 15:00:09".
       - A vehicle moving from the top of the frame to the bottom is moving toward the camera (getting larger).
       - A vehicle moving from the bottom of the frame to the top is moving away from the camera (getting smaller).
 
@@ -122,10 +120,10 @@ prompt_templates:
       List all static reference objects (road markings, barriers, signs, stationary vehicles). Establish the directional coordinate system. Record each anchor point with: name, type, position description.
 
       【Step 2: 运动向量】
-      For each moving vehicle on each road, extract displacement vectors between frames. Use the frame timestamps provided at the top of this prompt (e.g. "Frame 1: t=0.0s"). For EVERY vehicle motion record:
+      For each moving vehicle on each road, extract displacement vectors between frames. Read the surveillance timestamp on each frame (top-right or top-left corner). For EVERY vehicle motion record:
       - vehicle_id
       - description
-      - displacement: cite EXACT frame timestamps, e.g. "Frame 1 (t=0.0s): 画面底部中央 → Frame 3 (t=2.0s): 画面中部"
+      - displacement: cite ACTUAL timestamps from the frame watermarks, e.g. "14:59:40: 画面底部中央 → 14:59:42: 画面中部"
       - movement_direction
       - road_id
       Group by road/lane and summarize trends.
