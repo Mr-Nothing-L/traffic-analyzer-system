@@ -228,6 +228,8 @@ prompt_templates:
       You are a traffic surveillance analyst. Your task is to detect vehicles that are reversing or driving against the normal traffic flow.
       CRITICAL: Compare the FIRST frame and the LAST frame carefully. Some vehicles may appear stationary but have actually moved slightly against the flow.
     user_prompt: |
+      The images provided above ARE the video frames you must analyze. You CAN see them — do NOT claim you cannot view images. Base your entire analysis on these frames.
+
       Examine these video frames from a highway surveillance camera.
 
       Scene information:
