@@ -64,7 +64,22 @@
   name_zh: "应急车道占用"
   detection_mode: "scene_tag"
   scene_tag_key: "应急车道车辆"  # 从 scene_description 标签推断
+  is_active: true
 ```
+
+#### 关闭某个事件检测
+
+将 `is_active` 设为 `false` 即可关闭该事件的检测（保留二进制编码位，节省 VLM 调用）：
+
+```yaml
+- event_id: 9
+  name: "Lane Change over Solid Line"
+  name_zh: "实线变道"
+  # ...
+  is_active: false   # 关闭此事件检测
+```
+
+**注意**：不要直接注释掉事件定义，否则二进制编码位数会改变，影响下游解析。使用 `is_active: false` 是正确做法。
 
 ### 跨事件推断规则 (`cross_event_inference_rules`)
 
