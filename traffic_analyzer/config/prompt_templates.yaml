@@ -251,11 +251,12 @@ prompt_templates:
       2. Even if the prior knowledge describes a vehicle as "stopped", "静止", or "正在作业", you MUST still check whether it is reversing or backing up. A vehicle can be momentarily stopped while in the process of reversing.
       3. Do NOT conclude "no reversing" simply because the prior knowledge says a vehicle is stationary or performing maintenance. Stationary does NOT equal "not reversing" — the vehicle may have just finished reversing, or may be in the process of backing up.
       4. You MUST perform frame-by-frame comparison for EVERY vehicle mentioned in the prior knowledge as being on an emergency lane, shoulder, or stopped. Do not skip any candidate.
-      5. IMPORTANT — Engineering/Maintenance vehicles are NOT exempt from reversing/wrong-way checks:
-         - A road maintenance truck, emergency rescue vehicle, or construction vehicle on the emergency lane CAN still be reversing or backing up.
-         - Being an "engineering vehicle" or "正在作业" does NOT automatically mean its movement direction is normal.
-         - You MUST still check: is the vehicle's BODY movement direction consistent with the known normal flow of its road? If it moves opposite to the known normal flow, it IS reversing/wrong-way regardless of its type or purpose.
-         - Example: If a maintenance truck on the emergency lane is moving opposite to the normal traffic flow while its headlights face the normal direction, it is REVERSING (倒车). If its headlights also face the opposite direction, it is WRONG-WAY driving (逆行).
+      5. CRITICAL — Detection is PURELY PHYSICAL, not legal:
+         - Your job is to detect whether a vehicle's BODY MOVEMENT DIRECTION is opposite to the known normal flow. PERIOD.
+         - Do NOT make value judgments about whether the behavior is "legal" or "illegal", "violation" or "authorized". That is NOT your task.
+         - An engineering vehicle performing road maintenance IS STILL reversing or wrong-way driving if its body moves opposite to the normal flow. You MUST report it.
+         - If the vehicle is an engineering/maintenance vehicle, you MAY note this in the "description" field (e.g., "黄色工程养护车在应急车道倒车作业"), but you MUST still set detected=true.
+         - The purpose of this system is to RECORD ALL reversing/wrong-way movements, including authorized ones. Downstream systems will decide whether it is a violation.
 
       INSTRUCTIONS:
       1. Read the "Prior knowledge" carefully. Identify which specific vehicles (if any) are mentioned as being on emergency lanes, shoulders, or stopped/parked illegally.
@@ -270,7 +271,8 @@ prompt_templates:
       4. Report detected=false ONLY if:
          - No vehicle is mentioned in the prior knowledge as being on an emergency lane, shoulder, or stopped; OR
          - You have performed frame-by-frame comparison for EVERY candidate vehicle and confirmed through position change analysis that NONE of them are moving opposite to the known normal flow.
-         - NEVER report detected=false solely because the prior knowledge describes a vehicle as "stopped" or "静止". You must verify through actual frame comparison.
+         - NEVER report detected=false solely because the prior knowledge describes a vehicle as "stopped", "静止", or "正在作业". You must verify through actual frame comparison.
+         - NEVER report detected=false because a vehicle is an "engineering vehicle", "工程车", or "养护作业车". These vehicles CAN and DO reverse — you must detect them.
 
       Return ONLY a JSON object in this exact format (no markdown, no extra text):
       {
