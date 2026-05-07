@@ -255,11 +255,19 @@ prompt_templates:
       1. Read the "Prior knowledge" carefully. Identify which specific vehicles (if any) are mentioned as being on emergency lanes, shoulders, or stopped/parked illegally.
       2. For EACH vehicle identified in step 1, perform ALL of the following checks and write them in your reasoning:
          a. **Select two frames to compare**: Pick the EARLIEST frame and the LATEST frame where the vehicle is visible. Write their frame numbers/timestamps.
-         b. **Position change using fixed reference points**: Describe the vehicle's position in each frame relative to FIXED objects (road markings, guardrails, median barriers, traffic cones, signs) using camera-relative position descriptions (e.g. "画面左侧偏上", "画面中央偏右"). Do NOT use memory or visual estimation — cite specific reference points.
-         c. **Head orientation**: State which direction the vehicle's HEAD (front) is pointing (toward_top/toward_bottom/toward_left/toward_right).
-         d. **Body movement direction**: State which direction the vehicle's BODY actually moved (toward_top/toward_bottom/toward_left/toward_right) based on position change in (b).
-         e. **Compare with KNOWN normal flow**: The known normal flow direction for this road is listed in "Known normal flow directions" above. Is the body movement direction in (d) OPPOSITE to this known normal flow? If yes, this is WRONG-WAY or REVERSING.
-         f. **Head vs body consistency**: If head orientation (c) is opposite to body movement (d), the vehicle is REVERSING / BACKING UP. If head orientation matches body movement but both are opposite to known normal flow, it is WRONG-WAY driving.
+         b. **Pixel displacement estimation**: For the vehicle, estimate pixel displacement between the two frames:
+            - Choose a clearly identifiable feature point (e.g., front bumper center, a distinctive marking, or the vehicle's geometric center).
+            - Estimate its coordinates in the EARLIER frame and the LATER frame as **percentages of frame width/height** (0-100%).
+            - Calculate the displacement: Δx = x_later - x_earlier, Δy = y_later - y_earlier, both in **percentage points**.
+            - Also estimate the vehicle's approximate width and height as **percentages of frame dimensions**.
+            - Judge significance: if |Δx| or |Δy| exceeds 3% of frame dimension, OR if the displacement magnitude √(Δx² + Δy²) exceeds 2% of frame diagonal, classify as "significant". Otherwise "negligible".
+            - Record: pixel_displacement_estimate = {"delta_x_pct": float, "delta_y_pct": float, "magnitude_pct": float, "vehicle_width_pct": float, "vehicle_height_pct": float, "significance": "significant|negligible"}
+            - CRITICAL: Even "small" displacements (2-5% of frame) MUST be reported as "significant" if they are consistent in direction across frames. Do NOT dismiss displacement just because the absolute number seems small.
+         c. **Position change using fixed reference points**: Describe the vehicle's position in each frame relative to FIXED objects (road markings, guardrails, median barriers, traffic cones, signs) using camera-relative position descriptions (e.g. "画面左侧偏上", "画面中央偏右"). Do NOT use memory or visual estimation — cite specific reference points.
+         d. **Head orientation**: State which direction the vehicle's HEAD (front) is pointing (toward_top/toward_bottom/toward_left/toward_right).
+         e. **Body movement direction**: State which direction the vehicle's BODY actually moved (toward_top/toward_bottom/toward_left/toward_right) based on position change in (c).
+         f. **Compare with KNOWN normal flow**: The known normal flow direction for this road is listed in "Known normal flow directions" above. Is the body movement direction in (e) OPPOSITE to this known normal flow? If yes, this is WRONG-WAY or REVERSING.
+         g. **Head vs body consistency**: If head orientation (d) is opposite to body movement (e), the vehicle is REVERSING / BACKING UP. If head orientation matches body movement but both are opposite to known normal flow, it is WRONG-WAY driving.
       3. Be especially careful with white/light-colored vehicles on the shoulder — they are the most common reversing candidates.
       4. Report detected=false ONLY if:
          - No vehicle is mentioned in the prior knowledge as being on an emergency lane, shoulder, or stopped; OR
@@ -278,7 +286,15 @@ prompt_templates:
             "end_time_sec": 22.0,
             "confidence": 0.9,
             "description": "White sedan on emergency lane moving backward",
-            "reasoning": "通过对比第1帧(0.0s)和第8帧(7.0s)，黄色抢险车相对于左侧护栏和交通锥的位置明显向画面下方移动。第一帧中该车位于画面上方偏右位置，车头朝向下（画面近处）；到最后一帧中该车已移动到画面下方更近处。车辆车头朝向（朝下）与车身移动方向（朝下）一致，但都与正常车流方向（朝上）相反，属于逆行行为。"
+            "reasoning": "通过对比第1帧(0.0s)和第8帧(7.0s)，黄色抢险车相对于左侧护栏和交通锥的位置明显向画面下方移动。第一帧中该车位于画面上方偏右位置，车头朝向下（画面近处）；到最后一帧中该车已移动到画面下方更近处。车辆车头朝向（朝下）与车身移动方向（朝下）一致，但都与正常车流方向（朝上）相反，属于逆行行为。",
+            "pixel_displacement_estimate": {
+              "delta_x_pct": -2.5,
+              "delta_y_pct": 8.0,
+              "magnitude_pct": 8.4,
+              "vehicle_width_pct": 15.0,
+              "vehicle_height_pct": 10.0,
+              "significance": "significant"
+            }
           }
         ],
         "detected": true,
@@ -300,6 +316,11 @@ prompt_templates:
       - Even when detected=false, you MUST write a detailed reasoning explaining your analysis process.
 
       Be conservative. Only report if you are confident after comparing frames.
+
+      CRITICAL — Pixel displacement is your PRIMARY evidence for movement:
+      - A displacement classified as "significant" OVERRIDES any subjective impression of "no change".
+      - When pixel displacement says "significant" but your visual impression says "no change", TRUST the pixel displacement.
+      - Report the pixel numbers explicitly in your reasoning field.
 
   # ---------------------------------------------------------------------------
   # Vehicle Movement Tracking (precision frames)

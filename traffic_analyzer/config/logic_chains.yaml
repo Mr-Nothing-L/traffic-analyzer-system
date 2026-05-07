@@ -121,6 +121,15 @@ logic_chains:
                   confidence: { type: "number" }
                   description: { type: "string" }
                   reasoning: { type: "string" }
+                  pixel_displacement_estimate:
+                    type: "object"
+                    properties:
+                      delta_x_pct: { type: "number" }
+                      delta_y_pct: { type: "number" }
+                      magnitude_pct: { type: "number" }
+                      vehicle_width_pct: { type: "number" }
+                      vehicle_height_pct: { type: "number" }
+                      significance: { type: "string", enum: ["significant", "negligible"] }
             detected: { type: "boolean" }
             confidence: { type: "number" }
             reasoning: { type: "string" }
