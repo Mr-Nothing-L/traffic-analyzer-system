@@ -23,6 +23,7 @@ class DetectionMode(str, enum.Enum):
     """How an event category is detected."""
     DIRECT_VLM = "direct_vlm"
     LOGIC_CHAIN = "logic_chain"
+    SCENE_TAG = "scene_tag"
 
 
 class ConfidenceLevel(str, enum.Enum):
@@ -182,6 +183,8 @@ class SceneInfo(BaseModel):
     pedestrian_present: Optional[bool] = None
     non_motor_vehicle_present: Optional[bool] = None
     thrown_object_present: Optional[bool] = None
+    # Full 6-step direction analysis result (populated by direction_analysis chain)
+    direction_analysis: Optional[DirectionAnalysis] = None
 
 
 # ---------------------------------------------------------------------------
@@ -200,7 +203,29 @@ class EventCategory(BaseModel):
     definition: str = Field("", description="Detailed definition for LLM prompt")
     visual_indicators: List[str] = Field(default_factory=list)
     confidence_threshold: float = 0.7
+    prompt_template_id: Optional[str] = Field(
+        None, description="Template ID for direct_vlm mode. Required when detection_mode=direct_vlm."
+    )
+    scene_boolean_field: Optional[str] = Field(
+        None, description="SceneInfo boolean field name for scene_tag inference (e.g. 'pedestrian_present')"
+    )
+    scene_tag_key: Optional[str] = Field(
+        None, description="Tag key in scene_description for scene_tag inference (e.g. '行人')"
+    )
     is_active: bool = True
+
+
+class CrossEventInferenceRule(BaseModel):
+    """Rule for inferring a target event from a source event's detection result."""
+    rule_id: str
+    name: str = ""
+    target_event_id: int          # 要推断的目标事件
+    source_event_id: int          # 源事件（必须已检测到）
+    source_description_keywords: List[str] = Field(default_factory=list)
+                                  # 源事件实例描述中匹配任一关键词即触发推断
+    confidence_multiplier: float = 0.9
+    description_prefix: str = ""  # 推断实例的描述前缀
+    reasoning: str = ""           # 推断理由
 
 
 class EventInstance(BaseModel):
