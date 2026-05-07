@@ -325,37 +325,20 @@ class AnalysisOrchestrator:
             )
 
         # ------------------------------------------------------------------
-        # Frame selection: take the FIRST N seconds of coarse frames.
-        # With coarse_fps=1.0, this gives 1-second intervals, keeping
-        # vehicle displacement small enough that most vehicles are still
-        # visible across consecutive frames.
+        # Frame selection: extract DENSE frames from the FIRST 5 seconds.
+        # FPS=2.0 gives 0.5-second intervals, keeping vehicle displacement
+        # small enough for reliable motion tracking and direction analysis.
         # ------------------------------------------------------------------
-        coarse_frames = keyframes.coarse_frames
-        total_coarse = len(coarse_frames)
-
-        # Target frame count from configuration (default 30, configurable via CLI/env)
-        min_frames = 30
-        if (
-            self.config_manager._system_config is not None
-            and self.config_manager._system_config.scene_understanding_min_frames > 0
-        ):
-            min_frames = self.config_manager._system_config.scene_understanding_min_frames
-
-        target_count = min(min_frames, total_coarse)
-        raw_frames = coarse_frames[:target_count]
-
-        if total_coarse < min_frames:
-            # Not enough coarse frames — supplement from video file
-            logger.info(
-                "Coarse frames insufficient (%d < %d), supplementing from video",
-                total_coarse,
-                min_frames,
-            )
-            raw_frames = self._supplement_frames_from_video(
-                video_path, coarse_frames, min_frames, duration_sec
-            )
-        images: List[Any] = []
+        dense_frames = self._extract_dense_frames_for_scene(
+            video_path,
+            duration_sec=duration_sec,
+            max_seconds=5.0,
+            target_fps=2.0,
+        )
+        raw_frames = dense_frames
         total = len(raw_frames)
+        logger.info("Scene understanding: using %d dense frames (first 5s, 0.5s interval)", total)
+        images: List[Any] = []
         for idx, kf in enumerate(raw_frames):
             img = kf.image_data or kf.image_path
             if img is None:
@@ -499,6 +482,86 @@ class AnalysisOrchestrator:
         # The _verify_directions method is kept intact for backward compatibility.
 
         return scene_info
+
+    def _extract_dense_frames_for_scene(
+        self,
+        video_path: str,
+        duration_sec: float,
+        max_seconds: float = 5.0,
+        target_fps: float = 2.0,
+    ) -> List[Keyframe]:
+        """Extract dense frames from the FIRST N seconds of video for scene understanding.
+
+        Uses a higher FPS (default 2.0 = 0.5s interval) so vehicle displacement
+        between consecutive frames is small, making motion tracking and direction
+        analysis more reliable. Only the first `max_seconds` are sampled.
+
+        Args:
+            video_path: Path to the video file.
+            duration_sec: Total video duration in seconds.
+            max_seconds: How many seconds from the start to sample (default 5.0).
+            target_fps: Target sampling rate (default 2.0 = one frame every 0.5s).
+
+        Returns:
+            List of Keyframe objects with dense temporal coverage.
+        """
+        import cv2
+
+        cap = cv2.VideoCapture(video_path)
+        try:
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            total_vid_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            if fps <= 0 or total_vid_frames <= 0 or duration_sec <= 0:
+                return []
+
+            sample_duration = min(max_seconds, duration_sec)
+            interval = max(1, int(round(fps / target_fps)))
+            max_frames = int(sample_duration * target_fps)
+
+            keyframes: List[Keyframe] = []
+            frame_idx = 0
+            local_id = 0
+
+            while frame_idx < total_vid_frames and local_id < max_frames:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+                ret, frame = cap.read()
+                if not ret:
+                    break
+
+                timestamp = frame_idx / fps
+                if timestamp > sample_duration:
+                    break
+
+                from PIL import Image as PILImage
+                import io
+
+                img = PILImage.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=85)
+
+                keyframes.append(
+                    Keyframe(
+                        frame_id=local_id,
+                        timestamp_sec=round(timestamp, 2),
+                        image_data=buf.getvalue(),
+                        image_path=None,
+                        quality_score=0.5,
+                        is_precision=False,
+                    )
+                )
+                local_id += 1
+                frame_idx += interval
+
+            logger.info(
+                "Dense frame extraction: %d frames from first %.1fs (fps=%.1f, interval=%d)",
+                len(keyframes),
+                sample_duration,
+                target_fps,
+                interval,
+            )
+            return keyframes
+        finally:
+            cap.release()
 
     def _supplement_frames_from_video(
         self,
