@@ -304,8 +304,8 @@ class AnalysisOrchestrator:
         coarse_frames = keyframes.coarse_frames
         total_coarse = len(coarse_frames)
 
-        # Target frame count: min 30, max 2 FPS, absolute cap 60
-        target_count = max(30, min(60, int(duration_sec * 2)))
+        # Target frame count: fixed at 30 (uniformly distributed across entire video)
+        target_count = 30
         # But cannot exceed available coarse frames
         target_count = min(target_count, total_coarse)
 
