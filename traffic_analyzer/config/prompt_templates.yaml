@@ -199,12 +199,12 @@ prompt_templates:
       }
 
       IMPORTANT:
-      - Direction is defined relative to the video frame:
-        - "toward_top"    = vehicles move closer to the TOP edge (y-coordinate DECREASES from earlier to later frame)
-        - "toward_bottom" = vehicles move closer to the BOTTOM edge (y-coordinate INCREASES from earlier to later frame)
-        - "toward_left"   = vehicles move closer to the LEFT edge (x-coordinate DECREASES from earlier to later frame)
-        - "toward_right"  = vehicles move closer to the RIGHT edge (x-coordinate INCREASES from earlier to later frame)
-      - In video frames, the y-axis visually goes DOWN (top of frame is y=0, bottom is y=max).
+      - Direction is defined visually relative to the video frame (do NOT use coordinates):
+        - "toward_top"    = vehicles move closer to the TOP edge of the frame
+        - "toward_bottom" = vehicles move closer to the BOTTOM edge of the frame
+        - "toward_left"   = vehicles move closer to the LEFT edge of the frame
+        - "toward_right"  = vehicles move closer to the RIGHT edge of the frame
+      - To determine direction: pick ONE vehicle, note its position in an EARLIER frame, then note its position in a LATER frame. If it moved toward the top, use "toward_top".
       - Look at MULTIPLE vehicles, not just one
       - In a two-way highway, opposite roads should have opposite directions
       - If direction is unclear, say so with lower confidence
