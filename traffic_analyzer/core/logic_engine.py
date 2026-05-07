@@ -438,7 +438,14 @@ class LogicEngine:
         if step.input_images:
             resolved_images = _resolve_value(step.input_images, local_vars)
             if isinstance(resolved_images, list):
-                images = resolved_images
+                # Flatten one level: input_images is a list of expressions, each
+                # may resolve to a list of Keyframes (e.g. ["${keyframes.coarse_frames}"]
+                # -> [[Keyframe, ...]]). We need [Keyframe, ...].
+                for item in resolved_images:
+                    if isinstance(item, list):
+                        images.extend(item)
+                    else:
+                        images.append(item)
             else:
                 images = [resolved_images]
 
