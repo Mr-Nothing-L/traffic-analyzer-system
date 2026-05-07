@@ -17,6 +17,15 @@ prompt_templates:
     user_prompt: |
       Analyze these video frames from a highway surveillance camera.
 
+      CRITICAL — Frame temporal order:
+      The frames are provided in STRICT CHRONOLOGICAL ORDER.
+      - The FIRST frame (第1帧) is the EARLIEST moment in the video.
+      - The LAST frame (最后一帧) is the LATEST moment in the video.
+      - Each frame has a timestamp (t=XX.Xs) showing its position in the video timeline.
+      - When tracking vehicle movement, ALWAYS compare an EARLIER frame against a LATER frame.
+      - A vehicle moving from the top of the frame to the bottom is moving toward the camera (getting larger).
+      - A vehicle moving from the bottom of the frame to the top is moving away from the camera (getting smaller).
+
       Please provide your analysis in the following JSON format:
       {
         "road_count": <number of distinct roads/lane groups>,

@@ -333,15 +333,18 @@ class AnalysisOrchestrator:
                 video_path, coarse_frames, min_frames, duration_sec
             )
         images: List[Any] = []
+        total = len(raw_frames)
         for idx, kf in enumerate(raw_frames):
             img = kf.image_data or kf.image_path
             if img is None:
                 continue
-            label = f"FRAME {idx + 1}/{len(raw_frames)}  t={kf.timestamp_sec:.2f}s  EARLIEST→LATEST"
+            # Label must make the temporal order absolutely unambiguous.
             if idx == 0:
-                label += "  [OLDEST]"
-            if idx == len(raw_frames) - 1:
-                label += "  [NEWEST]"
+                label = f"第1帧(最早) | Frame 1/{total} | t={kf.timestamp_sec:.1f}s | [VIDEO START]"
+            elif idx == total - 1:
+                label = f"第{total}帧(最新) | Frame {total}/{total} | t={kf.timestamp_sec:.1f}s | [VIDEO END]"
+            else:
+                label = f"第{idx + 1}帧 | Frame {idx + 1}/{total} | t={kf.timestamp_sec:.1f}s"
             annotated = _annotate_frame(img, label)
             images.append(annotated)
 

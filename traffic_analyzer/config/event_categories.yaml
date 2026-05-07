@@ -233,7 +233,7 @@ event_categories:
       - "Lane change in no-change zone"
       - "Solid line violation"
     confidence_threshold: 0.7
-    is_active: true
+    is_active: false
 
 # =============================================================================
 # 跨事件推断规则（Cross-Event Inference Rules）
