@@ -116,14 +116,20 @@ class ConfigManager:
             for tmpl in raw_prompt_templates.get("prompt_templates", [])
         }
 
-        # Read optional scene_understanding frame count from env
+        # Read optional frame count limits from env
         su_min_frames = os.getenv("SCENE_UNDERSTANDING_MIN_FRAMES")
+        vlm_max_frames = os.getenv("VLM_MAX_FRAMES")
         system_kwargs: Dict[str, Any] = {}
         if su_min_frames is not None:
             try:
                 system_kwargs["scene_understanding_min_frames"] = int(su_min_frames)
             except ValueError:
                 logger.warning("Invalid SCENE_UNDERSTANDING_MIN_FRAMES value '%s', using default", su_min_frames)
+        if vlm_max_frames is not None:
+            try:
+                system_kwargs["vlm_max_frames"] = int(vlm_max_frames)
+            except ValueError:
+                logger.warning("Invalid VLM_MAX_FRAMES value '%s', using default", vlm_max_frames)
 
         self._system_config = SystemConfig(
             llm_provider=llm_config,

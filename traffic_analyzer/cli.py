@@ -52,10 +52,11 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
     output_path = _resolve_path(args.output) if args.output else None
 
-    # Pass --min-frames to the system via environment variable
+    # Pass --min-frames to the system via environment variables
     if args.min_frames != 30:
         os.environ["SCENE_UNDERSTANDING_MIN_FRAMES"] = str(args.min_frames)
-        logger.info("Scene understanding min frames set to %d", args.min_frames)
+        os.environ["VLM_MAX_FRAMES"] = str(args.min_frames)
+        logger.info("Max VLM input frames set to %d (scene_understanding + direct_vlm + logic_chain)", args.min_frames)
 
     try:
         orchestrator = AnalysisOrchestrator.from_config_dir(config_dir)

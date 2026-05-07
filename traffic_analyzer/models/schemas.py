@@ -433,6 +433,7 @@ class SystemConfig(BaseModel):
     max_video_length_sec: float = 300.0
     log_level: str = "INFO"
     scene_understanding_min_frames: int = 30
+    vlm_max_frames: int = 10
 
 
 # ---------------------------------------------------------------------------

@@ -459,6 +459,22 @@ class LogicEngine:
             elif isinstance(img, (str, bytes)):
                 actual_images.append(img)
 
+        # Limit max frames per VLM call to control latency
+        max_frames = 10
+        if (
+            self.config_manager is not None
+            and self.config_manager._system_config is not None
+            and self.config_manager._system_config.vlm_max_frames > 0
+        ):
+            max_frames = self.config_manager._system_config.vlm_max_frames
+        if len(actual_images) > max_frames:
+            logger.info(
+                "Limiting VLM input from %d to %d frames (vlm_max_frames)",
+                len(actual_images),
+                max_frames,
+            )
+            actual_images = actual_images[:max_frames]
+
         # Make VLM call
         response: LLMResponse = self.vlm_engine.call(
             template=template,

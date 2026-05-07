@@ -685,7 +685,13 @@ class AnalysisOrchestrator:
 
         images = []
         if context.keyframes:
-            images = [kf.image_data or kf.image_path for kf in context.keyframes.coarse_frames[:6]]
+            max_frames = 6
+            if (
+                self.config_manager._system_config is not None
+                and self.config_manager._system_config.vlm_max_frames > 0
+            ):
+                max_frames = self.config_manager._system_config.vlm_max_frames
+            images = [kf.image_data or kf.image_path for kf in context.keyframes.coarse_frames[:max_frames]]
             images = [img for img in images if img is not None]
 
         response = self.vlm_engine.call(
