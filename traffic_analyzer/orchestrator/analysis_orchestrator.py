@@ -33,6 +33,7 @@ from traffic_analyzer.models.schemas import (
     EventCategory,
     EventInstance,
     EventResult,
+    Keyframe,
     KeyframeSequence,
     PromptTemplate,
     Report,
@@ -212,9 +213,17 @@ class AnalysisOrchestrator:
         logger.info("  Coarse frames: %d", len(keyframes.coarse_frames))
         logger.info("  Precision frames: %d", len(keyframes.precision_frames))
 
+        # Extract video metadata early for scene understanding frame selection
+        video_meta = self._extract_video_meta(video_path)
+        context.video_meta = video_meta
+
         # Step 2: Global scene understanding
         logger.info("[2/7] Scene understanding...")
-        scene_info = self._scene_understanding(keyframes)
+        scene_info = self._scene_understanding(
+            keyframes,
+            video_path=video_path,
+            duration_sec=video_meta.duration_sec,
+        )
         context.scene_understanding = scene_info
         logger.info("  Roads detected: %d", scene_info.road_count)
         logger.info("  Traffic density: %s", scene_info.traffic_density)
@@ -248,8 +257,6 @@ class AnalysisOrchestrator:
 
         # Step 7: Report generation
         logger.info("[7/7] Generating report...")
-        video_meta = self._extract_video_meta(video_path)
-        context.video_meta = video_meta
         usage_stats = self.vlm_engine.get_usage_stats()
         analysis_duration_sec = time.perf_counter() - analysis_start
 
@@ -272,7 +279,12 @@ class AnalysisOrchestrator:
     # Pipeline steps
     # ------------------------------------------------------------------
 
-    def _scene_understanding(self, keyframes: KeyframeSequence) -> SceneInfo:
+    def _scene_understanding(
+        self,
+        keyframes: KeyframeSequence,
+        video_path: str,
+        duration_sec: float = 0.0,
+    ) -> SceneInfo:
         """Perform global scene understanding via VLM."""
         try:
             template = self.config_manager.get_prompt_template("scene_understanding")
@@ -285,10 +297,34 @@ class AnalysisOrchestrator:
                 user_prompt="Analyze these video frames and describe the road structure, traffic flow, and conditions.",
             )
 
-        # Use only the first 4 coarse frames for scene understanding.
-        # Fewer frames = smaller time gap = the same vehicles are more likely
-        # to appear across consecutive frames, making direction tracking reliable.
-        raw_frames = keyframes.coarse_frames[:4]
+        # ------------------------------------------------------------------
+        # Frame selection: uniformly distributed across entire video
+        # Requirements: min 30 frames, max 2 FPS, absolute cap 60
+        # ------------------------------------------------------------------
+        coarse_frames = keyframes.coarse_frames
+        total_coarse = len(coarse_frames)
+
+        # Target frame count: min 30, max 2 FPS, absolute cap 60
+        target_count = max(30, min(60, int(duration_sec * 2)))
+        # But cannot exceed available coarse frames
+        target_count = min(target_count, total_coarse)
+
+        if total_coarse >= 30:
+            # Uniformly select target_count frames from coarse_frames
+            if target_count >= total_coarse:
+                raw_frames = coarse_frames[:]
+            else:
+                indices = [int(i * (total_coarse - 1) / (target_count - 1)) for i in range(target_count)]
+                raw_frames = [coarse_frames[i] for i in indices]
+        else:
+            # Not enough coarse frames — supplement from video file
+            logger.info(
+                "Coarse frames insufficient (%d < 30), supplementing from video",
+                total_coarse,
+            )
+            raw_frames = self._supplement_frames_from_video(
+                video_path, coarse_frames, 30, duration_sec
+            )
         images: List[Any] = []
         for idx, kf in enumerate(raw_frames):
             img = kf.image_data or kf.image_path
@@ -441,6 +477,68 @@ class AnalysisOrchestrator:
             scene_info = self._verify_directions(scene_info, keyframes)
 
         return scene_info
+
+    def _supplement_frames_from_video(
+        self,
+        video_path: str,
+        existing_frames: List[Keyframe],
+        target_count: int,
+        duration_sec: float,
+    ) -> List[Keyframe]:
+        """Extract additional frames from video to reach target_count.
+
+        Frames are uniformly distributed across the entire video duration,
+        avoiding timestamps too close to already-existing frames.
+        """
+        import cv2
+
+        cap = cv2.VideoCapture(video_path)
+        try:
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            total_vid_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            if fps <= 0 or total_vid_frames <= 0 or duration_sec <= 0:
+                return existing_frames
+
+            existing_timestamps = {kf.timestamp_sec for kf in existing_frames}
+            result = existing_frames[:]
+            extra_needed = target_count - len(existing_frames)
+            if extra_needed <= 0:
+                return result
+
+            for i in range(extra_needed):
+                # Uniformly spaced timestamps across video
+                target_time = (i + 0.5) * duration_sec / extra_needed
+
+                # Skip if too close to an existing frame (< 0.3s)
+                if any(abs(target_time - ts) < 0.3 for ts in existing_timestamps):
+                    continue
+
+                frame_idx = min(int(target_time * fps), total_vid_frames - 1)
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+                ret, frame = cap.read()
+                if not ret:
+                    continue
+
+                from PIL import Image as PILImage
+                import io
+
+                img = PILImage.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=85)
+
+                result.append(
+                    Keyframe(
+                        frame_id=len(result),
+                        timestamp_sec=round(target_time, 2),
+                        image_data=buf.getvalue(),
+                        quality_score=0.5,
+                    )
+                )
+                existing_timestamps.add(target_time)
+
+            return result
+        finally:
+            cap.release()
 
     def _verify_directions(
         self,

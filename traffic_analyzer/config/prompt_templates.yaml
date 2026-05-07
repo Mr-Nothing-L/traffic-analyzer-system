@@ -244,11 +244,12 @@ prompt_templates:
       {% endif %}
 
       CRITICAL PRIOR KNOWLEDGE:
-      The "Prior knowledge" above is from an earlier comprehensive scene analysis. You MUST use it as your primary guide:
-      1. Focus ONLY on vehicles explicitly mentioned in the prior knowledge as being in illegal parking situations or occupying emergency lanes.
-      2. Do NOT scan the entire video for every possible vehicle. Your task is narrowly scoped: check ONLY whether the already-identified suspicious vehicles (from prior knowledge) are actually reversing or driving the wrong way.
-      3. If the prior knowledge does not mention any vehicle in an emergency lane or stopped illegally, conclude that no reversing/wrong-way is present.
-      4. IMPORTANT — Engineering/Maintenance vehicles are NOT exempt from reversing/wrong-way checks:
+      The "Prior knowledge" above is from an earlier comprehensive scene analysis. It provides a list of vehicles that MAY be candidates for reversing/wrong-way behavior. However, you MUST NOT take the prior knowledge at face value — your job is to independently verify through frame comparison:
+      1. The prior knowledge identifies candidate vehicles (e.g., vehicles on emergency lanes, stopped vehicles, engineering vehicles). Use this as a starting point, not a conclusion.
+      2. Even if the prior knowledge describes a vehicle as "stopped", "静止", or "正在作业", you MUST still check whether it is reversing or backing up. A vehicle can be momentarily stopped while in the process of reversing.
+      3. Do NOT conclude "no reversing" simply because the prior knowledge says a vehicle is stationary or performing maintenance. Stationary does NOT equal "not reversing" — the vehicle may have just finished reversing, or may be in the process of backing up.
+      4. You MUST perform frame-by-frame comparison for EVERY vehicle mentioned in the prior knowledge as being on an emergency lane, shoulder, or stopped. Do not skip any candidate.
+      5. IMPORTANT — Engineering/Maintenance vehicles are NOT exempt from reversing/wrong-way checks:
          - A road maintenance truck, emergency rescue vehicle, or construction vehicle on the emergency lane CAN still be reversing or backing up.
          - Being an "engineering vehicle" or "正在作业" does NOT automatically mean its movement direction is normal.
          - You MUST still check: is the vehicle's BODY movement direction consistent with the known normal flow of its road? If it moves opposite to the known normal flow, it IS reversing/wrong-way regardless of its type or purpose.
@@ -264,7 +265,10 @@ prompt_templates:
          e. **Compare with KNOWN normal flow**: The known normal flow direction for this road is listed in "Known normal flow directions" above. Is the body movement direction in (d) OPPOSITE to this known normal flow? If yes, this is WRONG-WAY or REVERSING.
          f. **Head vs body consistency**: If head orientation (c) is opposite to body movement (d), the vehicle is REVERSING / BACKING UP. If head orientation matches body movement but both are opposite to known normal flow, it is WRONG-WAY driving.
       3. Be especially careful with white/light-colored vehicles on the shoulder — they are the most common reversing candidates.
-      4. If no vehicle is mentioned in the prior knowledge as suspicious, or if all mentioned vehicles are confirmed to be moving normally, report detected=false.
+      4. Report detected=false ONLY if:
+         - No vehicle is mentioned in the prior knowledge as being on an emergency lane, shoulder, or stopped; OR
+         - You have performed frame-by-frame comparison for EVERY candidate vehicle and confirmed through position change analysis that NONE of them are moving opposite to the known normal flow.
+         - NEVER report detected=false solely because the prior knowledge describes a vehicle as "stopped" or "静止". You must verify through actual frame comparison.
 
       Return ONLY a JSON object in this exact format (no markdown, no extra text):
       {
