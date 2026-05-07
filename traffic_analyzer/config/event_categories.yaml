@@ -29,6 +29,7 @@ event_categories:
       - "No stopping sign violation"
     confidence_threshold: 0.7
     is_active: true
+    prompt_template_id: "direct_event_detection"  # direct_vlm 专用模板 ID
 
   - event_id: 1
     event_code: "B"
@@ -59,7 +60,8 @@ event_categories:
     name: "Traffic Accident"
     name_zh: "交通事故"
     description: "Vehicle collisions, breakdowns, debris, overturned vehicles, fire or smoke from vehicles."
-    detection_mode: "direct_vlm"
+    detection_mode: "logic_chain"
+    logic_chain_id: "accident_scene_tag"
     definition: |
       Traffic Incidents on highways include but are not limited to:
       - Vehicle collisions (rear-end, side-impact, multi-vehicle)
@@ -81,7 +83,7 @@ event_categories:
     name: "Person Presence in Highway"
     name_zh: "高速公路行人出现"
     description: "Pedestrians, stranded motorists, or individuals crossing restricted highway areas."
-    detection_mode: "direct_vlm"
+    detection_mode: "scene_tag"
     definition: |
       Person presence in highway indicators include:
       - Highways are restricted areas where pedestrian access poses serious safety risks
@@ -94,13 +96,15 @@ event_categories:
       - "Stranded motorist outside vehicle"
     confidence_threshold: 0.7
     is_active: true
+    scene_boolean_field: "pedestrian_present"  # SceneInfo 布尔字段名
+    scene_tag_key: "行人"  # scene_description 结构化标签键
 
   - event_id: 4
     event_code: "E"
     name: "Motorcycle Presence"
     name_zh: "摩托车出现"
     description: "Motorcycles present on the highway."
-    detection_mode: "direct_vlm"
+    detection_mode: "scene_tag"
     definition: |
       Motorcycle Presence has the following key visual indicators:
       - Two-wheeled configuration with visible wheels aligned front-to-back
@@ -115,6 +119,8 @@ event_categories:
       - "Smaller vehicle profile"
     confidence_threshold: 0.7
     is_active: true
+    scene_boolean_field: "non_motor_vehicle_present"  # SceneInfo 布尔字段名
+    scene_tag_key: "非机动车"  # scene_description 结构化标签键
 
   - event_id: 5
     event_code: "F"
@@ -137,6 +143,7 @@ event_categories:
       - "Vehicle queue extending far"
     confidence_threshold: 0.7
     is_active: true
+    prompt_template_id: "direct_event_detection"  # direct_vlm 专用模板 ID
 
   - event_id: 6
     event_code: "G"
@@ -162,6 +169,7 @@ event_categories:
       - "Lane closure signs"
     confidence_threshold: 0.7
     is_active: true
+    prompt_template_id: "direct_event_detection"  # direct_vlm 专用模板 ID
 
   - event_id: 7
     event_code: "H"
@@ -204,6 +212,7 @@ event_categories:
       - "Flying object near vehicles"
     confidence_threshold: 0.7
     is_active: true
+    prompt_template_id: "direct_event_detection"  # direct_vlm 专用模板 ID
 
   - event_id: 9
     event_code: "K"
@@ -225,3 +234,30 @@ event_categories:
       - "Solid line violation"
     confidence_threshold: 0.7
     is_active: true
+
+# =============================================================================
+# 跨事件推断规则（Cross-Event Inference Rules）
+# =============================================================================
+# 当一个事件被检测到时，可以据此推断另一个相关事件。
+# 例如：违法停车在路肩 → 推断为应急车道占用。
+# 用户可在此处自定义推断规则，无需修改代码。
+#
+# 字段说明：
+#   target_event_id:    要推断的目标事件 ID
+#   source_event_id:    源事件 ID（必须先被检测到）
+#   source_description_keywords: 在源事件实例的 description 中匹配任一关键词即触发
+#   confidence_multiplier: 推断结果的置信度 = 源事件置信度 × 此系数
+#   description_prefix: 推断实例的描述前缀
+#   reasoning:          推断理由（报告中显示）
+# =============================================================================
+
+cross_event_inference_rules:
+  - rule_id: "parking_to_emergency"
+    name: "违法停车在路肩 -> 应急车道占用"
+    target_event_id: 1
+    source_event_id: 0
+    source_description_keywords: ["shoulder", "emergency", "路肩", "应急"]
+    confidence_multiplier: 0.9
+    description_prefix: "车辆在应急车道/路肩区域停放"
+    reasoning: "违法停车事件检测到车辆在应急车道/路肩区域停放，符合应急车道占用定义。"
+
