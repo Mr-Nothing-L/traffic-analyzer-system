@@ -426,12 +426,12 @@ def _call_aliyun(
 class VLMInferenceEngine:
     """Unified inference engine for vision-language models.
 
-    Supports multiple providers: anthropic, openai, google, aliyun.
+    Supports multiple providers: anthropic, google, aliyun.
     Handles prompt templating via Jinja2, image encoding, JSON response
     extraction, basic schema validation, retry logic, and usage tracking.
     """
 
-    SUPPORTED_PROVIDERS = ("anthropic", "openai", "google", "aliyun")
+    SUPPORTED_PROVIDERS = ("anthropic", "google", "aliyun")
 
     def __init__(self, config: LLMProviderConfig) -> None:
         """Initialize the engine with provider configuration.
@@ -474,11 +474,6 @@ class VLMInferenceEngine:
             if self.config.base_url:
                 kwargs["base_url"] = self.config.base_url
             self._client = anthropic.Anthropic(**kwargs)
-        elif self.provider == "openai":
-            kwargs = {"api_key": self.config.api_key, "http_client": http_client}
-            if self.config.base_url:
-                kwargs["base_url"] = self.config.base_url
-            self._client = openai.OpenAI(**kwargs)
         elif self.provider == "google":
             genai.configure(api_key=self.config.api_key)
             self._client = genai
@@ -631,16 +626,6 @@ class VLMInferenceEngine:
                 self.config.temperature,
             )
             return _call_anthropic(self._client, kwargs)
-        elif self.provider == "openai":
-            _, kwargs = _build_openai_payload(
-                system_prompt,
-                user_prompt,
-                images,
-                self.config.model,
-                self.config.max_tokens,
-                self.config.temperature,
-            )
-            return _call_openai(self._client, kwargs)
         elif self.provider == "google":
             contents, kwargs = _build_google_payload(
                 system_prompt,

@@ -36,8 +36,8 @@ event_categories:
     name: "Emergency Lane Occupancy"
     name_zh: "应急车道占用"
     description: "Vehicles entering, stopping, occupying, or traveling within the emergency lane."
-    detection_mode: "logic_chain"
-    logic_chain_id: "emergency_lane_occupancy"
+    detection_mode: "scene_tag"
+    scene_tag_key: "应急车道车辆"  # scene_description 结构化标签键
     definition: |
       Emergency lanes typically have the following characteristics:
       - Located on the far left or far right edge of the roadway
@@ -260,4 +260,60 @@ cross_event_inference_rules:
     confidence_multiplier: 0.9
     description_prefix: "车辆在应急车道/路肩区域停放"
     reasoning: "违法停车事件检测到车辆在应急车道/路肩区域停放，符合应急车道占用定义。"
+
+# =============================================================================
+# 自定义事件示例（Custom Event Example）
+# =============================================================================
+# 以下是一个未启用的自定义事件示例，展示如何新增事件。
+# 只需取消注释并修改字段即可启用。
+#
+# 示例：检测 "动物穿越高速公路" 事件
+# =============================================================================
+
+# event_categories:
+#   # --- 示例1: direct_vlm 模式 ---
+#   # 适用于一眼就能判断的事件，直接调用 VLM 检测
+#   - event_id: 10
+#     event_code: "Z"
+#     name: "Animal Crossing"
+#     name_zh: "动物穿越"
+#     description: "Animals crossing the highway roadway."
+#     detection_mode: "direct_vlm"
+#     prompt_template_id: "direct_event_detection"  # 引用 prompt_templates.yaml 中的模板
+#     definition: |
+#       Animal crossing indicators:
+#       - Animals (deer, dogs, etc.) on the roadway
+#       - Animals moving across traffic lanes
+#     visual_indicators:
+#       - "Animal on road"
+#       - "Animal crossing lanes"
+#     confidence_threshold: 0.7
+#     is_active: true
+#
+#   # --- 示例2: logic_chain 模式 ---
+#   # 适用于需要多步推理的复杂事件
+#   # 需要在 logic_chains.yaml 中定义对应的逻辑链
+#   - event_id: 11
+#     event_code: "Y"
+#     name: "Complex Event"
+#     name_zh: "复杂事件"
+#     description: "An event requiring multi-step reasoning."
+#     detection_mode: "logic_chain"
+#     logic_chain_id: "my_custom_chain"  # 引用 logic_chains.yaml 中的链
+#     definition: "..."
+#     confidence_threshold: 0.7
+#     is_active: true
+#
+#   # --- 示例3: scene_tag 模式 ---
+#   # 适用于可从场景描述标签直接推断的事件，零 VLM 调用
+#   - event_id: 12
+#     event_code: "X"
+#     name: "Fire or Smoke"
+#     name_zh: "车辆起火/冒烟"
+#     description: "Fire or smoke from vehicles on the highway."
+#     detection_mode: "scene_tag"
+#     scene_tag_key: "起火冒烟"  # scene_description 中 {起火冒烟：有/无} 标签
+#     definition: "..."
+#     confidence_threshold: 0.7
+#     is_active: true
 
