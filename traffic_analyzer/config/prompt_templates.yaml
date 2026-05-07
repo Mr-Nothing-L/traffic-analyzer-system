@@ -47,7 +47,54 @@ prompt_templates:
         "pedestrian_present": <true|false>,
         "non_motor_vehicle_present": <true|false>,
         "thrown_object_present": <true|false>,
-        "confidence": <0.0-1.0>
+        "confidence": <0.0-1.0>,
+        "direction_analysis": {
+          "anchor_points": [
+            {"name": "...", "position": "...", "type": "..."}
+          ],
+          "vehicle_motions": [
+            {
+              "vehicle_id": "...",
+              "description": "...",
+              "displacement": "...",
+              "movement_direction": "toward_top|toward_bottom|toward_left|toward_right|stationary",
+              "road_id": 0
+            }
+          ],
+          "head_orientations": [
+            {
+              "vehicle_id": "...",
+              "head_orientation": "toward_top|toward_bottom|toward_left|toward_right|unknown",
+              "evidence": "..."
+            }
+          ],
+          "consistency_check": [
+            {
+              "vehicle_id": "...",
+              "movement": "toward_top|...",
+              "head_orientation": "toward_top|...",
+              "consistent": true,
+              "anomaly": false
+            }
+          ],
+          "perspective_check": [
+            {
+              "vehicle_id": "...",
+              "size_change": "getting larger|getting smaller|no change",
+              "matches_direction": true,
+              "trajectory_parallel_to_lanes": true
+            }
+          ],
+          "conclusions": [
+            {
+              "road_id": 0,
+              "name": "左侧道路",
+              "normal_direction": "toward_top|toward_bottom|toward_left|toward_right|unknown",
+              "confidence": 0.95,
+              "evidence_summary": "N/M vehicles moving..."
+            }
+          ]
+        }
       }
 
       CRITICAL DIRECTION RULES — follow strictly:
@@ -57,26 +104,50 @@ prompt_templates:
          - "从近到远" means vehicles move away from the camera toward the background.
       3. DIRECTION DETERMINATION PROCEDURE (mandatory):
          a. EACH image has a label burned into the top-left corner showing its frame number and timestamp (e.g. "FRAME 1/4 t=0.00s [OLDEST]"). The images are provided in CHRONOLOGICAL ORDER from OLDEST to NEWEST.
-         b. EACH image also has a semi-transparent white grid overlay with numbered rows (1-6, top to bottom) and columns (1-6, left to right). Use these grid coordinates to precisely describe vehicle positions (e.g. "cell (2,3)" means row 2, column 3).
-         c. For EACH road, identify at least 5 vehicles on the MAIN travel lanes (ignore emergency lane / shoulder vehicles).
-         d. For EACH vehicle, compare its position in an EARLIER frame (lower frame number, smaller timestamp) against a LATER frame (higher frame number, larger timestamp). Use ONLY ADJACENT frames (e.g. Frame 1 vs Frame 2, or Frame 2 vs Frame 3) — do NOT compare Frame 1 with Frame 4 because the same vehicle may have left the scene. Record the MOVEMENT direction using NATURAL-LANGUAGE directions:
+         b. For EACH road, identify at least 5 vehicles on the MAIN travel lanes (ignore emergency lane / shoulder vehicles).
+         c. For EACH vehicle, compare its position in an EARLIER frame (lower frame number, smaller timestamp) against a LATER frame (higher frame number, larger timestamp). Use ONLY ADJACENT frames (e.g. Frame 1 vs Frame 2, or Frame 2 vs Frame 3) — do NOT compare Frame 1 with Frame 4 because the same vehicle may have left the scene. Record the MOVEMENT direction using NATURAL-LANGUAGE directions:
             - "toward_top"    = vehicle moves closer to the TOP edge of the frame (its y-coordinate DECREASES from earlier to later frame)
             - "toward_bottom" = vehicle moves closer to the BOTTOM edge of the frame (its y-coordinate INCREASES from earlier to later frame)
             - "toward_left"   = vehicle moves closer to the LEFT edge of the frame (its x-coordinate DECREASES from earlier to later frame)
             - "toward_right"  = vehicle moves closer to the RIGHT edge of the frame (its x-coordinate INCREASES from earlier to later frame)
             - "stationary"    = vehicle did not move between frames
-         e. CRITICAL — COORDINATE SYSTEM (this is the #1 source of errors):
+         d. CRITICAL — COORDINATE SYSTEM (this is the #1 source of errors):
             - In COMPUTER VISION and VIDEO FRAMES, the Y-axis points DOWNWARD.
             - Top of the frame = Y = 0.  Bottom of the frame = Y = maximum (e.g. 1080).
             - If a vehicle's Y-coordinate INCREASES from earlier frame to later frame, it moved DOWNWARD = "toward_bottom".
             - If a vehicle's Y-coordinate DECREASES from earlier frame to later frame, it moved UPWARD = "toward_top".
             - DO NOT use standard math coordinates.  DO NOT flip the Y-axis.
-         f. ONLY vehicles with non-stationary movement count toward the majority vote. Stationary vehicles are excluded.
-         g. The normal direction is where MOST vehicles are MOVING. This is a pure position-change vote — no head orientation involved.
-         h. You MUST fill the "direction_evidence" array with at least 3 vehicles per road. For EACH vehicle you MUST write the "location_earlier" and "location_later" fields describing where the vehicle was in the earlier and later frame using GRID COORDINATES (e.g. "grid cell (row 2, col 3)", "grid cell (row 5, col 1)"). Do NOT fabricate evidence.
+         e. ONLY vehicles with non-stationary movement count toward the majority vote. Stationary vehicles are excluded.
+         f. The normal direction is where MOST vehicles are MOVING. This is a pure position-change vote — no head orientation involved.
+         g. You MUST fill the "direction_evidence" array with at least 3 vehicles per road. For EACH vehicle you MUST write the "location_earlier" and "location_later" fields describing where the vehicle was in the earlier and later frame using CAMERA-RELATIVE POSITION DESCRIPTIONS (e.g. "画面上部中央", "画面左下角", "画面右侧偏上"). Do NOT fabricate evidence.
       4. If a median barrier / divider (green anti-glare panels, concrete barriers, double solid lines, etc.) separates two road groups, the two sides MUST have opposite directions. This is a HARD CONSTRAINT — if your initial judgment gives the same direction to both sides, you MUST re-evaluate until they are opposite.
       5. After filling direction_evidence, compute the majority direction. Set "direction_confidence" based on how many moving vehicles support the majority (e.g., 5/5 = 1.0, 4/5 = 0.8, 3/5 = 0.6).
       6. "toward_top" = toward top edge, "toward_bottom" = toward bottom edge, "toward_left" = toward left edge, "toward_right" = toward right edge.
+
+      =============================================================================
+      DIRECTION ANALYSIS PROCEDURE (6-step, mandatory — output in direction_analysis field)
+      =============================================================================
+      In addition to the basic direction_evidence above, you MUST perform a comprehensive 6-step direction analysis and include it in the `direction_analysis` field of your JSON output. Do NOT skip any step.
+
+      【Step 1: 静态锚点】
+      List all static reference objects (road markings, barriers, signs, stationary vehicles). Establish the directional coordinate system. Record each anchor point with: name, type, position description.
+
+      【Step 2: 运动向量】
+      For each moving vehicle on each road, extract displacement vectors between adjacent frames. Record: vehicle description, position in earlier frame, position in later frame, movement direction. Group by road/lane and summarize trends.
+
+      【Step 3: 车头朝向】
+      For each vehicle, determine head orientation (front-facing direction). Identify front features (headlights, grille) vs rear features (taillights, license plate). Record: vehicle_id, head_orientation, evidence.
+
+      【Step 4: 一致性校验】
+      Create comparison table: vehicle_id | movement_direction | head_orientation | consistent? | anomaly?
+      Flag vehicles where movement opposes head orientation (reversing) or opposes normal flow (wrong-way).
+
+      【Step 5: 透视校验】
+      a) Size change: Does vehicle size change match movement direction (toward_bottom = larger, toward_top = smaller)?
+      b) Trajectory: Is the vehicle trajectory parallel to lane markings?
+
+      【Step 6: 结论】
+      For each road: normal_direction, confidence (based on ratio of supporting vehicles), evidence_summary. Use ONLY actual vehicle position changes as direction evidence. If a median barrier separates roads, the two sides MUST have opposite directions.
 
       IMPORTANT — scene_description requirements:
       In the "scene_description" field, you MUST use the following EXACT structured format for each indicator. This format allows automated parsing — do NOT deviate from it.
@@ -104,133 +175,8 @@ prompt_templates:
   # ---------------------------------------------------------------------------
   # Direction Analysis (multi-step comprehensive direction determination)
   # Purpose: Dedicated 6-step analysis to reliably determine traffic flow
-  #          direction per road. Replaces unreliable scene_understanding
-  #          direction judgment with a structured, evidence-based chain.
-  # ---------------------------------------------------------------------------
-  - template_id: "direction_analysis"
-    name: "Direction Analysis"
-    system_prompt: |
-      你是一位专业的交通监控分析师。你的任务是通过系统性的六步分析，精确判断视频中每条道路的正常车流方向。
-      你必须严格基于实际观察到的车辆位置变化来判断方向，不得使用车头朝向来判断行驶方向。
-      所有分析步骤必须详细记录，最终输出严格的JSON格式。
-    user_prompt: |
-      请对以下高速公路监控视频帧进行方向分析。这些帧按时间顺序从最早到最新排列。
-
-      场景信息（仅供参考，不作为最终判断依据）：
-      - 道路数量: {{ road_count }}
-      {% if pre_directions %}
-      - 预设方向（来自场景理解，仅供参考，需独立验证）：
-        {% for d in pre_directions %}
-        道路 {{ d.road_id }}: {{ d.normal_direction }}
-        {% endfor %}
-      {% endif %}
-
-      帧标注说明：
-      - 每帧左上角有标签，格式为 "FRAME N/4 t=X.XXs [OLDEST]/[NEWEST]"，表示帧序号、时间戳和时序位置。
-      - 每帧带有半透明白色网格覆盖层，行号1-6（从上到下），列号1-6（从左到右）。
-      - 使用网格坐标精确描述车辆位置，例如 "grid cell (row 2, col 3)" 表示第2行第3列。
-
-      坐标系统（关键，必须严格遵守）：
-      - 视频帧的Y轴向下：顶部 Y=0，底部 Y=最大值。
-      - 车辆Y坐标从较早帧到较晚帧增加 = 向下移动 = "toward_bottom"。
-      - 车辆Y坐标从较早帧到较晚帧减少 = 向上移动 = "toward_top"。
-      - 车辆X坐标从较早帧到较晚帧减少 = 向左移动 = "toward_left"。
-      - 车辆X坐标从较早帧到较晚帧增加 = 向右移动 = "toward_right"。
-      - 不要使用标准数学坐标系，不要翻转Y轴。
-
-      请按照以下六个步骤进行分析，并输出严格的JSON格式：
-
-      **步骤1：静态锚点识别**
-      列出画面中所有静态参考物（道路标线、护栏、标志牌、静止车辆等）。
-      为每个锚点记录其在网格中的位置。
-
-      **步骤2：运动向量提取**
-      对每条道路上的每个运动车辆，提取其在相邻帧之间的位移向量。
-      使用网格坐标精确描述位置变化，例如 "grid cell (row 2, col 3) → grid cell (row 1, col 3)"。
-      按道路/车道分组汇总运动趋势。
-      关键规则：仅使用相邻帧进行对比（如Frame 1 vs Frame 2，或Frame 2 vs Frame 3），不要对比Frame 1和Frame 4，因为同一辆车可能已经离开画面。
-
-      **步骤3：车头朝向分析**
-      对每个车辆，判断其车头朝向（前部指向方向）。
-      识别前部特征（大灯、格栅）与后部特征（尾灯、车牌）。
-      注意：此步骤仅用于后续一致性检查，不得用于直接判断行驶方向。
-
-      **步骤4：一致性检查**
-      创建对比表：车辆 | 运动方向 | 车头朝向 | 是否一致？
-      标记异常：车头朝向与运动方向相反的车辆（倒车/逆行）。
-
-      **步骤5：透视检查**
-      检查车辆大小变化是否与运动方向一致（靠近摄像头=变大，远离摄像头=变小）。
-      检查车辆轨迹是否与车道标线平行。
-
-      **步骤6：结论**
-      对每条道路给出正常车流方向、置信度和支持证据摘要。
-      置信度基于支持多数方向的移动车辆比例（如5/5=1.0, 4/5=0.8, 3/5=0.6）。
-      静止车辆不计入投票。
-
-      重要约束：
-      1. 方向判断必须仅基于车辆在帧间的实际位置变化，严禁使用车头朝向来判断方向。
-      2. 如果中央隔离带（绿色防眩板、混凝土护栏、双实线等）将道路分为两组，则两侧方向必须相反。这是硬性约束——如果初步判断两侧方向相同，必须重新评估直到相反。
-      3. 每条道路必须在主行车道上至少观察5辆车（忽略应急车道/路肩车辆）。
-      4. 必须填写至少3辆车的运动证据，每辆车必须包含"location_earlier"和"location_later"字段，使用网格坐标描述。
-
-      请只返回以下JSON格式，不要包含任何其他文本或markdown标记：
-
-      {
-        "direction_analysis": {
-          "anchor_points": [
-            {"name": "护栏", "position": "grid cell (row X, col Y)", "type": "static"}
-          ],
-          "vehicle_motions": [
-            {
-              "vehicle_id": "vehicle_1",
-              "description": "白色轿车",
-              "displacement": "grid cell (row 2, col 3) → grid cell (row 1, col 3)",
-              "movement_direction": "toward_top",
-              "road_id": 0
-            }
-          ],
-          "head_orientations": [
-            {
-              "vehicle_id": "vehicle_1",
-              "head_orientation": "toward_top",
-              "evidence": "可见大灯，朝向上方"
-            }
-          ],
-          "consistency_check": [
-            {
-              "vehicle_id": "vehicle_1",
-              "movement": "toward_top",
-              "head_orientation": "toward_top",
-              "consistent": true,
-              "anomaly": false
-            }
-          ],
-          "perspective_check": [
-            {
-              "vehicle_id": "vehicle_1",
-              "size_change": "getting smaller",
-              "matches_direction": true,
-              "trajectory_parallel_to_lanes": true
-            }
-          ],
-          "conclusions": [
-            {
-              "road_id": 0,
-              "name": "左侧道路",
-              "normal_direction": "toward_top",
-              "confidence": 0.95,
-              "evidence_summary": "5/5辆车向上移动，车头朝上，车辆变小（远离摄像头）"
-            }
-          ]
-        }
-      }
-
-      方向词汇表：toward_top（向顶部）, toward_bottom（向底部）, toward_left（向左侧）, toward_right（向右侧）, stationary（静止）, unknown（未知）。
-    output_format_hint: "JSON"
-
-  # ---------------------------------------------------------------------------
-  # Road Direction Analysis (for logic chains)
+  #          direction per road. Uses professional traffic analysis methodology.
+  #          STRICT REQUIREMENT: ALL 6 steps must be executed, no skipping.
   # ---------------------------------------------------------------------------
   - template_id: "road_direction_analysis"
     name: "Road Direction Analysis"
@@ -290,19 +236,35 @@ prompt_templates:
       {% for road in road_directions %}
         Road {{ road.road_id }}: {{ road.normal_direction }}
       {% endfor %}
+      - Prior knowledge from overall traffic situation analysis:
+      {% if scene_description %}
+        {{ scene_description }}
+      {% else %}
+        (No prior scene description available.)
+      {% endif %}
 
-      IMPORTANT: Each frame has a semi-transparent white grid overlay with numbered rows (1-6, top to bottom) and columns (1-6, left to right). Use these grid coordinates to precisely track vehicle positions across frames (e.g. "the vehicle moved from grid cell (2,3) to grid cell (2,1)").
+      CRITICAL PRIOR KNOWLEDGE:
+      The "Prior knowledge" above is from an earlier comprehensive scene analysis. You MUST use it as your primary guide:
+      1. Focus ONLY on vehicles explicitly mentioned in the prior knowledge as being in illegal parking situations or occupying emergency lanes.
+      2. Do NOT scan the entire video for every possible vehicle. Your task is narrowly scoped: check ONLY whether the already-identified suspicious vehicles (from prior knowledge) are actually reversing or driving the wrong way.
+      3. If the prior knowledge does not mention any vehicle in an emergency lane or stopped illegally, conclude that no reversing/wrong-way is present.
+      4. IMPORTANT — Engineering/Maintenance vehicles are NOT exempt from reversing/wrong-way checks:
+         - A road maintenance truck, emergency rescue vehicle, or construction vehicle on the emergency lane CAN still be reversing or backing up.
+         - Being an "engineering vehicle" or "正在作业" does NOT automatically mean its movement direction is normal.
+         - You MUST still check: is the vehicle's BODY movement direction consistent with the known normal flow of its road? If it moves opposite to the known normal flow, it IS reversing/wrong-way regardless of its type or purpose.
+         - Example: If a maintenance truck on the emergency lane is moving opposite to the normal traffic flow while its headlights face the normal direction, it is REVERSING (倒车). If its headlights also face the opposite direction, it is WRONG-WAY driving (逆行).
 
       INSTRUCTIONS:
-      1. Focus ONLY on finding suspicious vehicles — especially those on emergency lanes, shoulders, or stopped on the main roadway. Do NOT waste time re-verifying normal flow directions; use the Known normal flow directions above.
-      2. For EACH suspicious vehicle, perform ALL of the following checks and write them in your reasoning:
+      1. Read the "Prior knowledge" carefully. Identify which specific vehicles (if any) are mentioned as being on emergency lanes, shoulders, or stopped/parked illegally.
+      2. For EACH vehicle identified in step 1, perform ALL of the following checks and write them in your reasoning:
          a. **Select two frames to compare**: Pick the EARLIEST frame and the LATEST frame where the vehicle is visible. Write their frame numbers/timestamps.
-         b. **Position change using grid coordinates and fixed reference points**: Use the grid overlay to precisely measure the vehicle's position in each frame (e.g. "grid cell (row 3, col 2)"). Also describe how the vehicle's position changed relative to FIXED objects (road markings, guardrails, median barriers, traffic cones, signs). Do NOT use memory or visual estimation — cite specific grid cells and reference points.
+         b. **Position change using fixed reference points**: Describe the vehicle's position in each frame relative to FIXED objects (road markings, guardrails, median barriers, traffic cones, signs) using camera-relative position descriptions (e.g. "画面左侧偏上", "画面中央偏右"). Do NOT use memory or visual estimation — cite specific reference points.
          c. **Head orientation**: State which direction the vehicle's HEAD (front) is pointing (toward_top/toward_bottom/toward_left/toward_right).
          d. **Body movement direction**: State which direction the vehicle's BODY actually moved (toward_top/toward_bottom/toward_left/toward_right) based on position change in (b).
          e. **Compare with KNOWN normal flow**: The known normal flow direction for this road is listed in "Known normal flow directions" above. Is the body movement direction in (d) OPPOSITE to this known normal flow? If yes, this is WRONG-WAY or REVERSING.
          f. **Head vs body consistency**: If head orientation (c) is opposite to body movement (d), the vehicle is REVERSING / BACKING UP. If head orientation matches body movement but both are opposite to known normal flow, it is WRONG-WAY driving.
       3. Be especially careful with white/light-colored vehicles on the shoulder — they are the most common reversing candidates.
+      4. If no vehicle is mentioned in the prior knowledge as suspicious, or if all mentioned vehicles are confirmed to be moving normally, report detected=false.
 
       Return ONLY a JSON object in this exact format (no markdown, no extra text):
       {
@@ -340,68 +302,6 @@ prompt_templates:
 
   # ---------------------------------------------------------------------------
   # Vehicle Movement Tracking (precision frames)
-  # ---------------------------------------------------------------------------
-  - template_id: "vehicle_movement_tracking"
-    name: "Vehicle Movement Tracking"
-    system_prompt: |
-      Track the movement of a specific vehicle across multiple frames to determine its direction of travel.
-      Compare against the known normal flow direction.
-    user_prompt: |
-      Focus on the vehicle in the region: bbox={{ vehicle_bbox }}
-      Road ID: {{ road_id }}
-      Normal flow direction for this road: {{ normal_direction }}
-
-      Track this vehicle across these precision frames (higher temporal resolution).
-      Determine:
-      1. Which direction is the vehicle moving? (relative to frame: up/down/left/right)
-      2. Is this opposite to the normal flow direction?
-      3. Are backup/reverse lights visible?
-      4. How much has the vehicle displaced (approximate pixels)?
-
-      Return JSON:
-      {
-        "movement_direction": "<up|down|left|right|stationary|unclear>",
-        "is_opposite_to_flow": <true|false>,
-        "backup_lights_visible": <true|false>,
-        "displacement_pixels": <number>,
-        "confidence": <0.0-1.0>,
-        "evidence_frames": [<frame indices where evidence is clearest>],
-        "reasoning": "<explain your observation and conclusion>"
-      }
-
-      IMPORTANT: Movement direction must be based on actual position change across frames, NOT vehicle orientation.
-      A vehicle can face forward but move backward (reversing).
-
-  # ---------------------------------------------------------------------------
-  # Reversing Verification
-  # ---------------------------------------------------------------------------
-  - template_id: "reversing_verification"
-    name: "Reversing Verification"
-    system_prompt: |
-      You are verifying a previous finding about a potentially reversing vehicle.
-      Look at the evidence with fresh eyes and confirm or refute.
-    user_prompt: |
-      Previous analysis suggested a vehicle may be reversing.
-      Previous finding:
-      {{ movement_analysis | tojson }}
-
-      Please independently verify this conclusion by examining the video frames.
-
-      Return JSON:
-      {
-        "confirmed": <true|false>,
-        "confidence": <0.0-1.0>,
-        "event_subtype": "<reversing|wrong_way|backing_up>",
-        "reasoning": "<your independent assessment>"
-      }
-
-      event_subtype definitions:
-      - "reversing": Vehicle is backing up while facing the normal direction
-      - "wrong_way": Vehicle is driving head-on into opposing traffic
-      - "backing_up": Similar to reversing, typically slower and shorter distance
-
-  # ---------------------------------------------------------------------------
-  # Direct Event Detection (for simple categories)
   # ---------------------------------------------------------------------------
   - template_id: "direct_event_detection"
     name: "Direct Event Detection"
@@ -571,19 +471,3 @@ prompt_templates:
   # ---------------------------------------------------------------------------
   # Report Generation (Overall Traffic Summary)
   # ---------------------------------------------------------------------------
-  - template_id: "traffic_summary"
-    name: "Overall Traffic Summary"
-    system_prompt: |
-      You are a traffic operations center analyst. Write a concise summary of the overall traffic situation based on scene analysis.
-    user_prompt: |
-      Scene information:
-      {{ scene_info | tojson }}
-
-      Video metadata:
-      {{ video_meta | tojson }}
-
-      Write a 2-3 paragraph summary describing the overall traffic situation in this video.
-      Include: road structure, general traffic flow, weather/lighting conditions, and any notable overall patterns.
-      Write in Chinese (中文) as this is for a Chinese traffic management system.
-
-      Return plain text (not JSON).

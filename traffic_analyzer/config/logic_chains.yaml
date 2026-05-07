@@ -15,109 +15,63 @@
 
 logic_chains:
   # ---------------------------------------------------------------------------
-  # Chain: direction_analysis
-  # Purpose: Multi-step direction determination using dedicated VLM prompt.
-  # Strategy: Single VLM call with structured 6-step prompt, then aggregate
-  #           the result into a DirectionAnalysis object.
+  # Chain: accident_scene_tag
+  # Purpose: Detect traffic accidents solely from scene understanding tags.
+  #          No direct VLM call — relies entirely on the {交通事故：...} tag
+  #          produced by the scene_understanding step.
   # ---------------------------------------------------------------------------
-  - chain_id: "direction_analysis"
-    name: "Direction Analysis Chain"
-    name_zh: "方向分析链"
-    description: "Dedicated multi-step direction analysis to reliably determine traffic flow direction per road."
-    target_event_id: -1
+  - chain_id: "accident_scene_tag"
+    name: "Accident Detection from Scene Tags"
+    name_zh: "交通事故检测（基于场景标签）"
+    description: "Detect traffic accidents solely from scene understanding structured tags. No direct VLM call needed."
+    target_event_id: 2
     precondition: "scene_understanding is not None"
     required_context_keys:
-      - "keyframes"
       - "scene_understanding"
     output_schema:
-      direction_analysis: "DirectionAnalysis"
+      detected: "bool"
+      instances: "List[EventInstance]"
+      confidence: "float"
     steps:
-      - step_id: "DA1"
-        step_type: "vlm_call"
-        name: "Direction Analysis VLM Call"
-        description: "Call VLM with the 6-step direction analysis prompt."
-        prompt_template_id: "direction_analysis"
-        input_images: ["${keyframes.coarse_frames}"]
-        context_vars_mapping:
-          road_count: "${scene_understanding.road_count}"
-          pre_directions: "${scene_understanding.roads}"
-        output_key: "direction_analysis_raw"
-        response_schema:
-          type: "object"
-          required: ["direction_analysis"]
-          properties:
-            direction_analysis:
-              type: "object"
-              required: ["anchor_points", "vehicle_motions", "head_orientations", "consistency_check", "perspective_check", "conclusions"]
-              properties:
-                anchor_points:
-                  type: "array"
-                  items:
-                    type: "object"
-                    properties:
-                      name: { type: "string" }
-                      position: { type: "string" }
-                      type: { type: "string" }
-                vehicle_motions:
-                  type: "array"
-                  items:
-                    type: "object"
-                    properties:
-                      vehicle_id: { type: "string" }
-                      description: { type: "string" }
-                      displacement: { type: "string" }
-                      movement_direction: { type: "string", enum: ["toward_top", "toward_bottom", "toward_left", "toward_right", "stationary", "unknown"] }
-                      road_id: { type: "integer" }
-                head_orientations:
-                  type: "array"
-                  items:
-                    type: "object"
-                    properties:
-                      vehicle_id: { type: "string" }
-                      head_orientation: { type: "string", enum: ["toward_top", "toward_bottom", "toward_left", "toward_right", "unknown"] }
-                      evidence: { type: "string" }
-                consistency_check:
-                  type: "array"
-                  items:
-                    type: "object"
-                    properties:
-                      vehicle_id: { type: "string" }
-                      movement: { type: "string", enum: ["toward_top", "toward_bottom", "toward_left", "toward_right", "stationary", "unknown"] }
-                      head_orientation: { type: "string", enum: ["toward_top", "toward_bottom", "toward_left", "toward_right", "unknown"] }
-                      consistent: { type: "boolean" }
-                      anomaly: { type: "boolean" }
-                perspective_check:
-                  type: "array"
-                  items:
-                    type: "object"
-                    properties:
-                      vehicle_id: { type: "string" }
-                      size_change: { type: "string" }
-                      matches_direction: { type: "boolean" }
-                      trajectory_parallel_to_lanes: { type: "boolean" }
-                conclusions:
-                  type: "array"
-                  items:
-                    type: "object"
-                    properties:
-                      road_id: { type: "integer" }
-                      name: { type: "string" }
-                      normal_direction: { type: "string", enum: ["toward_top", "toward_bottom", "toward_left", "toward_right", "unknown"] }
-                      confidence: { type: "number" }
-                      evidence_summary: { type: "string" }
-
-      - step_id: "DA2"
-        step_type: "aggregate"
-        name: "Build DirectionAnalysis Result"
-        description: "Construct DirectionAnalysis from VLM raw output."
-        output_key: "direction_analysis"
-        context_vars_mapping:
-          anchor_points: "${direction_analysis_raw.direction_analysis.anchor_points}"
-          vehicle_motions: "${direction_analysis_raw.direction_analysis.vehicle_motions}"
-          head_orientations: "${direction_analysis_raw.direction_analysis.head_orientations}"
-          consistency_check: "${direction_analysis_raw.direction_analysis.consistency_check}"
-          perspective_check: "${direction_analysis_raw.direction_analysis.perspective_check}"
-          conclusions: "${direction_analysis_raw.direction_analysis.conclusions}"
+      - step_id: "A1"
+        step_type: "compute"
+        name: "Parse Accident Tag"
+        description: "Parse {交通事故：...} tag from scene_description to determine if accident is present."
+        compute_expression: |
+          def check_accident():
+              desc = scene_understanding.scene_description if scene_understanding else ""
+              pattern = re.compile(r"[\{【\[]\s*([^\{\}【】\[\]：:=→]+?)\s*[：:=→]\s*(.*?)[\}】\]]", re.DOTALL)
+              _PUNCT = "。，；！？.,;!?"
+              tags = {}
+              for m in pattern.finditer(desc):
+                  key = m.group(1).strip()
+                  value = m.group(2).strip(_PUNCT).strip()
+                  if key:
+                      tags[key] = value
+              accident_tag = tags.get("交通事故", "")
+              if accident_tag.startswith("有"):
+                  return {
+                      "detected": True,
+                      "instances": [{
+                          "start_time_sec": 0.0,
+                          "end_time_sec": 0.0,
+                          "confidence": 0.65,
+                          "description": "交通事故（由场景描述推断：" + accident_tag + "）",
+                          "reasoning": "场景描述中 {交通事故：...} 标签显示存在交通事故。",
+                      }],
+                      "confidence": 0.65,
+                      "summary": "交通事故（由场景描述推断：" + accident_tag + "）",
+                      "reasoning": "场景描述中 {交通事故：...} 标签显示存在交通事故。",
+                  }
+              else:
+                  return {
+                      "detected": False,
+                      "instances": [],
+                      "confidence": 0.0,
+                      "summary": "交通事故未检测到（scene_description 结构化标签为 无）",
+                      "reasoning": "场景描述中 {交通事故：...} 标签显示不存在交通事故。",
+                  }
+        output_key: "event_result"
 
   # ---------------------------------------------------------------------------
   # Chain: vehicle_reversing
@@ -148,6 +102,7 @@ logic_chains:
         context_vars_mapping:
           road_count: "${scene_understanding.road_count}"
           road_directions: "${scene_understanding.roads}"
+          scene_description: "${scene_understanding.scene_description}"
         output_key: "reversing_result"
         response_schema:
           type: "object"

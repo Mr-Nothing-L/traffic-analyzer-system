@@ -146,7 +146,78 @@ class ReportGenerator:
             lines.append(f"- **抛洒物**: {'有' if sc.thrown_object_present else '无'}")
         lines.append("")
 
-        # ---- Road Details (with direction evidence) ------------------------
+        # ---- Direction Analysis (6-step detailed) ------------------------
+        if sc.direction_analysis:
+            da = sc.direction_analysis
+            lines.append("### 车流方向分析（六步逻辑链）")
+            lines.append("")
+
+            # Step 1: Anchor Points
+            if da.anchor_points:
+                lines.append("#### Step 1: 静态锚点")
+                for ap in da.anchor_points:
+                    name = ap.get("name", "未知")
+                    pos = ap.get("position", "")
+                    typ = ap.get("type", "")
+                    extra = f" [{typ}]" if typ else ""
+                    lines.append(f"- **{name}**: {pos}{extra}")
+                lines.append("")
+
+            # Step 2: Vehicle Motions
+            if da.vehicle_motions:
+                lines.append("#### Step 2: 运动向量")
+                for vm in da.vehicle_motions:
+                    desc = vm.description or vm.vehicle_id
+                    disp = vm.displacement or "未记录"
+                    dire = vm.movement_direction or "unknown"
+                    lines.append(f"- **{desc}**: {disp} → 方向: {dire}")
+                lines.append("")
+
+            # Step 3: Head Orientations
+            if da.head_orientations:
+                lines.append("#### Step 3: 车头朝向")
+                for ho in da.head_orientations:
+                    vid = ho.vehicle_id or "未知车辆"
+                    ori = ho.head_orientation or "unknown"
+                    evi = ho.evidence or "未记录"
+                    lines.append(f"- **{vid}**: 朝向={ori}，依据：{evi}")
+                lines.append("")
+
+            # Step 4: Consistency Check
+            if da.consistency_check:
+                lines.append("#### Step 4: 一致性校验")
+                lines.append("| 车辆ID | 运动方向 | 车头朝向 | 是否一致 | 异常判定 |")
+                lines.append("|--------|----------|----------|----------|----------|")
+                for cc in da.consistency_check:
+                    c_icon = "是" if cc.consistent else "**否**"
+                    a_icon = "**异常**" if cc.anomaly else "正常"
+                    lines.append(
+                        f"| {cc.vehicle_id} | {cc.movement} | {cc.head_orientation} | {c_icon} | {a_icon} |"
+                    )
+                lines.append("")
+
+            # Step 5: Perspective Check
+            if da.perspective_check:
+                lines.append("#### Step 5: 透视校验")
+                for pc in da.perspective_check:
+                    vid = pc.vehicle_id or "未知车辆"
+                    sz = pc.size_change or "未记录"
+                    md = "一致" if pc.matches_direction else "**不一致**"
+                    tp = "平行" if pc.trajectory_parallel_to_lanes else "**不平行**"
+                    lines.append(f"- **{vid}**: 大小变化={sz}，透视匹配={md}，轨迹与车道={tp}")
+                lines.append("")
+
+            # Step 6: Conclusions
+            if da.conclusions:
+                lines.append("#### Step 6: 结论")
+                for conc in da.conclusions:
+                    lines.append(f"- **{conc.name} (道路 {conc.road_id})**:")
+                    lines.append(f"  - 正常方向: **{conc.normal_direction}**")
+                    lines.append(f"  - 置信度: {conc.confidence:.2f}")
+                    lines.append(f"  - 依据摘要: {conc.evidence_summary}")
+                lines.append("")
+
+        # ---- Road Details (summary) --------------------------------------
         if sc.roads:
             lines.append("### 道路详情")
             for road in sc.roads:

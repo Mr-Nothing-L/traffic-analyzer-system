@@ -221,9 +221,11 @@ class CrossEventInferenceRule(BaseModel):
     name: str = ""
     target_event_id: int          # 要推断的目标事件
     source_event_id: int          # 源事件（必须已检测到）
-    source_description_keywords: List[str] = Field(default_factory=list)
-                                  # 源事件实例描述中匹配任一关键词即触发推断
-    confidence_multiplier: float = 0.9
+    source_description_keywords: List[str] = Field(
+        default_factory=list,
+        description="源事件实例描述中匹配任一关键词即触发推断",
+    )
+    confidence_multiplier: float = Field(0.9, ge=0.0, le=1.0)
     description_prefix: str = ""  # 推断实例的描述前缀
     reasoning: str = ""           # 推断理由
 
