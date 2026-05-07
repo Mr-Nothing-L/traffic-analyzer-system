@@ -299,17 +299,23 @@ class AnalysisOrchestrator:
 
         # ------------------------------------------------------------------
         # Frame selection: uniformly distributed across entire video
-        # Requirements: min 30 frames, max 2 FPS, absolute cap 60
         # ------------------------------------------------------------------
         coarse_frames = keyframes.coarse_frames
         total_coarse = len(coarse_frames)
 
-        # Target frame count: fixed at 30 (uniformly distributed across entire video)
-        target_count = 30
+        # Target frame count from configuration (default 30, configurable via CLI/env)
+        min_frames = 30
+        if (
+            self.config_manager._system_config is not None
+            and self.config_manager._system_config.scene_understanding_min_frames > 0
+        ):
+            min_frames = self.config_manager._system_config.scene_understanding_min_frames
+
+        target_count = min_frames
         # But cannot exceed available coarse frames
         target_count = min(target_count, total_coarse)
 
-        if total_coarse >= 30:
+        if total_coarse >= min_frames:
             # Uniformly select target_count frames from coarse_frames
             if target_count >= total_coarse:
                 raw_frames = coarse_frames[:]
@@ -319,11 +325,12 @@ class AnalysisOrchestrator:
         else:
             # Not enough coarse frames — supplement from video file
             logger.info(
-                "Coarse frames insufficient (%d < 30), supplementing from video",
+                "Coarse frames insufficient (%d < %d), supplementing from video",
                 total_coarse,
+                min_frames,
             )
             raw_frames = self._supplement_frames_from_video(
-                video_path, coarse_frames, 30, duration_sec
+                video_path, coarse_frames, min_frames, duration_sec
             )
         images: List[Any] = []
         for idx, kf in enumerate(raw_frames):

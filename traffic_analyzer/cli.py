@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import List, Optional, Sequence
@@ -50,6 +51,11 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         return 1
 
     output_path = _resolve_path(args.output) if args.output else None
+
+    # Pass --min-frames to the system via environment variable
+    if args.min_frames != 30:
+        os.environ["SCENE_UNDERSTANDING_MIN_FRAMES"] = str(args.min_frames)
+        logger.info("Scene understanding min frames set to %d", args.min_frames)
 
     try:
         orchestrator = AnalysisOrchestrator.from_config_dir(config_dir)
@@ -152,6 +158,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="json",
         choices=["json", "markdown"],
         help="Output format (default: json).",
+    )
+    analyze_parser.add_argument(
+        "--min-frames", "-m",
+        type=int,
+        default=30,
+        help="Minimum number of frames for scene understanding (default: 30). Lower = faster but less accurate.",
     )
     analyze_parser.set_defaults(func=cmd_analyze)
 

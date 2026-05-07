@@ -432,6 +432,7 @@ class SystemConfig(BaseModel):
     event_confidence_threshold: float = 0.7
     max_video_length_sec: float = 300.0
     log_level: str = "INFO"
+    scene_understanding_min_frames: int = 30
 
 
 # ---------------------------------------------------------------------------
