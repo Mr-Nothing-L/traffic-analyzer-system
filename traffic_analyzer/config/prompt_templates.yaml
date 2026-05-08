@@ -92,8 +92,8 @@ prompt_templates:
       Required tags (must ALL appear in the scene_description, in this order):
       1. `{车流方向：描述}` — For each road, state the normal flow direction explicitly using camera-relative terms (e.g. "左侧道路从画面底部向顶部行驶（从近到远），右侧道路从画面顶部向底部行驶（从远到近）"). Always include both the frame-relative direction (从画面X向Y) AND the depth cue (从近到远/从远到近).
       2. `{行人：无}` or `{行人：有，具体描述}` — "无" if no pedestrians; otherwise describe what you see.
-      3. `{应急车道车辆：无}` or `{应急车道车辆：有，具体描述}` — "无" if no vehicles on shoulder; otherwise describe.
-      4. `{停车：无}` or `{停车：有，具体描述}` — "无" if no stationary vehicles; otherwise describe.
+      3. `{应急车道车辆：无}` or `{应急车道车辆：有，具体描述}` — "无" ONLY if the emergency lane / shoulder is completely empty. Otherwise describe ANY vehicle on the shoulder, including stopped, parked, or slow-moving vehicles. Check BOTH left and right shoulders carefully.
+      4. `{静止车辆：无}` or `{静止车辆：有，具体描述}` — "无" ONLY if all vehicles are in motion. Otherwise describe EVERY stationary or parked vehicle you see (e.g., "有，左侧车道黑色SUV静止，白色轿车停在应急车道"). Do NOT miss slow or stopped vehicles.
       5. `{工程车：无}` or `{工程车：有，具体描述}` — "无" if no construction; otherwise describe equipment/vehicles/workers present.
       6. `{非机动车：无}` or `{非机动车：有，具体描述}` — "无" if no motorcycles/bicycles; otherwise describe.
       7. `{交通事故：无}` or `{交通事故：有，具体描述}` — "无" if no accidents; otherwise describe collisions, overturned vehicles, fire, smoke, debris. BE CONSERVATIVE — only use "有" if you are confident.
@@ -105,7 +105,7 @@ prompt_templates:
       - If an event IS present, write "有，" followed by a brief factual description.
       - All text must be written in Chinese (中文).
       - Example valid scene_description:
-        "{车流方向：左侧道路从画面底部向顶部行驶（从近到远），右侧道路从画面顶部向底部行驶（从远到近）} {行人：无} {应急车道车辆：无} {停车：无} {工程车：无} {非机动车：无} {交通事故：无} {路锥：无}"
+        "{车流方向：左侧道路从画面底部向顶部行驶（从近到远），右侧道路从画面顶部向底部行驶（从远到近）} {行人：无} {应急车道车辆：无} {静止车辆：无} {工程车：无} {非机动车：无} {交通事故：无} {路锥：无}"
     output_format_hint: "JSON"
 
   # ---------------------------------------------------------------------------

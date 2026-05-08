@@ -335,7 +335,7 @@ class AnalysisOrchestrator:
         # ------------------------------------------------------------------
         coarse_frames = keyframes.coarse_frames
         total_coarse = len(coarse_frames)
-        target_count = 10
+        target_count = 20
 
         if total_coarse >= target_count:
             # Stage 1: first 5 frames (first ~5 seconds with coarse_fps=1.0)
