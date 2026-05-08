@@ -107,21 +107,22 @@ cross_event_inference_rules:
     |
     v
 1. 视频预处理
-   - 场景理解帧提取：从整个视频均匀选取 30 帧
+   - 场景理解帧提取：前 5 秒 @ 2 FPS（10 帧，0.5s 间隔）
    - 精确帧提取：自适应采样关键时刻（4 FPS）
     |
     v
 2. 场景理解 (scene_understanding)
-   - 单次综合 VLM 调用，输入 30 帧均匀分布帧
+   - 单次综合 VLM 调用，输入 10 帧密集帧
+   - 基于规则的方向判断（双向+隔离带 → 默认左来右去）
    - 输出结构化信息：道路结构、车流方向、天气、
      pedestrian_present、non_motor_vehicle_present、
      scene_description 标签（{类别：状态}格式）
     |
     v
-3. 事件检测（按事件类别）
-   - direct_vlm: 使用事件专用模板单次 VLM 调用
-   - logic_chain: 执行配置的多步逻辑链
-   - scene_tag: 直接从场景理解输出推断
+3. 事件检测（并行 + 串行）
+   - direct_vlm (4 个事件): 并行批量 VLM 调用
+   - logic_chain: 执行配置的多步逻辑链（串行）
+   - scene_tag: 直接从场景理解输出推断（零 VLM 调用）
     |
     v
 4. 后处理
@@ -131,8 +132,68 @@ cross_event_inference_rules:
     |
     v
 5. 报告生成
-   - Markdown 报告（人工可读）
+   - Markdown 报告（人工可读，含每步耗时分析）
    - 二进制编码 {bit_0_bit_1_..._bit_n}
+```
+
+---
+
+## 关键优化特性
+
+### 1. 并行 direct_vlm 检测
+
+4 个独立的 `direct_vlm` 事件通过 `ThreadPoolExecutor` **并发执行**，将串行的 ~200s 压缩到 ~50s。
+
+### 2. 密集帧场景理解
+
+`scene_understanding` 使用**前 5 秒 @ 2 FPS**（10 帧，0.5s 间隔），而非全视频均匀采样：
+- 车辆位移更小，匹配更准确
+- 不受视频总长度影响
+
+### 3. 基于规则的方向判断
+
+删除容易出错的 6 步运动分析，改用**规则默认值**：
+- **双向主路 + 隔离带** → 左侧来向（toward_bottom），右侧去向（toward_top），置信度 1.0
+- **匝道** → 与主路同向，置信度 0.9
+- **单车道** → 语义判断（车辆大小变化），置信度 0.6-0.8
+
+scene_understanding 耗时从 ~200s 降至 ~30s。
+
+### 4. 像素位移估计（倒车检测）
+
+倒车检测 Prompt 要求 VLM 输出像素级位移估计：
+- 以画面百分比估计特征点坐标变化
+- 位移 > 2% 对角线 → "significant"
+- 覆盖 VLM "看起来没动" 的主观误判
+
+### 5. 可调帧数（`--min-frames`）
+
+通过 CLI 参数控制所有 VLM 调用的输入帧数：
+
+```bash
+python3 -m traffic_analyzer analyze \
+  --video video.mp4 \
+  --min-frames 10        # 最少 10 帧，更快但可能欠采样
+```
+
+默认 30 帧。降低帧数可显著提速（尤其 scene_understanding），但可能影响精度。
+
+### 6. 图像缩放到 720p
+
+上传 VLM 前自动缩放到 720p，减少 ~55% 传输量，避免 API 超时。
+
+### 7. 逐步骤耗时日志
+
+分析结束时输出每步耗时分解：
+
+```
+Step timing breakdown:
+  preprocessing:       12.50s
+  scene_understanding:  28.54s
+  event_detection:      54.43s
+  post_processing:       0.00s
+  report_generation:     0.00s
+  TOTAL:               193.12s
 ```
 
 ---
@@ -163,18 +224,52 @@ traffic_analyzer/
 
 ## 快速开始
 
+### 1. 配置 LLM 提供商
+
 ```bash
-# 配置 LLM 提供商
 cp traffic_analyzer/config/.env.example traffic_analyzer/config/.env
 # 编辑 .env，设置 API Key 和模型
+```
 
-# 运行分析
-python3 -c "
+### 2. 验证配置
+
+```bash
+python3 -m traffic_analyzer validate-config \
+  --config-dir ./traffic_analyzer/config
+```
+
+### 3. 运行分析
+
+```bash
+# 基本用法（默认 30 帧）
+python3 -m traffic_analyzer analyze \
+  --video ./path/to/video.mp4 \
+  --format markdown \
+  --output ./report.md
+
+# 快速模式（10 帧，适合短视频/测试）
+python3 -m traffic_analyzer analyze \
+  --video ./path/to/video.mp4 \
+  --format markdown \
+  --output ./report.md \
+  --min-frames 10
+
+# 带 CV 轨迹验证
+python3 -m traffic_analyzer analyze \
+  --video ./path/to/video.mp4 \
+  --cv-tracks ./tracks.json \
+  --format markdown \
+  --output ./report.md
+```
+
+### 4. Python API
+
+```python
 from traffic_analyzer.orchestrator.analysis_orchestrator import AnalysisOrchestrator
+
 orch = AnalysisOrchestrator.from_config_dir('traffic_analyzer/config')
 report = orch.analyze('path/to/video.mp4')
 print(report.binary_encoding.encoding_string)
-"
 ```
 
 ---
