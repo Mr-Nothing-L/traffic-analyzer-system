@@ -324,22 +324,24 @@ prompt_templates:
     user_prompt: |
       Detect ROAD CONSTRUCTION / MAINTENANCE WORK ZONES in these video frames.
 
-      Definition — A scene counts as road construction ONLY if it contains:
-      1. **Workers in high-visibility clothing** (orange, yellow, or lime-green vests/hats) AND
-      2. **A significant number of traffic cones or barriers** (at least 5+ cones, or continuous barrier tape, or work-zone barrels) AND
-      3. **Engineering/construction vehicles or equipment** (asphalt pavers, rollers, cement mixers, excavators, dump trucks, cranes, etc.)
+      Definition — A scene counts as road construction if it contains EITHER:
+      (A) **A visible arrangement of traffic cones or barriers** (forming a work zone, lane closure, or traffic guidance area) AND **at least one of the following**:
+          - Workers in high-visibility clothing (orange, yellow, or lime-green vests/hats)
+          - Engineering/construction vehicles or equipment (asphalt pavers, rollers, cement mixers, excavators, dump trucks, cranes, etc.)
+      (B) Active construction equipment operating on the road surface (even without cones, e.g., nighttime paving with only vehicle-mounted arrow boards).
 
       CRITICAL — What does NOT count as road construction:
-      - A single sweeper truck or cleaning vehicle performing routine road cleaning WITHOUT workers and WITHOUT a cone barrier system.
-      - A parked engineering vehicle with no active work, no workers, and no cones.
+      - A single sweeper truck or cleaning vehicle performing routine road cleaning WITHOUT cones/barriers forming a work zone.
+      - A parked engineering vehicle with no active work and no cone/barrier system.
       - Emergency rescue or breakdown vehicles (police, ambulance, tow truck) — these are NOT construction.
-      - Occasional scattered cones (< 5) without workers or equipment.
+      - Randomly scattered individual cones (1-2 cones with no pattern) without workers or equipment.
 
       INSTRUCTIONS:
-      1. Look for the COMBINATION of workers + cones/barriers + equipment. All three must be present for a confident detection.
-      2. If only an engineering vehicle is visible without workers and without a substantial cone/barrier system, report detected=false.
-      3. If workers and cones are present but no construction equipment, still report detected=true (manual road work).
-      4. Note the approximate location (which lane, shoulder, or full lane closure).
+      1. Cones/barriers arranged to guide traffic, close a lane, or mark a work zone count as construction indicators. Even 3-5 cones in a clear pattern (line, curve, or zone boundary) are sufficient.
+      2. If cones + workers are present but no heavy equipment, report detected=true (manual road work or marking).
+      3. If cones + engineering vehicle are present but no visible workers, report detected=true (mechanized work, workers may be inside the vehicle or out of frame).
+      4. If ONLY an engineering vehicle is visible without cones/barriers and without workers, report detected=false.
+      5. Note the approximate location (which lane, shoulder, or full lane closure).
 
       Return JSON:
       {
