@@ -325,32 +325,54 @@ class AnalysisOrchestrator:
             )
 
         # ------------------------------------------------------------------
-        # Frame selection: UNIFORM sampling across the ENTIRE video.
-        # Use up to 10 coarse frames evenly distributed to cover the full
-        # duration, ensuring no critical events (e.g., emergency lane
-        # occupancy) are missed in any time segment.
+        # Frame selection: TWO-STAGE sampling (dense front + uniform tail).
+        #   Stage 1: First 5s dense — 5 frames from the first 5 seconds
+        #            (high density for reliable motion/direction analysis).
+        #   Stage 2: Remaining uniform — 5 frames evenly distributed
+        #            across the REST of the video (catches late events).
+        # This balances density for direction analysis with coverage for
+        # event detection across the full duration.
         # ------------------------------------------------------------------
         coarse_frames = keyframes.coarse_frames
         total_coarse = len(coarse_frames)
-        target_count = min(10, total_coarse)
+        target_count = 10
 
         if total_coarse >= target_count:
-            # Uniform selection across the full video
-            indices = [int(i * (total_coarse - 1) / (target_count - 1)) for i in range(target_count)]
-            raw_frames = [coarse_frames[i] for i in indices]
+            # Stage 1: first 5 frames (first ~5 seconds with coarse_fps=1.0)
+            front_count = min(5, total_coarse)
+            front_frames = coarse_frames[:front_count]
+
+            # Stage 2: remaining frames uniformly from the tail
+            remaining = coarse_frames[front_count:]
+            back_count = target_count - front_count
+            if remaining and back_count > 0:
+                back_indices = [
+                    front_count + int(i * (len(remaining) - 1) / max(back_count - 1, 1))
+                    for i in range(back_count)
+                ]
+                back_frames = [coarse_frames[i] for i in back_indices]
+            else:
+                back_frames = []
+
+            raw_frames = front_frames + back_frames
+            # Ensure we don't exceed target_count
+            raw_frames = raw_frames[:target_count]
         else:
-            # Not enough coarse frames — supplement from video file
+            # Not enough coarse frames — use all we have
+            raw_frames = coarse_frames[:]
             logger.info(
-                "Coarse frames insufficient (%d < %d), supplementing from video",
+                "Coarse frames insufficient (%d < %d), using all available",
                 total_coarse,
                 target_count,
             )
-            raw_frames = self._supplement_frames_from_video(
-                video_path, coarse_frames, target_count, duration_sec
-            )
 
         total = len(raw_frames)
-        logger.info("Scene understanding: using %d uniformly sampled frames across full video", total)
+        logger.info(
+            "Scene understanding: using %d frames (first %d dense + %d uniform tail)",
+            total,
+            min(5, total),
+            max(0, total - 5),
+        )
         images: List[Any] = []
         for idx, kf in enumerate(raw_frames):
             img = kf.image_data or kf.image_path

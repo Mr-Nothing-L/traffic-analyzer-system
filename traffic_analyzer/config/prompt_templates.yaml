@@ -97,6 +97,7 @@ prompt_templates:
       5. `{工程车：无}` or `{工程车：有，具体描述}` — "无" if no construction; otherwise describe equipment/vehicles/workers present.
       6. `{非机动车：无}` or `{非机动车：有，具体描述}` — "无" if no motorcycles/bicycles; otherwise describe.
       7. `{交通事故：无}` or `{交通事故：有，具体描述}` — "无" if no accidents; otherwise describe collisions, overturned vehicles, fire, smoke, debris. BE CONSERVATIVE — only use "有" if you are confident.
+      8. `{路锥：无}` or `{路锥：有N个，在位置描述}` — "无" if no traffic cones; otherwise state the approximate count and location (e.g., "有12个，在左侧道路应急车道旁形成作业区"). Count visible cones even if partially occluded.
 
       CRITICAL RULES:
       - The tag name inside the braces must be EXACTLY as shown above.
@@ -104,7 +105,7 @@ prompt_templates:
       - If an event IS present, write "有，" followed by a brief factual description.
       - All text must be written in Chinese (中文).
       - Example valid scene_description:
-        "{车流方向：左侧道路从画面底部向顶部行驶（从近到远），右侧道路从画面顶部向底部行驶（从远到近）} {行人：无} {应急车道车辆：无} {停车：无} {工程车：无} {非机动车：无} {交通事故：无}"
+        "{车流方向：左侧道路从画面底部向顶部行驶（从近到远），右侧道路从画面顶部向底部行驶（从远到近）} {行人：无} {应急车道车辆：无} {停车：无} {工程车：无} {非机动车：无} {交通事故：无} {路锥：无}"
     output_format_hint: "JSON"
 
   # ---------------------------------------------------------------------------
