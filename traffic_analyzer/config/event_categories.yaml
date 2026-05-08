@@ -29,7 +29,7 @@ event_categories:
       - "No stopping sign violation"
     confidence_threshold: 0.7
     is_active: true
-    prompt_template_id: "direct_event_detection"  # direct_vlm 专用模板 ID
+    prompt_template_id: "road_construction_detection"  # direct_vlm 专用模板 ID
 
   - event_id: 1
     event_code: "B"
@@ -143,7 +143,7 @@ event_categories:
       - "Vehicle queue extending far"
     confidence_threshold: 0.7
     is_active: true
-    prompt_template_id: "direct_event_detection"  # direct_vlm 专用模板 ID
+    prompt_template_id: "road_construction_detection"  # direct_vlm 专用模板 ID
 
   - event_id: 6
     event_code: "G"
@@ -169,7 +169,7 @@ event_categories:
       - "Lane closure signs"
     confidence_threshold: 0.7
     is_active: true
-    prompt_template_id: "direct_event_detection"  # direct_vlm 专用模板 ID
+    prompt_template_id: "road_construction_detection"  # direct_vlm 专用模板 ID
 
   - event_id: 7
     event_code: "H"
@@ -212,7 +212,7 @@ event_categories:
       - "Flying object near vehicles"
     confidence_threshold: 0.7
     is_active: true
-    prompt_template_id: "direct_event_detection"  # direct_vlm 专用模板 ID
+    prompt_template_id: "road_construction_detection"  # direct_vlm 专用模板 ID
 
   - event_id: 9
     event_code: "K"

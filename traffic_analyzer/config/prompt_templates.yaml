@@ -311,6 +311,65 @@ prompt_templates:
       Be conservative - only report what you are reasonably confident about.
 
   # ---------------------------------------------------------------------------
+  # Road Construction Detection
+  # Purpose: Dedicated template for road construction / maintenance work zones.
+  # Why: Generic template misses the nuance between actual construction
+  #      (workers + cones + equipment) vs routine cleaning (sweeper truck only).
+  # ---------------------------------------------------------------------------
+  - template_id: "road_construction_detection"
+    name: "Road Construction Detection"
+    system_prompt: |
+      You are a traffic surveillance analyst. Detect active road construction or maintenance work zones.
+    user_prompt: |
+      Detect ROAD CONSTRUCTION / MAINTENANCE WORK ZONES in these video frames.
+
+      Definition — A scene counts as road construction ONLY if it contains:
+      1. **Workers in high-visibility clothing** (orange, yellow, or lime-green vests/hats) AND
+      2. **A significant number of traffic cones or barriers** (at least 5+ cones, or continuous barrier tape, or work-zone barrels) AND
+      3. **Engineering/construction vehicles or equipment** (asphalt pavers, rollers, cement mixers, excavators, dump trucks, cranes, etc.)
+
+      CRITICAL — What does NOT count as road construction:
+      - A single sweeper truck or cleaning vehicle performing routine road cleaning WITHOUT workers and WITHOUT a cone barrier system.
+      - A parked engineering vehicle with no active work, no workers, and no cones.
+      - Emergency rescue or breakdown vehicles (police, ambulance, tow truck) — these are NOT construction.
+      - Occasional scattered cones (< 5) without workers or equipment.
+
+      INSTRUCTIONS:
+      1. Look for the COMBINATION of workers + cones/barriers + equipment. All three must be present for a confident detection.
+      2. If only an engineering vehicle is visible without workers and without a substantial cone/barrier system, report detected=false.
+      3. If workers and cones are present but no construction equipment, still report detected=true (manual road work).
+      4. Note the approximate location (which lane, shoulder, or full lane closure).
+
+      Return JSON:
+      {
+        "detected": <true|false>,
+        "instances": [
+          {
+            "start_time_sec": <approximate start time>,
+            "end_time_sec": <approximate end time>,
+            "confidence": <0.0-1.0>,
+            "evidence_frames": [<frame indices>],
+            "description": "<what you observed: workers, equipment, cone layout>",
+            "reasoning": "<why this is or is not construction: list what you saw and what was missing>"
+          }
+        ],
+        "summary": "<overall assessment>",
+        "confidence": <0.0-1.0>
+      }
+
+      If the event is NOT present, return:
+      {
+        "detected": false,
+        "instances": [],
+        "summary": "未检测到道路施工。说明看到了什么（如：只有一辆清扫车，无工人，无锥桶；或：有工程车但无锥桶隔离系统）。",
+        "confidence": 0.0
+      }
+
+      IMPORTANT:
+      - All text fields "description", "reasoning", and "summary" must be written in Chinese (中文).
+      - Be conservative. If unsure whether it is construction vs routine cleaning, report detected=false and explain why.
+
+  # ---------------------------------------------------------------------------
   # Emergency Lane Location
   # ---------------------------------------------------------------------------
   - template_id: "emergency_lane_location"
