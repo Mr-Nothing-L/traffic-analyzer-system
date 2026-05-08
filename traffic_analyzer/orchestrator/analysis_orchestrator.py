@@ -325,19 +325,32 @@ class AnalysisOrchestrator:
             )
 
         # ------------------------------------------------------------------
-        # Frame selection: extract DENSE frames from the FIRST 5 seconds.
-        # FPS=2.0 gives 0.5-second intervals, keeping vehicle displacement
-        # small enough for reliable motion tracking and direction analysis.
+        # Frame selection: UNIFORM sampling across the ENTIRE video.
+        # Use up to 10 coarse frames evenly distributed to cover the full
+        # duration, ensuring no critical events (e.g., emergency lane
+        # occupancy) are missed in any time segment.
         # ------------------------------------------------------------------
-        dense_frames = self._extract_dense_frames_for_scene(
-            video_path,
-            duration_sec=duration_sec,
-            max_seconds=5.0,
-            target_fps=2.0,
-        )
-        raw_frames = dense_frames
+        coarse_frames = keyframes.coarse_frames
+        total_coarse = len(coarse_frames)
+        target_count = min(10, total_coarse)
+
+        if total_coarse >= target_count:
+            # Uniform selection across the full video
+            indices = [int(i * (total_coarse - 1) / (target_count - 1)) for i in range(target_count)]
+            raw_frames = [coarse_frames[i] for i in indices]
+        else:
+            # Not enough coarse frames — supplement from video file
+            logger.info(
+                "Coarse frames insufficient (%d < %d), supplementing from video",
+                total_coarse,
+                target_count,
+            )
+            raw_frames = self._supplement_frames_from_video(
+                video_path, coarse_frames, target_count, duration_sec
+            )
+
         total = len(raw_frames)
-        logger.info("Scene understanding: using %d dense frames (first 5s, 0.5s interval)", total)
+        logger.info("Scene understanding: using %d uniformly sampled frames across full video", total)
         images: List[Any] = []
         for idx, kf in enumerate(raw_frames):
             img = kf.image_data or kf.image_path
