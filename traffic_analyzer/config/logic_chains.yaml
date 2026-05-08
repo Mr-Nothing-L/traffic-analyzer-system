@@ -84,7 +84,7 @@ logic_chains:
     name_zh: "车辆逆行/倒车检测"
     description: "Direct detection of reversing/逆行 vehicles. Only runs when parking or emergency lane events are detected."
     target_event_id: 7
-    precondition: "event_results.get(0, {}).get('detected', False) or event_results.get(1, {}).get('detected', False) or scene_tags.get('停车', '').startswith('有') or scene_tags.get('应急车道车辆', '').startswith('有')"
+    precondition: "event_results.get(0, {}).get('detected', False) or event_results.get(1, {}).get('detected', False) or scene_tags.get('静止车辆', '').startswith('有') or scene_tags.get('应急车道车辆', '').startswith('有')"
     required_context_keys:
       - "keyframes"
       - "scene_understanding"
