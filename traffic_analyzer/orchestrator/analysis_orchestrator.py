@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import io
 import logging
+import os
+import platform
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -44,6 +46,37 @@ from traffic_analyzer.models.schemas import (
 logger = logging.getLogger(__name__)
 
 
+def _get_system_font_path() -> Optional[str]:
+    """Return a path to a usable bold system font, or None if none found."""
+    system = platform.system()
+    candidates: List[str] = []
+    if system == "Windows":
+        windir = os.environ.get("WINDIR", r"C:\Windows")
+        candidates = [
+            os.path.join(windir, r"Fonts\arialbd.ttf"),
+            os.path.join(windir, r"Fonts\arial.ttf"),
+            os.path.join(windir, r"Fonts\msyhbd.ttc"),
+            os.path.join(windir, r"Fonts\simhei.ttf"),
+        ]
+    elif system == "Darwin":
+        candidates = [
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/System/Library/Fonts/Arial.ttf",
+            "/Library/Fonts/Arial Bold.ttf",
+        ]
+    else:
+        candidates = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+            "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
+        ]
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return None
+
+
 def _annotate_frame(image: Any, label: str) -> bytes:
     """Overlay *label* on the top-left corner of *image* and return as JPEG bytes.
 
@@ -66,13 +99,14 @@ def _annotate_frame(image: Any, label: str) -> bytes:
 
     # Try to load a TrueType font; fall back to default bitmap font
     font: ImageFont.FreeTypeFont | ImageFont.ImageFont
-    try:
-        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 28)
-    except Exception:
+    font_path = _get_system_font_path()
+    if font_path:
         try:
-            font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 28)
+            font = ImageFont.truetype(font_path, 28)
         except Exception:
             font = ImageFont.load_default()
+    else:
+        font = ImageFont.load_default()
 
     draw = ImageDraw.Draw(img)
 
