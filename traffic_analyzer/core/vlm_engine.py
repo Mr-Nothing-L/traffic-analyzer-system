@@ -117,7 +117,13 @@ def _extract_json_from_text(text: str) -> Dict[str, Any]:
     text = text.strip()
     # Try direct parse first
     try:
-        return json.loads(text)
+        result = json.loads(text)
+        if isinstance(result, dict):
+            return result
+        # VLM sometimes returns a JSON array (e.g. []) instead of an object.
+        # If the array contains a dict as its first element, use that.
+        if isinstance(result, list) and result and isinstance(result[0], dict):
+            return result[0]
     except json.JSONDecodeError:
         pass
 
@@ -134,11 +140,15 @@ def _extract_json_from_text(text: str) -> Dict[str, Any]:
     match = re.search(r"(\{.*\}|\[.*\])", text, re.DOTALL)
     if match:
         try:
-            return json.loads(match.group(1))
+            result = json.loads(match.group(1))
+            if isinstance(result, dict):
+                return result
+            if isinstance(result, list) and result and isinstance(result[0], dict):
+                return result[0]
         except json.JSONDecodeError as exc:
             raise ResponseParseError(f"Found JSON-like block but failed to parse: {exc}")
 
-    raise ResponseParseError("No JSON object or array found in response text.")
+    raise ResponseParseError("No JSON object found in response text.")
 
 
 def _validate_schema_basic(data: Dict[str, Any], schema: Dict[str, Any]) -> None:
