@@ -30,18 +30,10 @@ prompt_templates:
         "roads": [
           {
             "road_id": <0-based index>,
-            "name": "<camera-relative description. Describe which side of the frame the road is on and the observed vehicle movement direction. ALWAYS use camera/viewer-relative terms. Format: 'XX侧道路，车辆从画面底部向顶部行驶（从近到远）' or 'XX侧道路，车辆从画面顶部向底部行驶（从远到近）'. The direction MUST be described relative to the camera/viewer, NOT relative to the road itself.>",
+            "name": "<camera-relative description. Example: '左侧道路，车辆从画面顶部向底部行驶（从远到近）' or '右侧道路，车辆从画面底部向顶部行驶（从近到远）'. ALWAYS use camera/viewer-relative terms with depth cue (从远到近 / 从近到远).>",
             "normal_direction": "<toward_top|toward_bottom|toward_left|toward_right>",
             "direction_confidence": <0.0-1.0>,
-            "direction_evidence": [
-              {
-                "vehicle": "<brief description, e.g. 白色轿车>",
-                "movement": "<toward_top|toward_bottom|toward_left|toward_right|stationary>",
-                "location_earlier": "<where vehicle was in the earlier-timestamp frame, e.g. frame-bottom, frame-top-left, center>",
-                "location_later": "<where vehicle was in the later-timestamp frame, e.g. frame-top, frame-bottom-right, center>",
-                "frames_compared": "<actual timestamp strings from the frame watermarks, e.g. 14:59:40 → 15:00:09>"
-              }
-            ],
+            "direction_reasoning": "<one-sentence explanation of which rule was applied>",
             "lane_count": <number of lanes>,
             "has_emergency_lane": <true|false>
           }
@@ -54,100 +46,43 @@ prompt_templates:
         "pedestrian_present": <true|false>,
         "non_motor_vehicle_present": <true|false>,
         "thrown_object_present": <true|false>,
-        "confidence": <0.0-1.0>,
-        "direction_analysis": {
-          "anchor_points": [
-            {"name": "...", "position": "...", "type": "..."}
-          ],
-          "vehicle_motions": [
-            {
-              "vehicle_id": "...",
-              "description": "...",
-              "displacement": "...",
-              "movement_direction": "toward_top|toward_bottom|toward_left|toward_right|stationary",
-              "road_id": 0
-            }
-          ],
-          "head_orientations": [
-            {
-              "vehicle_id": "...",
-              "head_orientation": "toward_top|toward_bottom|toward_left|toward_right|unknown",
-              "evidence": "..."
-            }
-          ],
-          "consistency_check": [
-            {
-              "vehicle_id": "...",
-              "movement": "toward_top|...",
-              "head_orientation": "toward_top|...",
-              "consistent": true,
-              "anomaly": false
-            }
-          ],
-          "perspective_check": [
-            {
-              "vehicle_id": "...",
-              "size_change": "getting larger|getting smaller|no change",
-              "matches_direction": true,
-              "trajectory_parallel_to_lanes": true
-            }
-          ],
-          "conclusions": [
-            {
-              "road_id": 0,
-              "name": "左侧道路",
-              "normal_direction": "toward_top|toward_bottom|toward_left|toward_right|unknown",
-              "confidence": 0.95,
-              "evidence_summary": "N/M vehicles moving..."
-            }
-          ]
-        }
+        "confidence": <0.0-1.0>
       }
 
-      DIRECTION REQUIREMENTS:
-      1. Determine direction ONLY by observing ACTUAL vehicle movement across frames. Do NOT use road names, highway numbers, or geography.
-      2. Use camera-relative semantics in the "name" field: describe as "从画面X向Y行驶" and add "(从远到近)" or "(从近到远)".
-      3. "direction_evidence" is a SUMMARY — fill it with 2-3 representative vehicles AFTER completing the detailed 6-step direction_analysis below. Do NOT write detailed analysis in direction_evidence; put details in direction_analysis.vehicle_motions.
-      4. If a median barrier separates two road groups, the two sides MUST have opposite directions.
-      5. Set "direction_confidence" based on ratio of supporting vehicles (e.g. 5/5 = 1.0).
-
       =============================================================================
-      DIRECTION ANALYSIS PROCEDURE (6-step, mandatory — output in direction_analysis field)
+      DIRECTION DETERMINATION RULES (apply these INSTEAD of visual motion analysis)
       =============================================================================
-      In addition to the basic direction_evidence above, you MUST perform a comprehensive 6-step direction analysis and include it in the `direction_analysis` field of your JSON output. Do NOT skip any step.
 
-      【Step 1: 静态锚点】
-      List all static reference objects (road markings, barriers, signs, stationary vehicles). Establish the directional coordinate system. Record each anchor point with: name, type, position description.
+      RULE 1 — Bidirectional main road with median barrier (DEFAULT for Chinese expressways):
+      - If the video shows TWO main roads separated by a median barrier (guardrail, fence, green strip, or concrete divider):
+        - LEFT side road (画面左侧道路): INCOMING traffic, vehicles move TOWARD the camera (from far to near, getting larger) → normal_direction = "toward_bottom"
+        - RIGHT side road (画面右侧道路): OUTGOING traffic, vehicles move AWAY from the camera (from near to far, getting smaller) → normal_direction = "toward_top"
+        - direction_confidence = 1.0
+        - direction_reasoning = "双向主路+隔离带，默认左侧来向右侧去向"
+      - This is the DEFAULT assumption. Only override if you see clear evidence of the opposite.
 
-      【Step 2: 运动向量】
-      For each moving vehicle on each road, extract displacement vectors between CONSECUTIVE frames (1-second interval). The frames are provided at 1-second intervals, so compare frame N with frame N+1 (e.g., 14:59:40 vs 14:59:41).
+      RULE 2 — Ramps (entrances / exits):
+      - If a ramp merges into or diverges from a main road:
+        - The ramp flows in the SAME direction as the main road it connects to.
+        - If the ramp is on the LEFT side of the main road → normal_direction = "toward_bottom" (same as left main road).
+        - If the ramp is on the RIGHT side of the main road → normal_direction = "toward_top" (same as right main road).
+        - direction_confidence = 0.9
+        - direction_reasoning = "匝道与所在主路同向"
 
-      CRITICAL RULES for motion extraction:
-      1. ALWAYS use adjacent frames (time difference = 1 second). Do NOT skip frames.
-      2. If a vehicle is visible in frame N but NOT in frame N+1 (left the frame), discard that vehicle and pick another one that is visible in BOTH consecutive frames.
-      3. If a vehicle enters the frame in frame N+1 but was not in frame N, do NOT use it — you need the vehicle to be visible in BOTH frames.
-      4. Read the surveillance timestamp on each frame (top-right or top-left corner). For EVERY vehicle motion record:
-         - vehicle_id
-         - description
-         - displacement: cite ACTUAL timestamps from the frame watermarks, e.g. "14:59:40: 画面底部中央 → 14:59:41: 画面中部偏上"
-         - movement_direction
-         - road_id
-      5. Collect at least 3-5 valid vehicle motions per road. If a vehicle disappears after 1 second, it is normal — just pick another visible vehicle.
-      Group by road/lane and summarize trends.
+      RULE 3 — Single main road or single ramp (no median barrier visible):
+      - Only when the scene shows a SINGLE road or ramp with no clear bidirectional separation:
+        - Observe vehicle sizes: vehicles closer to the camera appear LARGER.
+        - If vehicles get LARGER as they move toward the BOTTOM of the frame → they are APPROACHING (toward_bottom).
+        - If vehicles get LARGER as they move toward the TOP of the frame → they are APPROACHING (toward_top).
+        - Use this size-change cue to determine normal_direction.
+        - direction_confidence = 0.6-0.8
+        - direction_reasoning = "单车道/单匝道，基于语义和透视判断"
 
-      【Step 3: 车头朝向】
-      For each vehicle, determine head orientation (front-facing direction). Identify front features (headlights, grille) vs rear features (taillights, license plate). Record: vehicle_id, head_orientation, evidence.
-
-      【Step 4: 一致性校验】
-      Create comparison table: vehicle_id | movement_direction | head_orientation | consistent? | anomaly?
-      Flag vehicles where movement opposes head orientation (reversing) or opposes normal flow (wrong-way).
-
-      【Step 5: 透视校验】
-      a) Size change: Does vehicle size change match movement direction (toward_bottom = larger, toward_top = smaller)?
-      b) Trajectory: Is the vehicle trajectory parallel to lane markings?
-
-      【Step 6: 结论】
-      For each road: normal_direction, confidence (based on ratio of supporting vehicles), evidence_summary. Use ONLY actual vehicle position changes as direction evidence. If a median barrier separates roads, the two sides MUST have opposite directions.
+      Camera perspective reference:
+      - Top of frame = FAR from camera (distant, vehicles appear SMALL).
+      - Bottom of frame = NEAR camera (close, vehicles appear LARGE).
+      - toward_bottom = moving from top to bottom = APPROACHING camera (getting larger).
+      - toward_top = moving from bottom to top = RECEDING from camera (getting smaller).
 
       IMPORTANT — scene_description requirements:
       In the "scene_description" field, you MUST use the following EXACT structured format for each indicator. This format allows automated parsing — do NOT deviate from it.
