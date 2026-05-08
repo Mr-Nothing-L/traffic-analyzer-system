@@ -18,7 +18,7 @@ event_categories:
     detection_mode: "direct_vlm"
     definition: |
       Illegal Parking has the following key visual indicators:
-      - Vehicles stopped on the main travel lanes
+      - Vehicles stopped on the main travel lanes (primary indicator — vehicles stopped on main travel lanes blocking regular traffic count as illegal parking)
       - Vehicles blocking regular lanes or access points
       - Vehicles stopped in areas with "No Stopping" or "No Parking" signage
       - Vehicles parked on shoulders or emergency lanes WITHOUT clear emergency rescue signs, flashing lights, or personnel in safety vests. A vehicle with trunk/hood open on the shoulder for an extended time counts as illegal parking unless there is active emergency assistance visible.
@@ -36,8 +36,8 @@ event_categories:
     name: "Emergency Lane Occupancy"
     name_zh: "应急车道占用"
     description: "Vehicles entering, stopping, occupying, or traveling within the emergency lane."
-    detection_mode: "scene_tag"
-    scene_tag_key: "应急车道车辆"  # scene_description 结构化标签键
+    detection_mode: "direct_vlm"
+    prompt_template_id: "emergency_lane_occupancy_detection"
     definition: |
       Emergency lanes typically have the following characteristics:
       - Located on the far left or far right edge of the roadway

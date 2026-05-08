@@ -1,5 +1,5 @@
 python3 -m traffic_analyzer analyze \
---video ./error/02-04-07-08-10_Event_65536_1754981986753_1.mp4 \
+--video output/01-02-07-11_Event_65536_1750981599056_1.mp4 \
 --format markdown  \
---output output/02-04-07-08-10_Event_65536_1754981986753_1.md \
+--output output/01-02-07-11_Event_65536_1750981599056_1.md \
 --min-frames 20

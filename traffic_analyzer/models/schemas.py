@@ -167,6 +167,7 @@ class RoadInfo(BaseModel):
     direction_evidence: List[DirectionEvidence] = Field(default_factory=list)
     lane_count: int = 0
     has_emergency_lane: bool = False
+    emergency_lane_side: Optional[Literal["left", "right", "both", "none"]] = None
 
 
 class SceneInfo(BaseModel):

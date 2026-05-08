@@ -61,8 +61,8 @@ def _annotate_frame(image: Any, label: str) -> bytes:
 
     img = img.convert("RGB")
 
-    # Resize to 720p max to reduce VLM payload and avoid API timeouts
-    img.thumbnail((1280, 720), Image.LANCZOS)
+    # Resize to 1080p max for better VLM detail recognition
+    img.thumbnail((1920, 1080), Image.LANCZOS)
 
     # Try to load a TrueType font; fall back to default bitmap font
     font: ImageFont.FreeTypeFont | ImageFont.ImageFont
@@ -846,14 +846,19 @@ class AnalysisOrchestrator:
                         user_prompt=f"Detect {category.name_zh}: {category.description}",
                     )
 
+                # Build context vars: always include event info + optional scene understanding
+                ctx_vars: Dict[str, Any] = {
+                    "event_name": category.name_zh,
+                    "event_definition": category.definition,
+                    "visual_indicators": category.visual_indicators,
+                }
+                if context.scene_understanding:
+                    ctx_vars["scene_understanding"] = context.scene_understanding
+
                 batch_requests.append({
                     "template": template,
                     "images": shared_images,
-                    "context_vars": {
-                        "event_name": category.name_zh,
-                        "event_definition": category.definition,
-                        "visual_indicators": category.visual_indicators,
-                    },
+                    "context_vars": ctx_vars,
                 })
                 batched_categories.append(category)
 
@@ -968,14 +973,18 @@ class AnalysisOrchestrator:
             )
 
         images = self._get_event_images(context)
+        ctx_vars: Dict[str, Any] = {
+            "event_name": category.name_zh,
+            "event_definition": category.definition,
+            "visual_indicators": category.visual_indicators,
+        }
+        if context.scene_understanding:
+            ctx_vars["scene_understanding"] = context.scene_understanding
+
         response = self.vlm_engine.call(
             template=template,
             images=images,
-            context_vars={
-                "event_name": category.name_zh,
-                "event_definition": category.definition,
-                "visual_indicators": category.visual_indicators,
-            },
+            context_vars=ctx_vars,
         )
         return self._parse_direct_vlm_response(response, category)
 

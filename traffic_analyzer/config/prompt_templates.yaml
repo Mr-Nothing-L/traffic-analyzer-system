@@ -12,37 +12,38 @@ prompt_templates:
   - template_id: "scene_understanding"
     name: "Global Scene Understanding"
     system_prompt: |
-      You are an expert traffic surveillance analyst. Analyze the provided video frames from a highway monitoring camera.
-      Provide a structured analysis of the scene. Be precise and factual.
+      你是一名专业的高速公路监控分析师。分析来自高速公路监控摄像头的视频帧。
+      提供场景的结构化分析。务必精确、客观。
     user_prompt: |
-      Analyze these video frames from a highway surveillance camera.
+      分析这些来自高速公路监控摄像头的视频帧。
 
-      The images are provided in chronological order from earliest to latest.
-      Each frame has a surveillance timestamp watermark in the top-right or top-left corner (e.g. "2025-06-08 23:59:23" or "14:59:40"). READ these timestamps to determine chronological order.
+      图像按时间顺序从早到晚排列。
+      每帧画面在右上角或左上角带有监控时间戳水印（例如 "2025-06-08 23:59:23" 或 "14:59:40"）。读取这些时间戳以确定时间顺序。
 
-      When describing vehicle movement, ALWAYS cite the ACTUAL timestamps from the frame watermarks, e.g. "14:59:40 → 15:00:09".
-      - A vehicle moving from the top of the frame to the bottom is moving toward the camera (getting larger).
-      - A vehicle moving from the bottom of the frame to the top is moving away from the camera (getting smaller).
+      描述车辆运动时，务必引用画面水印中的实际时间戳，例如 "14:59:40 → 15:00:09"。
+      - 车辆从画面上方向下方移动表示向摄像头靠近（逐渐变大）。
+      - 车辆从画面下方向上方移动表示远离摄像头（逐渐变小）。
 
-      Please provide your analysis in the following JSON format:
+      请按以下 JSON 格式提供分析结果：
       {
-        "road_count": <number of distinct roads/lane groups>,
+        "road_count": <不同道路/车道组的数量>,
         "roads": [
           {
-            "road_id": <0-based index>,
-            "name": "<camera-relative description. Example: '左侧道路，车辆从画面顶部向底部行驶（从远到近）' or '右侧道路，车辆从画面底部向顶部行驶（从近到远）'. ALWAYS use camera/viewer-relative terms with depth cue (从远到近 / 从近到远).>",
+            "road_id": <从0开始的索引>,
+            "name": "<相对于摄像头的描述。示例：'左侧道路，车辆从画面顶部向底部行驶（从远到近）' 或 '右侧道路，车辆从画面底部向顶部行驶（从近到远）'。务必使用相对于摄像头/观察者的术语，并包含深度提示（从远到近 / 从近到远）。>",
             "normal_direction": "<toward_top|toward_bottom|toward_left|toward_right>",
             "direction_confidence": <0.0-1.0>,
-            "direction_reasoning": "<one-sentence explanation of which rule was applied>",
-            "lane_count": <number of lanes>,
-            "has_emergency_lane": <true|false>
+            "direction_reasoning": "<一句说明应用了哪条规则>",
+            "lane_count": <车道数量>,
+            "has_emergency_lane": <true|false>,
+            "emergency_lane_side": "<left|right|both|none>" — 对每条道路，明确指出应急车道在哪一侧。在中国高速公路上：应急车道通常位于每条道路的外侧边缘（右行道路在右侧，左行道路在左侧）。注意：路面颜色/纹理不同、白色实线标线、宽度较窄、路肩区域。
           }
         ],
         "weather": "<clear|rain|fog|snow|unknown>",
         "lighting": "<day|night|dusk|dawn|unknown>",
         "traffic_density": "<light|moderate|heavy>",
-        "total_vehicles_estimate": <approximate count>,
-        "scene_description": "<brief overall description>",
+        "total_vehicles_estimate": <大致数量>,
+        "scene_description": "<简要整体描述>",
         "pedestrian_present": <true|false>,
         "non_motor_vehicle_present": <true|false>,
         "thrown_object_present": <true|false>,
@@ -50,62 +51,92 @@ prompt_templates:
       }
 
       =============================================================================
-      DIRECTION DETERMINATION RULES (apply these INSTEAD of visual motion analysis)
+      方向判定规则（应用这些规则，而非视觉运动分析）
       =============================================================================
 
-      RULE 1 — Bidirectional main road with median barrier (DEFAULT for Chinese expressways):
-      - If the video shows TWO main roads separated by a median barrier (guardrail, fence, green strip, or concrete divider):
-        - LEFT side road (画面左侧道路): INCOMING traffic, vehicles move TOWARD the camera (from far to near, getting larger) → normal_direction = "toward_bottom"
-        - RIGHT side road (画面右侧道路): OUTGOING traffic, vehicles move AWAY from the camera (from near to far, getting smaller) → normal_direction = "toward_top"
+      规则 1 — 双向主路+中央隔离带（中国高速公路默认情况）：
+      - 如果视频显示两条由中央隔离带（护栏、栅栏、绿化带或混凝土隔离墩）分隔的主路：
+        - 左侧道路（画面左侧道路）：来向车流，车辆朝向摄像头移动（从远到近，逐渐变大）→ normal_direction = "toward_bottom"
+        - 右侧道路（画面右侧道路）：去向车流，车辆远离摄像头移动（从近到远，逐渐变小）→ normal_direction = "toward_top"
         - direction_confidence = 1.0
         - direction_reasoning = "双向主路+隔离带，默认左侧来向右侧去向"
-      - This is the DEFAULT assumption. Only override if you see clear evidence of the opposite.
+      - 这是默认假设。仅当看到明确相反证据时才可覆盖。
 
-      RULE 2 — Ramps (entrances / exits):
-      - If a ramp merges into or diverges from a main road:
-        - The ramp flows in the SAME direction as the main road it connects to.
-        - If the ramp is on the LEFT side of the main road → normal_direction = "toward_bottom" (same as left main road).
-        - If the ramp is on the RIGHT side of the main road → normal_direction = "toward_top" (same as right main road).
+      规则 2 — 匝道（入口/出口）：
+      - 如果匝道汇入或驶出主路：
+        - 匝道方向与其连接的主路方向相同。
+        - 如果匝道在主路左侧 → normal_direction = "toward_bottom"（与左侧主路相同）。
+        - 如果匝道在主路右侧 → normal_direction = "toward_top"（与右侧主路相同）。
         - direction_confidence = 0.9
         - direction_reasoning = "匝道与所在主路同向"
 
-      RULE 3 — Single main road or single ramp (no median barrier visible):
-      - Only when the scene shows a SINGLE road or ramp with no clear bidirectional separation:
-        - Observe vehicle sizes: vehicles closer to the camera appear LARGER.
-        - If vehicles get LARGER as they move toward the BOTTOM of the frame → they are APPROACHING (toward_bottom).
-        - If vehicles get LARGER as they move toward the TOP of the frame → they are APPROACHING (toward_top).
-        - Use this size-change cue to determine normal_direction.
+      规则 3 — 单条主路或单条匝道（无可见中央隔离带）：
+      - 仅当场景显示单条道路或匝道，且无明确双向分隔时：
+        - 观察车辆大小：离摄像头越近的车辆看起来越大。
+        - 如果车辆向画面下方移动时变大 → 车辆正在靠近（toward_bottom）。
+        - 如果车辆向画面上方移动时变大 → 车辆正在靠近（toward_top）。
+        - 使用此大小变化线索确定 normal_direction。
         - direction_confidence = 0.6-0.8
         - direction_reasoning = "单车道/单匝道，基于语义和透视判断"
 
-      Camera perspective reference:
-      - Top of frame = FAR from camera (distant, vehicles appear SMALL).
-      - Bottom of frame = NEAR camera (close, vehicles appear LARGE).
-      - toward_bottom = moving from top to bottom = APPROACHING camera (getting larger).
-      - toward_top = moving from bottom to top = RECEDING from camera (getting smaller).
+      摄像头视角参考：
+      - 画面上方 = 远离摄像头（远处，车辆看起来小）。
+      - 画面下方 = 靠近摄像头（近处，车辆看起来大）。
+      - toward_bottom = 从上向下移动 = 靠近摄像头（逐渐变大）。
+      - toward_top = 从下向上移动 = 远离摄像头（逐渐变小）。
 
-      IMPORTANT — scene_description requirements:
-      In the "scene_description" field, you MUST use the following EXACT structured format for each indicator. This format allows automated parsing — do NOT deviate from it.
+      =============================================================================
+      应急车道识别规则
+      =============================================================================
 
-      Use the pattern `{类别：状态/描述}` where "无" means absent and any other text means present with details.
+      对每条道路，你必须判断是否存在应急车道以及位于哪一侧。使用以下规则：
 
-      Required tags (must ALL appear in the scene_description, in this order):
-      1. `{车流方向：描述}` — For each road, state the normal flow direction explicitly using camera-relative terms (e.g. "左侧道路从画面底部向顶部行驶（从近到远），右侧道路从画面顶部向底部行驶（从远到近）"). Always include both the frame-relative direction (从画面X向Y) AND the depth cue (从近到远/从远到近).
-      2. `{行人：无}` or `{行人：有，具体描述}` — "无" if no pedestrians; otherwise describe what you see.
-      3. `{应急车道车辆：无}` or `{应急车道车辆：有，具体描述}` — "无" ONLY if the emergency lane / shoulder is completely empty. Otherwise describe ANY vehicle on the shoulder, including stopped, parked, or slow-moving vehicles. Check BOTH left and right shoulders carefully.
-      4. `{静止车辆：无}` or `{静止车辆：有，具体描述}` — "无" ONLY if all vehicles are in motion. Otherwise describe EVERY stationary or parked vehicle you see (e.g., "有，左侧车道黑色SUV静止，白色轿车停在应急车道"). Do NOT miss slow or stopped vehicles.
-      5. `{工程车：无}` or `{工程车：有，具体描述}` — "无" if no construction; otherwise describe equipment/vehicles/workers present.
-      6. `{非机动车：无}` or `{非机动车：有，具体描述}` — "无" if no motorcycles/bicycles; otherwise describe.
-      7. `{交通事故：无}` or `{交通事故：有，具体描述}` — "无" if no accidents; otherwise describe collisions, overturned vehicles, fire, smoke, debris. BE CONSERVATIVE — only use "有" if you are confident.
-      8. `{路锥：无}` or `{路锥：有N个，在位置描述}` — "无" if no traffic cones; otherwise state the approximate count and location (e.g., "有12个，在左侧道路应急车道旁形成作业区"). Count visible cones even if partially occluded.
+      规则 A — 相对于车流方向的位置：
+      - 应急车道始终位于每条道路的外侧边缘（离中央隔离带/中央分隔带最远的一侧）。
+      - 对于车流方向为 toward_bottom（从远到近，上→下）的道路：应急车道位于该道路的左侧（画面左侧）。
+      - 对于车流方向为 toward_top（从近到远，下→上）的道路：应急车道位于该道路的右侧（画面右侧）。
+      - 示例：在典型的双向高速公路上，左侧道路（来向）的应急车道在最左侧，右侧道路（去向）的应急车道在最右侧。
 
-      CRITICAL RULES:
-      - The tag name inside the braces must be EXACTLY as shown above.
-      - If an event is NOT present, you MUST write "无" after the colon. Do NOT write "未发现" or leave it blank.
-      - If an event IS present, write "有，" followed by a brief factual description.
-      - All text must be written in Chinese (中文).
-      - Example valid scene_description:
-        "{车流方向：左侧道路从画面底部向顶部行驶（从近到远），右侧道路从画面顶部向底部行驶（从远到近）} {行人：无} {应急车道车辆：无} {静止车辆：无} {工程车：无} {非机动车：无} {交通事故：无} {路锥：无}"
+      规则 B — 视觉特征（注意以下所有特征）：
+      - 与相邻主车道之间由白色实线分隔。重要：实线并不自动意味着应急车道——普通车道边界也可以是实线。
+      - 位于道路最外侧边缘，在最后一条主行车道之外。
+      - 可能有隆声带、凸起路面标线或"应急车道"标志。
+      - 出入匝道的有白色或黄色网状实线的导流区属于应急车道。
+      - 通常应急车道都是紧挨着护栏的。
+
+      规则 C — 什么不是应急车道：
+      - 两条主行车道之间的白色实线是车道边界，不是应急车道边界。
+      - 由锥桶标记的临时车道偏移或车道封闭不构成应急车道。
+      - 收费站或服务区的宽路肩不是应急车道。
+
+      规则 D — 报告要求：
+      - 如果不确定某条车道是否为应急车道，设置 has_emergency_lane=false 且 emergency_lane_side="none"。
+      - 仅在看到规则 B 中至少两项视觉特征时，才报告 has_emergency_lane=true。
+
+      重要 — scene_description 要求：
+      在 "scene_description" 字段中，你必须对每个指标使用以下精确结构化格式。此格式支持自动解析——请勿偏离。
+
+      使用模式 `{类别：状态/描述}`，其中 "无" 表示不存在，任何其他文本表示存在并附详情。
+
+      必需标签（必须全部按此顺序出现在 scene_description 中）：
+      0. {概括性描述输入视频看到的交通场景，包括应急车道上是否有车辆行驶；是否有异常停止的车辆等。}
+      1. `{车流方向：描述}` — 对每条道路，使用相对于摄像头的术语明确指出正常流向（例如 "左侧道路从画面底部向顶部行驶（从近到远），右侧道路从画面顶部向底部行驶（从远到近）"）。务必同时包含相对于画面的方向（从画面X向Y）和深度提示（从近到远/从远到近）。
+      2. `{行人：无}` 或 `{行人：有，具体描述}` — 无行人时写 "无"；否则描述所见内容。
+      3. `{应急车道位置：描述}` — 必填。对每条道路，明确指出应急车道的位置。注意：路面颜色/纹理不同、白色实线标线、较窄车道宽度、外侧边缘路肩。示例："道路0应急车道在画面右侧，道路1应急车道在画面左侧" 或 "只有道路0有应急车道，在画面右侧"。如果看不到应急车道，写 "无"。
+      4. `{应急车道车辆：无}` 或 `{应急车道车辆：有，具体描述}` — 按照{应急车道位置：描述}仔细检查。仅当应急车道/路肩完全空无一车时才写 "无"。否则描述路肩上的任何车辆，包括静止、停放、慢速移动或正在行驶的车辆。应急车道中的任何车辆均计入，无论其是否在移动。
+      5. `{静止车辆：无}` 或 `{静止车辆：有，具体描述}` — 描述你看到的每一辆静止或停放的车辆（例如，"有，左侧车道黑色SUV静止，白色轿车停在应急车道，施工区域内有车辆静止"）。仅当所有车辆都在运动时才写 "无"。包括画面中看起来小的车辆（远离摄像头）以及被锥桶包围起来的封闭区域，尤其是锥桶包围区域通常有静止车辆；
+      6. `{工程车：无}` 或 `{工程车：有，具体描述}` — 无施工时写 "无"；否则描述存在的设备/车辆/工人。
+      7. `{非机动车：无}` 或 `{非机动车：有，具体描述}` — 无摩托车/自行车时写 "无"；否则描述。
+      8. `{交通事故：无}` 或 `{交通事故：有，具体描述}` — 无事故时写 "无"；否则描述碰撞、翻车、有警车、拖车等。务必保守——仅在确信时才使用 "有"。
+      9. `{路锥：无}` 或 `{路锥：有N个，在位置描述}` — 无交通锥时写 "无"；否则说明大致数量和位置（例如，"有12个，在左侧道路应急车道旁形成作业区"）。即使部分遮挡也计入可见锥桶。
+
+      关键规则：
+      - 花括号内的标签名称必须与上述完全一致。
+      - 如果事件不存在，冒号后必须写 "无"。不要写 "未发现" 或留空。
+      - 如果事件存在，写 "有，" 后跟简要客观描述。
+      - 所有文本必须使用中文书写。
+      - 有效的 scene_description 示例：
+        "{车流方向：左侧道路从画面顶部向底部行驶（从远到近），右侧道路从画面底部向顶部行驶（从近到远）} {行人：无} {应急车道位置：道路0（左侧来向车道）应急车道在画面左侧，道路1（右侧去向车道）应急车道在画面右侧} {应急车道车辆：无} {静止车辆：无} {工程车：无} {非机动车：无} {交通事故：无} {路锥：无}"
     output_format_hint: "JSON"
 
   # ---------------------------------------------------------------------------
@@ -320,57 +351,133 @@ prompt_templates:
   - template_id: "road_construction_detection"
     name: "Road Construction Detection"
     system_prompt: |
-      You are a traffic surveillance analyst. Detect active road construction or maintenance work zones.
+      你是一名交通监控分析师。检测活跃的道路施工或维护作业区。
     user_prompt: |
-      Detect ROAD CONSTRUCTION / MAINTENANCE WORK ZONES in these video frames.
+      检测这些视频帧中的道路施工/维护作业区。
 
-      Definition — A scene counts as road construction if it contains EITHER:
-      (A) **A visible arrangement of traffic cones or barriers** (forming a work zone, lane closure, or traffic guidance area) AND **at least one of the following**:
-          - Workers in high-visibility clothing (orange, yellow, or lime-green vests/hats)
-          - Engineering/construction vehicles or equipment (asphalt pavers, rollers, cement mixers, excavators, dump trucks, cranes, etc.)
-      (B) Active construction equipment operating on the road surface (even without cones, e.g., nighttime paving with only vehicle-mounted arrow boards).
+      定义 — 以下任一情况均认定为道路施工：
+      (A) **可见的交通锥或隔离栏布置**（形成作业区、车道封闭或交通引导区域），并且**至少满足以下一项**：
+          - 穿着高可视性服装的工人（橙色、黄色或荧光绿色背心/帽子）
+          - 工程/施工车辆或设备（沥青摊铺机、压路机、水泥搅拌车、挖掘机、自卸卡车、起重机等）
+          - 由锥桶/隔离栏布置明确指示的车道封闭或交通引导（区域封闭，引导）
+      (B) 在路面上作业的施工设备（即使没有锥桶，例如夜间铺设仅靠车载箭头板指示）。
+      
 
-      CRITICAL — What does NOT count as road construction:
-      - A single sweeper truck or cleaning vehicle performing routine road cleaning WITHOUT cones/barriers forming a work zone.
-      - A parked engineering vehicle with no active work and no cone/barrier system.
-      - Emergency rescue or breakdown vehicles (police, ambulance, tow truck) — these are NOT construction.
-      - Randomly scattered individual cones (1-2 cones with no pattern) without workers or equipment.
+      重要 — 以下情况**不属于**道路施工：
+      - 单一清扫车或清洁车辆执行日常道路清洁
+      - 应急救援或故障处理车辆（警车、救护车、拖车）——这些**不是**施工。
+      
 
-      INSTRUCTIONS:
-      1. Cones/barriers arranged to guide traffic, close a lane, or mark a work zone count as construction indicators. Even 3-5 cones in a clear pattern (line, curve, or zone boundary) are sufficient.
-      2. If cones + workers are present but no heavy equipment, report detected=true (manual road work or marking).
-      3. If cones + engineering vehicle are present but no visible workers, report detected=true (mechanized work, workers may be inside the vehicle or out of frame).
-      4. If ONLY an engineering vehicle is visible without cones/barriers and without workers, report detected=false.
-      5. Note the approximate location (which lane, shoulder, or full lane closure).
+      操作指引：
+      1. 用于引导交通、封闭车道或标记作业区的锥桶/隔离栏均视为施工 报告 detected=true（有明确施工范围划分）。即使只有3-5个锥桶形成清晰图案（直线、曲线或区域边界）也足够。
+      2. 如果锥桶+工人存在但无重型设备，报告 detected=true（人工道路作业或标线作业）。
+      3. 如果锥桶+工程车辆存在但无可见工人，报告 detected=true（机械化作业，工人可能在车内或画面外）。
+      4. 如果**只有**工程车辆可见，无锥桶/隔离栏且无工人，报告 detected=false。
+      5. 记录大致位置（哪条车道、路肩或全封闭）。
 
-      Return JSON:
+      返回 JSON：
       {
         "detected": <true|false>,
         "instances": [
           {
-            "start_time_sec": <approximate start time>,
-            "end_time_sec": <approximate end time>,
+            "start_time_sec": <大致开始时间>,
+            "end_time_sec": <大致结束时间>,
             "confidence": <0.0-1.0>,
-            "evidence_frames": [<frame indices>],
-            "description": "<what you observed: workers, equipment, cone layout>",
-            "reasoning": "<why this is or is not construction: list what you saw and what was missing>"
+            "evidence_frames": [<帧索引>],
+            "description": "<观察到的内容：工人、设备、锥桶布置>",
+            "reasoning": "<为什么属于或不属于施工：列出看到的和缺失的>"
           }
         ],
-        "summary": "<overall assessment>",
+        "summary": "<总体评估>",
         "confidence": <0.0-1.0>
       }
 
-      If the event is NOT present, return:
+      如果事件中**不存在**施工，返回：
       {
         "detected": false,
         "instances": [],
-        "summary": "未检测到道路施工。说明看到了什么（如：只有一辆清扫车，无工人，无锥桶；或：有工程车但无锥桶隔离系统）。",
+        "summary": "未检测到道路施工。说明看到了什么（如：只有一辆清扫车，无工人，无锥桶；或：有工程车但无锥桶隔离系统）。解释为什么认为不是施工（如没有用锥桶封闭区域；）",
         "confidence": 0.0
       }
 
-      IMPORTANT:
-      - All text fields "description", "reasoning", and "summary" must be written in Chinese (中文).
-      - Be conservative. If unsure whether it is construction vs routine cleaning, report detected=false and explain why.
+      重要：
+      - 所有文本字段 "description"、"reasoning" 和 "summary" 必须使用中文书写。
+      - 务必保守。如果不确定是施工还是日常清洁，报告 detected=false 并说明原因。
+
+  # ---------------------------------------------------------------------------
+  # Emergency Lane Occupancy Detection
+  # Purpose: Dedicated direct VLM detection for emergency lane occupancy.
+  # Why: scene_tag mode relies on a single tag in scene_understanding which
+  #      easily misses vehicles in the emergency lane. A dedicated VLM call
+  #      focuses attention specifically on emergency lane areas.
+  # ---------------------------------------------------------------------------
+  - template_id: "emergency_lane_occupancy_detection"
+    name: "Emergency Lane Occupancy Detection"
+    system_prompt: |
+      你是一名交通监控分析师。你的唯一任务是检测应急车道上的车辆占用情况。
+    user_prompt: |
+      检测这些视频帧中的应急车道占用情况。
+
+      {% if scene_understanding %}
+      已知场景信息（来自场景理解分析）：
+      - 道路数量：{{ scene_understanding.road_count }}
+      - 各道路信息：
+      {% for road in scene_understanding.roads %}
+        道路 {{ road.road_id }}: {{ road.name }}，应急车道: {% if road.has_emergency_lane %}有，位于 {{ road.emergency_lane_side }} 侧{% else %}无{% endif %}
+      {% endfor %}
+      - 场景描述：{{ scene_understanding.scene_description }}
+      {% endif %}
+
+      定义 — 应急车道占用：
+      应急车道（路肩）是高速公路最外侧的专用车道，通常用于紧急停车。以下情况均属于应急车道占用：
+      - 任何车辆在应急车道上行驶（无论速度多慢）
+      - 任何车辆在应急车道上停止或停放
+      - 任何车辆部分或完全进入应急车道区域
+      - 工程车、养护车等 authorized vehicles 在应急车道上也算占用（后续系统会判断是否为合法作业）
+      - 匝道出入口处的白色/黄色网状实线导流区也属于应急车道范围，该区域内的车辆同样计入应急车道占用
+
+      检查步骤：
+      1. 首先根据已知场景信息确定应急车道位置（如果没有已知信息，则从画面中自行判断）。
+      2. 逐帧仔细检查应急车道区域，特别注意：
+         - 画面边缘区域（应急车道通常在画面最左或最右侧）
+         - 应急车道通常紧挨护栏
+         - 即使车辆看起来很小（远距离）也要检查
+         - 即使车辆只是部分压线进入应急车道也要报告
+        
+      3. 对发现的每一辆应急车道上的车辆，描述：
+         - 车辆类型、颜色
+         - 在应急车道上的行为（行驶/停止/停放/部分进入）
+         - 所在位置（哪条道路的应急车道）
+
+      返回 JSON：
+      {
+        "detected": <true|false>,
+        "instances": [
+          {
+            "start_time_sec": <大致开始时间>,
+            "end_time_sec": <大致结束时间>,
+            "confidence": <0.0-1.0>,
+            "evidence_frames": [<帧索引>],
+            "description": "<观察到的内容：车辆类型、颜色、在应急车道上的行为>",
+            "reasoning": "<为什么判断为应急车道占用：车辆位置、行为描述>"
+          }
+        ],
+        "summary": "<总体评估>",
+        "confidence": <0.0-1.0>
+      }
+
+      如果未检测到应急车道占用，返回：
+      {
+        "detected": false,
+        "instances": [],
+        "summary": "未检测到应急车道占用。已仔细检查应急车道区域，未发现任何车辆。",
+        "confidence": 0.0
+      }
+
+      重要：
+      - 所有文本字段 "description"、"reasoning" 和 "summary" 必须使用中文书写。
+      - 即使只有一辆车部分进入应急车道，也必须报告 detected=true。
+      - 如果应急车道上有车辆但你不确定它是否在应急车道内，宁可报告 detected=true 也不要遗漏。
 
   # ---------------------------------------------------------------------------
   # Emergency Lane Location

@@ -107,12 +107,12 @@ cross_event_inference_rules:
     |
     v
 1. 视频预处理
-   - 场景理解帧提取：前 5 秒 @ 2 FPS（10 帧，0.5s 间隔）
+   - 场景理解帧提取：两段式采样（前 5 秒密集 + 后段均匀），共 20 帧
    - 精确帧提取：自适应采样关键时刻（4 FPS）
     |
     v
 2. 场景理解 (scene_understanding)
-   - 单次综合 VLM 调用，输入 10 帧密集帧
+   - 单次综合 VLM 调用，输入 20 帧（前 5 秒密集 + 后段均匀）
    - 基于规则的方向判断（双向+隔离带 → 默认左来右去）
    - 输出结构化信息：道路结构、车流方向、天气、
      pedestrian_present、non_motor_vehicle_present、
