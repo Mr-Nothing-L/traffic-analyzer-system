@@ -7,6 +7,7 @@ exposing them as strongly typed Pydantic models.
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 import os
 from pathlib import Path
@@ -360,12 +361,36 @@ class ConfigManager:
         Returns:
             An ``LLMProviderConfig`` with values overridden by the environment.
         """
-        env_path = self.config_dir / ".env"
-        if env_path.exists():
-            load_dotenv(dotenv_path=str(env_path), override=True)
-            logger.debug("Loaded environment variables from %s", env_path)
-        else:
-            load_dotenv(override=True)  # fall back to CWD / process env
+        # Search for .env in multiple locations (config_dir, package root, CWD)
+        env_loaded = False
+        candidates = [self.config_dir / ".env"]
+
+        # Also check the package root directory (one level above this file's package)
+        try:
+            import traffic_analyzer as _ta
+            pkg_root = Path(_ta.__file__).resolve().parent.parent
+            candidates.append(pkg_root / ".env")
+        except Exception:
+            pass
+
+        for env_path in candidates:
+            if env_path.exists():
+                load_dotenv(dotenv_path=str(env_path), override=True)
+                logger.info("Loaded environment variables from %s", env_path)
+                env_loaded = True
+                break
+
+        if not env_loaded:
+            # Final fallback: CWD / process env
+            loaded = load_dotenv(override=True)
+            if loaded:
+                logger.info("Loaded environment variables from CWD .env")
+            else:
+                logger.warning(
+                    "No .env file found. Searched: %s. "
+                    "Ensure you have a .env file in the config directory or project root.",
+                    ", ".join(str(p) for p in candidates),
+                )
 
         kwargs: Dict[str, Any] = {}
 
