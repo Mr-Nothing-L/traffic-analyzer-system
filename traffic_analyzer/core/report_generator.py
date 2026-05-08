@@ -243,11 +243,6 @@ class ReportGenerator:
         if not report.event_results:
             lines.append("_未检测到任何事件类别。_")
             lines.append("")
-        elif all(not r.detected for r in report.event_results):
-            # All events are zero — show a clear summary instead of listing every "not detected".
-            lines.append("> **该视频无任何交通事件。** 所有事件类别均未触发。"
-            )
-            lines.append("")
         else:
             for result in report.event_results:
                 lines.extend(self._render_event_result(result))
