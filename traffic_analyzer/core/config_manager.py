@@ -112,10 +112,19 @@ class ConfigManager:
             for chain in raw_logic_chains.get("logic_chains", [])
         }
 
-        self._prompt_templates = {
-            tmpl["template_id"]: PromptTemplate.model_validate(tmpl)
-            for tmpl in raw_prompt_templates.get("prompt_templates", [])
-        }
+        # Group prompt templates by template_id to support multiple versions
+        self._prompt_templates: Dict[str, Dict[str, PromptTemplate]] = {}
+        for tmpl in raw_prompt_templates.get("prompt_templates", []):
+            pt = PromptTemplate.model_validate(tmpl)
+            if pt.template_id not in self._prompt_templates:
+                self._prompt_templates[pt.template_id] = {}
+            self._prompt_templates[pt.template_id][pt.version] = pt
+            logger.debug("Loaded prompt template '%s' version '%s'", pt.template_id, pt.version)
+
+        # Log templates with multiple versions
+        for tid, versions in self._prompt_templates.items():
+            if len(versions) > 1:
+                logger.info("Prompt template '%s' has %d versions: %s", tid, len(versions), list(versions.keys()))
 
         # Read optional frame count limits from env
         su_min_frames = os.getenv("SCENE_UNDERSTANDING_MIN_FRAMES")
@@ -167,23 +176,72 @@ class ConfigManager:
             raise RuntimeError("Configuration has not been loaded. Call load_all() first.")
         return self._logic_chains.get(chain_id)
 
-    def get_prompt_template(self, template_id: str) -> PromptTemplate:
-        """Fetch a prompt template by its unique identifier.
+    def get_prompt_template(
+        self,
+        template_id: str,
+        version: Optional[str] = None,
+    ) -> PromptTemplate:
+        """Fetch a prompt template by ID, with optional version selection.
+
+        Supports A/B testing via ``traffic_percentage`` on template variants.
+        Version selection order:
+        1. Explicit ``version`` parameter
+        2. Environment variable ``PROMPT_VERSION_{template_id}``
+        3. A/B traffic split (if variants have ``traffic_percentage``)
+        4. Latest version (highest version string)
 
         Args:
-            template_id: The ``template_id`` field of the desired ``PromptTemplate``.
+            template_id: The ``template_id`` of the desired template.
+            version: Optional explicit version to select.
 
         Returns:
-            The matching ``PromptTemplate``.
+            The selected ``PromptTemplate``.
 
         Raises:
             KeyError: If no template with the given ID exists.
+            ValueError: If the requested version is not found.
         """
         if self._system_config is None:
             raise RuntimeError("Configuration has not been loaded. Call load_all() first.")
         if template_id not in self._prompt_templates:
             raise KeyError(f"Prompt template '{template_id}' not found.")
-        return self._prompt_templates[template_id]
+
+        versions = self._prompt_templates[template_id]
+
+        # 1. Explicit version parameter
+        if version is not None:
+            if version not in versions:
+                raise ValueError(
+                    f"Prompt template '{template_id}' version '{version}' not found. "
+                    f"Available: {list(versions.keys())}"
+                )
+            return versions[version]
+
+        # 2. Environment variable override
+        env_version = os.getenv(f"PROMPT_VERSION_{template_id.upper().replace('-', '_')}")
+        if env_version and env_version in versions:
+            logger.debug("Using env-specified version '%s' for template '%s'", env_version, template_id)
+            return versions[env_version]
+
+        # 3. A/B traffic split (only when multiple variants have traffic_percentage)
+        variants_with_traffic = [
+            (v, pt) for v, pt in versions.items() if pt.traffic_percentage is not None
+        ]
+        if len(variants_with_traffic) > 1:
+            import random
+            roll = random.randint(1, 100)
+            cumulative = 0
+            for v, pt in sorted(variants_with_traffic, key=lambda x: x[1].traffic_percentage or 0):
+                cumulative += pt.traffic_percentage or 0
+                if roll <= cumulative:
+                    logger.debug("A/B selected version '%s' for template '%s' (roll=%d)", v, template_id, roll)
+                    return pt
+            # Fallback to last variant if roll exceeds cumulative
+            return variants_with_traffic[-1][1]
+
+        # 4. Default: latest version (highest version string)
+        latest_version = max(versions.keys())
+        return versions[latest_version]
 
     def get_inference_rules(self) -> List[CrossEventInferenceRule]:
         """Return all configured cross-event inference rules."""
@@ -425,11 +483,17 @@ class ConfigManager:
             ("LLM_TEMPERATURE", "temperature", float),
             ("LLM_TIMEOUT", "timeout", float),
             ("LLM_MAX_RETRIES", "max_retries", int),
+            ("LLM_CACHE_MAX_SIZE", "cache_max_size", int),
         ):
             if (val := os.getenv(env_name)) is not None:
                 try:
                     kwargs[attr_name] = cast(val)
                 except (ValueError, TypeError) as exc:
                     logger.warning("Invalid %s value '%s': %s", env_name, val, exc)
+
+        # Boolean flag for cache enable/disable
+        cache_enabled = os.getenv("LLM_ENABLE_CACHE")
+        if cache_enabled is not None:
+            kwargs["enable_cache"] = cache_enabled.lower() in ("1", "true", "yes", "on")
 
         return LLMProviderConfig(**kwargs)

@@ -25,6 +25,11 @@ from PIL import Image, ImageDraw, ImageFont
 from traffic_analyzer.core.config_manager import ConfigManager
 from traffic_analyzer.core.external_adapter import ExternalAdapter
 from traffic_analyzer.core.logic_engine import LogicEngine, _parse_scene_tags
+from traffic_analyzer.core.pipeline_steps import (
+    EventDetectionStep,
+    PostProcessStep,
+    SceneUnderstandingStep,
+)
 from traffic_analyzer.core.report_generator import ReportGenerator
 from traffic_analyzer.core.video_preprocessor import VideoPreprocessor
 from traffic_analyzer.core.vlm_engine import VLMInferenceEngine
@@ -122,22 +127,7 @@ def _annotate_frame(image: Any, label: str) -> bytes:
     overlay_draw.rectangle(rect, fill=(0, 0, 0, 180))
     img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
 
-    # Draw text
-    draw = ImageDraw.Draw(img)
-
-    # Measure text size
-    bbox = draw.textbbox((0, 0), label, font=font)
-    text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    pad = 10
-    rect = [4, 4, 8 + text_w + pad * 2, 8 + text_h + pad * 2]
-
-    # Draw semi-transparent black background for label
-    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    overlay_draw = ImageDraw.Draw(overlay)
-    overlay_draw.rectangle(rect, fill=(0, 0, 0, 180))
-    img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
-
-    # Draw text
+    # Draw text on top of the background
     draw = ImageDraw.Draw(img)
     draw.text((8 + pad, 8 + pad), label, fill=(255, 255, 255), font=font)
 
@@ -163,6 +153,9 @@ class AnalysisOrchestrator:
         logic_engine: LogicEngine,
         report_generator: ReportGenerator,
         external_adapter: Optional[ExternalAdapter] = None,
+        scene_understanding_step: Optional[SceneUnderstandingStep] = None,
+        event_detection_step: Optional[EventDetectionStep] = None,
+        post_process_step: Optional[PostProcessStep] = None,
     ) -> None:
         """Initialize the orchestrator with all required modules.
 
@@ -173,6 +166,9 @@ class AnalysisOrchestrator:
             logic_engine: Logic chain execution engine.
             report_generator: Report generation module.
             external_adapter: Optional external CV data adapter.
+            scene_understanding_step: Optional custom scene understanding step.
+            event_detection_step: Optional custom event detection step.
+            post_process_step: Optional custom post-processing step.
         """
         self.config_manager = config_manager
         self.video_preprocessor = video_preprocessor
@@ -180,6 +176,11 @@ class AnalysisOrchestrator:
         self.logic_engine = logic_engine
         self.report_generator = report_generator
         self.external_adapter = external_adapter
+
+        # Pipeline steps (created lazily if not provided)
+        self._scene_understanding_step = scene_understanding_step
+        self._event_detection_step = event_detection_step
+        self._post_process_step = post_process_step
 
     # ------------------------------------------------------------------
     # Factory
@@ -209,6 +210,11 @@ class AnalysisOrchestrator:
         report_generator = ReportGenerator()
         external_adapter = ExternalAdapter()
 
+        # Create pipeline steps
+        scene_step = SceneUnderstandingStep(config_manager, vlm_engine, max_retries=1)
+        event_step = EventDetectionStep(config_manager, vlm_engine, logic_engine)
+        post_step = PostProcessStep(config_manager)
+
         return cls(
             config_manager=config_manager,
             video_preprocessor=video_preprocessor,
@@ -216,6 +222,9 @@ class AnalysisOrchestrator:
             logic_engine=logic_engine,
             report_generator=report_generator,
             external_adapter=external_adapter,
+            scene_understanding_step=scene_step,
+            event_detection_step=event_step,
+            post_process_step=post_step,
         )
 
     # ------------------------------------------------------------------
@@ -257,14 +266,22 @@ class AnalysisOrchestrator:
         video_meta = self._extract_video_meta(video_path)
         context.video_meta = video_meta
 
-        # Step 2: Global scene understanding
+        # Step 2: Global scene understanding (via PipelineStep if available)
         logger.info("[2/7] Scene understanding...")
         t0 = time.perf_counter()
-        scene_info = self._scene_understanding(
-            keyframes,
-            video_path=video_path,
-            duration_sec=video_meta.duration_sec,
-        )
+        if self._scene_understanding_step:
+            su_result = self._scene_understanding_step.execute(context)
+            if su_result.success and su_result.data:
+                scene_info = su_result.data
+            else:
+                logger.warning("Scene understanding step failed, using fallback")
+                scene_info = SceneInfo()
+        else:
+            scene_info = self._scene_understanding(
+                keyframes,
+                video_path=video_path,
+                duration_sec=video_meta.duration_sec,
+            )
         step_times["scene_understanding"] = time.perf_counter() - t0
         context.scene_understanding = scene_info
         logger.info("  Roads detected: %d", scene_info.road_count)
@@ -281,19 +298,34 @@ class AnalysisOrchestrator:
             logger.info("  No CV tracks provided, skipping external validation")
         step_times["cv_tracks"] = time.perf_counter() - t0
 
-        # Step 4: Event detection
+        # Step 4: Event detection (via PipelineStep if available)
         logger.info("[4/7] Detecting events...")
         t0 = time.perf_counter()
-        event_results = self._detect_events(context)
+        if self._event_detection_step:
+            ed_result = self._event_detection_step.execute(context)
+            if ed_result.success and ed_result.data:
+                event_results = ed_result.data
+            else:
+                logger.error("Event detection step failed: %s", ed_result.error)
+                event_results = list(context.event_results.values())
+        else:
+            event_results = self._detect_events(context)
         step_times["event_detection"] = time.perf_counter() - t0
         context.event_results = {r.event_id: r for r in event_results}
         detected_count = sum(1 for r in event_results if r.detected)
         logger.info("  Events detected: %d / %d", detected_count, len(event_results))
 
-        # Step 5: Post-process inferred events
+        # Step 5: Post-process inferred events (via PipelineStep if available)
         logger.info("[5/7] Post-processing inferred events...")
         t0 = time.perf_counter()
-        event_results = self._post_process_events(event_results, context.scene_understanding)
+        if self._post_process_step:
+            pp_result = self._post_process_step.execute(context)
+            if pp_result.success and pp_result.data:
+                event_results = pp_result.data
+            else:
+                logger.error("Post-processing step failed: %s", pp_result.error)
+        else:
+            event_results = self._post_process_events(event_results, context.scene_understanding)
         step_times["post_processing"] = time.perf_counter() - t0
         context.event_results = {r.event_id: r for r in event_results}
 

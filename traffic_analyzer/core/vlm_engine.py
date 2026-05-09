@@ -10,12 +10,14 @@ and usage tracking.
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import json
 import logging
 import re
 import time
 import uuid
+from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 
 from jinja2 import Template, UndefinedError, StrictUndefined
@@ -62,6 +64,53 @@ class SchemaValidationError(VLMEngineError):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _compute_cache_key(system_prompt: str, user_prompt: str, images: List[Any]) -> str:
+    """Compute a deterministic cache key for a VLM call.
+
+    The key is a SHA-256 hex digest of the prompt text combined with
+    the raw image data.  This allows identical calls (same prompt +
+    same images) to hit the cache even if the caller passes different
+    Python object identities.
+
+    Args:
+        system_prompt: Rendered system prompt.
+        user_prompt: Rendered user prompt.
+        images: List of images (PIL Image, bytes, or file paths).
+
+    Returns:
+        Hex digest string suitable as a cache key.
+    """
+    hasher = hashlib.sha256()
+    hasher.update((system_prompt or "").encode("utf-8"))
+    hasher.update(b"\x00")
+    hasher.update((user_prompt or "").encode("utf-8"))
+
+    for img in images:
+        hasher.update(b"\x00")
+        if isinstance(img, bytes):
+            hasher.update(img)
+        elif isinstance(img, str):
+            try:
+                with open(img, "rb") as fh:
+                    hasher.update(fh.read())
+            except OSError:
+                hasher.update(img.encode("utf-8"))
+        else:
+            # PIL Image or other – convert to PNG bytes
+            try:
+                from PIL import Image as PILImage
+                if isinstance(img, PILImage.Image):
+                    buf = io.BytesIO()
+                    img.save(buf, format="PNG")
+                    hasher.update(buf.getvalue())
+                else:
+                    hasher.update(str(img).encode("utf-8"))
+            except Exception:
+                hasher.update(str(img).encode("utf-8"))
+
+    return hasher.hexdigest()
+
 
 def _encode_image_to_base64(image: Any) -> str:
     """Convert an image to a base64-encoded PNG string.
@@ -472,6 +521,13 @@ class VLMInferenceEngine:
         self._total_retries: int = 0
         self._failed_calls: int = 0
 
+        # Response cache (LRU, bounded by config.cache_max_size)
+        self._cache_enabled: bool = getattr(config, "enable_cache", True)
+        self._cache_max_size: int = getattr(config, "cache_max_size", 128)
+        self._cache: OrderedDict[str, LLMResponse] = OrderedDict()
+        self._cache_hits: int = 0
+        self._cache_misses: int = 0
+
     def _init_client(self) -> None:
         """Initialize the underlying SDK client based on provider."""
         # Create an http client that bypasses system proxies to avoid
@@ -562,6 +618,19 @@ class VLMInferenceEngine:
         """
         system_prompt, user_prompt = self.render_prompt(template, context_vars)
 
+        # --- Cache lookup ---
+        cache_key = ""
+        if self._cache_enabled:
+            cache_key = _compute_cache_key(system_prompt, user_prompt, images)
+            cached = self._cache.get(cache_key)
+            if cached is not None:
+                self._cache_hits += 1
+                # Move to end (most recently used)
+                self._cache.move_to_end(cache_key)
+                logger.debug("[cache] HIT for key %s... (%d cached)", cache_key[:16], len(self._cache))
+                return cached
+            self._cache_misses += 1
+
         call_id = str(uuid.uuid4())
         start_time = time.perf_counter()
         retry_count = 0
@@ -607,7 +676,7 @@ class VLMInferenceEngine:
         if not success:
             self._failed_calls += 1
 
-        return LLMResponse(
+        response = LLMResponse(
             success=success,
             raw_text=raw_text,
             parsed_data=parsed_data,
@@ -618,6 +687,16 @@ class VLMInferenceEngine:
             latency_ms=latency_ms,
             retry_count=retry_count,
         )
+
+        # --- Cache store (only successful responses) ---
+        if self._cache_enabled and cache_key and success:
+            self._cache[cache_key] = response
+            # Evict oldest if over capacity
+            while len(self._cache) > self._cache_max_size:
+                self._cache.popitem(last=False)
+            logger.debug("[cache] STORED key %s... (size=%d)", cache_key[:16], len(self._cache))
+
+        return response
 
     def _execute_once(
         self,
@@ -774,6 +853,7 @@ class VLMInferenceEngine:
         Returns:
             Dictionary with total calls, tokens, latency, retries, and failures.
         """
+        total_cache_lookups = self._cache_hits + self._cache_misses
         return {
             "provider": self.provider,
             "model": self.config.model,
@@ -786,6 +866,14 @@ class VLMInferenceEngine:
             "total_retries": self._total_retries,
             "average_latency_ms": round(
                 self._total_latency_ms / max(self._total_calls, 1), 2
+            ),
+            "cache_enabled": self._cache_enabled,
+            "cache_size": len(self._cache),
+            "cache_max_size": self._cache_max_size,
+            "cache_hits": self._cache_hits,
+            "cache_misses": self._cache_misses,
+            "cache_hit_rate": round(
+                self._cache_hits / max(total_cache_lookups, 1), 4
             ),
         }
 

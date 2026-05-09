@@ -313,11 +313,16 @@ class PromptTemplate(BaseModel):
     """A reusable prompt template."""
     template_id: str
     name: str
+    version: str = "1.0"
     system_prompt: str = ""
     user_prompt: str = ""
     output_format_hint: str = ""
     example_input: Optional[Dict[str, Any]] = None
     example_output: Optional[str] = None
+    # A/B testing: percentage of traffic that uses this variant (0-100)
+    # When multiple variants of the same template_id exist, one is selected
+    # based on traffic_percentage. If not set, the latest version is used.
+    traffic_percentage: Optional[int] = Field(None, ge=0, le=100)
 
 
 class LLMResponse(BaseModel):
@@ -422,6 +427,8 @@ class LLMProviderConfig(BaseModel):
     temperature: float = 0.2
     timeout: float = 120.0
     max_retries: int = 3
+    enable_cache: bool = True
+    cache_max_size: int = 128
 
 
 class SystemConfig(BaseModel):

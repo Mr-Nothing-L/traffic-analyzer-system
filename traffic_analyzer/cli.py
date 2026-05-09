@@ -102,6 +102,15 @@ def cmd_validate_config(args: argparse.Namespace) -> int:
         logger.info("Loaded %d event categories", len(categories))
         for cat in categories:
             logger.info("  [%d] %s (%s)", cat.event_id, cat.name, cat.detection_mode.value)
+
+        # Cross-reference validation
+        errors = manager.validate_config()
+        if errors:
+            logger.error("Configuration has %d cross-reference error(s):", len(errors))
+            for err in errors:
+                logger.error("  - %s", err)
+            return 1
+
         logger.info("Configuration is valid.")
         return 0
     except Exception as exc:
