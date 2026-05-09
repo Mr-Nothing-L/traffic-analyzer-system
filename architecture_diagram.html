@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Traffic Analyzer Architecture Diagram</title>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js" integrity="sha384-ZZ1pncU3bQe8y31yfZdMFdSpttDoPmOZg2wguVK9almUodir1PghgT0eY7Mrty8H" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js" integrity="sha384-en/ztfPSRkGfME4KIm05joYXynqzUgbsG5nMrj/xEFAHXkeZfO3yMK8QQ+mP7p1/" crossorigin="anonymous"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'JetBrains Mono', monospace;
+      background: #020617;
+      min-height: 100vh;
+      padding: 2rem;
+      color: white;
+    }
+    .container { max-width: 1320px; margin: 0 auto; }
+    .header { margin-bottom: 2rem; }
+    .header-row {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      margin-bottom: 0.5rem;
+    }
+    .pulse-dot {
+      width: 12px;
+      height: 12px;
+      background: #34d399;
+      border-radius: 50%;
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+    h1 {
+      font-size: 1.5rem;
+      font-weight: 700;
+      letter-spacing: -0.025em;
+    }
+    .subtitle {
+      color: #94a3b8;
+      font-size: 0.875rem;
+      margin-left: 1.75rem;
+    }
+    .diagram-container {
+      background: rgba(15, 23, 42, 0.5);
+      border-radius: 1rem;
+      border: 1px solid #1e293b;
+      padding: 1.5rem;
+      overflow-x: auto;
+    }
+    svg {
+      width: 100%;
+      min-width: 1100px;
+      display: block;
+    }
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 1rem;
+      margin-top: 2rem;
+    }
+    .card {
+      background: rgba(15, 23, 42, 0.5);
+      border-radius: 0.75rem;
+      border: 1px solid #1e293b;
+      padding: 1.25rem;
+    }
+    .card-header {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-bottom: 0.75rem;
+    }
+    .card-dot { width: 8px; height: 8px; border-radius: 50%; }
+    .card-dot.cyan { background: #22d3ee; }
+    .card-dot.emerald { background: #34d399; }
+    .card-dot.violet { background: #a78bfa; }
+    .card-dot.amber { background: #fbbf24; }
+    .card-dot.rose { background: #fb7185; }
+    .card h3 { font-size: 0.875rem; font-weight: 600; }
+    .card ul {
+      list-style: none;
+      color: #94a3b8;
+      font-size: 0.75rem;
+    }
+    .card li { margin-bottom: 0.375rem; }
+    .footer {
+      text-align: center;
+      margin-top: 1.5rem;
+      color: #475569;
+      font-size: 0.75rem;
+    }
+    .toolbar {
+      display: flex;
+      gap: 0.5rem;
+      margin-left: auto;
+      flex-shrink: 0;
+      align-items: center;
+    }
+    .toolbar-toggle {
+      background: transparent;
+      border: none;
+      color: #475569;
+      cursor: pointer;
+      font-size: 1.25rem;
+      line-height: 1;
+      padding: 0.25rem 0.5rem;
+      border-radius: 0.375rem;
+      transition: color 0.2s, background 0.2s;
+    }
+    .toolbar-toggle:hover { color: #94a3b8; background: rgba(30, 41, 59, 0.5); }
+    .toolbar-actions { display: none; gap: 0.5rem; }
+    .toolbar.expanded .toolbar-actions { display: flex; }
+    .toolbar-actions button {
+      background: rgba(30, 41, 59, 0.8);
+      border: 1px solid #334155;
+      color: #94a3b8;
+      padding: 0.375rem 0.75rem;
+      border-radius: 0.375rem;
+      font-family: inherit;
+      font-size: 0.75rem;
+      cursor: pointer;
+      transition: all 0.2s;
+      white-space: nowrap;
+    }
+    .toolbar-actions button:hover {
+      background: rgba(51, 65, 85, 0.8);
+      color: white;
+      border-color: #475569;
+    }
+    @media print {
+      body { background: #020617; padding: 1rem; }
+      .toolbar { display: none !important; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container" id="report-container">
+    <div class="header">
+      <div class="header-row">
+        <div class="pulse-dot"></div>
+        <h1>Traffic Analyzer · 高速交通事件判别系统</h1>
+        <div class="toolbar">
+          <div class="toolbar-actions">
+            <button onclick="copyAsImage(this)">📋 Copy</button>
+            <button onclick="downloadPNG(this)">🖼️ PNG</button>
+            <button onclick="downloadPDF(this)">📄 PDF</button>
+          </div>
+          <button class="toolbar-toggle" onclick="this.parentElement.classList.toggle('expanded')" title="Export options" aria-label="Export options">⋯</button>
+        </div>
+      </div>
+      <p class="subtitle">基于多模态大模型 (VLM) 的高速公路监控视频 10 类事件检测框架 · YAML 配置驱动 · 三种检测模式</p>
+    </div>
+
+    <div class="diagram-container">
+      <svg viewBox="0 0 1280 1020">
+        <defs>
+          <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#64748b" />
+          </marker>
+          <marker id="arrowhead-emerald" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#34d399" />
+          </marker>
+          <marker id="arrowhead-cyan" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#22d3ee" />
+          </marker>
+          <marker id="arrowhead-amber" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#fbbf24" />
+          </marker>
+          <marker id="arrowhead-violet" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#a78bfa" />
+          </marker>
+          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <rect width="100%" height="100%" fill="url(#grid)" />
+
+        <!-- ============================================
+             ARROWS (drawn first so they go behind boxes)
+             ============================================ -->
+
+        <!-- Inputs → Orchestrator -->
+        <line x1="155" y1="148" x2="495" y2="320" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <line x1="265" y1="148" x2="495" y2="335" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+        <!-- CLI → Orchestrator -->
+        <line x1="370" y1="148" x2="500" y2="320" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrowhead-cyan)"/>
+
+        <!-- Configs → ConfigManager (pipeline tap below) -->
+        <line x1="640" y1="252" x2="640" y2="320" stroke="#fbbf24" stroke-width="1.5" stroke-dasharray="4,4" marker-end="url(#arrowhead-amber)"/>
+
+        <!-- Orchestrator → 4 core engines -->
+        <line x1="430" y1="395" x2="180" y2="475" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrowhead-emerald)"/>
+        <line x1="500" y1="395" x2="395" y2="475" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrowhead-emerald)"/>
+        <line x1="640" y1="395" x2="640" y2="475" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrowhead-emerald)"/>
+        <line x1="780" y1="395" x2="880" y2="475" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrowhead-emerald)"/>
+        <line x1="850" y1="395" x2="1100" y2="475" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrowhead-emerald)"/>
+
+        <!-- VLMEngine → External Providers (right curve up) -->
+        <path d="M 730 510 Q 940 450 940 250" fill="none" stroke="#fbbf24" stroke-width="1.5" stroke-dasharray="6,3" marker-end="url(#arrowhead-amber)"/>
+        <text x="855" y="395" fill="#fbbf24" font-size="9" font-weight="600">HTTPS / Retry</text>
+
+        <!-- Engines → Detection modes -->
+        <line x1="160" y1="615" x2="240" y2="675" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrowhead-violet)"/>
+        <line x1="640" y1="615" x2="240" y2="675" stroke="#a78bfa" stroke-width="1.5" stroke-dasharray="3,3" marker-end="url(#arrowhead-violet)"/>
+        <line x1="640" y1="615" x2="640" y2="675" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrowhead-violet)"/>
+        <line x1="880" y1="615" x2="640" y2="675" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrowhead-violet)"/>
+        <line x1="160" y1="615" x2="1040" y2="675" stroke="#a78bfa" stroke-width="1.5" stroke-dasharray="3,3" marker-end="url(#arrowhead-violet)"/>
+
+        <!-- Detection modes → Post-processing -->
+        <line x1="240" y1="850" x2="240" y2="900" stroke="#fb923c" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <line x1="640" y1="850" x2="640" y2="900" stroke="#fb923c" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <line x1="1040" y1="850" x2="1040" y2="900" stroke="#fb923c" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+        <!-- Post-processing → ReportGenerator (back up to engine) -->
+        <path d="M 640 970 Q 640 990 760 990 L 1100 990 Q 1180 990 1180 925 L 1180 615" fill="none" stroke="#34d399" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arrowhead-emerald)"/>
+
+        <!-- ReportGenerator → conceptual outputs label -->
+        <text x="1170" y="650" fill="#94a3b8" font-size="8" text-anchor="end">→ MD / JSON / Bits</text>
+
+        <!-- ============================================
+             SECTION 1: TOP — Inputs / Entry / Configs / LLM Providers
+             ============================================ -->
+
+        <!-- Inputs (slate / external) -->
+        <rect x="50" y="95" width="100" height="55" rx="6" fill="#0f172a"/>
+        <rect x="50" y="95" width="100" height="55" rx="6" fill="rgba(30, 41, 59, 0.7)" stroke="#94a3b8" stroke-width="1.5"/>
+        <text x="100" y="118" fill="white" font-size="11" font-weight="600" text-anchor="middle">Video MP4</text>
+        <text x="100" y="135" fill="#94a3b8" font-size="9" text-anchor="middle">单/多机位监控</text>
+
+        <rect x="160" y="95" width="110" height="55" rx="6" fill="#0f172a"/>
+        <rect x="160" y="95" width="110" height="55" rx="6" fill="rgba(30, 41, 59, 0.7)" stroke="#94a3b8" stroke-width="1.5"/>
+        <text x="215" y="118" fill="white" font-size="11" font-weight="600" text-anchor="middle">CV Tracks JSON</text>
+        <text x="215" y="135" fill="#94a3b8" font-size="9" text-anchor="middle">merge_tracks.py · 可选</text>
+
+        <!-- User Entry (cyan / frontend) -->
+        <rect x="290" y="95" width="160" height="55" rx="6" fill="#0f172a"/>
+        <rect x="290" y="95" width="160" height="55" rx="6" fill="rgba(8, 51, 68, 0.5)" stroke="#22d3ee" stroke-width="1.5"/>
+        <text x="370" y="118" fill="white" font-size="11" font-weight="600" text-anchor="middle">analyze.sh / CLI</text>
+        <text x="370" y="135" fill="#22d3ee" font-size="9" text-anchor="middle">python -m traffic_analyzer</text>
+
+        <!-- Configuration region (amber dashed boundary) -->
+        <rect x="475" y="80" width="335" height="175" rx="12" fill="rgba(251, 191, 36, 0.05)" stroke="#fbbf24" stroke-width="1" stroke-dasharray="8,4"/>
+        <text x="487" y="98" fill="#fbbf24" font-size="10" font-weight="600">Configuration · YAML + .env</text>
+
+        <rect x="490" y="108" width="305" height="28" rx="6" fill="#0f172a"/>
+        <rect x="490" y="108" width="305" height="28" rx="6" fill="rgba(120, 53, 15, 0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+        <text x="642" y="126" fill="white" font-size="10" font-weight="500" text-anchor="middle">event_categories.yaml</text>
+
+        <rect x="490" y="142" width="305" height="28" rx="6" fill="#0f172a"/>
+        <rect x="490" y="142" width="305" height="28" rx="6" fill="rgba(120, 53, 15, 0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+        <text x="642" y="160" fill="white" font-size="10" font-weight="500" text-anchor="middle">logic_chains.yaml</text>
+
+        <rect x="490" y="176" width="305" height="28" rx="6" fill="#0f172a"/>
+        <rect x="490" y="176" width="305" height="28" rx="6" fill="rgba(120, 53, 15, 0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+        <text x="642" y="194" fill="white" font-size="10" font-weight="500" text-anchor="middle">prompt_templates.yaml</text>
+
+        <rect x="490" y="210" width="305" height="32" rx="6" fill="#0f172a"/>
+        <rect x="490" y="210" width="305" height="32" rx="6" fill="rgba(136, 19, 55, 0.4)" stroke="#fb7185" stroke-width="1.5"/>
+        <text x="642" y="225" fill="white" font-size="10" font-weight="500" text-anchor="middle">.env</text>
+        <text x="642" y="237" fill="#fb7185" font-size="8" text-anchor="middle">API Keys · Provider Config</text>
+
+        <!-- External LLM Providers region (amber dashed) -->
+        <rect x="830" y="80" width="400" height="175" rx="12" fill="rgba(251, 191, 36, 0.05)" stroke="#fbbf24" stroke-width="1" stroke-dasharray="8,4"/>
+        <text x="842" y="98" fill="#fbbf24" font-size="10" font-weight="600">External VLM Providers · HTTPS</text>
+
+        <rect x="850" y="110" width="365" height="35" rx="6" fill="#0f172a"/>
+        <rect x="850" y="110" width="365" height="35" rx="6" fill="rgba(120, 53, 15, 0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+        <text x="1032" y="125" fill="white" font-size="11" font-weight="600" text-anchor="middle">Anthropic Claude</text>
+        <text x="1032" y="139" fill="#94a3b8" font-size="8" text-anchor="middle">claude-3-5-sonnet · 默认推荐</text>
+
+        <rect x="850" y="155" width="365" height="35" rx="6" fill="#0f172a"/>
+        <rect x="850" y="155" width="365" height="35" rx="6" fill="rgba(120, 53, 15, 0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+        <text x="1032" y="170" fill="white" font-size="11" font-weight="600" text-anchor="middle">Google Gemini</text>
+        <text x="1032" y="184" fill="#94a3b8" font-size="8" text-anchor="middle">gemini-2.x · 备选</text>
+
+        <rect x="850" y="200" width="365" height="35" rx="6" fill="#0f172a"/>
+        <rect x="850" y="200" width="365" height="35" rx="6" fill="rgba(120, 53, 15, 0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+        <text x="1032" y="215" fill="white" font-size="11" font-weight="600" text-anchor="middle">Aliyun Qwen-VL</text>
+        <text x="1032" y="229" fill="#94a3b8" font-size="8" text-anchor="middle">qwen-vl-max · 备选</text>
+
+        <!-- ============================================
+             SECTION 2: ConfigManager + AnalysisOrchestrator + Schemas
+             ============================================ -->
+
+        <!-- ConfigManager (left bridge) -->
+        <rect x="50" y="285" width="220" height="100" rx="8" fill="#0f172a"/>
+        <rect x="50" y="285" width="220" height="100" rx="8" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="160" y="308" fill="white" font-size="12" font-weight="600" text-anchor="middle">ConfigManager</text>
+        <text x="160" y="324" fill="#94a3b8" font-size="9" text-anchor="middle">core/config_manager.py · 435 行</text>
+        <text x="160" y="345" fill="#94a3b8" font-size="9" text-anchor="middle">• 加载 + Schema 校验</text>
+        <text x="160" y="360" fill="#94a3b8" font-size="9" text-anchor="middle">• 多路径 .env 检测</text>
+        <text x="160" y="375" fill="#94a3b8" font-size="9" text-anchor="middle">• EventCategory / LogicChain</text>
+
+        <!-- AnalysisOrchestrator (center, prominent) -->
+        <rect x="290" y="280" width="450" height="115" rx="10" fill="#0f172a"/>
+        <rect x="290" y="280" width="450" height="115" rx="10" fill="rgba(6, 78, 59, 0.5)" stroke="#34d399" stroke-width="2"/>
+        <text x="515" y="306" fill="white" font-size="14" font-weight="700" text-anchor="middle">AnalysisOrchestrator</text>
+        <text x="515" y="322" fill="#34d399" font-size="9" text-anchor="middle">orchestrator/analysis_orchestrator.py · 1260 行 · 5 阶段流水线</text>
+        <text x="515" y="346" fill="#94a3b8" font-size="9" text-anchor="middle">① preprocessing  →  ② scene_understanding  →  ③ event_detection</text>
+        <text x="515" y="362" fill="#94a3b8" font-size="9" text-anchor="middle">→  ④ post_processing (推断链)  →  ⑤ report_generation</text>
+        <text x="515" y="382" fill="#34d399" font-size="9" font-weight="600" text-anchor="middle">逐步骤耗时统计 · ThreadPoolExecutor 并行 · 配置驱动</text>
+
+        <!-- Pydantic Schemas (right) -->
+        <rect x="760" y="285" width="220" height="100" rx="8" fill="#0f172a"/>
+        <rect x="760" y="285" width="220" height="100" rx="8" fill="rgba(76, 29, 149, 0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="870" y="308" fill="white" font-size="12" font-weight="600" text-anchor="middle">Pydantic Schemas</text>
+        <text x="870" y="324" fill="#94a3b8" font-size="9" text-anchor="middle">models/schemas.py · 467 行</text>
+        <text x="870" y="345" fill="#94a3b8" font-size="9" text-anchor="middle">• SceneInfo · EventResult</text>
+        <text x="870" y="360" fill="#94a3b8" font-size="9" text-anchor="middle">• AnalysisReport · BinaryEnc</text>
+        <text x="870" y="375" fill="#94a3b8" font-size="9" text-anchor="middle">• 类型安全 · 反序列化</text>
+
+        <!-- Tests (right small) -->
+        <rect x="1000" y="285" width="230" height="100" rx="8" fill="#0f172a"/>
+        <rect x="1000" y="285" width="230" height="100" rx="8" fill="rgba(15, 23, 42, 0.7)" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="4,3"/>
+        <text x="1115" y="308" fill="white" font-size="12" font-weight="600" text-anchor="middle">Test Suite</text>
+        <text x="1115" y="324" fill="#94a3b8" font-size="9" text-anchor="middle">tests/ · 7 个测试模块</text>
+        <text x="1115" y="345" fill="#94a3b8" font-size="9" text-anchor="middle">test_orchestrator · test_cli</text>
+        <text x="1115" y="360" fill="#94a3b8" font-size="9" text-anchor="middle">test_logic_engine · test_vlm</text>
+        <text x="1115" y="375" fill="#94a3b8" font-size="9" text-anchor="middle">test_video_preprocessor</text>
+
+        <!-- ============================================
+             SECTION 3: Core Engines (5 boxes, emerald)
+             ============================================ -->
+
+        <text x="50" y="455" fill="#34d399" font-size="11" font-weight="600">Core Engines · traffic_analyzer/core/</text>
+
+        <rect x="50" y="465" width="225" height="155" rx="8" fill="#0f172a"/>
+        <rect x="50" y="465" width="225" height="155" rx="8" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="162" y="488" fill="white" font-size="12" font-weight="600" text-anchor="middle">VideoPreprocessor</text>
+        <text x="162" y="504" fill="#94a3b8" font-size="9" text-anchor="middle">video_preprocessor.py · 562 行</text>
+        <text x="162" y="525" fill="#94a3b8" font-size="9" text-anchor="middle">• 两段式采样 (前 5s + 后段)</text>
+        <text x="162" y="541" fill="#94a3b8" font-size="9" text-anchor="middle">• Coarse 1-2 fps · 20 帧</text>
+        <text x="162" y="557" fill="#94a3b8" font-size="9" text-anchor="middle">• Precision 4 fps · 41 帧</text>
+        <text x="162" y="573" fill="#94a3b8" font-size="9" text-anchor="middle">• 帧标注 · 缩略图网格</text>
+        <text x="162" y="592" fill="#34d399" font-size="9" font-weight="600" text-anchor="middle">缩放 720p · 减传 55%</text>
+        <text x="162" y="608" fill="#94a3b8" font-size="8" text-anchor="middle">跨平台中文字体加载</text>
+
+        <rect x="290" y="465" width="225" height="155" rx="8" fill="#0f172a"/>
+        <rect x="290" y="465" width="225" height="155" rx="8" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="402" y="488" fill="white" font-size="12" font-weight="600" text-anchor="middle">ExternalAdapter</text>
+        <text x="402" y="504" fill="#94a3b8" font-size="9" text-anchor="middle">external_adapter.py · 457 行</text>
+        <text x="402" y="525" fill="#94a3b8" font-size="9" text-anchor="middle">• CV 轨迹 JSON 适配</text>
+        <text x="402" y="541" fill="#94a3b8" font-size="9" text-anchor="middle">• merge_tracks 输出整合</text>
+        <text x="402" y="557" fill="#94a3b8" font-size="9" text-anchor="middle">• 静止 / 应急车道触发</text>
+        <text x="402" y="573" fill="#94a3b8" font-size="9" text-anchor="middle">• 仅作为辅助证据</text>
+        <text x="402" y="592" fill="#34d399" font-size="9" font-weight="600" text-anchor="middle">可选输入 · 即插即用</text>
+
+        <rect x="530" y="465" width="225" height="155" rx="8" fill="#0f172a"/>
+        <rect x="530" y="465" width="225" height="155" rx="8" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="642" y="488" fill="white" font-size="12" font-weight="600" text-anchor="middle">VLMEngine</text>
+        <text x="642" y="504" fill="#94a3b8" font-size="9" text-anchor="middle">vlm_engine.py · 820 行</text>
+        <text x="642" y="525" fill="#94a3b8" font-size="9" text-anchor="middle">• 多 Provider 抽象</text>
+        <text x="642" y="541" fill="#94a3b8" font-size="9" text-anchor="middle">• 重试 · 指数退避</text>
+        <text x="642" y="557" fill="#94a3b8" font-size="9" text-anchor="middle">• Schema 校验 + 降级</text>
+        <text x="642" y="573" fill="#94a3b8" font-size="9" text-anchor="middle">• JSON 数组兼容</text>
+        <text x="642" y="592" fill="#34d399" font-size="9" font-weight="600" text-anchor="middle">Anthropic / Gemini / Qwen</text>
+        <text x="642" y="608" fill="#94a3b8" font-size="8" text-anchor="middle">--min-frames 可调</text>
+
+        <rect x="770" y="465" width="225" height="155" rx="8" fill="#0f172a"/>
+        <rect x="770" y="465" width="225" height="155" rx="8" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="882" y="488" fill="white" font-size="12" font-weight="600" text-anchor="middle">LogicEngine</text>
+        <text x="882" y="504" fill="#94a3b8" font-size="9" text-anchor="middle">logic_engine.py · 820 行</text>
+        <text x="882" y="525" fill="#94a3b8" font-size="9" text-anchor="middle">• YAML 多步链执行</text>
+        <text x="882" y="541" fill="#94a3b8" font-size="9" text-anchor="middle">• vlm_call · compute</text>
+        <text x="882" y="557" fill="#94a3b8" font-size="9" text-anchor="middle">• condition · aggregate</text>
+        <text x="882" y="573" fill="#94a3b8" font-size="9" text-anchor="middle">• Jinja2 变量替换</text>
+        <text x="882" y="592" fill="#34d399" font-size="9" font-weight="600" text-anchor="middle">像素位移估计 (倒车)</text>
+        <text x="882" y="608" fill="#94a3b8" font-size="8" text-anchor="middle">帧对比分析 · 结构化推理</text>
+
+        <rect x="1010" y="465" width="220" height="155" rx="8" fill="#0f172a"/>
+        <rect x="1010" y="465" width="220" height="155" rx="8" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="1120" y="488" fill="white" font-size="12" font-weight="600" text-anchor="middle">ReportGenerator</text>
+        <text x="1120" y="504" fill="#94a3b8" font-size="9" text-anchor="middle">report_generator.py · 468 行</text>
+        <text x="1120" y="525" fill="#94a3b8" font-size="9" text-anchor="middle">• Markdown 人工可读</text>
+        <text x="1120" y="541" fill="#94a3b8" font-size="9" text-anchor="middle">• 二进制位编码</text>
+        <text x="1120" y="557" fill="#94a3b8" font-size="9" text-anchor="middle">• 步骤耗时分解</text>
+        <text x="1120" y="573" fill="#94a3b8" font-size="9" text-anchor="middle">• JSON 结构化输出</text>
+        <text x="1120" y="592" fill="#34d399" font-size="9" font-weight="600" text-anchor="middle">{b0_b1_..._b9}</text>
+
+        <!-- ============================================
+             SECTION 4: Detection Modes (3 violet boxes)
+             ============================================ -->
+
+        <text x="50" y="660" fill="#a78bfa" font-size="11" font-weight="600">Detection Modes · 配置驱动 (event_categories.yaml)</text>
+
+        <!-- direct_vlm (parallel) -->
+        <rect x="50" y="670" width="380" height="180" rx="10" fill="#0f172a"/>
+        <rect x="50" y="670" width="380" height="180" rx="10" fill="rgba(76, 29, 149, 0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="240" y="695" fill="white" font-size="13" font-weight="700" text-anchor="middle">direct_vlm</text>
+        <text x="240" y="711" fill="#a78bfa" font-size="9" text-anchor="middle">并行检测 · ThreadPoolExecutor</text>
+        <line x1="80" y1="722" x2="400" y2="722" stroke="#a78bfa" stroke-width="0.5" stroke-dasharray="2,2"/>
+        <text x="240" y="740" fill="#94a3b8" font-size="10" text-anchor="middle">单次 VLM 调用 · 专用 Prompt</text>
+        <text x="70" y="765" fill="white" font-size="10">• E0 违法停车 (Illegal Parking)</text>
+        <text x="70" y="785" fill="white" font-size="10">• E5 严重拥堵 (Severe Congestion)</text>
+        <text x="70" y="805" fill="white" font-size="10">• E6 道路施工 (Road Construction)</text>
+        <text x="70" y="825" fill="white" font-size="10">• E8 抛洒物 (Debris on Road)</text>
+        <text x="240" y="845" fill="#a78bfa" font-size="8" font-weight="600" text-anchor="middle">~50s 并发 (vs ~200s 串行)</text>
+
+        <!-- logic_chain (sequential) -->
+        <rect x="450" y="670" width="380" height="180" rx="10" fill="#0f172a"/>
+        <rect x="450" y="670" width="380" height="180" rx="10" fill="rgba(76, 29, 149, 0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="640" y="695" fill="white" font-size="13" font-weight="700" text-anchor="middle">logic_chain</text>
+        <text x="640" y="711" fill="#a78bfa" font-size="9" text-anchor="middle">串行多步链 · YAML 定义</text>
+        <line x1="480" y1="722" x2="800" y2="722" stroke="#a78bfa" stroke-width="0.5" stroke-dasharray="2,2"/>
+        <text x="640" y="740" fill="#94a3b8" font-size="10" text-anchor="middle">vlm_call → compute → condition → aggregate</text>
+        <text x="470" y="765" fill="white" font-size="10">• E2 交通事故 (Traffic Accident)</text>
+        <text x="470" y="785" fill="white" font-size="10">• E7 逆行 / 倒车 (Reverse Driving)</text>
+        <text x="470" y="805" fill="white" font-size="10">• E9 实线变道 (Solid-line Change)</text>
+        <text x="640" y="833" fill="#a78bfa" font-size="8" font-weight="600" text-anchor="middle">结构化推理 · 帧对比 · 先验融合</text>
+
+        <!-- scene_tag (zero VLM) -->
+        <rect x="850" y="670" width="380" height="180" rx="10" fill="#0f172a"/>
+        <rect x="850" y="670" width="380" height="180" rx="10" fill="rgba(76, 29, 149, 0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="1040" y="695" fill="white" font-size="13" font-weight="700" text-anchor="middle">scene_tag</text>
+        <text x="1040" y="711" fill="#a78bfa" font-size="9" text-anchor="middle">零 VLM 调用 · 场景标签推断</text>
+        <line x1="880" y1="722" x2="1200" y2="722" stroke="#a78bfa" stroke-width="0.5" stroke-dasharray="2,2"/>
+        <text x="1040" y="740" fill="#94a3b8" font-size="10" text-anchor="middle">从 SceneInfo 直接推断 · 最快最稳</text>
+        <text x="870" y="765" fill="white" font-size="10">• E1 应急车道占用 (Emergency Lane)</text>
+        <text x="870" y="785" fill="white" font-size="10">• E3 行人出现 (Pedestrian)</text>
+        <text x="870" y="805" fill="white" font-size="10">• E4 摩托车出现 (Non-motor Vehicle)</text>
+        <text x="1040" y="833" fill="#a78bfa" font-size="8" font-weight="600" text-anchor="middle">scene_tag_key · scene_boolean_field</text>
+
+        <!-- ============================================
+             SECTION 5: Post-processing (orange bus-style)
+             ============================================ -->
+
+        <text x="50" y="893" fill="#fb923c" font-size="11" font-weight="600">Post-Processing · 推断链 (analysis_orchestrator)</text>
+
+        <rect x="50" y="903" width="380" height="65" rx="6" fill="#0f172a"/>
+        <rect x="50" y="903" width="380" height="65" rx="6" fill="rgba(251, 146, 60, 0.25)" stroke="#fb923c" stroke-width="1.5"/>
+        <text x="240" y="924" fill="white" font-size="11" font-weight="600" text-anchor="middle">Cross-Event Inference</text>
+        <text x="240" y="940" fill="#94a3b8" font-size="9" text-anchor="middle">cross_event_inference_rules</text>
+        <text x="240" y="956" fill="#fb923c" font-size="8" text-anchor="middle">parking_to_emergency · 关键词触发</text>
+
+        <rect x="450" y="903" width="380" height="65" rx="6" fill="#0f172a"/>
+        <rect x="450" y="903" width="380" height="65" rx="6" fill="rgba(251, 146, 60, 0.25)" stroke="#fb923c" stroke-width="1.5"/>
+        <text x="640" y="924" fill="white" font-size="11" font-weight="600" text-anchor="middle">Boolean Field Inference</text>
+        <text x="640" y="940" fill="#94a3b8" font-size="9" text-anchor="middle">scene_boolean_field</text>
+        <text x="640" y="956" fill="#fb923c" font-size="8" text-anchor="middle">pedestrian_present · non_motor_vehicle_present</text>
+
+        <rect x="850" y="903" width="380" height="65" rx="6" fill="#0f172a"/>
+        <rect x="850" y="903" width="380" height="65" rx="6" fill="rgba(251, 146, 60, 0.25)" stroke="#fb923c" stroke-width="1.5"/>
+        <text x="1040" y="924" fill="white" font-size="11" font-weight="600" text-anchor="middle">Tag-based Inference</text>
+        <text x="1040" y="940" fill="#94a3b8" font-size="9" text-anchor="middle">scene_description · 结构化标签</text>
+        <text x="1040" y="956" fill="#fb923c" font-size="8" text-anchor="middle">{类别：状态} · 应急车道 · 静止车辆</text>
+
+        <!-- ============================================
+             LEGEND (bottom-left, outside boundaries)
+             ============================================ -->
+        <text x="50" y="996" fill="white" font-size="10" font-weight="600">Legend</text>
+
+        <rect x="100" y="988" width="14" height="10" rx="2" fill="rgba(8, 51, 68, 0.5)" stroke="#22d3ee" stroke-width="1"/>
+        <text x="120" y="997" fill="#94a3b8" font-size="8">User Entry</text>
+
+        <rect x="180" y="988" width="14" height="10" rx="2" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1"/>
+        <text x="200" y="997" fill="#94a3b8" font-size="8">Core Service</text>
+
+        <rect x="270" y="988" width="14" height="10" rx="2" fill="rgba(76, 29, 149, 0.4)" stroke="#a78bfa" stroke-width="1"/>
+        <text x="290" y="997" fill="#94a3b8" font-size="8">Detection / Schema</text>
+
+        <rect x="395" y="988" width="14" height="10" rx="2" fill="rgba(120, 53, 15, 0.3)" stroke="#fbbf24" stroke-width="1"/>
+        <text x="415" y="997" fill="#94a3b8" font-size="8">Config / External Service</text>
+
+        <rect x="555" y="988" width="14" height="10" rx="2" fill="rgba(251, 146, 60, 0.25)" stroke="#fb923c" stroke-width="1"/>
+        <text x="575" y="997" fill="#94a3b8" font-size="8">Post-Processing</text>
+
+        <rect x="675" y="988" width="14" height="10" rx="2" fill="rgba(136, 19, 55, 0.4)" stroke="#fb7185" stroke-width="1"/>
+        <text x="695" y="997" fill="#94a3b8" font-size="8">Secret / Auth</text>
+
+        <rect x="775" y="988" width="14" height="10" rx="2" fill="rgba(30, 41, 59, 0.7)" stroke="#94a3b8" stroke-width="1"/>
+        <text x="795" y="997" fill="#94a3b8" font-size="8">External I/O</text>
+
+        <line x1="870" y1="993" x2="884" y2="993" stroke="#fbbf24" stroke-width="1" stroke-dasharray="3,3"/>
+        <text x="890" y="996" fill="#94a3b8" font-size="8">HTTPS Call</text>
+      </svg>
+    </div>
+
+    <!-- Info Cards -->
+    <div class="cards">
+      <div class="card">
+        <div class="card-header">
+          <div class="card-dot emerald"></div>
+          <h3>Pipeline · 5 阶段流水线</h3>
+        </div>
+        <ul>
+          <li>• preprocessing — 视频预处理 (~12s)</li>
+          <li>• scene_understanding — 场景理解 (~30s)</li>
+          <li>• event_detection — 事件检测 (~50s 并发)</li>
+          <li>• post_processing — 跨事件推断</li>
+          <li>• report_generation — 报告 + 二进制位</li>
+          <li>• 总耗时 ~190s · 逐步骤计时输出</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-dot violet"></div>
+          <h3>Detection · 三种检测模式</h3>
+        </div>
+        <ul>
+          <li>• direct_vlm — 单次 VLM 直接判断 (4 事件)</li>
+          <li>• logic_chain — YAML 多步推理链 (3 事件)</li>
+          <li>• scene_tag — 零 VLM · 标签推断 (3 事件)</li>
+          <li>• 二进制编码 10 位 {b0_b1_..._b9}</li>
+          <li>• is_active=false 关闭事件不改位</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-dot amber"></div>
+          <h3>Configuration · 配置驱动</h3>
+        </div>
+        <ul>
+          <li>• event_categories.yaml — 事件 + 模式</li>
+          <li>• logic_chains.yaml — 多步链定义</li>
+          <li>• prompt_templates.yaml — Jinja2 模板</li>
+          <li>• cross_event_inference_rules — 推断</li>
+          <li>• .env — Provider · API Key 配置</li>
+          <li>• 新增事件无需改代码</li>
+        </ul>
+      </div>
+    </div>
+
+    <p class="footer">
+      Traffic Analyzer · ~5500 LOC · Python 3 · Pydantic + ThreadPoolExecutor + Jinja2 · MIT
+    </p>
+  </div>
+
+  <script>
+    async function copyAsImage(btn) {
+      const orig = btn.textContent;
+      try {
+        const el = document.getElementById('report-container');
+        const r = el.getBoundingClientRect();
+        const pad = 32;
+        const canvas = await html2canvas(document.body, { backgroundColor: '#020617', scale: 2, useCORS: true, ignoreElements: (e) => e.classList && e.classList.contains('toolbar'), x: r.left + window.scrollX - pad, y: r.top + window.scrollY - pad, width: r.width + pad * 2, height: r.height + pad * 2 });
+        const blob = await new Promise(r => canvas.toBlob(r, 'image/png'));
+        await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+        btn.textContent = '✓ Copied!';
+      } catch (e) {
+        btn.textContent = '✗ Failed';
+      }
+      setTimeout(() => btn.textContent = orig, 2000);
+    }
+
+    async function downloadPNG(btn) {
+      const orig = btn.textContent;
+      btn.textContent = '⏳ ...';
+      try {
+        const el = document.getElementById('report-container');
+        const r = el.getBoundingClientRect();
+        const pad = 32;
+        const canvas = await html2canvas(document.body, { backgroundColor: '#020617', scale: 2, useCORS: true, ignoreElements: (e) => e.classList && e.classList.contains('toolbar'), x: r.left + window.scrollX - pad, y: r.top + window.scrollY - pad, width: r.width + pad * 2, height: r.height + pad * 2 });
+        const link = document.createElement('a');
+        link.download = 'traffic_analyzer_architecture.png';
+        link.href = canvas.toDataURL('image/png');
+        link.click();
+        btn.textContent = '✓ Done!';
+      } catch (e) {
+        btn.textContent = '✗ Failed';
+      }
+      setTimeout(() => btn.textContent = orig, 2000);
+    }
+
+    async function downloadPDF(btn) {
+      const orig = btn.textContent;
+      btn.textContent = '⏳ ...';
+      try {
+        const el = document.getElementById('report-container');
+        const r = el.getBoundingClientRect();
+        const pad = 32;
+        const canvas = await html2canvas(document.body, { backgroundColor: '#020617', scale: 2, useCORS: true, ignoreElements: (e) => e.classList && e.classList.contains('toolbar'), x: r.left + window.scrollX - pad, y: r.top + window.scrollY - pad, width: r.width + pad * 2, height: r.height + pad * 2 });
+        const imgData = canvas.toDataURL('image/png');
+        const { jsPDF } = window.jspdf;
+        const orientation = canvas.width > canvas.height ? 'landscape' : 'portrait';
+        const pdf = new jsPDF({ orientation, unit: 'px', format: [canvas.width, canvas.height], hotfixes: ['px_scaling'] });
+        pdf.addImage(imgData, 'PNG', 0, 0, canvas.width, canvas.height);
+        pdf.save('traffic_analyzer_architecture.pdf');
+        btn.textContent = '✓ Done!';
+      } catch (e) {
+        btn.textContent = '✗ Failed';
+      }
+      setTimeout(() => btn.textContent = orig, 2000);
+    }
+  </script>
+</body>
+</html>
