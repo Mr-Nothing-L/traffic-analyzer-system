@@ -182,7 +182,52 @@ python3 -m traffic_analyzer analyze \
 
 上传 VLM 前自动缩放到 720p，减少 ~55% 传输量，避免 API 超时。
 
-### 7. 逐步骤耗时日志
+### 7. VLM 调用结果缓存
+
+基于图像内容 + Prompt 文本的 SHA-256 哈希缓存，避免重复调用：
+- LRU 淘汰策略，默认最多缓存 128 条
+- 命中时直接返回缓存结果，零 token 消耗
+- 可通过环境变量 `LLM_ENABLE_CACHE=false` 关闭
+
+```python
+# 查看缓存统计
+stats = vlm_engine.get_usage_stats()
+print(f"缓存命中率: {stats['cache_hit_rate']:.1%}")
+print(f"缓存节省调用: {stats['cache_hits']}")
+```
+
+### 8. 可插拔 PipelineStep 架构
+
+将分析流程拆分为独立的 `PipelineStep` 子类，每个步骤自带重试和回退：
+- `SceneUnderstandingStep` — 场景理解（支持 1 次重试 + 空结果回退）
+- `EventDetectionStep` — 事件检测（单事件失败不影响其他事件）
+- `PostProcessStep` — 后处理（支持回退到原始结果）
+
+步骤级别的失败被隔离，不会导致整个 pipeline 崩溃。
+
+### 9. Prompt 版本管理与 A/B 测试
+
+`prompt_templates.yaml` 支持同一 `template_id` 的多个版本：
+
+```yaml
+prompt_templates:
+  - template_id: "direct_event_detection"
+    name: "Direct Detection v1"
+    version: "1.0"
+    user_prompt: "..."
+  - template_id: "direct_event_detection"
+    name: "Direct Detection v2"
+    version: "2.0"
+    user_prompt: "...改进后的prompt..."
+    traffic_percentage: 30   # 30% 流量使用此版本
+```
+
+版本选择优先级：
+1. 环境变量 `PROMPT_VERSION_direct_event_detection=2.0`
+2. A/B 流量分割（`traffic_percentage`）
+3. 默认最高版本号
+
+### 10. 逐步骤耗时日志
 
 分析结束时输出每步耗时分解：
 
@@ -205,13 +250,14 @@ traffic_analyzer/
 ├── config/
 │   ├── event_categories.yaml      # 事件定义、检测模式、推断配置
 │   ├── logic_chains.yaml          # 多步逻辑链定义
-│   └── prompt_templates.yaml      # VLM Prompt 模板库
+│   └── prompt_templates.yaml      # VLM Prompt 模板库（支持多版本）
 ├── core/
 │   ├── config_manager.py          # 配置加载、验证、热重载
 │   ├── logic_engine.py            # 逻辑链执行引擎
+│   ├── pipeline_steps.py          # 可插拔分析步骤（重试/回退）
 │   ├── report_generator.py        # 报告生成
 │   ├── video_preprocessor.py      # 视频帧提取（coarse + precision）
-│   └── vlm_engine.py              # VLM 调用封装（支持多提供商）
+│   └── vlm_engine.py              # VLM 调用封装（支持多提供商 + 缓存）
 ├── models/
 │   └── schemas.py                 # Pydantic 数据模型
 ├── orchestrator/
@@ -231,12 +277,44 @@ cp traffic_analyzer/config/.env.example traffic_analyzer/config/.env
 # 编辑 .env，设置 API Key 和模型
 ```
 
-### 2. 验证配置
+支持的环境变量：
+
+| 变量 | 说明 | 默认值 |
+|---|---|---|
+| `LLM_PROVIDER` | VLM 提供商 (`anthropic`/`google`/`aliyun`) | `anthropic` |
+| `LLM_API_KEY` | API Key | - |
+| `LLM_MODEL` | 模型名称 | `claude-sonnet-4-6` |
+| `LLM_MAX_TOKENS` | 最大输出 token | `4096` |
+| `LLM_TEMPERATURE` | 采样温度 | `0.2` |
+| `LLM_TIMEOUT` | API 超时（秒） | `120` |
+| `LLM_MAX_RETRIES` | 最大重试次数 | `3` |
+| `LLM_ENABLE_CACHE` | 启用 VLM 结果缓存 | `true` |
+| `LLM_CACHE_MAX_SIZE` | 缓存最大条目数 | `128` |
+| `SCENE_UNDERSTANDING_MIN_FRAMES` | 场景理解最少帧数 | `30` |
+| `VLM_MAX_FRAMES` | VLM 调用最大帧数 | `10` |
+| `PROMPT_VERSION_{TEMPLATE_ID}` | 强制使用指定 Prompt 版本 | - |
+
+### 2. 安装 pre-commit hook（推荐）
+
+```bash
+pip install pre-commit
+pre-commit install
+```
+
+配置变更时自动校验，防止提交无效配置。
+
+### 3. 验证配置
 
 ```bash
 python3 -m traffic_analyzer validate-config \
   --config-dir ./traffic_analyzer/config
 ```
+
+校验内容包括：
+- YAML 语法和结构
+- 事件类别 → 逻辑链/Prompt 模板的交叉引用
+- 跨事件推断规则的源/目标事件有效性
+- 分支步骤的 `true_next_step` / `false_next_step` 目标存在性
 
 ### 3. 运行分析
 
