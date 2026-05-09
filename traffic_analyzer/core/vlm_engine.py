@@ -10,11 +10,13 @@ and usage tracking.
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import io
 import json
 import logging
 import re
+import threading
 import time
 import uuid
 from collections import OrderedDict
@@ -527,6 +529,7 @@ class VLMInferenceEngine:
         self._cache: OrderedDict[str, LLMResponse] = OrderedDict()
         self._cache_hits: int = 0
         self._cache_misses: int = 0
+        self._cache_lock = threading.Lock()
 
     def _init_client(self) -> None:
         """Initialize the underlying SDK client based on provider."""
@@ -622,14 +625,15 @@ class VLMInferenceEngine:
         cache_key = ""
         if self._cache_enabled:
             cache_key = _compute_cache_key(system_prompt, user_prompt, images)
-            cached = self._cache.get(cache_key)
-            if cached is not None:
-                self._cache_hits += 1
-                # Move to end (most recently used)
-                self._cache.move_to_end(cache_key)
-                logger.debug("[cache] HIT for key %s... (%d cached)", cache_key[:16], len(self._cache))
-                return cached
-            self._cache_misses += 1
+            with self._cache_lock:
+                cached = self._cache.get(cache_key)
+                if cached is not None:
+                    self._cache_hits += 1
+                    # Move to end (most recently used)
+                    self._cache.move_to_end(cache_key)
+                    logger.debug("[cache] HIT for key %s... (%d cached)", cache_key[:16], len(self._cache))
+                    return copy.deepcopy(cached)
+                self._cache_misses += 1
 
         call_id = str(uuid.uuid4())
         start_time = time.perf_counter()
@@ -667,14 +671,15 @@ class VLMInferenceEngine:
         latency_ms = (time.perf_counter() - start_time) * 1000.0
 
         # Update stats
-        self._total_calls += 1
-        self._total_prompt_tokens += prompt_tokens
-        self._total_completion_tokens += completion_tokens
-        self._total_tokens += total_tokens
-        self._total_latency_ms += latency_ms
-        self._total_retries += retry_count
-        if not success:
-            self._failed_calls += 1
+        with self._cache_lock:
+            self._total_calls += 1
+            self._total_prompt_tokens += prompt_tokens
+            self._total_completion_tokens += completion_tokens
+            self._total_tokens += total_tokens
+            self._total_latency_ms += latency_ms
+            self._total_retries += retry_count
+            if not success:
+                self._failed_calls += 1
 
         response = LLMResponse(
             success=success,
@@ -690,11 +695,12 @@ class VLMInferenceEngine:
 
         # --- Cache store (only successful responses) ---
         if self._cache_enabled and cache_key and success:
-            self._cache[cache_key] = response
-            # Evict oldest if over capacity
-            while len(self._cache) > self._cache_max_size:
-                self._cache.popitem(last=False)
-            logger.debug("[cache] STORED key %s... (size=%d)", cache_key[:16], len(self._cache))
+            with self._cache_lock:
+                self._cache[cache_key] = copy.deepcopy(response)
+                # Evict oldest if over capacity
+                while len(self._cache) > self._cache_max_size:
+                    self._cache.popitem(last=False)
+                logger.debug("[cache] STORED key %s... (size=%d)", cache_key[:16], len(self._cache))
 
         return response
 

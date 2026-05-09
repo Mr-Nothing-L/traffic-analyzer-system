@@ -239,8 +239,14 @@ class ConfigManager:
             # Fallback to last variant if roll exceeds cumulative
             return variants_with_traffic[-1][1]
 
-        # 4. Default: latest version (highest version string)
-        latest_version = max(versions.keys())
+        # 4. Default: latest version (semantic version comparison)
+        def _version_key(v: str) -> tuple:
+            try:
+                return tuple(int(x) for x in v.split("."))
+            except ValueError:
+                return (0,)
+
+        latest_version = max(versions.keys(), key=_version_key)
         return versions[latest_version]
 
     def get_inference_rules(self) -> List[CrossEventInferenceRule]:
@@ -365,6 +371,24 @@ class ConfigManager:
                 errors.append(
                     f"Inference rule '{rule.rule_id}' has empty source_description_keywords."
                 )
+
+        # 9. Prompt template A/B traffic percentage validation
+        for template_id, versions in self._prompt_templates.items():
+            variants_with_traffic = [
+                (v, pt) for v, pt in versions.items() if pt.traffic_percentage is not None
+            ]
+            if len(variants_with_traffic) > 1:
+                total_pct = sum(pt.traffic_percentage or 0 for _, pt in variants_with_traffic)
+                if total_pct > 100:
+                    errors.append(
+                        f"Prompt template '{template_id}' A/B variants traffic_percentage "
+                        f"sum to {total_pct}% (exceeds 100%)."
+                    )
+                elif total_pct < 100:
+                    errors.append(
+                        f"Prompt template '{template_id}' A/B variants traffic_percentage "
+                        f"sum to {total_pct}% (less than 100%, some traffic will fallback to last variant)."
+                    )
 
         return errors
 

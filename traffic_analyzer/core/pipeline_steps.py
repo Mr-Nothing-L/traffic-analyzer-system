@@ -22,6 +22,7 @@ from traffic_analyzer.core.logic_engine import LogicEngine, _parse_scene_tags
 from traffic_analyzer.core.vlm_engine import VLMInferenceEngine
 from traffic_analyzer.models.schemas import (
     AnalysisContext,
+    CrossEventInferenceRule,
     DirectionAnalysis,
     DirectionConclusion,
     ConsistencyCheck,
@@ -447,8 +448,7 @@ class SceneUnderstandingStep(PipelineStep):
         return SceneInfo()
 
 
-class ResponseParseError(Exception):
-    """Raised when VLM response cannot be parsed."""
+from traffic_analyzer.core.vlm_engine import ResponseParseError
 
 
 class EventDetectionStep(PipelineStep):
@@ -540,7 +540,8 @@ class EventDetectionStep(PipelineStep):
                     detected=False,
                     summary="Configuration error: no prompt_template_id",
                 )
-                # Skip batch, append error result later
+                results.append(error_result)
+                context.event_results[category.event_id] = error_result
                 continue
             try:
                 template = self.config_manager.get_prompt_template(template_id)
@@ -822,11 +823,10 @@ class PostProcessStep(PipelineStep):
 
     def _apply_cross_event_inference(
         self,
-        rule: Any,
+        rule: CrossEventInferenceRule,
         results_by_id: Dict[int, EventResult],
         event_categories: Dict[int, EventCategory],
     ) -> None:
-        from traffic_analyzer.models.schemas import CrossEventInferenceRule
 
         source_result = results_by_id.get(rule.source_event_id)
         target_result = results_by_id.get(rule.target_event_id)
@@ -861,7 +861,7 @@ class PostProcessStep(PipelineStep):
                 target_result.confidence,
                 max(i.confidence for i in inferred_instances),
             )
-            target_result.instances = inferred_instances
+            target_result.instances.extend(inferred_instances)
             source_cat = event_categories.get(rule.source_event_id)
             source_name = source_cat.name_zh if source_cat else str(rule.source_event_id)
             target_result.summary = (
