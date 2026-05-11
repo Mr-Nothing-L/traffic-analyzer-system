@@ -17,16 +17,18 @@ event_categories:
     description: "Vehicles stopped on main travel lanes, blocking regular lanes or access points, or parked in no-stopping zones."
     detection_mode: "direct_vlm"
     definition: |
-      Illegal Parking has the following key visual indicators:
-      - Vehicles stopped on the main travel lanes (primary indicator — vehicles stopped on main travel lanes blocking regular traffic count as illegal parking)
-      - Vehicles blocking regular lanes or access points
-      - Vehicles stopped in areas with "No Stopping" or "No Parking" signage
-      - Vehicles parked on shoulders or emergency lanes WITHOUT clear emergency rescue signs, flashing lights, or personnel in safety vests. A vehicle with trunk/hood open on the shoulder for an extended time counts as illegal parking unless there is active emergency assistance visible.
-      - NOTE: On Chinese expressways, emergency lanes are for emergency use ONLY. A stopped vehicle on the emergency shoulder is illegal parking unless it is clearly receiving emergency assistance or has hazard lights on with personnel present.
+      违法停车判定规则（必须与标注文档 v4.4 完全一致）：
+      1. 只针对机动车——摩托车、电动自行车、自行车等非机动车静止时**不判定**为违法停车。
+      2. 车辆由行驶状态变为静止状态，且静止持续时间达到或超过 10 秒。
+      3. 事件发生的区域包括：行车道、应急车道、导流区和路肩。
+      4. 施工区域内，车辆停车施工需标注为违法停车。
+      5. 涉及交通事故时，只需标注交通事故，**不重复标注**违法停车。
+      6. 应急车道上的车辆静止时，需同时判定违法停车和应急车道占用（两个事件均触发）。
     visual_indicators:
-      - "Stationary vehicle on traffic lane"
-      - "Vehicle blocking lane for extended time"
-      - "No stopping sign violation"
+      - "机动车静止在行车道/应急车道/导流区/路肩"
+      - "车辆长时间阻挡车道"
+      - "禁停标志区域内停车"
+      - "车辆静止时间 ≥ 10 秒"
     confidence_threshold: 0.7
     is_active: true
     prompt_template_id: "direct_event_detection"  # direct_vlm 专用模板 ID

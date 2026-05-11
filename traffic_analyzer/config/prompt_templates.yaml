@@ -218,38 +218,38 @@ prompt_templates:
       2. Even if the prior knowledge describes a vehicle as "stopped", "静止", or "正在作业", you MUST still check whether it is reversing or backing up. A vehicle can be momentarily stopped while in the process of reversing.
       3. Do NOT conclude "no reversing" simply because the prior knowledge says a vehicle is stationary or performing maintenance. Stationary does NOT equal "not reversing" — the vehicle may have just finished reversing, or may be in the process of backing up.
       4. You MUST perform frame-by-frame comparison for EVERY vehicle mentioned in the prior knowledge as being on an emergency lane, shoulder, or stopped. Do not skip any candidate.
-      5. CRITICAL — Detection is PURELY PHYSICAL, not legal:
-         - Your job is to detect whether a vehicle's BODY MOVEMENT DIRECTION is opposite to the known normal flow. PERIOD.
-         - Do NOT make value judgments about whether the behavior is "legal" or "illegal", "violation" or "authorized". That is NOT your task.
-         - An engineering vehicle performing road maintenance IS STILL reversing or wrong-way driving if its body moves opposite to the normal flow. You MUST report it.
-         - If the vehicle is an engineering/maintenance vehicle, you MAY note this in the "description" field (e.g., "黄色工程养护车在应急车道倒车作业"), but you MUST still set detected=true.
-         - The purpose of this system is to RECORD ALL reversing/wrong-way movements, including authorized ones. Downstream systems will decide whether it is a violation.
+      5. 关键规则 — 物理检测优先，但须排除施工区域：
+         - 你的任务是检测车辆的车身移动方向是否与已知正常流向相反。
+         - **施工区域内车辆往返作业不算逆行/倒车** — 如果车辆位于有锥桶、施工标志牌和施工人员组成的施工区域内，即使其移动方向与正常流向相反，也**不判定**为逆行/倒车。
+         - 工程养护车在**非施工区域**的应急车道或路肩倒车/逆行时，必须报告。
+         - 不要对行为做"合法/非法"的价值判断，只记录物理运动。
+         - 下游系统会判断是否为违规。
 
-      INSTRUCTIONS:
-      1. Read the "Prior knowledge" carefully. Identify which specific vehicles (if any) are mentioned as being on emergency lanes, shoulders, or stopped/parked illegally.
-      2. For EACH vehicle identified in step 1, perform ALL of the following checks and write them in your reasoning:
-         a. **Select two frames to compare**: Pick the EARLIEST frame and the LATEST frame where the vehicle is visible. Write their frame numbers/timestamps.
-         b. **Pixel displacement estimation**: For the vehicle, estimate pixel displacement between the two frames:
-            - Choose a clearly identifiable feature point (e.g., front bumper center, a distinctive marking, or the vehicle's geometric center).
-            - Estimate its coordinates in the EARLIER frame and the LATER frame as **percentages of frame width/height** (0-100%).
-            - Calculate the displacement: Δx = x_later - x_earlier, Δy = y_later - y_earlier, both in **percentage points**.
-            - Also estimate the vehicle's approximate width and height as **percentages of frame dimensions**.
-            - Judge significance: if |Δx| or |Δy| exceeds 3% of frame dimension, OR if the displacement magnitude √(Δx² + Δy²) exceeds 2% of frame diagonal, classify as "significant". Otherwise "negligible".
-            - Record: pixel_displacement_estimate = {"delta_x_pct": float, "delta_y_pct": float, "magnitude_pct": float, "vehicle_width_pct": float, "vehicle_height_pct": float, "significance": "significant|negligible"}
-            - CRITICAL: Even "small" displacements (2-5% of frame) MUST be reported as "significant" if they are consistent in direction across frames. Do NOT dismiss displacement just because the absolute number seems small.
-         c. **Position change using fixed reference points**: Describe the vehicle's position in each frame relative to FIXED objects (road markings, guardrails, median barriers, traffic cones, signs) using camera-relative position descriptions (e.g. "画面左侧偏上", "画面中央偏右"). Do NOT use memory or visual estimation — cite specific reference points.
-         d. **Head orientation**: State which direction the vehicle's HEAD (front) is pointing (toward_top/toward_bottom/toward_left/toward_right).
-         e. **Body movement direction**: State which direction the vehicle's BODY actually moved (toward_top/toward_bottom/toward_left/toward_right) based on position change in (c).
-         f. **Compare with KNOWN normal flow**: The known normal flow direction for this road is listed in "Known normal flow directions" above. Is the body movement direction in (e) OPPOSITE to this known normal flow? If yes, this is WRONG-WAY or REVERSING.
-         g. **Head vs body consistency**: If head orientation (d) is opposite to body movement (e), the vehicle is REVERSING / BACKING UP. If head orientation matches body movement but both are opposite to known normal flow, it is WRONG-WAY driving.
-      3. Be especially careful with white/light-colored vehicles on the shoulder — they are the most common reversing candidates.
-      4. Report detected=false ONLY if:
-         - No vehicle is mentioned in the prior knowledge as being on an emergency lane, shoulder, or stopped; OR
-         - You have performed frame-by-frame comparison for EVERY candidate vehicle and confirmed through position change analysis that NONE of them are moving opposite to the known normal flow.
-         - NEVER report detected=false solely because the prior knowledge describes a vehicle as "stopped", "静止", or "正在作业". You must verify through actual frame comparison.
-         - NEVER report detected=false because a vehicle is an "engineering vehicle", "工程车", or "养护作业车". These vehicles CAN and DO reverse — you must detect them.
+      检测步骤：
+      1. 仔细阅读"先验知识"，识别哪些车辆位于应急车道、路肩或静止/违停。
+      2. 对每辆候选车辆执行以下7步检查，并将每步结果写入 reasoning：
+         a. **选帧对比**：选择该车最早可见帧和最晚可见帧，记录帧号和时间戳。
+         b. **像素位移估计**：
+            - 选取可识别的特征点（前保险杠中心、显著标记或几何中心）。
+            - 估算该点在早帧和晚帧中的坐标，以**画面宽高的百分比**表示（0-100%）。
+            - 计算位移：Δx = x_晚 - x_早，Δy = y_晚 - y_早，单位为**百分点**。同时估算车辆宽高占画面百分比。
+            - 显著性判断：|Δx|或|Δy|超过3%画面尺寸，或位移幅值√(Δx²+Δy²)超过2%画面对角线 → "significant"，否则"negligible"。
+            - 记录：pixel_displacement_estimate = {"delta_x_pct": float, "delta_y_pct": float, "magnitude_pct": float, "vehicle_width_pct": float, "vehicle_height_pct": float, "significance": "significant|negligible"}
+            - **即使位移数值很小（2-5%），只要在多帧中方向一致，也必须报告为"significant"。**
+         c. **固定参照物位置变化**：描述车辆相对于护栏、标线、隔离带、交通锥、标志牌等固定物体的位置变化（如"画面左侧偏上"→"画面中央偏右"）。
+         d. **车头朝向**：车头指向（toward_top/toward_bottom/toward_left/toward_right）。
+         e. **车身实际移动方向**：基于位置变化判断（toward_top/toward_bottom/toward_left/toward_right）。
+         f. **与已知正常流向对比**：车身移动方向是否与此道路已知正常流向相反？如是，则为逆行/倒车。
+         g. **车头与车身一致性**：车头朝向与车身移动方向相反 → REVERSING（倒车）；车头与车身同向但都与正常流向相反 → WRONG-WAY（逆行）。
+         h. **施工区域排除**：检查车辆是否在有锥桶/施工标志牌/施工人员的施工区域内。如是，**不判定为逆行/倒车**。
+      3. 特别注意路肩上的白色/浅色车辆 — 它们是最常见的倒车候选。
+      4. **仅在以下情况报告 detected=false**：
+         - 先验知识中未提及应急车道/路肩/静止车辆；或
+         - 对每辆候选车辆逐帧对比后，确认**没有任何车辆**的移动方向与正常流向相反；且
+         - 候选车辆**不在施工区域内**。
+         - **不要因为先验知识说车辆"静止"或"正在作业"就报告 false，必须通过实际帧对比验证。**
 
-      Return ONLY a JSON object in this exact format (no markdown, no extra text):
+      输出格式 — JSON（无markdown，无额外文本）：
       {
         "vehicles": [
           {
@@ -259,8 +259,8 @@ prompt_templates:
             "start_time_sec": 0.0,
             "end_time_sec": 22.0,
             "confidence": 0.9,
-            "description": "White sedan on emergency lane moving backward",
-            "reasoning": "通过对比第1帧(0.0s)和第8帧(7.0s)，黄色抢险车相对于左侧护栏和交通锥的位置明显向画面下方移动。第一帧中该车位于画面上方偏右位置，车头朝向下（画面近处）；到最后一帧中该车已移动到画面下方更近处。车辆车头朝向（朝下）与车身移动方向（朝下）一致，但都与正常车流方向（朝上）相反，属于逆行行为。",
+            "description": "白色轿车在应急车道倒车",
+            "reasoning": "通过对比第1帧(0.0s)和第8帧(7.0s)，黄色抢险车相对于左侧护栏和交通锥的位置明显向画面下方移动...",
             "pixel_displacement_estimate": {
               "delta_x_pct": -2.5,
               "delta_y_pct": 8.0,
@@ -273,28 +273,28 @@ prompt_templates:
         ],
         "detected": true,
         "confidence": 0.9,
-        "reasoning": "检测到1辆逆行车辆：右侧应急车道上的黄色抢险车。对比第1帧和第8帧，该车相对于交通锥和护栏的位置向画面下方移动，车头朝下但车身也向下移动，与正常车流方向（朝上）相反。"
+        "reasoning": "检测到1辆逆行车辆：右侧应急车道上的黄色抢险车..."
       }
 
-      If no reversing or wrong-way vehicles are found, return:
+      如果未检测到逆行/倒车车辆，返回：
       {
         "vehicles": [],
         "detected": false,
         "confidence": 0.0,
-        "reasoning": "详细说明检查了哪些车辆，对比了哪些帧，以及为什么判断没有倒车/逆行。例如：检查了右侧应急车道的工程车，对比第1帧和第8帧，该车相对于交通锥的位置向画面下方移动，与正常车流方向一致，因此不是倒车。"
+        "reasoning": "详细说明检查了哪些车辆、对比了哪些帧、为什么判断没有逆行/倒车。例如：检查了右侧应急车道的工程车，对比第1帧和第8帧，该车位于施工区域（有锥桶和施工人员），根据规则不计入逆行；同时该车相对于交通锥的位置向画面下方移动，与正常车流方向一致。"
       }
 
-      IMPORTANT:
-      - All text fields "description" and "reasoning" must be written in Chinese (中文).
-      - The "reasoning" field must contain SPECIFIC frame numbers/timestamps, reference points, and the full chain of reasoning (position change → head orientation → body movement → comparison with normal flow).
-      - Even when detected=false, you MUST write a detailed reasoning explaining your analysis process.
+      重要：
+      - "description"、"reasoning" 字段必须使用中文。
+      - "reasoning" 必须包含具体帧号/时间戳、参照物、完整推理链（位置变化→车头朝向→车身移动→与正常流向对比→施工区域排除）。
+      - 即使 detected=false，也必须写出详细的分析过程。
 
-      Be conservative. Only report if you are confident after comparing frames.
+      保持保守。仅在帧对比后有信心时才报告。
 
-      CRITICAL — Pixel displacement is your PRIMARY evidence for movement:
-      - A displacement classified as "significant" OVERRIDES any subjective impression of "no change".
-      - When pixel displacement says "significant" but your visual impression says "no change", TRUST the pixel displacement.
-      - Report the pixel numbers explicitly in your reasoning field.
+      关键 — 像素位移是主要证据：
+      - "significant" 分类覆盖任何主观"没动"的印象。
+      - 当像素位移说 significant 但视觉印象说没动时，**相信像素位移**。
+      - 在 reasoning 中明确写出像素数值。
 
   # ---------------------------------------------------------------------------
   # Vehicle Movement Tracking (precision frames)
