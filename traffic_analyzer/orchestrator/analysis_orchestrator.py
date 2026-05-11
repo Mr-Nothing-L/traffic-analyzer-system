@@ -1019,12 +1019,21 @@ class AnalysisOrchestrator:
                     # No VLM call; result is determined by post-processing from
                     # scene boolean fields (pedestrian_present, etc.) or
                     # structured tags in scene_description.
-                    result = EventResult(
-                        event_id=category.event_id,
-                        event_name=category.name_zh,
-                        detected=False,
-                        summary="等待场景标签后处理",
-                    )
+                    with tool_call(
+                        "event_detector.detect",
+                        event=category.event_id,
+                        mode="scene_tag",
+                    ) as _tc:
+                        result = EventResult(
+                            event_id=category.event_id,
+                            event_name=category.name_zh,
+                            detected=False,
+                            summary="等待场景标签后处理",
+                        )
+                        _tc.result(
+                            f"detected={result.detected}, "
+                            f"confidence={result.confidence:.2f}"
+                        )
                 else:
                     logger.warning("Unknown detection mode for %s: %s", category.name_zh, category.detection_mode)
                     result = EventResult(
