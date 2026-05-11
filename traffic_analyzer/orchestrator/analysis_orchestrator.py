@@ -278,18 +278,27 @@ class AnalysisOrchestrator:
         # Step 2: Global scene understanding (via PipelineStep if available)
         logger.info("[2/7] Scene understanding...")
         t0 = time.perf_counter()
-        if self._scene_understanding_step:
-            su_result = self._scene_understanding_step.execute(context)
-            if su_result.success and su_result.data:
-                scene_info = su_result.data
+        with tool_call(
+            "vlm_engine.scene_understanding",
+            provider=self.vlm_engine.provider,
+            frames=len(keyframes.coarse_frames),
+        ) as _tc:
+            if self._scene_understanding_step:
+                su_result = self._scene_understanding_step.execute(context)
+                if su_result.success and su_result.data:
+                    scene_info = su_result.data
+                else:
+                    logger.warning("Scene understanding step failed, using fallback")
+                    scene_info = SceneInfo()
             else:
-                logger.warning("Scene understanding step failed, using fallback")
-                scene_info = SceneInfo()
-        else:
-            scene_info = self._scene_understanding(
-                keyframes,
-                video_path=video_path,
-                duration_sec=video_meta.duration_sec,
+                scene_info = self._scene_understanding(
+                    keyframes,
+                    video_path=video_path,
+                    duration_sec=video_meta.duration_sec,
+                )
+            _tc.result(
+                f"roads={scene_info.road_count}, "
+                f"density={scene_info.traffic_density}"
             )
         step_times["scene_understanding"] = time.perf_counter() - t0
         context.scene_understanding = scene_info
