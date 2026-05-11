@@ -22,6 +22,7 @@ from traffic_analyzer.models.schemas import (
     LogicStep,
     StepType,
 )
+from traffic_analyzer.utils.tool_call_logger import tool_call, tool_call_nested
 
 logger = logging.getLogger(__name__)
 
@@ -324,6 +325,7 @@ class LogicEngine:
         step_index = 0
         steps = logic_chain.steps
         evidence_log: List[str] = []
+        steps_total = len(steps)
 
         logger.info(
             "Executing logic chain '%s' (%d steps)",
@@ -331,31 +333,51 @@ class LogicEngine:
             len(steps),
         )
 
-        while 0 <= step_index < len(steps):
-            step = steps[step_index]
-            try:
-                next_index = self._execute_step(
-                    step, steps, local_vars, context, evidence_log
-                )
-                step_index = next_index
-            except Exception as exc:
-                logger.error(
-                    "Logic chain '%s' failed at step '%s': %s",
-                    logic_chain.chain_id,
-                    step.step_id,
-                    exc,
-                )
-                # Return a failed result rather than crashing the whole pipeline
-                return EventResult(
-                    event_id=logic_chain.target_event_id,
-                    event_name=logic_chain.name,
-                    detected=False,
-                    summary=f"Logic chain execution failed at step {step.step_id}: {exc}",
-                    analysis_process=evidence_log,
-                )
+        with tool_call(
+            "reasoning_chain.execute",
+            event=logic_chain.chain_id,
+            steps=steps_total,
+        ) as _parent:
+            local_vars["__tool_call_parent__"] = _parent
+            local_vars["__tool_call_total__"] = steps_total
+            local_vars["__tool_call_idx__"] = 0
 
-        # Build final EventResult from local_vars
-        return self._build_event_result(logic_chain, local_vars, evidence_log)
+            while 0 <= step_index < len(steps):
+                step = steps[step_index]
+                local_vars["__tool_call_idx__"] = step_index + 1
+                try:
+                    next_index = self._execute_step(
+                        step, steps, local_vars, context, evidence_log
+                    )
+                    step_index = next_index
+                except Exception as exc:
+                    logger.error(
+                        "Logic chain '%s' failed at step '%s': %s",
+                        logic_chain.chain_id,
+                        step.step_id,
+                        exc,
+                    )
+                    # Return a failed result rather than crashing the whole pipeline
+                    failed_result = EventResult(
+                        event_id=logic_chain.target_event_id,
+                        event_name=logic_chain.name,
+                        detected=False,
+                        summary=f"Logic chain execution failed at step {step.step_id}: {exc}",
+                        analysis_process=evidence_log,
+                    )
+                    _parent.result(
+                        f"detected={failed_result.detected}, "
+                        f"confidence={failed_result.confidence:.2f}"
+                    )
+                    return failed_result
+
+            # Build final EventResult from local_vars
+            final_result = self._build_event_result(logic_chain, local_vars, evidence_log)
+            _parent.result(
+                f"detected={final_result.detected}, "
+                f"confidence={final_result.confidence:.2f}"
+            )
+            return final_result
 
     # ------------------------------------------------------------------
     # Step dispatch
@@ -383,6 +405,38 @@ class LogicEngine:
         """
         step_type = step.step_type
         logger.debug("Executing step '%s' (%s)", step.step_id, step_type)
+
+        parent = local_vars.get("__tool_call_parent__")
+        total = local_vars.get("__tool_call_total__", 0)
+        idx = local_vars.get("__tool_call_idx__", 0)
+        step_type_name = (
+            step_type.value if hasattr(step_type, "value") else str(step_type)
+        )
+        nested_name = f"{step_type_name}.{step.step_id}"
+
+        if parent is None:
+            return self._dispatch_step(
+                step, all_steps, local_vars, context, evidence_log
+            )
+
+        with tool_call_nested(parent, idx, total, nested_name) as _sub:
+            next_idx = self._dispatch_step(
+                step, all_steps, local_vars, context, evidence_log
+            )
+            summary = evidence_log[-1] if evidence_log else "ok"
+            _sub.result(summary)
+            return next_idx
+
+    def _dispatch_step(
+        self,
+        step: LogicStep,
+        all_steps: List[LogicStep],
+        local_vars: Dict[str, Any],
+        context: AnalysisContext,
+        evidence_log: List[str],
+    ) -> int:
+        """Internal: original dispatch logic from _execute_step."""
+        step_type = step.step_type
 
         if step_type == StepType.VLM_CALL:
             return self._execute_vlm_step(step, all_steps, local_vars, context, evidence_log)
