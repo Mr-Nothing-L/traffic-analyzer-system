@@ -341,14 +341,27 @@ class AnalysisOrchestrator:
         # Step 5: Post-process inferred events (via PipelineStep if available)
         logger.info("[5/7] Post-processing inferred events...")
         t0 = time.perf_counter()
-        if self._post_process_step:
-            pp_result = self._post_process_step.execute(context)
-            if pp_result.success and pp_result.data:
-                event_results = pp_result.data
+        before_detected = sum(1 for r in event_results if r.detected)
+        with tool_call(
+            "post_process.run_inference",
+            phases=3,
+            event_count=len(event_results),
+        ) as _tc:
+            if self._post_process_step:
+                pp_result = self._post_process_step.execute(context)
+                if pp_result.success and pp_result.data:
+                    event_results = pp_result.data
+                else:
+                    logger.error("Post-processing step failed: %s", pp_result.error)
             else:
-                logger.error("Post-processing step failed: %s", pp_result.error)
-        else:
-            event_results = self._post_process_events(event_results, context.scene_understanding)
+                event_results = self._post_process_events(
+                    event_results, context.scene_understanding
+                )
+            after_detected = sum(1 for r in event_results if r.detected)
+            inferred = after_detected - before_detected
+            _tc.result(
+                f"inferred_added={inferred}, total_detected={after_detected}"
+            )
         step_times["post_processing"] = time.perf_counter() - t0
         context.event_results = {r.event_id: r for r in event_results}
 
