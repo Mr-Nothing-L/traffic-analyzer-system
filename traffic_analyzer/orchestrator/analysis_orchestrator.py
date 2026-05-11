@@ -309,8 +309,13 @@ class AnalysisOrchestrator:
         logger.info("[3/7] Loading CV tracks...")
         t0 = time.perf_counter()
         if cv_tracks_path and self.external_adapter:
-            tracks = self.external_adapter.load_cv_tracks(cv_tracks_path)
-            context.cv_tracks = tracks
+            with tool_call(
+                "external_adapter.load_cv_tracks",
+                path=os.path.basename(cv_tracks_path),
+            ) as _tc:
+                tracks = self.external_adapter.load_cv_tracks(cv_tracks_path)
+                context.cv_tracks = tracks
+                _tc.result(f"tracks={len(tracks)}")
             logger.info("  Tracks loaded: %d", len(tracks))
         else:
             logger.info("  No CV tracks provided, skipping external validation")
