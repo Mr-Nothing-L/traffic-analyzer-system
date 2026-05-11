@@ -47,6 +47,7 @@ from traffic_analyzer.models.schemas import (
     SceneInfo,
     VideoMetadata,
 )
+from traffic_analyzer.utils.tool_call_logger import tool_call
 
 logger = logging.getLogger(__name__)
 
@@ -256,7 +257,15 @@ class AnalysisOrchestrator:
         # Step 1: Video preprocessing
         logger.info("[1/7] Preprocessing video...")
         t0 = time.perf_counter()
-        keyframes = self.video_preprocessor.process(video_path)
+        with tool_call(
+            "video_preprocessor.process",
+            video=os.path.basename(video_path),
+        ) as _tc:
+            keyframes = self.video_preprocessor.process(video_path)
+            _tc.result(
+                f"coarse={len(keyframes.coarse_frames)}, "
+                f"precision={len(keyframes.precision_frames)}"
+            )
         step_times["preprocessing"] = time.perf_counter() - t0
         context.keyframes = keyframes
         logger.info("  Coarse frames: %d", len(keyframes.coarse_frames))
