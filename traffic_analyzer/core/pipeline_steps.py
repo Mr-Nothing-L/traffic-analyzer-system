@@ -20,6 +20,7 @@ from traffic_analyzer.core.config_manager import ConfigManager
 from traffic_analyzer.core.external_adapter import ExternalAdapter
 from traffic_analyzer.core.logic_engine import LogicEngine, _parse_scene_tags
 from traffic_analyzer.core.vlm_engine import VLMInferenceEngine
+from traffic_analyzer.utils.tool_call_logger import tool_call
 from traffic_analyzer.models.schemas import (
     AnalysisContext,
     CrossEventInferenceRule,
@@ -491,12 +492,20 @@ class EventDetectionStep(PipelineStep):
                 if category.detection_mode == "logic_chain":
                     result = self._detect_logic_chain(category, context)
                 elif category.detection_mode == "scene_tag":
-                    result = EventResult(
-                        event_id=category.event_id,
-                        event_name=category.name_zh,
-                        detected=False,
-                        summary="等待场景标签后处理",
-                    )
+                    with tool_call(
+                        "event_detector.detect",
+                        event=category.event_id,
+                        mode="scene_tag",
+                    ) as _tc:
+                        result = EventResult(
+                            event_id=category.event_id,
+                            event_name=category.name_zh,
+                            detected=False,
+                            summary="等待场景标签后处理",
+                        )
+                        _tc.result(
+                            "stub created, real detection in post_process"
+                        )
                 else:
                     logger.warning("Unknown detection mode for %s: %s", category.name_zh, category.detection_mode)
                     result = EventResult(
@@ -624,6 +633,15 @@ class EventDetectionStep(PipelineStep):
             )
             logger.info("[parallel] done: %s, detected=%s", category.name_zh, detected)
             result = self._parse_direct_vlm_response(resp, category)
+            with tool_call(
+                "event_detector.detect",
+                event=category.event_id,
+                mode="direct_vlm",
+            ) as _tc:
+                _tc.result(
+                    f"detected={result.detected}, "
+                    f"confidence={result.confidence:.2f}"
+                )
             results.append(result)
             context.event_results[result.event_id] = result
             if resp.success and isinstance(resp.parsed_data, dict):
