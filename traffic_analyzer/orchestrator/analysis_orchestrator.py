@@ -377,13 +377,21 @@ class AnalysisOrchestrator:
         logger.info("[7/7] Generating report...")
         t0 = time.perf_counter()
         usage_stats = self.vlm_engine.get_usage_stats()
-        report = self.report_generator.generate(
-            event_results=event_results,
-            scene_info=scene_info,
-            video_meta=video_meta,
-            usage_stats=usage_stats,
-            analysis_duration_sec=round(0.0, 2),  # placeholder, updated below
-        )
+        with tool_call(
+            "report_generator.generate",
+            formats=["markdown", "json", "binary"],
+            events=len(event_results),
+        ) as _tc:
+            report = self.report_generator.generate(
+                event_results=event_results,
+                scene_info=scene_info,
+                video_meta=video_meta,
+                usage_stats=usage_stats,
+                analysis_duration_sec=round(0.0, 2),  # placeholder, updated below
+            )
+            _tc.result(
+                f"binary_code={report.binary_encoding.encoding_string}"
+            )
         step_times["report_generation"] = time.perf_counter() - t0
         context.final_report = report
 
