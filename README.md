@@ -359,3 +359,36 @@ print(report.binary_encoding.encoding_string)
 - **Aliyun** (通义千问)
 
 在 `.env` 中配置提供商和 API Key。
+
+
+## Tool-Call 风格日志输出
+
+运行时会输出类似现代 AI Agent (Cursor / Cline / Claude Code) 的工具调用轨迹日志,例如:
+
+```
+[INFO] 14:30:00 🔧 tool_call: video_preprocessor.process(video='clip.mp4')
+[INFO] 14:30:03   ↳ result: coarse=20, precision=41 | elapsed=3.0s
+[INFO] 14:30:03 🔧 tool_call: vlm_engine.scene_understanding(provider='claude', frames=20)
+[INFO] 14:30:31   ↳ result: roads=4, density='normal' | elapsed=28.0s
+[INFO] 14:30:31 🔧 tool_call: reasoning_chain.execute(event='E7', steps=4)
+[INFO] 14:30:31   🔧 step[1/4]: vlm_call.candidate_extraction(provider='claude')
+[INFO] 14:30:39     ↳ result: candidates=2 vehicles | elapsed=8.0s
+```
+
+通过环境变量 `TRAFFIC_ANALYZER_TOOL_LOG_LEVEL` 切换粒度:
+
+| 值 | 行为 |
+|---|---|
+| `off` | 不输出任何 tool_call 日志 |
+| `macro` | 仅顶层调用,不打嵌套 step[i/N] |
+| `mid` | 顶层 + 嵌套 (**默认**) |
+| `fine` | 预留,未来扩展 VLM 单次调用 / schema 校验 |
+
+示例:
+
+```bash
+TRAFFIC_ANALYZER_TOOL_LOG_LEVEL=off python -m traffic_analyzer ...    # 关闭
+TRAFFIC_ANALYZER_TOOL_LOG_LEVEL=macro python -m traffic_analyzer ...  # 仅顶层
+```
+
+此日志是**纯显示层**,不影响并行/性能/结果,关掉后输出二进制编码与开启时完全一致。
