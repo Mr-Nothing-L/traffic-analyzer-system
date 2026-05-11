@@ -989,6 +989,15 @@ class AnalysisOrchestrator:
                 )
                 logger.info("[parallel] done: %s, detected=%s", category.name_zh, detected)
                 result = self._parse_direct_vlm_response(resp, category)
+                with tool_call(
+                    "event_detector.detect",
+                    event=category.event_id,
+                    mode="direct_vlm",
+                ) as _tc:
+                    _tc.result(
+                        f"detected={result.detected}, "
+                        f"confidence={result.confidence:.2f}"
+                    )
                 results.append(result)
                 context.event_results[result.event_id] = result
                 if resp.success and isinstance(resp.parsed_data, dict):
@@ -1070,12 +1079,22 @@ class AnalysisOrchestrator:
         if context.scene_understanding:
             ctx_vars["scene_understanding"] = context.scene_understanding
 
-        response = self.vlm_engine.call(
-            template=template,
-            images=images,
-            context_vars=ctx_vars,
-        )
-        return self._parse_direct_vlm_response(response, category)
+        with tool_call(
+            "event_detector.detect",
+            event=category.event_id,
+            mode="direct_vlm",
+        ) as _tc:
+            response = self.vlm_engine.call(
+                template=template,
+                images=images,
+                context_vars=ctx_vars,
+            )
+            result = self._parse_direct_vlm_response(response, category)
+            _tc.result(
+                f"detected={result.detected}, "
+                f"confidence={result.confidence:.2f}"
+            )
+            return result
 
     def _detect_logic_chain(self, category: EventCategory, context: AnalysisContext) -> EventResult:
         """Detect an event using a configured logic chain."""
