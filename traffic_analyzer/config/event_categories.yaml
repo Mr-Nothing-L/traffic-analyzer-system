@@ -31,7 +31,7 @@ event_categories:
       - "车辆明显处于静止/停放状态（无需验证静止时长）"
     confidence_threshold: 0.7
     is_active: true
-    prompt_template_id: "direct_event_detection"  # direct_vlm 专用模板 ID
+    prompt_template_id: "illegal_parking_detection"
 
   - event_id: 1
     event_code: "B"
@@ -64,6 +64,7 @@ event_categories:
     description: "Vehicle collisions, breakdowns, debris, overturned vehicles, fire or smoke from vehicles."
     detection_mode: "logic_chain"
     logic_chain_id: "accident_scene_tag"
+    prompt_template_id: "traffic_accident_detection"
     definition: |
       Traffic Incidents on highways include but are not limited to:
       - Vehicle collisions (rear-end, side-impact, multi-vehicle)
@@ -98,6 +99,7 @@ event_categories:
       - "Stranded motorist outside vehicle"
     confidence_threshold: 0.7
     is_active: true
+    prompt_template_id: "pedestrian_detection"
     scene_boolean_field: "pedestrian_present"  # SceneInfo 布尔字段名
     scene_tag_key: "行人"  # scene_description 结构化标签键
 
@@ -121,6 +123,7 @@ event_categories:
       - "Smaller vehicle profile"
     confidence_threshold: 0.7
     is_active: true
+    prompt_template_id: "motorcycle_detection"
     scene_boolean_field: "non_motor_vehicle_present"  # SceneInfo 布尔字段名
     scene_tag_key: "非机动车"  # scene_description 结构化标签键
 
@@ -145,7 +148,7 @@ event_categories:
       - "Vehicle queue extending far"
     confidence_threshold: 0.7
     is_active: true
-    prompt_template_id: "direct_event_detection"  # direct_vlm 专用模板 ID
+    prompt_template_id: "heavy_congestion_detection"
 
   - event_id: 6
     event_code: "G"
@@ -171,7 +174,7 @@ event_categories:
       - "Lane closure signs"
     confidence_threshold: 0.7
     is_active: true
-    prompt_template_id: "road_construction_detection"  # direct_vlm 专用模板 ID
+    prompt_template_id: "road_construction_detection"
 
   - event_id: 7
     event_code: "H"
@@ -214,7 +217,7 @@ event_categories:
       - "Flying object near vehicles"
     confidence_threshold: 0.7
     is_active: true
-    prompt_template_id: "direct_event_detection"  # direct_vlm 专用模板 ID
+    prompt_template_id: "thrown_object_detection"
 
   - event_id: 9
     event_code: "K"
@@ -223,6 +226,7 @@ event_categories:
     description: "Vehicle crossing solid lane lines to change lanes."
     detection_mode: "logic_chain"
     logic_chain_id: "lane_change_solid"
+    prompt_template_id: "lane_change_solid_detection"
     definition: |
       Lane changes across solid lane lines can include:
       - Solid white or yellow lines indicate areas where lane changes are prohibited

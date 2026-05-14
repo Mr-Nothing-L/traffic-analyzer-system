@@ -29,6 +29,12 @@ output/
 *.avi
 *.mov
 
+# Large artifacts (zips, dataset dumps, intermediate caches)
+*.zip
+MP4TEST/
+HTML-graph/
+masked/
+
 # IDE
 .vscode/
 .idea/
@@ -45,10 +51,11 @@ Thumbs.db
 # Error logs
 error/
 
-# Root-level output files (only root dir, not subdirs)
+# Root-level output / scratch files (only root dir, not subdirs)
 /*.json
 /*.md
 /*.py
+/*.html
 
 # Keep these root-level files
 !README.md

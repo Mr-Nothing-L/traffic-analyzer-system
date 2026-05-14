@@ -15,12 +15,9 @@ from __future__ import annotations
 import io
 import logging
 import os
-import platform
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-
-from PIL import Image, ImageDraw, ImageFont
 
 from traffic_analyzer.core.config_manager import ConfigManager
 from traffic_analyzer.core.external_adapter import ExternalAdapter
@@ -47,97 +44,16 @@ from traffic_analyzer.models.schemas import (
     SceneInfo,
     VideoMetadata,
 )
+from traffic_analyzer.utils.event_detection import (
+    detect_logic_chain as _detect_logic_chain_impl,
+    parse_direct_vlm_response as _parse_direct_vlm_response_impl,
+    select_event_images as _select_event_images_impl,
+)
+from traffic_analyzer.utils.image_overlay import annotate_frame
 from traffic_analyzer.utils.tool_call_logger import tool_call
 
 logger = logging.getLogger(__name__)
 
-
-def _get_system_font_path() -> Optional[str]:
-    """Return a path to a usable bold system font, or None if none found."""
-    system = platform.system()
-    candidates: List[str] = []
-    if system == "Windows":
-        windir = os.environ.get("WINDIR", r"C:\Windows")
-        candidates = [
-            os.path.join(windir, r"Fonts\arialbd.ttf"),
-            os.path.join(windir, r"Fonts\arial.ttf"),
-            os.path.join(windir, r"Fonts\msyhbd.ttc"),
-            os.path.join(windir, r"Fonts\simhei.ttf"),
-        ]
-    elif system == "Darwin":
-        candidates = [
-            "/System/Library/Fonts/Helvetica.ttc",
-            "/System/Library/Fonts/Arial.ttf",
-            "/Library/Fonts/Arial Bold.ttf",
-        ]
-    else:
-        candidates = [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-            "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
-            "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
-        ]
-    for path in candidates:
-        if os.path.isfile(path):
-            return path
-    return None
-
-
-def _annotate_frame(image: Any, label: str) -> bytes:
-    """Overlay *label* on the top-left corner of *image* and return as JPEG bytes.
-
-    The label is drawn with a dark semi-transparent background so it remains
-    readable regardless of image content.
-    """
-    if isinstance(image, bytes):
-        img = Image.open(io.BytesIO(image))
-    elif isinstance(image, str):
-        img = Image.open(image)
-    elif isinstance(image, Image.Image):
-        img = image.copy()
-    else:
-        raise TypeError(f"Unsupported image type: {type(image)}")
-
-    img = img.convert("RGB")
-
-    # Resize to 1080p max for better VLM detail recognition
-    img.thumbnail((1920, 1080), Image.LANCZOS)
-
-    # Try to load a TrueType font; fall back to default bitmap font
-    font: ImageFont.FreeTypeFont | ImageFont.ImageFont
-    font_path = _get_system_font_path()
-    if font_path:
-        try:
-            font = ImageFont.truetype(font_path, 28)
-        except Exception:
-            font = ImageFont.load_default()
-    else:
-        font = ImageFont.load_default()
-
-    draw = ImageDraw.Draw(img)
-
-    # Measure text size
-    bbox = draw.textbbox((0, 0), label, font=font)
-    text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    pad = 10
-    rect = [4, 4, 8 + text_w + pad * 2, 8 + text_h + pad * 2]
-
-    # Draw semi-transparent black background for label
-    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    overlay_draw = ImageDraw.Draw(overlay)
-    overlay_draw.rectangle(rect, fill=(0, 0, 0, 180))
-    img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
-
-    # Draw text on top of the background
-    draw = ImageDraw.Draw(img)
-    draw.text((8 + pad, 8 + pad), label, fill=(255, 255, 255), font=font)
-
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=90)
-    return buf.getvalue()
-
-
-import re
 
 class OrchestratorError(Exception):
     """Base exception for orchestration errors."""
@@ -495,7 +411,7 @@ class AnalysisOrchestrator:
                 label = f"第{total}帧(最新) | Frame {total}/{total} | t={kf.timestamp_sec:.1f}s | [VIDEO END]"
             else:
                 label = f"第{idx + 1}帧 | Frame {idx + 1}/{total} | t={kf.timestamp_sec:.1f}s"
-            annotated = _annotate_frame(img, label)
+            annotated = annotate_frame(img, label)
             images.append(annotated)
 
         response = self.vlm_engine.call(
@@ -794,7 +710,7 @@ class AnalysisOrchestrator:
                 label += "  [OLDEST]"
             if idx == len(raw_frames) - 1:
                 label += "  [NEWEST]"
-            annotated = _annotate_frame(img, label)
+            annotated = annotate_frame(img, label)
             images.append(annotated)
 
         response = self.vlm_engine.call(
@@ -840,69 +756,14 @@ class AnalysisOrchestrator:
         return scene_info
 
     def _get_event_images(self, context: AnalysisContext) -> List[Any]:
-        """Select images from keyframes for VLM event detection.
-
-        Returns up to max_frames coarse frames, evenly distributed.
-        """
-        images: List[Any] = []
-        if not context.keyframes:
-            return images
-
-        max_frames = 6
-        if (
-            self.config_manager._system_config is not None
-            and self.config_manager._system_config.vlm_max_frames > 0
-        ):
-            max_frames = self.config_manager._system_config.vlm_max_frames
-
-        coarse = context.keyframes.coarse_frames
-        if len(coarse) > max_frames:
-            indices = [int(i * (len(coarse) - 1) / (max_frames - 1)) for i in range(max_frames)]
-            selected = [coarse[i] for i in indices]
-        else:
-            selected = coarse
-
-        images = [kf.image_data or kf.image_path for kf in selected]
-        images = [img for img in images if img is not None]
-        return images
+        """Select images from keyframes for VLM event detection."""
+        system_config = self.config_manager._system_config
+        vlm_max_frames = system_config.vlm_max_frames if system_config is not None else 0
+        return _select_event_images_impl(context, vlm_max_frames)
 
     def _parse_direct_vlm_response(self, response: Any, category: EventCategory) -> EventResult:
         """Parse a VLM response into an EventResult for direct_vlm detection."""
-        if response.success and isinstance(response.parsed_data, dict):
-            data = response.parsed_data
-            detected = bool(data.get("detected", False))
-            instances_data = data.get("instances", [])
-            instances = []
-            if isinstance(instances_data, list):
-                for inst in instances_data:
-                    if isinstance(inst, dict):
-                        instances.append(
-                            EventInstance(
-                                event_id=category.event_id,
-                                event_name=category.name_zh,
-                                start_time_sec=float(inst.get("start_time_sec", 0.0)),
-                                end_time_sec=float(inst.get("end_time_sec", 0.0)),
-                                confidence=float(inst.get("confidence", 0.0)),
-                                evidence_frames=inst.get("evidence_frames", []),
-                                description=str(inst.get("description", "")),
-                                reasoning=str(inst.get("reasoning", "")),
-                            )
-                        )
-            return EventResult(
-                event_id=category.event_id,
-                event_name=category.name_zh,
-                detected=detected,
-                instances=instances,
-                summary=str(data.get("summary", "")),
-                confidence=float(data.get("confidence", 0.0)),
-            )
-
-        return EventResult(
-            event_id=category.event_id,
-            event_name=category.name_zh,
-            detected=False,
-            summary=f"VLM call failed or returned invalid data: {response.raw_text[:200]}",
-        )
+        return _parse_direct_vlm_response_impl(response, category)
 
     def _detect_events(self, context: AnalysisContext) -> List[EventResult]:
         """Detect all configured events.
@@ -1128,24 +989,7 @@ class AnalysisOrchestrator:
 
     def _detect_logic_chain(self, category: EventCategory, context: AnalysisContext) -> EventResult:
         """Detect an event using a configured logic chain."""
-        if not category.logic_chain_id:
-            return EventResult(
-                event_id=category.event_id,
-                event_name=category.name_zh,
-                detected=False,
-                summary="Logic chain ID not configured",
-            )
-
-        logic_chain = self.config_manager.get_logic_chain(category.logic_chain_id)
-        if not logic_chain:
-            return EventResult(
-                event_id=category.event_id,
-                event_name=category.name_zh,
-                detected=False,
-                summary=f"Logic chain '{category.logic_chain_id}' not found",
-            )
-
-        return self.logic_engine.execute(logic_chain, context)
+        return _detect_logic_chain_impl(category, context, self.config_manager, self.logic_engine)
 
     def _post_process_events(
         self,
