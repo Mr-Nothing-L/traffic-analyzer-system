@@ -97,3 +97,32 @@ def detect_logic_chain(
         )
 
     return logic_engine.execute(logic_chain, context)
+
+def dispatch_sequential_event(
+    category: EventCategory,
+    context: AnalysisContext,
+    config_manager: ConfigManager,
+    logic_engine: LogicEngine,
+) -> EventResult:
+    """Dispatch a single sequential event (logic_chain or scene_tag) to the correct handler.
+
+    This is the unified entry point for non-direct_vlm events. Adding a new
+    detection mode only requires updating this function.
+    """
+    if category.detection_mode == "logic_chain":
+        return detect_logic_chain(category, context, config_manager, logic_engine)
+    elif category.detection_mode == "scene_tag":
+        return EventResult(
+            event_id=category.event_id,
+            event_name=category.name_zh,
+            detected=False,
+            summary="等待场景标签后处理",
+        )
+    else:
+        return EventResult(
+            event_id=category.event_id,
+            event_name=category.name_zh,
+            detected=False,
+            summary=f"Unknown detection mode: {category.detection_mode}",
+        )
+

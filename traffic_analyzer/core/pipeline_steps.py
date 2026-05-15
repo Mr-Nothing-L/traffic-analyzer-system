@@ -20,6 +20,7 @@ from traffic_analyzer.core.logic_engine import LogicEngine, _parse_scene_tags
 from traffic_analyzer.core.vlm_engine import VLMInferenceEngine
 from traffic_analyzer.utils.event_detection import (
     detect_logic_chain as _detect_logic_chain_impl,
+    dispatch_sequential_event as _dispatch_sequential_event_impl,
     parse_direct_vlm_response as _parse_direct_vlm_response_impl,
     select_event_images as _select_event_images_impl,
 )
@@ -403,31 +404,27 @@ class EventDetectionStep(PipelineStep):
         # Sequential logic_chain / scene_tag
         for category in sequential_categories:
             try:
-                if category.detection_mode == "logic_chain":
-                    result = self._detect_logic_chain(category, context)
-                elif category.detection_mode == "scene_tag":
-                    with tool_call(
-                        "event_detector.detect",
-                        event=category.event_id,
-                        mode="scene_tag",
-                    ) as _tc:
-                        result = EventResult(
-                            event_id=category.event_id,
-                            event_name=category.name_zh,
-                            detected=False,
-                            summary="等待场景标签后处理",
-                        )
-                        _tc.result(
-                            "stub created, real detection in post_process"
-                        )
-                else:
-                    logger.warning("Unknown detection mode for %s: %s", category.name_zh, category.detection_mode)
+                if category.detection_mode == "direct_vlm":
+                    # Should not reach here (direct_vlm is handled in parallel batch)
+                    logger.warning("direct_vlm event %s in sequential loop", category.name_zh)
                     result = EventResult(
                         event_id=category.event_id,
                         event_name=category.name_zh,
                         detected=False,
-                        summary=f"Unknown detection mode: {category.detection_mode}",
+                        summary="direct_vlm event should be in parallel batch",
                     )
+                else:
+                    with tool_call(
+                        "event_detector.detect",
+                        event=category.event_id,
+                        mode=category.detection_mode,
+                    ) as _tc:
+                        result = _dispatch_sequential_event_impl(
+                            category, context, self.config_manager, self.logic_engine
+                        )
+                        _tc.result(
+                            f"detected={result.detected}"
+                        )
                 results.append(result)
                 context.event_results[result.event_id] = result
             except Exception as exc:
@@ -469,12 +466,19 @@ class EventDetectionStep(PipelineStep):
             try:
                 template = self.config_manager.get_prompt_template(template_id)
             except KeyError:
-                template = PromptTemplate(
-                    template_id=template_id,
-                    name="Direct Event Detection",
-                    system_prompt="You are a traffic surveillance analyst.",
-                    user_prompt=f"Detect {category.name_zh}: {category.description}",
+                logger.error(
+                    "Event %s references unknown prompt_template_id '%s'",
+                    category.name_zh, template_id,
                 )
+                error_result = EventResult(
+                    event_id=category.event_id,
+                    event_name=category.name_zh,
+                    detected=False,
+                    summary=f"Configuration error: prompt template '{template_id}' not found",
+                )
+                results.append(error_result)
+                context.event_results[category.event_id] = error_result
+                continue
 
             ctx_vars: Dict[str, Any] = {
                 "event_name": category.name_zh,
@@ -719,6 +723,15 @@ class PostProcessStep(PipelineStep):
                 )
 
         if inferred_instances:
+            # Skip inference if target already has direct_vlm instances (avoid duplication)
+            if target_result.detected and target_result.instances:
+                logger.debug(
+                    "Skipping inference for %s: already detected by direct_vlm "
+                    "with %d instance(s)",
+                    target_name,
+                    len(target_result.instances),
+                )
+                return
             target_result.detected = True
             target_result.confidence = max(
                 target_result.confidence,

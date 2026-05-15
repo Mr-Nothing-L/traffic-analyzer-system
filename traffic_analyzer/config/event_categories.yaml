@@ -1,259 +1,196 @@
 # =============================================================================
-# Traffic Event Categories Configuration
+# 交通事件类别配置 (Traffic Event Categories)
 # =============================================================================
-# Based on wanji_grpo_train.py event definitions.
-# Users can add new categories by appending to this file.
-# Each category maps to a bit position in the binary encoding output.
+# 事件定义 / 检测模式 / Prompt 模板 / 逻辑链 / 推断规则 全部通过 YAML 配置。
+# 新增事件无需改代码，只需在本文件追加并运行 validate-config。
 #
-# Binary encoding format: {bit_0_bit_1_..._bit_n}
-# Example: {1_0_1_0_0_0_0_0_1_0} means event 0, 2, and 8 are detected.
+# 输出格式：二进制编码 {bit_0_bit_1_..._bit_9}
+# 示例：{1_0_1_0_0_0_0_0_1_0} 表示事件 0、2、8 被检出。
 # =============================================================================
 
+# -----------------------------------------------------------------------------
+# 三种检测模式速查
+# -----------------------------------------------------------------------------
+# direct_vlm  → 单次 VLM 调用。必需字段：prompt_template_id
+# logic_chain → YAML 多步链。必需字段：logic_chain_id
+# scene_tag   → 零 VLM，从 scene_understanding 推断。
+#               必需字段：scene_boolean_field 或 scene_tag_key
+#
+# 关闭事件请用 is_active: false，不要注释整段（保留二进制位数）。
+# -----------------------------------------------------------------------------
+
 event_categories:
+  # --- event_id: 0 | 违法停车 (A) ---
   - event_id: 0
     event_code: "A"
     name: "Illegal Parking"
     name_zh: "违法停车"
-    description: "Vehicles stopped on main travel lanes, blocking regular lanes or access points, or parked in no-stopping zones."
+    description: "机动车在禁止停车区域静止或停放"
     detection_mode: "direct_vlm"
-    definition: |
-      违法停车判定规则（必须与标注文档 v4.5 完全一致）：
-      1. 只针对机动车——摩托车、电动自行车、自行车等非机动车静止时**不判定**为违法停车。
-      2. 车辆由行驶状态变为静止状态。**注意：静止持续时间无需在视频中完整体现，视频中只要能看到车辆处于静止/停放状态即可判定。**
-      3. 事件发生的区域包括：行车道、应急车道、导流区和路肩。
-      4. 施工区域内，车辆停车施工需标注为违法停车。不要因为车辆位于施工区域就排除其违法停车的判定。
-      5. 涉及交通事故时，只需标注交通事故，**不重复标注**违法停车。
-      6. 应急车道上的车辆静止时，需同时判定违法停车和应急车道占用（两个事件均触发）。
-    visual_indicators:
-      - "机动车静止在行车道/应急车道/导流区/路肩"
-      - "车辆长时间阻挡车道"
-      - "禁停标志区域内停车"
-      - "车辆明显处于静止/停放状态（无需验证静止时长）"
+    prompt_template_id: "illegal_parking_detection"
     confidence_threshold: 0.7
     is_active: true
-    prompt_template_id: "illegal_parking_detection"
+    definition: |
+      违法停车判定规则（与标注文档 v4.5 一致）：
+      1. 只针对机动车——非机动车静止时不判定为违法停车。
+      2. 车辆由行驶状态变为静止状态。静止持续时间无需完整体现，视频中只要能看到车辆处于静止/停放状态即可判定。
+      3. 事件区域：行车道、应急车道、导流区、路肩。
+      4. 施工区域内车辆停车施工需标注为违法停车。
+      5. 涉及交通事故时，只标注交通事故，不重复标注违法停车。
+      6. 应急车道上的车辆静止时，需同时判定违法停车和应急车道占用（两个事件均触发）。
 
+  # --- event_id: 1 | 应急车道占用 (B) ---
   - event_id: 1
     event_code: "B"
     name: "Emergency Lane Occupancy"
     name_zh: "应急车道占用"
-    description: "Vehicles entering, stopping, occupying, or traveling within the emergency lane."
+    description: "车辆进入、停止、占用或在应急车道内行驶"
     detection_mode: "direct_vlm"
     prompt_template_id: "emergency_lane_occupancy_detection"
-    definition: |
-      Emergency lanes typically have the following characteristics:
-      - Located on the far left or far right edge of the roadway
-      - Often marked with different colored pavement (red, yellow, or distinct asphalt)
-      - May have different line markings (solid white lines, hatched markings, or thicker boundary lines)
-      - Usually narrower than standard traffic lanes
-      - May contain signage indicating "Emergency Lane", "No Stopping Except Emergency"
-      - Often have a different surface texture or material
-      - Typically free of regular traffic flow
-      - May be separated by rumble strips or raised pavement markers
-    visual_indicators:
-      - "Vehicle in emergency lane area"
-      - "Different pavement color/texture"
-      - "Emergency lane signage"
     confidence_threshold: 0.7
     is_active: true
+    definition: |
+      应急车道（路肩）特征：
+      - 位于道路最外侧边缘，通常由白色实线与主车道分隔
+      - 路面颜色/纹理可能与主车道不同
+      - 宽度通常比标准车道窄
+      - 可能有"应急车道"标志或隆声带
+      - 匝道出入口处的白色/黄色网状实线导流区也属于应急车道
 
+  # --- event_id: 2 | 交通事故 (C) ---
   - event_id: 2
     event_code: "C"
     name: "Traffic Accident"
     name_zh: "交通事故"
-    description: "Vehicle collisions, breakdowns, debris, overturned vehicles, fire or smoke from vehicles."
+    description: "车辆碰撞、翻车、起火、散落物等突发事件"
     detection_mode: "logic_chain"
     logic_chain_id: "accident_scene_tag"
     prompt_template_id: "traffic_accident_detection"
-    definition: |
-      Traffic Incidents on highways include but are not limited to:
-      - Vehicle collisions (rear-end, side-impact, multi-vehicle)
-      - Vehicle breakdowns or stalled vehicles
-      - Debris or obstacles on the roadway
-      - Overturned or rolled vehicles
-      - Fire or smoke from vehicles
-      - Animals on the roadway
-    visual_indicators:
-      - "Damaged vehicles"
-      - "Smoke or fire"
-      - "Debris on road"
-      - "Overturned vehicle"
     confidence_threshold: 0.7
     is_active: true
+    definition: |
+      交通事故包括：车辆碰撞、翻车、起火/冒烟、路面散落物、动物进入车道等。
+      注意：单独车辆机械故障（无碰撞、无人员伤亡、无财产损失）不算事故。
 
+  # --- event_id: 3 | 高速公路行人出现 (D) ---
   - event_id: 3
     event_code: "D"
     name: "Person Presence in Highway"
     name_zh: "高速公路行人出现"
-    description: "Pedestrians, stranded motorists, or individuals crossing restricted highway areas."
+    description: "行人或滞留驾乘人员出现在高速公路限制区域"
     detection_mode: "scene_tag"
-    definition: |
-      Person presence in highway indicators include:
-      - Highways are restricted areas where pedestrian access poses serious safety risks
-      - Highway intrusions typically involve pedestrians, stranded motorists who have exited vehicles
-      - Common false positives include roadside signs, bridge shadows, overpasses, vegetation
-      - Detection confidence should account for partial occlusions, motion blur, and perspective distortion
-    visual_indicators:
-      - "Human figure on highway lanes"
-      - "Person on shoulder or median"
-      - "Stranded motorist outside vehicle"
+    prompt_template_id: "pedestrian_detection"
     confidence_threshold: 0.7
     is_active: true
-    prompt_template_id: "pedestrian_detection"
-    scene_boolean_field: "pedestrian_present"  # SceneInfo 布尔字段名
-    scene_tag_key: "行人"  # scene_description 结构化标签键
+    scene_boolean_field: "pedestrian_present"
+    scene_tag_key: "行人"
+    definition: |
+      行人出现：高速公路车道、路肩、中央隔离带、匝道等区域行走的普通人或滞留驾乘人员。
+      排除：施工区域内的高可视性服装人员、交警、救援人员、路侧标志牌/阴影/植被误报。
 
+  # --- event_id: 4 | 摩托车出现 (E) ---
   - event_id: 4
     event_code: "E"
     name: "Motorcycle Presence"
     name_zh: "摩托车出现"
-    description: "Motorcycles present on the highway."
+    description: "摩托车出现在高速公路上"
     detection_mode: "scene_tag"
-    definition: |
-      Motorcycle Presence has the following key visual indicators:
-      - Two-wheeled configuration with visible wheels aligned front-to-back
-      - Smaller profile compared to cars and trucks
-      - Single rider or passenger positioned in tandem
-      - Visible handlebars and exposed engine components
-      - Often positioned between lanes or in standard traffic lanes
-      - Riders typically wear helmets and protective gear
-    visual_indicators:
-      - "Two-wheeled vehicle"
-      - "Rider with helmet"
-      - "Smaller vehicle profile"
+    prompt_template_id: "motorcycle_detection"
     confidence_threshold: 0.7
     is_active: true
-    prompt_template_id: "motorcycle_detection"
-    scene_boolean_field: "non_motor_vehicle_present"  # SceneInfo 布尔字段名
-    scene_tag_key: "非机动车"  # scene_description 结构化标签键
+    scene_boolean_field: "non_motor_vehicle_present"
+    scene_tag_key: "非机动车"
+    definition: |
+      摩托车出现：两轮/三轮摩托车在高速公路上行驶或静止。
+      注意与电动自行车/自行车区分：摩托车有燃油发动机、车把、排气管，骑手通常戴头盔。
 
+  # --- event_id: 5 | 严重拥堵 (F) ---
   - event_id: 5
     event_code: "F"
     name: "Heavy Congestion"
     name_zh: "严重拥堵"
-    description: "Severe traffic congestion with reduced speeds and high vehicle density."
+    description: "车辆通行能力显著下降、车速明显降低、排队较长的交通状态"
     detection_mode: "direct_vlm"
-    definition: |
-      Traffic Congestion on highways is typically characterized by:
-      - Reduced vehicle speeds compared to typical highway flow
-      - High vehicle density with minimal spacing between vehicles
-      - Stop-and-go traffic patterns
-      - Lane occupancy rates exceeding normal capacity
-      - Reduced average vehicle velocity across multiple lanes
-      - Extended queuing or backup of vehicles
-    visual_indicators:
-      - "High vehicle density"
-      - "Minimal spacing between vehicles"
-      - "Stop-and-go pattern"
-      - "Vehicle queue extending far"
+    prompt_template_id: "heavy_congestion_detection"
     confidence_threshold: 0.7
     is_active: true
-    prompt_template_id: "heavy_congestion_detection"
+    definition: |
+      严重拥堵特征：车速显著降低（接近停滞）、车辆密度极高、车间距极小、走走停停模式、
+      多车道同时排队且队列延伸较远。与正常车流密集不同，需车速下降+排队延伸两者兼具。
 
+  # --- event_id: 6 | 道路施工 (G) ---
   - event_id: 6
     event_code: "G"
     name: "Road Construction"
     name_zh: "道路施工"
-    description: "Road construction zones with equipment, workers, and temporary signage."
+    description: "道路施工或维护作业区域"
     detection_mode: "direct_vlm"
-    definition: |
-      Road construction indicators include:
-      - Orange traffic cones, barrels, or barriers creating work zones
-      - Construction vehicles (asphalt pavers, rollers, cement mixers, dump trucks, excavators)
-      - Workers in high-visibility clothing (orange, yellow, or lime green vests)
-      - Lane closures or narrowed lanes with temporary markings
-      - Construction equipment actively operating or parked in work zones
-      - Temporary signage indicating construction ahead or lane shifts
-      - Fresh asphalt (darker surface), concrete work, or exposed roadbed
-      - Reduced speed limit signs specific to work zones
-      - Flashing warning lights on construction vehicles or arrow boards
-    visual_indicators:
-      - "Orange cones/barrels"
-      - "Construction vehicles"
-      - "Workers in safety vests"
-      - "Lane closure signs"
+    prompt_template_id: "road_construction_detection"
     confidence_threshold: 0.7
     is_active: true
-    prompt_template_id: "road_construction_detection"
+    definition: |
+      道路施工判定（v4.5）：
+      - 有交通锥/隔离栏布置形成的作业区/车道封闭，且至少有一项：施工人员、工程车辆、车道封闭引导
+      - 或路面作业的施工设备
+      排除：单一清扫车日常清洁；应急救援车辆；施工车辆缓行/停车、人员仅捡垃圾等非施工操作。
 
+  # --- event_id: 7 | 车辆逆行/倒车 (H) ---
   - event_id: 7
     event_code: "H"
     name: "Vehicle Reversing"
     name_zh: "车辆逆行/倒车"
-    description: "Vehicle moving opposite to the flow of traffic, including reversing or backing up."
+    description: "车辆移动方向与车道正常流向相反"
     detection_mode: "logic_chain"
     logic_chain_id: "vehicle_reversing"
-    definition: |
-      Vehicle reversing has the following key visual indicators:
-      - White reverse lights/backup lights illuminated on the vehicle
-      - Vehicle moving opposite to the flow of traffic
-      - Decreasing distance between the vehicle and fixed reference points behind it
-      - Vehicle moving backward relative to lane markings or road features
-
-      IMPORTANT: Reversing/Backing up is classified as a form of wrong-way driving (逆行).
-      The core determination is whether the vehicle's MOVEMENT DIRECTION is opposite to
-      the normal flow direction of its lane.
-    visual_indicators:
-      - "Vehicle moving against traffic flow"
-      - "Backup lights illuminated"
-      - "Decreasing distance to rear reference points"
     confidence_threshold: 0.8
     is_active: true
+    definition: |
+      车辆逆行/倒车：车辆移动方向与所在车道正常流向相反。
+      判定依据：白倒车灯亮、车辆相对于固定参照物反向移动、车头朝向与正常流向相反。
+      施工区域内车辆往返作业不算逆行/倒车。
 
+  # --- event_id: 8 | 抛洒物 (J) ---
   - event_id: 8
     event_code: "J"
     name: "Thrown Objects"
     name_zh: "抛洒物"
-    description: "Objects on the highway roadway, either stationary or moving."
+    description: "车道内可能影响通行的遗落异物"
     detection_mode: "direct_vlm"
-    definition: |
-      Thrown objects on highways can include:
-      - Objects may be stationary on the road surface or moving through the air
-      - Plastic bags, bottles, papers, clothing items, small debris, etc.
-      - Objects may blend with road surface colors or be highly contrasting
-    visual_indicators:
-      - "Foreign object on roadway"
-      - "Debris in traffic lane"
-      - "Flying object near vehicles"
+    prompt_template_id: "thrown_object_detection"
     confidence_threshold: 0.7
     is_active: true
-    prompt_template_id: "thrown_object_detection"
+    definition: |
+      抛洒物：遗落至车道内可能影响车辆通行的异物（塑料袋、瓶子、木板、泥土等）。
+      排除：施工区域内正常放置的物品；事故碎片（由事故统一标注）；路面正常设施；车辆正常装载物。
+      三角警示牌：起到提醒作用时不标；无提醒作用（倒地、不在事故车后正常放置）按抛洒物处理。
 
+  # --- event_id: 9 | 实线变道 (K) [关闭中] ---
   - event_id: 9
     event_code: "K"
     name: "Lane Change over Solid Line"
     name_zh: "实线变道"
-    description: "Vehicle crossing solid lane lines to change lanes."
+    description: "车辆跨越实线标线变道"
     detection_mode: "logic_chain"
     logic_chain_id: "lane_change_solid"
     prompt_template_id: "lane_change_solid_detection"
-    definition: |
-      Lane changes across solid lane lines can include:
-      - Solid white or yellow lines indicate areas where lane changes are prohibited
-      - Dashed/broken lane lines indicate areas where lane changes are permitted when safe
-      - A lane change violation occurs when a vehicle's path crosses over a solid line
-      - Vehicle positioning should be tracked relative to lane markings throughout
-      - Brief tire contact during normal driving is different from active lane change across the line
-    visual_indicators:
-      - "Vehicle crossing solid white/yellow line"
-      - "Lane change in no-change zone"
-      - "Solid line violation"
     confidence_threshold: 0.7
     is_active: false
+    definition: |
+      实线变道：车辆主动跨越白色/黄色实线从一个车道驶入另一个车道。
+      排除：车轮短暂压线但车身仍在原车道；跨越虚线变道；匝道正常汇入。
 
 # =============================================================================
-# 跨事件推断规则（Cross-Event Inference Rules）
+# 跨事件推断规则
 # =============================================================================
-# 当一个事件被检测到时，可以据此推断另一个相关事件。
-# 例如：违法停车在路肩 → 推断为应急车道占用。
-# 用户可在此处自定义推断规则，无需修改代码。
+# 规则：源事件被检测到 + description 命中关键词 → 推断目标事件。
+# 推断结果仅在目标事件未被 direct_vlm 检出时才生效（避免重复）。
 #
 # 字段说明：
-#   target_event_id:    要推断的目标事件 ID
+#   target_event_id:    目标事件 ID
 #   source_event_id:    源事件 ID（必须先被检测到）
-#   source_description_keywords: 在源事件实例的 description 中匹配任一关键词即触发
-#   confidence_multiplier: 推断结果的置信度 = 源事件置信度 × 此系数
-#   description_prefix: 推断实例的描述前缀
+#   source_description_keywords: description 中匹配任一关键词即触发
+#   confidence_multiplier: 推断置信度 = 源置信度 × 此系数
+#   description_prefix: 推断实例描述前缀
 #   reasoning:          推断理由（报告中显示）
 # =============================================================================
 
@@ -268,58 +205,13 @@ cross_event_inference_rules:
     reasoning: "违法停车事件检测到车辆在应急车道/路肩区域停放，符合应急车道占用定义。"
 
 # =============================================================================
-# 自定义事件示例（Custom Event Example）
+# 自定义事件示例（取消注释即可启用）
 # =============================================================================
-# 以下是一个未启用的自定义事件示例，展示如何新增事件。
-# 只需取消注释并修改字段即可启用。
-#
-# 示例：检测 "动物穿越高速公路" 事件
-# =============================================================================
-
 # event_categories:
-#   # --- 示例1: direct_vlm 模式 ---
-#   # 适用于一眼就能判断的事件，直接调用 VLM 检测
 #   - event_id: 10
 #     event_code: "Z"
-#     name: "Animal Crossing"
 #     name_zh: "动物穿越"
-#     description: "Animals crossing the highway roadway."
 #     detection_mode: "direct_vlm"
-#     prompt_template_id: "direct_event_detection"  # 引用 prompt_templates.yaml 中的模板
-#     definition: |
-#       Animal crossing indicators:
-#       - Animals (deer, dogs, etc.) on the roadway
-#       - Animals moving across traffic lanes
-#     visual_indicators:
-#       - "Animal on road"
-#       - "Animal crossing lanes"
+#     prompt_template_id: "direct_event_detection"
 #     confidence_threshold: 0.7
 #     is_active: true
-#
-#   # --- 示例2: logic_chain 模式 ---
-#   # 适用于需要多步推理的复杂事件
-#   # 需要在 logic_chains.yaml 中定义对应的逻辑链
-#   - event_id: 11
-#     event_code: "Y"
-#     name: "Complex Event"
-#     name_zh: "复杂事件"
-#     description: "An event requiring multi-step reasoning."
-#     detection_mode: "logic_chain"
-#     logic_chain_id: "my_custom_chain"  # 引用 logic_chains.yaml 中的链
-#     definition: "..."
-#     confidence_threshold: 0.7
-#     is_active: true
-#
-#   # --- 示例3: scene_tag 模式 ---
-#   # 适用于可从场景描述标签直接推断的事件，零 VLM 调用
-#   - event_id: 12
-#     event_code: "X"
-#     name: "Fire or Smoke"
-#     name_zh: "车辆起火/冒烟"
-#     description: "Fire or smoke from vehicles on the highway."
-#     detection_mode: "scene_tag"
-#     scene_tag_key: "起火冒烟"  # scene_description 中 {起火冒烟：有/无} 标签
-#     definition: "..."
-#     confidence_threshold: 0.7
-#     is_active: true
-
