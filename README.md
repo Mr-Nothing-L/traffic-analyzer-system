@@ -352,6 +352,69 @@ print(report.binary_encoding.encoding_string)
 
 ---
 
+### 5. 批量推理与评估
+
+项目提供两个批量处理脚本，位于 `scripts/` 目录：
+
+#### 批量推理 (`batch_infer.py`)
+
+对目录下的所有视频批量执行分析：
+
+```bash
+python3 scripts/batch_infer.py   --video-dir ./videos   --output-dir ./reports   --format markdown   --min-frames 30
+```
+
+参数说明：
+
+| 参数 | 说明 | 默认值 |
+|---|---|---|
+| `--video-dir` / `-v` | 输入视频目录（必需） | - |
+| `--output-dir` / `-o` | 输出报告目录（必需） | - |
+| `--config-dir` / `-c` | 配置目录 | `./traffic_analyzer/config` |
+| `--format` / `-f` | 输出格式 (`markdown` / `json`) | `markdown` |
+| `--min-frames` / `-m` | VLM 最大输入帧数 | `30` |
+| `--cv-tracks-dir` | CV 轨迹 JSON 目录（可选） | - |
+| `--force` | 强制覆盖已有报告 | - |
+
+脚本会自动匹配视频与已存在的报告，跳过已处理的视频（除非加 `--force`）。
+
+#### 批量评估 (`batch_evaluate.py`)
+
+将推理报告与真实标签对比，输出每类事件的精确率、召回率、F1 分数：
+
+```bash
+# 基本用法（从视频文件名提取真实标签）
+python3 scripts/batch_evaluate.py   --video-dir ./videos   --report-dir ./reports   --output evaluation_result.json
+
+# 使用独立标注文件
+python3 scripts/batch_evaluate.py   --video-dir ./videos   --report-dir ./reports   --gt-mode annotation_file   --annotation-file ./annotations.json   --output evaluation_result.json
+
+# 单类别模式（只评估 config 中 is_active=true 的事件）
+python3 scripts/batch_evaluate.py   --video-dir ./videos   --report-dir ./reports   --single-class   --config-dir ./traffic_analyzer/config   --output evaluation_result.json
+```
+
+参数说明：
+
+| 参数 | 说明 | 默认值 |
+|---|---|---|
+| `--video-dir` / `-v` | 视频目录（用于提取真实标签） | - |
+| `--report-dir` / `-r` | 报告目录（`.md` 或 `.json`） | - |
+| `--output` | 评估结果 JSON 输出路径 | `evaluation_result.json` |
+| `--gt-mode` | 真实标签来源 (`filename` / `annotation_file`) | `filename` |
+| `--annotation-file` | 标注文件路径（JSON 或 CSV） | - |
+| `--single-class` | 只评估 `is_active=true` 的事件 | - |
+| `--config-dir` / `-c` | 配置目录（配合 `--single-class`） | `./traffic_analyzer/config` |
+
+**单类别模式 (`--single-class`)**：当某些事件被设为 `is_active: false` 时，这些事件会被完全排除在评估指标之外，避免关闭的事件拉低整体分数。
+
+评估结果包含：
+- 每类事件的 TP / FP / FN / 精确率 / 召回率 / F1
+- 宏平均（Macro Average）指标
+- 每个视频的预测 vs 真实标签对照表
+- Markdown 表格格式直接输出到终端
+
+---
+
 ## 支持的 VLM 提供商
 
 - **Anthropic** (Claude) — 默认推荐
