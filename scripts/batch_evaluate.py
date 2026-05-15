@@ -18,11 +18,12 @@ Usage:
         --annotation-file /path/to/annotations.json \
         --output evaluation_result.json
 
-    # Single-class mode (only evaluate events present in report filename)
+    # Single-class mode (only evaluate is_active=true events from config)
     python scripts/batch_evaluate.py \
         --video-dir /path/to/videos \
         --report-dir /path/to/reports \
         --single-class \
+        --config-dir ./traffic_analyzer/config \
         --output evaluation_result.json
 """
 
@@ -35,6 +36,8 @@ import logging
 import os
 import re
 import sys
+
+import yaml
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
@@ -239,14 +242,30 @@ def extract_pred(report_path: Path) -> Set[int]:
 
 
 # ---------------------------------------------------------------------------
-# Single-class mode helpers
+# Active-event loading from config
 # ---------------------------------------------------------------------------
-def extract_single_class_from_report_filename(filename: str) -> Set[int]:
-    """Extract the event class from a report filename (same rules as video GT).
+def load_active_events_from_config(config_dir: Path) -> Set[int]:
+    """Load is_active=true event IDs from event_categories.yaml.
 
-    Returns the set of event IDs that the report is "about".
+    Parameters
+    ----------
+    config_dir:
+        Directory containing event_categories.yaml.
+
+    Returns
+    -------
+        Set of event IDs where is_active is true.
     """
-    return extract_gt_from_filename(filename)
+    config_path = config_dir / "event_categories.yaml"
+    if not config_path.exists():
+        raise FileNotFoundError(f"event_categories.yaml not found: {config_path}")
+
+    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    active_events: Set[int] = set()
+    for cat in data.get("event_categories", []):
+        if cat.get("is_active", True):
+            active_events.add(int(cat["event_id"]))
+    return active_events
 
 
 # ---------------------------------------------------------------------------
@@ -402,8 +421,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--single-class",
         action="store_true",
         help=(
-            "Single-class mode: for each video, ONLY evaluate events that appear "
-            "in the report/video filename. All other events are forced to false."
+            "Single-class mode: only evaluate events with is_active=true in "
+            "event_categories.yaml. All inactive events are excluded from metrics."
+        ),
+    )
+    parser.add_argument(
+        "--config-dir", "-c",
+        default="./traffic_analyzer/config",
+        help=(
+            "Path to configuration directory containing event_categories.yaml "
+            "(default: ./traffic_analyzer/config). Used with --single-class."
         ),
     )
     parser.add_argument(
@@ -415,6 +442,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     logger = _setup_logging(args.log_level)
+
+    # Load active events for single-class mode
+    active_event_ids: Optional[Set[int]] = None
+    if args.single_class:
+        config_dir = Path(args.config_dir).expanduser().resolve()
+        try:
+            active_event_ids = load_active_events_from_config(config_dir)
+            logger.info(
+                "Single-class mode: evaluating %d active events from config: %s",
+                len(active_event_ids),
+                sorted(active_event_ids),
+            )
+        except FileNotFoundError as exc:
+            logger.error("%s", exc)
+            return 1
 
     video_dir = Path(args.video_dir).expanduser().resolve()
     report_dir = Path(args.report_dir).expanduser().resolve()
@@ -499,19 +541,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         else:
             gt = extract_gt_from_filename(video_path.name)
 
-        # Single-class mask
+        # Single-class mask (from config is_active)
         mask: Optional[Set[int]] = None
         if args.single_class:
-            # Use the events present in the video/report filename
-            mask = extract_gt_from_filename(video_path.name)
-            if not mask:
-                # Fallback: try report filename
-                mask = extract_single_class_from_report_filename(report_path.name)
-            if not mask:
-                logger.warning("Could not determine single-class mask for %s, skipping", video_path.name)
-                skipped_videos.append(report_path.name)
-                continue
-            logger.debug("Single-class mask for %s: %s", video_path.name, mask)
+            mask = active_event_ids
 
         predictions.append(pred)
         ground_truths.append(gt)
