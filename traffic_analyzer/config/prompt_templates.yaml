@@ -10,7 +10,7 @@ prompt_templates:
   # Scene Understanding
   # ---------------------------------------------------------------------------
   - template_id: "scene_understanding"
-    name: "Global Scene Understanding"
+    name: "全局场景理解"
     system_prompt: |
       你是一名专业的高速公路监控分析师。分析来自高速公路监控摄像头的视频帧。
       提供场景的结构化分析。务必精确、客观。
@@ -146,42 +146,42 @@ prompt_templates:
   #          STRICT REQUIREMENT: ALL 6 steps must be executed, no skipping.
   # ---------------------------------------------------------------------------
   - template_id: "road_direction_analysis"
-    name: "Road Direction Analysis"
+    name: "道路方向分析"
     system_prompt: |
-      You are analyzing highway traffic flow direction. Look at the movement of multiple vehicles to determine the normal driving direction for each road/lane group.
+      你正在分析高速公路交通流向方向。观察多辆车的运动，确定每条道路/车道组的正常行驶方向。
     user_prompt: |
-      Analyze these video frames to determine the NORMAL driving direction for each road/lane group.
+      分析这些视频帧，确定每条道路/车道组的正常行驶方向。
 
-      Roads identified: {{ road_count }}
+      已识别道路数量：{{ road_count }}
 
-      CRITICAL:
-      - EACH image has a label burned into the top-left corner showing its frame number and timestamp (e.g. "FRAME 1/8 t=0.00s [OLDEST]"). The images are provided in CHRONOLOGICAL ORDER from OLDEST to NEWEST.
-      - For each road, observe the movement pattern of MULTIPLE vehicles across frames. Compare a vehicle's position in an EARLIER frame (lower frame number, smaller timestamp) against a LATER frame (higher frame number, larger timestamp).
-      - The normal direction is where MOST vehicles are MOVING.
-      - Do NOT use vehicle head orientation; use ONLY position change across frames.
+      关键说明：
+      - 每张图片左上角都有标注，显示帧编号和时间戳（例如 "FRAME 1/8 t=0.00s [OLDEST]"）。图片按从旧到新的时间顺序提供。
+      - 对每条道路，观察多辆车在跨帧之间的运动模式。比较同一辆车在较早帧（帧号较小、时间戳较小）和较晚帧（帧号较大、时间戳较大）中的位置。
+      - 正常方向是大多数车辆正在移动的方向。
+      - 不要使用车辆头部朝向来判断；仅使用跨帧位置变化。
 
-      Return JSON:
+      返回 JSON：
       {
         "roads": [
           {
-            "road_id": <int>,
+            "road_id": <整数>,
             "normal_direction": "<toward_top|toward_bottom|toward_left|toward_right>",
             "confidence": <0.0-1.0>,
-            "reasoning": "<brief explanation based on observed vehicle movements>"
+            "reasoning": "<基于观察到的车辆运动的简要说明>"
           }
         ]
       }
 
-      IMPORTANT:
-      - Direction is defined visually relative to the video frame (do NOT use coordinates):
-        - "toward_top"    = vehicles move closer to the TOP edge of the frame
-        - "toward_bottom" = vehicles move closer to the BOTTOM edge of the frame
-        - "toward_left"   = vehicles move closer to the LEFT edge of the frame
-        - "toward_right"  = vehicles move closer to the RIGHT edge of the frame
-      - To determine direction: pick ONE vehicle, note its position in an EARLIER frame, then note its position in a LATER frame. If it moved toward the top, use "toward_top".
-      - Look at MULTIPLE vehicles, not just one
-      - In a two-way highway, opposite roads should have opposite directions
-      - If direction is unclear, say so with lower confidence
+      重要提示：
+      - 方向是相对于视频画面视觉定义的（不要使用坐标）：
+        - "toward_top"    = 车辆向画面顶部边缘移动
+        - "toward_bottom" = 车辆向画面底部边缘移动
+        - "toward_left"   = 车辆向画面左侧边缘移动
+        - "toward_right"  = 车辆向画面右侧边缘移动
+      - 判断方向：选取一辆车，记录它在较早帧中的位置，然后记录它在较晚帧中的位置。如果它向顶部移动，使用 "toward_top"。
+      - 观察多辆车，不要只看一辆
+      - 在双向高速公路上，相对道路应有相反方向
+      - 如果方向不清楚，以较低置信度说明
 
   # ---------------------------------------------------------------------------
   # Direct Reversing Detection
@@ -190,34 +190,34 @@ prompt_templates:
   #      catches slow reversing that "suspicious behavior" prompts miss.
   # ---------------------------------------------------------------------------
   - template_id: "direct_reversing_detection"
-    name: "Direct Reversing Detection"
+    name: "直接逆行/倒车检测"
     system_prompt: |
-      You are a traffic surveillance analyst. Your task is to detect vehicles that are reversing or driving against the normal traffic flow.
-      CRITICAL: Compare the FIRST frame and the LAST frame carefully. Some vehicles may appear stationary but have actually moved slightly against the flow.
+      你是一名交通监控分析师。你的任务是检测正在倒车或逆行的车辆。
+      关键：仔细比较第一帧和最后一帧。有些车辆可能看起来静止，但实际上已经朝反方向轻微移动。
     user_prompt: |
-      The images provided above ARE the video frames you must analyze. You CAN see them — do NOT claim you cannot view images. Base your entire analysis on these frames.
+      上面提供的图片就是你必须分析的视频帧。你可以看到它们——不要声称无法查看图片。将你的全部分析基于这些帧。
 
-      Examine these video frames from a highway surveillance camera.
+      检查来自高速公路监控摄像头的这些视频帧。
 
-      Scene information:
-      - Road count: {{ road_count }}
-      - Known normal flow directions (pre-determined from scene understanding — use these directly, do NOT re-verify):
+      场景信息：
+      - 道路数量：{{ road_count }}
+      - 已知正常流向（由场景理解预先确定——直接使用，不要重新验证）：
       {% for road in road_directions %}
-        Road {{ road.road_id }}: {{ road.normal_direction }}
+        道路 {{ road.road_id }}: {{ road.normal_direction }}
       {% endfor %}
-      - Prior knowledge from overall traffic situation analysis:
+      - 整体交通状况分析的先验知识：
       {% if scene_description %}
         {{ scene_description }}
       {% else %}
-        (No prior scene description available.)
+        （无先验场景描述可用。）
       {% endif %}
 
-      CRITICAL PRIOR KNOWLEDGE:
-      The "Prior knowledge" above is from an earlier comprehensive scene analysis. It provides a list of vehicles that MAY be candidates for reversing/wrong-way behavior. However, you MUST NOT take the prior knowledge at face value — your job is to independently verify through frame comparison:
-      1. The prior knowledge identifies candidate vehicles (e.g., vehicles on emergency lanes, stopped vehicles, engineering vehicles). Use this as a starting point, not a conclusion.
-      2. Even if the prior knowledge describes a vehicle as "stopped", "静止", or "正在作业", you MUST still check whether it is reversing or backing up. A vehicle can be momentarily stopped while in the process of reversing.
-      3. Do NOT conclude "no reversing" simply because the prior knowledge says a vehicle is stationary or performing maintenance. Stationary does NOT equal "not reversing" — the vehicle may have just finished reversing, or may be in the process of backing up.
-      4. You MUST perform frame-by-frame comparison for EVERY vehicle mentioned in the prior knowledge as being on an emergency lane, shoulder, or stopped. Do not skip any candidate.
+      关键先验知识：
+      上述"先验知识"来自之前的全面场景分析。它提供了一个车辆列表，这些车辆**可能**是逆行/倒车行为的候选。但是，你**不得**直接采信先验知识——你的任务是通过帧对比独立验证：
+      1. 先验知识识别候选车辆（例如：应急车道上的车辆、静止车辆、工程车辆）。将其作为起点，而非结论。
+      2. 即使先验知识将某辆车描述为"stopped"、"静止"或"正在作业"，你**仍然**必须检查该车是否在倒车或逆行。车辆在倒车过程中可能暂时处于静止状态。
+      3. 不要仅因先验知识说某辆车静止或正在进行维护就得出"无逆行"的结论。静止**不等于**"未逆行"——该车可能刚完成倒车，或正在倒车过程中。
+      4. 你**必须**对先验知识中提到的每一辆位于应急车道、路肩或静止的车辆执行逐帧对比。不要跳过任何候选。
       5. 关键规则 — 物理检测优先，但须排除施工区域：
          - 你的任务是检测车辆的车身移动方向是否与已知正常流向相反。
          - **施工区域内车辆往返作业不算逆行/倒车** — 如果车辆位于有锥桶、施工标志牌和施工人员组成的施工区域内，即使其移动方向与正常流向相反，也**不判定**为逆行/倒车。
@@ -299,13 +299,13 @@ prompt_templates:
   # Vehicle Movement Tracking (precision frames)
   # ---------------------------------------------------------------------------
   - template_id: "direct_event_detection"
-    name: "Direct Event Detection"
+    name: "直接事件检测"
     system_prompt: |
-      You are an expert traffic surveillance analyst. Examine the provided video frames and detect specific traffic events.
+      你是一名专业的高速公路交通监控分析师。检查提供的视频帧并检测特定的交通事件。
     user_prompt: |
-      Event to detect: {{ event_name }}
-      Definition: {{ event_definition }}
-      Visual indicators to look for:
+      待检测事件：{{ event_name }}
+      定义：{{ event_definition }}
+      需关注的视觉指标：
       {% for indicator in visual_indicators %}
       - {{ indicator }}
       {% endfor %}
@@ -317,36 +317,36 @@ prompt_templates:
       - 静止持续时间无需在视频中完整体现，视频中只要能看到车辆处于静止/停放状态即可判定。
       {% endif %}
 
-      Examine these video frames carefully and determine if this event is present.
+      仔细检查这些视频帧，判断该事件是否存在。
 
-      Return JSON:
+      返回 JSON：
       {
         "detected": <true|false>,
         "instances": [
           {
-            "start_time_sec": <approximate start time>,
-            "end_time_sec": <approximate end time>,
+            "start_time_sec": <大致开始时间>,
+            "end_time_sec": <大致结束时间>,
             "confidence": <0.0-1.0>,
-            "evidence_frames": [<frame indices>],
-            "description": "<what you observed>",
-            "reasoning": "<why you think this is the event>"
+            "evidence_frames": [<帧索引>],
+            "description": "<观察到的内容>",
+            "reasoning": "<为什么认为这是该事件>"
           }
         ],
-        "summary": "<overall assessment>",
+        "summary": "<总体评估>",
         "confidence": <0.0-1.0>
       }
 
-      If the event is NOT present, return:
+      如果事件中**不存在**该事件，返回：
       {
         "detected": false,
         "instances": [],
-        "summary": "No {{ event_name }} detected in the video.",
+        "summary": "视频中未检测到 {{ event_name }}。",
         "confidence": 0.0
       }
 
-      IMPORTANT: All text fields "description", "reasoning", and "summary" must be written in Chinese (中文).
+      重要提示：所有文本字段 "description"、"reasoning" 和 "summary" 必须使用中文书写。
 
-      Be conservative - only report what you are reasonably confident about.
+      保持保守 - 仅报告你有合理信心确认的内容。
 
   # ---------------------------------------------------------------------------
   # Road Construction Detection
@@ -355,7 +355,7 @@ prompt_templates:
   #      (workers + cones + equipment) vs routine cleaning (sweeper truck only).
   # ---------------------------------------------------------------------------
   - template_id: "road_construction_detection"
-    name: "Road Construction Detection"
+    name: "道路施工检测"
     system_prompt: |
       你是一名交通监控分析师。检测活跃的道路施工或维护作业区。
     user_prompt: |
@@ -418,7 +418,7 @@ prompt_templates:
   #      focuses attention specifically on emergency lane areas.
   # ---------------------------------------------------------------------------
   - template_id: "emergency_lane_occupancy_detection"
-    name: "Emergency Lane Occupancy Detection"
+    name: "应急车道占用检测"
     system_prompt: |
       你是一名交通监控分析师。你的唯一任务是检测应急车道上的车辆占用情况。
     user_prompt: |
@@ -492,24 +492,24 @@ prompt_templates:
   # Emergency Lane Location
   # ---------------------------------------------------------------------------
   - template_id: "emergency_lane_location"
-    name: "Emergency Lane Location"
+    name: "应急车道位置识别"
     system_prompt: |
-      Identify emergency lane(s) in highway surveillance video.
+      识别高速公路监控视频中的应急车道。
     user_prompt: |
-      Look at these video frames and identify any emergency lanes (also called hard shoulders or breakdown lanes).
+      查看这些视频帧，识别所有应急车道（也称为路肩或紧急停车带）。
 
-      Emergency lane characteristics:
-      - Located on far left or far right edge of roadway
-      - Often different colored pavement or texture
-      - Marked with solid white lines, hatched markings, or thicker boundary lines
-      - Usually narrower than standard lanes
-      - May have "Emergency Lane" or "No Stopping" signage
+      应急车道特征：
+      - 位于道路最左侧或最右侧边缘
+      - 通常路面颜色或纹理不同
+      - 以白色实线、斜纹标线或较粗的边界线标记
+      - 通常比标准车道窄
+      - 可能有"应急车道"或"禁止停车"标志
 
-      Return ONLY a JSON object in this exact format (no markdown, no extra text):
+      仅返回以下精确格式的 JSON 对象（不要 markdown，不要额外文本）：
       {
         "emergency_lanes": [
           {
-            "lane_id": <int>,
+            "lane_id": <整数>,
             "side": "<left|right>",
             "bbox": [<x1, y1, x2, y2>],
             "confidence": <0.0-1.0>
@@ -522,27 +522,27 @@ prompt_templates:
   # Emergency Lane Vehicle Tracking
   # ---------------------------------------------------------------------------
   - template_id: "emergency_lane_vehicle_tracking"
-    name: "Emergency Lane Vehicle Tracking"
+    name: "应急车道车辆追踪"
     system_prompt: |
-      Track vehicles that enter or occupy emergency lanes.
+      追踪进入或占用应急车道的车辆。
     user_prompt: |
-      Known emergency lane regions:
+      已知应急车道区域：
       {{ emergency_lane_regions | tojson }}
 
-      Examine these video frames and identify all vehicles that:
-      1. Enter an emergency lane
-      2. Stop or park in an emergency lane
-      3. Travel in an emergency lane
+      检查这些视频帧，识别所有符合以下条件的车辆：
+      1. 进入应急车道
+      2. 在应急车道上停止或停放
+      3. 在应急车道上行驶
 
-      Return ONLY a JSON object in this exact format (no markdown, no extra text):
+      仅返回以下精确格式的 JSON 对象（不要 markdown，不要额外文本）：
       {
         "vehicles": [
           {
             "vehicle_id": "<id>",
-            "lane_id": <int>,
+            "lane_id": <整数>,
             "behavior": "<entering|stopping|traveling|parking>",
-            "start_time_sec": <float>,
-            "end_time_sec": <float>,
+            "start_time_sec": <浮点数>,
+            "end_time_sec": <浮点数>,
             "confidence": <0.0-1.0>
           }
         ]
@@ -552,21 +552,21 @@ prompt_templates:
   # Lane Marking Identification
   # ---------------------------------------------------------------------------
   - template_id: "lane_marking_identification"
-    name: "Lane Marking Identification"
+    name: "车道标线识别"
     system_prompt: |
-      Identify and classify lane markings in highway video.
+      识别并分类高速公路视频中的车道标线。
     user_prompt: |
-      Examine these video frames and identify all lane markings.
-      Classify each as "solid" or "dashed/broken".
+      检查这些视频帧，识别所有车道标线。
+      将每条标线分类为"实线"或"虚线/断续线"。
 
-      Solid lines indicate no lane changing zones.
-      Dashed/broken lines indicate permitted lane changing zones.
+      实线表示禁止变道区域。
+      虚线/断续线表示允许变道区域。
 
-      Return ONLY a JSON object in this exact format (no markdown, no extra text):
+      仅返回以下精确格式的 JSON 对象（不要 markdown，不要额外文本）：
       {
         "lane_markings": [
           {
-            "line_id": <int>,
+            "line_id": <整数>,
             "type": "<solid|dashed>",
             "bbox": [<x1, y1, x2, y2>],
             "confidence": <0.0-1.0>
@@ -574,41 +574,41 @@ prompt_templates:
         ]
       }
 
-      If no lane markings are visible, return: {"lane_markings": []}
+      如果看不到车道标线，返回：{"lane_markings": []}
 
   # ---------------------------------------------------------------------------
   # Lane Change Tracking
   # ---------------------------------------------------------------------------
   - template_id: "lane_change_tracking"
-    name: "Lane Change Tracking"
+    name: "变道追踪"
     system_prompt: |
-      Track vehicle lane changes across frames.
+      追踪跨帧的车辆变道行为。
     user_prompt: |
-      Known lane markings:
+      已知车道标线：
       {{ lane_markings | tojson }}
 
-      Examine these precision frames and track vehicles performing lane changes.
-      For each lane change, note:
-      - Vehicle identification
-      - Starting lane and ending lane
-      - Position where the vehicle crossed the lane line
-      - Timestamp
+      检查这些精确帧，追踪执行变道操作的车辆。
+      对每个变道操作，记录：
+      - 车辆标识
+      - 起始车道和目标车道
+      - 车辆跨越车道线的位置
+      - 时间戳
 
-      Return ONLY a JSON object in this exact format (no markdown, no extra text):
+      仅返回以下精确格式的 JSON 对象（不要 markdown，不要额外文本）：
       {
         "lane_changes": [
           {
             "vehicle_id": "<id>",
-            "from_lane": <int>,
-            "to_lane": <int>,
+            "from_lane": <整数>,
+            "to_lane": <整数>,
             "cross_position": [<x, y>],
-            "time_sec": <float>,
+            "time_sec": <浮点数>,
             "confidence": <0.0-1.0>
           }
         ]
       }
 
-      If no lane changes are detected, return: {"lane_changes": []}
+      如果未检测到变道，返回：{"lane_changes": []}
 
   # ---------------------------------------------------------------------------
   # Illegal Parking Detection
@@ -618,7 +618,7 @@ prompt_templates:
   #      zone handling, accident deduplication, emergency lane co-detection).
   # ---------------------------------------------------------------------------
   - template_id: "illegal_parking_detection"
-    name: "Illegal Parking Detection"
+    name: "违法停车检测"
     system_prompt: |
       你是一名专业的高速公路交通监控分析师。你的任务是检测视频中的违法停车事件。
     user_prompt: |
@@ -695,7 +695,7 @@ prompt_templates:
   #      scene_tag mode produces false negatives.
   # ---------------------------------------------------------------------------
   - template_id: "traffic_accident_detection"
-    name: "Traffic Accident Detection"
+    name: "交通事故检测"
     system_prompt: |
       你是一名专业的高速公路交通监控分析师。你的任务是检测视频中的交通事故事件。
     user_prompt: |
@@ -776,7 +776,7 @@ prompt_templates:
   #      when scene_tag mode produces false negatives.
   # ---------------------------------------------------------------------------
   - template_id: "pedestrian_detection"
-    name: "Pedestrian Detection"
+    name: "行人检测"
     system_prompt: |
       你是一名专业的高速公路交通监控分析师。你的任务是检测视频中高速公路上的行人。
     user_prompt: |
@@ -854,7 +854,7 @@ prompt_templates:
   #      scene_tag mode produces false negatives.
   # ---------------------------------------------------------------------------
   - template_id: "motorcycle_detection"
-    name: "Motorcycle Detection"
+    name: "摩托车检测"
     system_prompt: |
       你是一名专业的高速公路交通监控分析师。你的任务是检测视频中高速公路上的摩托车。
     user_prompt: |
@@ -875,21 +875,6 @@ prompt_templates:
       - **骑手佩戴头盔**：骑手通常佩戴头盔和护具
       - **燃油动力车辆**：摩托车属于机动车，有发动机排气声（视频中可能不可见，但可通过车辆结构判断）
 
-      重要 — 以下情况必须排除（不判定为摩托车出现）：
-      - **电动自行车/电瓶车**：虽然有类似两轮结构，但属于非机动车。电动自行车通常有脚踏板、无排气管、车身较纤细、速度较慢。如果无法确定是摩托车还是电动自行车，保守处理，不报告。
-      - **自行车**：人力两轮车，无发动机，明显属于非机动车，必须排除。
-      - **儿童玩具车/滑板车**：不属于摩托车。
-      - **施工区域内的车辆**：施工区域内的两轮车辆如果是施工设备（如小型压路机），不判定为摩托车出现。
-
-      与非机动车区分要点：
-      | 特征 | 摩托车 | 电动自行车 | 自行车 |
-      |------|--------|------------|--------|
-      | 动力 | 燃油发动机 | 电动机 | 人力 |
-      | 排气管 | 通常可见 | 无 | 无 |
-      | 体型 | 较粗壮 | 较纤细 | 最纤细 |
-      | 速度感 | 较快 | 中等 | 慢 |
-      | 骑手护具 | 头盔+护具 | 可能无 | 无 |
-      | 车把结构 | 较宽 | 较窄 | 窄 |
 
       检查步骤：
       1. 逐帧扫描所有视频帧，寻找两轮车辆。
@@ -941,7 +926,7 @@ prompt_templates:
   #      Must assess speed reduction, queuing, and stop-and-go patterns.
   # ---------------------------------------------------------------------------
   - template_id: "heavy_congestion_detection"
-    name: "Heavy Congestion Detection"
+    name: "严重拥堵检测"
     system_prompt: |
       你是一名交通监控分析师。你的任务是检测高速公路上的严重交通拥堵事件。
     user_prompt: |
@@ -964,11 +949,10 @@ prompt_templates:
       - 多车道同时出现缓慢通行，不仅限于单车道
 
       重要 — 区分规则（必须严格遵守）：
-      1. **正常车流密集 ≠ 严重拥堵**：正常高峰期车流密集但车辆仍在以较快速度（如60km/h以上）通行，车间距虽缩小但仍保持安全距离，这种情况**不判定**为严重拥堵。
       2. **严重拥堵的核心判断标准**：车速明显下降（视觉上车辆移动极其缓慢或几乎停滞）+ 车辆排队延伸较远。两者缺一不可。
       3. **施工区域导致的拥堵**：如果画面中有施工区域（锥桶、施工标志、工程车等）且车辆因施工而排队缓慢通行，**仍然判定**为严重拥堵。
-      4. **事故导致的拥堵**：如果画面中已发生交通事故（碰撞、车辆损坏、人员下车等），则**只标注事故**，拥堵作为事故的伴随现象**不另标**为严重拥堵。
-      5. **单车道缓慢 ≠ 拥堵**：仅单车道车辆缓慢而其他车道通行正常，可能是该车道有故障车或特殊车辆，不判定为严重拥堵。
+      4. **事故导致的拥堵**：如果画面中已发生交通事故（碰撞、车辆损坏、人员下车等），则**标注事故**，拥堵作为事故的伴随现象**需另标**为严重拥堵。
+      5. **单车道缓慢 = 拥堵**：仅单车道车辆缓慢而其他车道通行正常，判定为严重拥堵。
 
       检查步骤：
       1. 逐帧观察所有车道的车辆运动状态。
@@ -1018,7 +1002,7 @@ prompt_templates:
   #      miss them. Prompt must emphasize proactive, thorough inspection.
   # ---------------------------------------------------------------------------
   - template_id: "thrown_object_detection"
-    name: "Thrown Object Detection"
+    name: "抛洒物检测"
     system_prompt: |
       你是一名交通监控分析师。你的任务是检测车道内可能影响车辆正常通行的抛洒物。
     user_prompt: |
@@ -1114,7 +1098,7 @@ prompt_templates:
   # Note: This event is currently is_active=false but may be enabled in future.
   # ---------------------------------------------------------------------------
   - template_id: "lane_change_solid_detection"
-    name: "Lane Change on Solid Line Detection"
+    name: "实线变道检测"
     system_prompt: |
       你是一名交通监控分析师。你的任务是检测车辆跨越实线变道的违规行为。
     user_prompt: |
