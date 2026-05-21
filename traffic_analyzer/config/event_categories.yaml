@@ -78,7 +78,7 @@ event_categories:
     name: "Person Presence in Highway"
     name_zh: "高速公路行人出现"
     description: "行人或滞留驾乘人员出现在高速公路限制区域"
-    detection_mode: "scene_tag"
+    detection_mode: "direct_vlm"
     prompt_template_id: "pedestrian_detection"
     confidence_threshold: 0.7
     is_active: true
@@ -94,11 +94,11 @@ event_categories:
     name: "Motorcycle Presence"
     name_zh: "摩托车出现"
     description: "摩托车出现在高速公路上"
-    detection_mode: "scene_tag"
-    prompt_template_id: "motorcycle_detection"
+    detection_mode: "direct_vlm"
+    prompt_template_id: "non_motor_vehicle_detection"
     confidence_threshold: 0.7
     is_active: true
-    scene_boolean_field: "non_motor_vehicle_present"
+    scene_boolean_field: "non_motor_vehicle_detection"
     scene_tag_key: "非机动车"
     definition: |
       摩托车出现：两轮/三轮摩托车在高速公路上行驶或静止。

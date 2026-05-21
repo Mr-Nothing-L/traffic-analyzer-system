@@ -59,11 +59,13 @@ logic_chains:
   - chain_id: "vehicle_reversing"
     name: "车辆逆行/倒车检测"
     target_event_id: 7
+    # 前置条件分层：
+  #   - 违停(event 0)、应急车道占用(event 1) 有专门的 VLM 精确检测，以 event_results 为准
+  #   - 工程车无单独 VLM 检测，沿用 scene_understanding 的 {工程车：...} 标签
     precondition: |
       event_results.get(0, {}).get('detected', False) or
       event_results.get(1, {}).get('detected', False) or
-      scene_tags.get('静止车辆', '').startswith('有') or
-      scene_tags.get('应急车道车辆', '').startswith('有')
+      scene_tags.get('工程车', '').startswith('有')
     steps:
       - step_id: "S1"
         step_type: "vlm_call"

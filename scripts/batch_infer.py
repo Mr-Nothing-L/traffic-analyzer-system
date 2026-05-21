@@ -20,8 +20,9 @@ import os
 import subprocess
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 
 def _setup_logging(log_level: str = "INFO") -> logging.Logger:
@@ -32,6 +33,26 @@ def _setup_logging(log_level: str = "INFO") -> logging.Logger:
         datefmt="%H:%M:%S",
     )
     return logging.getLogger("batch_infer")
+
+
+def _setup_file_logging(log_path: Path, log_level: str = "INFO") -> logging.Logger:
+    """Configure a file-only logger for a single video."""
+    logger = logging.getLogger(f"batch_infer.{log_path.stem}")
+    logger.setLevel(getattr(logging, log_level.upper(), logging.INFO))
+
+    # Avoid duplicate handlers on repeated calls
+    if logger.handlers:
+        logger.handlers.clear()
+
+    fh = logging.FileHandler(log_path, encoding="utf-8")
+    fh.setLevel(logging.DEBUG)
+    formatter = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    fh.setFormatter(formatter)
+    logger.addHandler(fh)
+    return logger
 
 
 def _resolve_path(path: str) -> Path:
@@ -59,9 +80,13 @@ def _run_single(
     fmt: str,
     min_frames: int,
     cv_tracks_path: Optional[Path],
-    logger: logging.Logger,
-) -> bool:
-    """Run analysis on a single video via subprocess. Returns True on success."""
+    log_path: Optional[Path],
+) -> Tuple[str, bool, str]:
+    """Run analysis on a single video via subprocess.
+
+    Returns (video_name, success, message) for aggregation by the main process.
+    Per-video logs are written to *log_path* when provided.
+    """
     cmd = [
         sys.executable, "-m", "traffic_analyzer", "analyze",
         "--video", str(video_path),
@@ -73,7 +98,14 @@ def _run_single(
     if cv_tracks_path:
         cmd += ["--cv-tracks", str(cv_tracks_path)]
 
-    logger.debug("Running: %s", " ".join(cmd))
+    # Optional per-video log file
+    log_fh = None
+    if log_path:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_fh = open(log_path, "w", encoding="utf-8")
+        log_fh.write(f"[BEGIN] {video_path.name}\n")
+        log_fh.write(f"CMD: {' '.join(cmd)}\n")
+        log_fh.flush()
 
     try:
         result = subprocess.run(
@@ -83,18 +115,38 @@ def _run_single(
             encoding="utf-8",
             timeout=3600,  # 1 hour per video
         )
-        if result.returncode != 0:
-            logger.error("Analysis failed for %s (exit %d)", video_path.name, result.returncode)
+        if log_fh:
+            log_fh.write(f"\n[STDOUT]\n{result.stdout}\n")
             if result.stderr:
-                logger.error("stderr: %s", result.stderr[:500])
-            return False
-        return True
+                log_fh.write(f"\n[STDERR]\n{result.stderr}\n")
+            log_fh.write(f"\n[EXIT CODE] {result.returncode}\n")
+            log_fh.flush()
+
+        if result.returncode != 0:
+            msg = f"FAILED (exit {result.returncode})"
+            if result.stderr:
+                msg += f" — {result.stderr[:200]}"
+            if log_fh:
+                log_fh.write(f"[END] {msg}\n")
+            return video_path.name, False, msg
+
+        msg = f"OK -> {output_path.name}"
+        if log_fh:
+            log_fh.write(f"[END] {msg}\n")
+        return video_path.name, True, msg
     except subprocess.TimeoutExpired:
-        logger.error("Analysis timed out for %s", video_path.name)
-        return False
+        msg = "FAILED (timeout after 3600s)"
+        if log_fh:
+            log_fh.write(f"[END] {msg}\n")
+        return video_path.name, False, msg
     except Exception as exc:
-        logger.error("Analysis error for %s: %s", video_path.name, exc)
-        return False
+        msg = f"FAILED ({exc})"
+        if log_fh:
+            log_fh.write(f"[END] {msg}\n")
+        return video_path.name, False, msg
+    finally:
+        if log_fh:
+            log_fh.close()
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -146,6 +198,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
         help="Logging level (default: INFO).",
     )
+    parser.add_argument(
+        "--workers", "-w",
+        type=int,
+        default=4,
+        help="Number of parallel workers (default: 4). Set to 1 for serial execution.",
+    )
+    parser.add_argument(
+        "--log-dir", "-l",
+        default=None,
+        help="Optional directory for per-video log files.",
+    )
     args = parser.parse_args(argv)
 
     logger = _setup_logging(args.log_level)
@@ -183,14 +246,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     logger.info("Found %d video(s) in %s", total, video_dir)
     logger.info("Output directory: %s", output_dir)
     logger.info("Format: %s", args.format)
+    logger.info("Workers: %d", args.workers)
 
-    start_time = time.time()
+    log_dir: Optional[Path] = None
+    if args.log_dir:
+        log_dir = _resolve_path(args.log_dir)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        logger.info("Log directory: %s", log_dir)
 
-    for idx, video_path in enumerate(videos, start=1):
+    # ------------------------------------------------------------------
+    # Build task list (skip already-processed unless --force)
+    # ------------------------------------------------------------------
+    tasks: List[Tuple[Path, Path, Path, str, int, Optional[Path], Optional[Path]]] = []
+    for video_path in videos:
         output_path = _build_output_path(video_path, output_dir, args.format)
-
         if output_path.exists() and not args.force:
-            logger.info("[%d/%d] SKIP (exists): %s", idx, total, video_path.name)
             skipped += 1
             continue
 
@@ -201,22 +271,52 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if candidate.exists():
                 cv_tracks_path = candidate
 
-        logger.info("[%d/%d] Processing: %s", idx, total, video_path.name)
-        success = _run_single(
-            video_path=video_path,
-            output_path=output_path,
-            config_dir=config_dir,
-            fmt=args.format,
-            min_frames=args.min_frames,
-            cv_tracks_path=cv_tracks_path,
-            logger=logger,
-        )
-        if success:
-            processed += 1
-            logger.info("[%d/%d] DONE: %s -> %s", idx, total, video_path.name, output_path.name)
-        else:
-            failed += 1
-            logger.error("[%d/%d] FAILED: %s", idx, total, video_path.name)
+        # Per-video log file
+        per_video_log: Optional[Path] = None
+        if log_dir:
+            per_video_log = log_dir / (video_path.stem + ".log")
+
+        tasks.append((
+            video_path, output_path, config_dir,
+            args.format, args.min_frames, cv_tracks_path, per_video_log,
+        ))
+
+    to_process = len(tasks)
+    logger.info("Tasks: %d to process, %d skipped (already exists)", to_process, skipped)
+
+    # ------------------------------------------------------------------
+    # Execute: serial or parallel
+    # ------------------------------------------------------------------
+    start_time = time.time()
+
+    if args.workers <= 1 or to_process == 1:
+        # Serial execution
+        for idx, task in enumerate(tasks, start=1):
+            logger.info("[%d/%d] Processing: %s", idx, to_process, task[0].name)
+            name, success, msg = _run_single(*task)
+            if success:
+                processed += 1
+                logger.info("[%d/%d] DONE: %s", idx, to_process, msg)
+            else:
+                failed += 1
+                logger.error("[%d/%d] FAILED: %s — %s", idx, to_process, name, msg)
+    else:
+        # Parallel execution via ProcessPoolExecutor
+        with ProcessPoolExecutor(max_workers=args.workers) as executor:
+            future_to_name = {
+                executor.submit(_run_single, *task): task[0].name
+                for task in tasks
+            }
+            completed = 0
+            for future in as_completed(future_to_name):
+                completed += 1
+                name, success, msg = future.result()
+                if success:
+                    processed += 1
+                    logger.info("[%d/%d] DONE: %s", completed, to_process, msg)
+                else:
+                    failed += 1
+                    logger.error("[%d/%d] FAILED: %s — %s", completed, to_process, name, msg)
 
     elapsed = time.time() - start_time
     logger.info("=" * 50)
