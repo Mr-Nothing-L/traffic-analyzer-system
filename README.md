@@ -361,7 +361,13 @@ print(report.binary_encoding.encoding_string)
 对目录下的所有视频批量执行分析：
 
 ```bash
-python3 scripts/batch_infer.py   --video-dir ./videos   --output-dir ./reports   --format markdown   --min-frames 30
+python3 scripts/batch_infer.py \
+  --video-dir ./videos \
+  --output-dir ./reports \
+  --log-dir ./logs \
+  --workers 4 \
+  --format markdown \
+  --min-frames 30
 ```
 
 参数说明：
@@ -374,9 +380,12 @@ python3 scripts/batch_infer.py   --video-dir ./videos   --output-dir ./reports  
 | `--format` / `-f` | 输出格式 (`markdown` / `json`) | `markdown` |
 | `--min-frames` / `-m` | VLM 最大输入帧数 | `30` |
 | `--cv-tracks-dir` | CV 轨迹 JSON 目录（可选） | - |
-| `--force` | 强制覆盖已有报告 | - |
+| `--workers` / `-w` | 并行 worker 数（ProcessPoolExecutor） | CPU 核心数 |
+| `--log-dir` / `-l` | 逐视频日志文件存放目录 | - |
+| `--skip-existing` | 跳过已有报告的视频（默认启用） | `true` |
+| `--no-skip-existing` | 强制重新处理所有视频 | - |
 
-脚本会自动匹配视频与已存在的报告，跳过已处理的视频（除非加 `--force`）。
+脚本会自动匹配视频与已存在的报告，跳过已处理的视频（除非加 `--no-skip-existing`）。
 
 #### 批量评估 (`batch_evaluate.py`)
 
@@ -384,13 +393,26 @@ python3 scripts/batch_infer.py   --video-dir ./videos   --output-dir ./reports  
 
 ```bash
 # 基本用法（从视频文件名提取真实标签）
-python3 scripts/batch_evaluate.py   --video-dir ./videos   --report-dir ./reports   --output evaluation_result.json
+python3 scripts/batch_evaluate.py \
+  --video-dir ./videos \
+  --report-dir ./reports \
+  --output evaluation_result.json
 
 # 使用独立标注文件
-python3 scripts/batch_evaluate.py   --video-dir ./videos   --report-dir ./reports   --gt-mode annotation_file   --annotation-file ./annotations.json   --output evaluation_result.json
+python3 scripts/batch_evaluate.py \
+  --video-dir ./videos \
+  --report-dir ./reports \
+  --gt-mode annotation_file \
+  --annotation-file ./annotations.json \
+  --output evaluation_result.json
 
 # 单类别模式（只评估 config 中 is_active=true 的事件）
-python3 scripts/batch_evaluate.py   --video-dir ./videos   --report-dir ./reports   --single-class   --config-dir ./traffic_analyzer/config   --output evaluation_result.json
+python3 scripts/batch_evaluate.py \
+  --video-dir ./videos \
+  --report-dir ./reports \
+  --single-class \
+  --config-dir ./traffic_analyzer/config \
+  --output evaluation_result.json
 ```
 
 参数说明：
@@ -399,7 +421,7 @@ python3 scripts/batch_evaluate.py   --video-dir ./videos   --report-dir ./report
 |---|---|---|
 | `--video-dir` / `-v` | 视频目录（用于提取真实标签） | - |
 | `--report-dir` / `-r` | 报告目录（`.md` 或 `.json`） | - |
-| `--output` | 评估结果 JSON 输出路径 | `evaluation_result.json` |
+| `--output` | 评估结果输出路径（支持 `.json` / `.md` / `.html`） | `evaluation_result.json` |
 | `--gt-mode` | 真实标签来源 (`filename` / `annotation_file`) | `filename` |
 | `--annotation-file` | 标注文件路径（JSON 或 CSV） | - |
 | `--single-class` | 只评估 `is_active=true` 的事件 | - |
@@ -407,11 +429,60 @@ python3 scripts/batch_evaluate.py   --video-dir ./videos   --report-dir ./report
 
 **单类别模式 (`--single-class`)**：当某些事件被设为 `is_active: false` 时，这些事件会被完全排除在评估指标之外，避免关闭的事件拉低整体分数。
 
+**输出格式**：根据 `--output` 的文件扩展名自动选择：
+- `.json` — 原始 JSON 数据，含每事件和每视频指标
+- `.md` — Markdown 表格，含事件汇总 + 逐视频详情表（`file://` 可点击链接）
+- `.html` — 交互式 HTML 报告（见下文）
+
 评估结果包含：
 - 每类事件的 TP / FP / FN / 精确率 / 召回率 / F1
 - 宏平均（Macro Average）指标
 - 每个视频的预测 vs 真实标签对照表
 - Markdown 表格格式直接输出到终端
+
+#### HTML 交互式报告
+
+通过 `--output report.html` 生成交互式 HTML 评估报告：
+
+```bash
+python3 scripts/batch_evaluate.py \
+  --video-dir ./videos \
+  --report-dir ./reports \
+  --output evaluation_report.html \
+  --single-class
+```
+
+特性：
+- 左侧：事件统计表 + 逐视频结果表（支持筛选 ✅/❌）
+- 右侧：视频播放器 + Markdown 报告预览面板
+- 点击表格行播放视频，点击报告链接预览 Markdown
+- 所有数据内联嵌入，使用 `file://` 绝对路径，可直接双击打开，无需 HTTP 服务器
+
+#### 完整批量工作流示例
+
+```bash
+# 1. 批量推理（4 并行 worker，保存日志）
+python3 scripts/batch_infer.py \
+  --video-dir ./测试视频 \
+  --output-dir ./output \
+  --log-dir ./log \
+  --workers 4 \
+  --format markdown
+
+# 2. 生成 Markdown 评估报告
+python3 scripts/batch_evaluate.py \
+  --video-dir ./测试视频 \
+  --report-dir ./output \
+  --output ./evaluation_report.md \
+  --single-class
+
+# 3. 生成 HTML 交互式报告
+python3 scripts/batch_evaluate.py \
+  --video-dir ./测试视频 \
+  --report-dir ./output \
+  --output ./evaluation_report.html \
+  --single-class
+```
 
 ---
 
