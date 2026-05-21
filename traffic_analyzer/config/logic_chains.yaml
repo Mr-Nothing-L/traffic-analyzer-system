@@ -24,7 +24,6 @@ logic_chains:
         step_type: "compute"
         name: "解析交通事故标签"
         compute_expression: |
-          import re
           desc = scene_understanding.scene_description if scene_understanding else ""
           pattern = re.compile(r"[\{【\[]\s*([^\{\}【】\[\]：:=→]+?)\s*[：:=→]\s*(.*?)[\}】\]]", re.DOTALL)
           _PUNCT = "。，；！？.,;!?"
@@ -39,17 +38,16 @@ logic_chains:
               return {
                   "detected": True,
                   "instances": [{
-                      "start_time_sec": 0.0, "end_time_sec": 0.0, "confidence": 0.65,
+                      "start_time_sec": 0.0, "end_time_sec": 0.0,
                       "description": "交通事故（场景标签推断：" + accident_tag + "）",
                       "reasoning": "场景描述 {交通事故：...} 标签显示存在交通事故。",
                   }],
-                  "confidence": 0.65,
                   "summary": "交通事故（场景标签推断：" + accident_tag + "）",
                   "reasoning": "场景描述 {交通事故：...} 标签显示存在交通事故。",
               }
           else:
               return {
-                  "detected": False, "instances": [], "confidence": 0.0,
+                  "detected": False, "instances": [],
                   "summary": "未检测到交通事故",
                   "reasoning": "场景描述 {交通事故：...} 标签显示不存在。",
               }
@@ -123,11 +121,10 @@ logic_chains:
           if len(vehicles) > 0:
               return {
                   "detected": True, "instances": vehicles,
-                  "confidence": emergency_vehicles.get("confidence", 0.85),
                   "summary": "检测到应急车道占用",
               }
           else:
-              return {"detected": False, "instances": [], "confidence": 0.0, "summary": "未检测到应急车道占用"}
+              return {"detected": False, "instances": [], "summary": "未检测到应急车道占用"}
         output_key: "event_result"
 
   # --- event_id: 9 | 实线变道 [关闭中] ---
@@ -179,4 +176,3 @@ logic_chains:
         context_vars_mapping:
           detected: "${len(violations) > 0}"
           instances: "${violations}"
-          confidence: "${0.8 if len(violations) > 0 else 0.0}"

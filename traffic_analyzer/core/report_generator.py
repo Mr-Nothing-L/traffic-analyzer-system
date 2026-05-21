@@ -97,7 +97,7 @@ class ReportGenerator:
         --------
         1. Video metadata header
         2. Overall traffic situation (Chinese)
-        3. Per-category analysis with confidence / evidence / reasoning
+        3. Per-category analysis with evidence / reasoning
         4. Final classification with binary encoding explanation
         5. Disposal recommendations
         """
@@ -213,7 +213,6 @@ class ReportGenerator:
                 for conc in da.conclusions:
                     lines.append(f"- **{conc.name} (道路 {conc.road_id})**:")
                     lines.append(f"  - 正常方向: **{conc.normal_direction}**")
-                    lines.append(f"  - 置信度: {conc.confidence:.2f}")
                     lines.append(f"  - 依据摘要: {conc.evidence_summary}")
                 lines.append("")
 
@@ -222,7 +221,7 @@ class ReportGenerator:
             lines.append("### 道路详情")
             for road in sc.roads:
                 lines.append(f"**道路 {road.road_id}**: {road.name}")
-                lines.append(f"- **正常方向**: {road.normal_direction} (置信度: {road.direction_confidence:.2f})")
+                lines.append(f"- **正常方向**: {road.normal_direction}")
                 lines.append(f"- **车道数**: {road.lane_count}")
                 lines.append(f"- **应急车道**: {'有' if road.has_emergency_lane else '无'}")
                 if road.direction_evidence:
@@ -425,7 +424,6 @@ class ReportGenerator:
         lines.append(name_line)
         lines.append("")
         lines.append(f"- **是否检测到**: {'是' if result.detected else '否'}")
-        lines.append(f"- **综合置信度**: {result.confidence:.2f}")
         if result.summary:
             lines.append(f"- **摘要**: {result.summary}")
         if result.reasoning:
@@ -436,7 +434,6 @@ class ReportGenerator:
             lines.append("#### 检测实例")
             for idx, inst in enumerate(result.instances, start=1):
                 lines.append(f"**实例 {idx}**")
-                lines.append(f"- **置信度**: {inst.confidence:.2f} ({inst.confidence_level.value})")
                 if inst.vehicle_id:
                     lines.append(f"- **车辆 ID**: {inst.vehicle_id}")
                 if inst.road_id is not None:

@@ -561,7 +561,16 @@ class LogicEngine:
         local_vars: Dict[str, Any],
         evidence_log: List[str],
     ) -> int:
-        """Execute a computation step."""
+        """Execute a computation step.
+
+        Supports three forms of compute_expression:
+        1. Single-line expression → evaluated with _safe_eval.
+        2. Multi-line function definition (starts with "def ") → executed with
+           _safe_exec, then the defined function is auto-discovered and called.
+        3. Multi-line code block with top-level ``return`` → executed with
+           _safe_exec in a fresh locals dict; the returned value is extracted
+           from the locals dict under the magic key ``__return_value__``.
+        """
         if not step.compute_expression:
             raise StepExecutionError(f"Step {step.step_id} missing compute_expression")
 
@@ -588,6 +597,17 @@ class LogicEngine:
                 if param_name in local_vars:
                     kwargs[param_name] = local_vars[param_name]
             result = func(**kwargs)
+        elif "\n" in expr or "return " in expr:
+            # Multi-line code block (e.g. with imports, loops, if/else, return)
+            # Wrap in a function so we can capture the return value reliably.
+            wrapped_code = "def __compute_fn__():\n" + "\n".join(
+                "    " + line for line in expr.splitlines()
+            )
+            exec_locals = _safe_exec(wrapped_code, local_vars)
+            func = exec_locals.get("__compute_fn__")
+            if func is None:
+                raise StepExecutionError("Failed to compile compute_expression wrapper")
+            result = func()
         else:
             # Single-line expression
             result = _safe_eval(expr, local_vars)
