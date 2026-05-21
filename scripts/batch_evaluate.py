@@ -907,7 +907,12 @@ def format_html_report(
 
     function playVideo(href, label) {{
       const url = encodeURI(href).replace(/#/g, '%23');
-      player.src = url;
+      // Use <source> element to properly set video type for MP4 files
+      player.innerHTML = '';
+      const source = document.createElement('source');
+      source.src = url;
+      source.type = 'video/mp4';
+      player.appendChild(source);
       player.load();
       player.play().catch(() => {{}});
       nowPlaying.textContent = label || href;
@@ -934,7 +939,9 @@ def format_html_report(
       }}
 
       try {{
-        const md = atob(mdB64);
+        // Proper UTF-8 decoding: atob() returns Latin-1 bytes; decode them as UTF-8
+        const bytes = Uint8Array.from(atob(mdB64), c => c.charCodeAt(0));
+        const md = new TextDecoder('utf-8').decode(bytes);
         if (typeof marked !== 'undefined') {{
           marked.setOptions({{ breaks: true, gfm: true }});
           reportPreview.className = '';
