@@ -32,7 +32,6 @@ prompt_templates:
             "road_id": <从0开始的索引>,
             "name": "<相对于摄像头的描述。示例：'左侧道路，车辆从画面顶部向底部行驶（从远到近）' 或 '右侧道路，车辆从画面底部向顶部行驶（从近到远）'。务必使用相对于摄像头/观察者的术语，并包含深度提示（从远到近 / 从近到远）。>",
             "normal_direction": "<toward_top|toward_bottom|toward_left|toward_right>",
-            "direction_confidence": <0.0-1.0>,
             "direction_reasoning": "<一句说明应用了哪条规则>",
             "lane_count": <车道数量>,
             "has_emergency_lane": <true|false>,
@@ -46,8 +45,7 @@ prompt_templates:
         "scene_description": "<简要整体描述>",
         "pedestrian_present": <true|false>,
         "non_motor_vehicle_present": <true|false>,
-        "thrown_object_present": <true|false>,
-        "confidence": <0.0-1.0>
+        "thrown_object_present": <true|false>
       }
 
       =============================================================================
@@ -166,7 +164,6 @@ prompt_templates:
           {
             "road_id": <整数>,
             "normal_direction": "<toward_top|toward_bottom|toward_left|toward_right>",
-            "confidence": <0.0-1.0>,
             "reasoning": "<基于观察到的车辆运动的简要说明>"
           }
         ]
@@ -257,7 +254,6 @@ prompt_templates:
             "behavior": "reversing",
             "start_time_sec": 0.0,
             "end_time_sec": 22.0,
-            "confidence": 0.9,
             "description": "白色轿车在应急车道倒车",
             "reasoning": "通过对比第1帧(0.0s)和第8帧(7.0s)，黄色抢险车相对于左侧护栏和交通锥的位置明显向画面下方移动...",
             "pixel_displacement_estimate": {
@@ -271,7 +267,6 @@ prompt_templates:
           }
         ],
         "detected": true,
-        "confidence": 0.9,
         "reasoning": "检测到1辆逆行车辆：右侧应急车道上的黄色抢险车..."
       }
 
@@ -279,7 +274,6 @@ prompt_templates:
       {
         "vehicles": [],
         "detected": false,
-        "confidence": 0.0,
         "reasoning": "详细说明检查了哪些车辆、对比了哪些帧、为什么判断没有逆行/倒车。例如：检查了右侧应急车道的工程车，对比第1帧和第8帧，该车位于施工区域（有锥桶和施工人员），根据规则不计入逆行；同时该车相对于交通锥的位置向画面下方移动，与正常车流方向一致。"
       }
 
@@ -326,22 +320,19 @@ prompt_templates:
           {
             "start_time_sec": <大致开始时间>,
             "end_time_sec": <大致结束时间>,
-            "confidence": <0.0-1.0>,
             "evidence_frames": [<帧索引>],
             "description": "<观察到的内容>",
             "reasoning": "<为什么认为这是该事件>"
           }
         ],
-        "summary": "<总体评估>",
-        "confidence": <0.0-1.0>
+        "summary": "<总体评估>"
       }
 
       如果事件中**不存在**该事件，返回：
       {
         "detected": false,
         "instances": [],
-        "summary": "视频中未检测到 {{ event_name }}。",
-        "confidence": 0.0
+        "summary": "视频中未检测到 {{ event_name }}。"
       }
 
       重要提示：所有文本字段 "description"、"reasoning" 和 "summary" 必须使用中文书写。
@@ -388,22 +379,19 @@ prompt_templates:
           {
             "start_time_sec": <大致开始时间>,
             "end_time_sec": <大致结束时间>,
-            "confidence": <0.0-1.0>,
             "evidence_frames": [<帧索引>],
             "description": "<观察到的内容：工人、设备、锥桶布置>",
             "reasoning": "<为什么属于或不属于施工：列出看到的和缺失的>"
           }
         ],
-        "summary": "<总体评估>",
-        "confidence": <0.0-1.0>
+        "summary": "<总体评估>"
       }
 
       如果事件中**不存在**施工，返回：
       {
         "detected": false,
         "instances": [],
-        "summary": "未检测到道路施工。说明看到了什么（如：只有一辆清扫车，无工人，无锥桶；或：有工程车但无锥桶隔离系统）。解释为什么认为不是施工（如没有用锥桶封闭区域；）",
-        "confidence": 0.0
+        "summary": "未检测到道路施工。说明看到了什么（如：只有一辆清扫车，无工人，无锥桶；或：有工程车但无锥桶隔离系统）。解释为什么认为不是施工（如没有用锥桶封闭区域；）"
       }
 
       重要：
@@ -465,22 +453,19 @@ prompt_templates:
           {
             "start_time_sec": <大致开始时间>,
             "end_time_sec": <大致结束时间>,
-            "confidence": <0.0-1.0>,
             "evidence_frames": [<帧索引>],
             "description": "<观察到的内容：车辆类型、颜色、在应急车道上的行为>",
             "reasoning": "<为什么判断为应急车道占用：车辆位置、行为描述>"
           }
         ],
-        "summary": "<总体评估>",
-        "confidence": <0.0-1.0>
+        "summary": "<总体评估>"
       }
 
       如果未检测到应急车道占用，返回：
       {
         "detected": false,
         "instances": [],
-        "summary": "未检测到应急车道占用。已仔细检查应急车道区域，未发现任何车辆。",
-        "confidence": 0.0
+        "summary": "未检测到应急车道占用。已仔细检查应急车道区域，未发现任何车辆。"
       }
 
       重要：
@@ -511,11 +496,9 @@ prompt_templates:
           {
             "lane_id": <整数>,
             "side": "<left|right>",
-            "bbox": [<x1, y1, x2, y2>],
-            "confidence": <0.0-1.0>
+            "bbox": [<x1, y1, x2, y2>]
           }
-        ],
-        "confidence": <0.0-1.0>
+        ]
       }
 
   # ---------------------------------------------------------------------------
@@ -542,8 +525,7 @@ prompt_templates:
             "lane_id": <整数>,
             "behavior": "<entering|stopping|traveling|parking>",
             "start_time_sec": <浮点数>,
-            "end_time_sec": <浮点数>,
-            "confidence": <0.0-1.0>
+            "end_time_sec": <浮点数>
           }
         ]
       }
@@ -568,8 +550,7 @@ prompt_templates:
           {
             "line_id": <整数>,
             "type": "<solid|dashed>",
-            "bbox": [<x1, y1, x2, y2>],
-            "confidence": <0.0-1.0>
+            "bbox": [<x1, y1, x2, y2>]
           }
         ]
       }
@@ -602,8 +583,7 @@ prompt_templates:
             "from_lane": <整数>,
             "to_lane": <整数>,
             "cross_position": [<x, y>],
-            "time_sec": <浮点数>,
-            "confidence": <0.0-1.0>
+            "time_sec": <浮点数>
           }
         ]
       }
@@ -662,22 +642,19 @@ prompt_templates:
           {
             "start_time_sec": <大致开始时间（秒）>,
             "end_time_sec": <大致结束时间（秒）>,
-            "confidence": <0.0-1.0>,
             "evidence_frames": [<帧索引>],
             "description": "<观察到的内容：车辆类型、颜色、停放位置、状态描述>",
             "reasoning": "<为什么判定为违法停车：车辆类型确认、静止状态判断、所在区域、排除规则检查结果>"
           }
         ],
-        "summary": "<总体评估：共检测到几辆违法停车车辆，分别位于什么位置，有无特殊情况>",
-        "confidence": <0.0-1.0>
+        "summary": "<总体评估：共检测到几辆违法停车车辆，分别位于什么位置，有无特殊情况>"
       }
 
       如果未检测到违法停车，返回：
       {
         "detected": false,
         "instances": [],
-        "summary": "未检测到违法停车。已逐帧检查所有车辆，所有车辆均在正常行驶，或静止车辆为非机动车/交通事故/正常等红灯。",
-        "confidence": 0.0
+        "summary": "未检测到违法停车。已逐帧检查所有车辆，所有车辆均在正常行驶，或静止车辆为非机动车/交通事故/正常等红灯。"
       }
 
       重要：
@@ -744,22 +721,19 @@ prompt_templates:
           {
             "start_time_sec": <大致开始时间（秒）>,
             "end_time_sec": <大致结束时间（秒）>,
-            "confidence": <0.0-1.0>,
             "evidence_frames": [<帧索引>],
             "description": "<观察到的内容：事故类型、涉及车辆、损坏程度、位置>",
             "reasoning": "<为什么判定为交通事故：看到的视觉证据、排除其他可能性的理由>"
           }
         ],
-        "summary": "<总体评估：事故严重程度、影响范围、涉及车辆数>",
-        "confidence": <0.0-1.0>
+        "summary": "<总体评估：事故严重程度、影响范围、涉及车辆数>"
       }
 
       如果未检测到交通事故，返回：
       {
         "detected": false,
         "instances": [],
-        "summary": "未检测到交通事故。已逐帧检查所有视频帧，未发现车辆碰撞、翻车、起火、散落物等事故迹象。所有车辆正常行驶或停放。",
-        "confidence": 0.0
+        "summary": "未检测到交通事故。已逐帧检查所有视频帧，未发现车辆碰撞、翻车、起火、散落物等事故迹象。所有车辆正常行驶或停放。"
       }
 
       重要：
@@ -824,22 +798,19 @@ prompt_templates:
           {
             "start_time_sec": <大致开始时间（秒）>,
             "end_time_sec": <大致结束时间（秒）>,
-            "confidence": <0.0-1.0>,
             "evidence_frames": [<帧索引>],
             "description": "<观察到的内容：行人位置、行为、穿着、人数>",
             "reasoning": "<为什么判定为行人：人形特征确认、位置描述、排除施工/误报源的理由>"
           }
         ],
-        "summary": "<总体评估：共发现多少行人，分布在什么位置，有无危险行为>",
-        "confidence": <0.0-1.0>
+        "summary": "<总体评估：共发现多少行人，分布在什么位置，有无危险行为>"
       }
 
       如果未检测到行人，返回：
       {
         "detected": false,
         "instances": [],
-        "summary": "未检测到高速公路行人。已逐帧检查所有视频帧，未发现人形目标。所有疑似目标经排查确认为标志牌、阴影、植被等误报源，或位于施工区域内的 authorized 作业人员。",
-        "confidence": 0.0
+        "summary": "未检测到高速公路行人。已逐帧检查所有视频帧，未发现人形目标。所有疑似目标经排查确认为标志牌、阴影、植被等误报源，或位于施工区域内的 authorized 作业人员。"
       }
 
       重要：
@@ -952,7 +923,6 @@ prompt_templates:
           {
             "start_time_sec": <大致开始时间（秒）>,
             "end_time_sec": <大致结束时间（秒）>,
-            "confidence": <0.0-1.0>,
             "evidence_frames": [<帧索引>],
             "vehicle_type": "<motorcycle|electric_bicycle|bicycle|tricycle|electric_tricycle|scooter|unknown_two_wheel_or_three_wheel>",
             "position": "<所在位置描述>",
@@ -961,16 +931,14 @@ prompt_templates:
             "reasoning": "<为什么判定为本事件：两轮/三轮结构、车身尺寸、骑乘姿态、位置、运动状态，以及排除行人/施工设备/普通机动车/标志牌等误报源的依据>"
           }
         ],
-        "summary": "<总体评估：共发现多少辆非机动车或两轮/三轮异常车辆，分别是什么类型，位于什么位置>",
-        "confidence": <0.0-1.0>
+        "summary": "<总体评估：共发现多少辆非机动车或两轮/三轮异常车辆，分别是什么类型，位于什么位置>"
       }
 
       如果未检测到，返回：
       {
         "detected": false,
         "instances": [],
-        "summary": "未检测到非机动车及两轮/三轮异常车辆。已逐帧检查所有视频帧，未发现摩托车、电动自行车、自行车、三轮车、滑板车等目标。",
-        "confidence": 0.0
+        "summary": "未检测到非机动车及两轮/三轮异常车辆。已逐帧检查所有视频帧，未发现摩托车、电动自行车、自行车、三轮车、滑板车等目标。"
       }
 
       重要：
@@ -1030,22 +998,19 @@ prompt_templates:
           {
             "start_time_sec": <float>,
             "end_time_sec": <float>,
-            "confidence": <0.0-1.0>,
             "evidence_frames": [<int>],
             "description": "<中文描述：拥堵位置、涉及车道、排队长度、车辆状态等>",
             "reasoning": "<中文推理：详细说明判断依据，包括车速观察、车间距、排队长度、多车道状态、是否排除事故等>"
           }
         ],
-        "summary": "<中文总体评估：是否检测到严重拥堵，拥堵程度描述，涉及范围>",
-        "confidence": <0.0-1.0>
+        "summary": "<中文总体评估：是否检测到严重拥堵，拥堵程度描述，涉及范围>"
       }
 
       如果未检测到严重交通拥堵，返回：
       {
         "detected": false,
         "instances": [],
-        "summary": "<中文说明：未检测到严重交通拥堵。描述实际交通状态（如：车流正常通行、车流密集但速度正常、单车道缓慢但其他车道正常等），并说明为什么不符合严重拥堵的判断标准>",
-        "confidence": 0.0
+        "summary": "<中文说明：未检测到严重交通拥堵。描述实际交通状态（如：车流正常通行、车流密集但速度正常、单车道缓慢但其他车道正常等），并说明为什么不符合严重拥堵的判断标准>"
       }
 
       重要：
@@ -1123,22 +1088,19 @@ prompt_templates:
           {
             "start_time_sec": <float>,
             "end_time_sec": <float>,
-            "confidence": <0.0-1.0>,
             "evidence_frames": [<int>],
             "description": "<中文描述：抛洒物类型、颜色、大小、所在车道位置、状态（静止/滚动/飘落等）>",
             "reasoning": "<中文推理：详细说明发现过程、帧间对比结果、为什么判断为抛洒物、排除了哪些正常设施等>"
           }
         ],
-        "summary": "<中文总体评估：是否检测到抛洒物，涉及数量和类型，对交通的潜在影响>",
-        "confidence": <0.0-1.0>
+        "summary": "<中文总体评估：是否检测到抛洒物，涉及数量和类型，对交通的潜在影响>"
       }
 
       如果未检测到抛洒物，返回：
       {
         "detected": false,
         "instances": [],
-        "summary": "<中文说明：未检测到抛洒物。详细说明检查过程，包括检查了哪些区域、对比了哪些帧、排除了哪些可疑目标（如：检查了所有车道路面，未发现与路面颜色/纹理不一致的异物；远处路面清晰，无异常像素块；帧间对比未发现新出现或移动的物体等）>",
-        "confidence": 0.0
+        "summary": "<中文说明：未检测到抛洒物。详细说明检查过程，包括检查了哪些区域、对比了哪些帧、排除了哪些可疑目标（如：检查了所有车道路面，未发现与路面颜色/纹理不一致的异物；远处路面清晰，无异常像素块；帧间对比未发现新出现或移动的物体等）>"
       }
 
       重要：
@@ -1210,22 +1172,19 @@ prompt_templates:
           {
             "start_time_sec": <float>,
             "end_time_sec": <float>,
-            "confidence": <0.0-1.0>,
             "evidence_frames": [<int>],
             "description": "<中文描述：违规车辆类型、颜色、从哪条车道跨越至哪条车道、跨越的实线类型、所在道路>",
             "reasoning": "<中文推理：详细说明变道过程、起始帧和结束帧的车辆位置、跨越的是实线还是虚线、为什么判定为实线变道违规、排除了哪些正常压线情况等>"
           }
         ],
-        "summary": "<中文总体评估：是否检测到实线变道违规，涉及车辆数量，违规类型分布>",
-        "confidence": <0.0-1.0>
+        "summary": "<中文总体评估：是否检测到实线变道违规，涉及车辆数量，违规类型分布>"
       }
 
       如果未检测到实线变道违规，返回：
       {
         "detected": false,
         "instances": [],
-        "summary": "<中文说明：未检测到实线变道违规。描述实际交通状态（如：所有车辆均在各自车道内正常行驶；有车辆变道但跨越的是虚线；有车辆短暂压线但车身仍在原车道内等），并说明为什么不符合实线变道的判断标准>",
-        "confidence": 0.0
+        "summary": "<中文说明：未检测到实线变道违规。描述实际交通状态（如：所有车辆均在各自车道内正常行驶；有车辆变道但跨越的是虚线；有车辆短暂压线但车身仍在原车道内等），并说明为什么不符合实线变道的判断标准>"
       }
 
       重要：

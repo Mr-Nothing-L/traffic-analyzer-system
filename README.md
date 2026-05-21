@@ -392,11 +392,11 @@ python3 scripts/batch_infer.py \
 将推理报告与真实标签对比，输出每类事件的精确率、召回率、F1 分数：
 
 ```bash
-# 基本用法（从视频文件名提取真实标签）
+# 默认：生成 HTML 交互式报告
 python3 scripts/batch_evaluate.py \
   --video-dir ./videos \
   --report-dir ./reports \
-  --output evaluation_result.json
+  --output evaluation_report.html
 
 # 使用独立标注文件
 python3 scripts/batch_evaluate.py \
@@ -404,6 +404,18 @@ python3 scripts/batch_evaluate.py \
   --report-dir ./reports \
   --gt-mode annotation_file \
   --annotation-file ./annotations.json \
+  --output evaluation_report.html
+
+# 显式指定 Markdown 表格报告
+python3 scripts/batch_evaluate.py \
+  --video-dir ./videos \
+  --report-dir ./reports \
+  --output evaluation_report.md
+
+# 显式指定 JSON 原始数据
+python3 scripts/batch_evaluate.py \
+  --video-dir ./videos \
+  --report-dir ./reports \
   --output evaluation_result.json
 
 # 单类别模式（只评估 config 中 is_active=true 的事件）
@@ -412,7 +424,7 @@ python3 scripts/batch_evaluate.py \
   --report-dir ./reports \
   --single-class \
   --config-dir ./traffic_analyzer/config \
-  --output evaluation_result.json
+  --output evaluation_report.html
 ```
 
 参数说明：
@@ -421,7 +433,7 @@ python3 scripts/batch_evaluate.py \
 |---|---|---|
 | `--video-dir` / `-v` | 视频目录（用于提取真实标签） | - |
 | `--report-dir` / `-r` | 报告目录（`.md` 或 `.json`） | - |
-| `--output` | 评估结果输出路径（支持 `.json` / `.md` / `.html`） | `evaluation_result.json` |
+| `--output` | 评估结果输出路径（支持 `.html` / `.md` / `.json`，按扩展名自动识别格式） | `evaluation_report.html` |
 | `--gt-mode` | 真实标签来源 (`filename` / `annotation_file`) | `filename` |
 | `--annotation-file` | 标注文件路径（JSON 或 CSV） | - |
 | `--single-class` | 只评估 `is_active=true` 的事件 | - |
@@ -430,9 +442,9 @@ python3 scripts/batch_evaluate.py \
 **单类别模式 (`--single-class`)**：当某些事件被设为 `is_active: false` 时，这些事件会被完全排除在评估指标之外，避免关闭的事件拉低整体分数。
 
 **输出格式**：根据 `--output` 的文件扩展名自动选择：
-- `.json` — 原始 JSON 数据，含每事件和每视频指标
+- `.html` — 交互式 HTML 报告（默认，见下文）
 - `.md` — Markdown 表格，含事件汇总 + 逐视频详情表（`file://` 可点击链接）
-- `.html` — 交互式 HTML 报告（见下文）
+- `.json` — 原始 JSON 数据，含每事件和每视频指标
 
 评估结果包含：
 - 每类事件的 TP / FP / FN / 精确率 / 召回率 / F1
@@ -469,18 +481,18 @@ python3 scripts/batch_infer.py \
   --workers 4 \
   --format markdown
 
-# 2. 生成 Markdown 评估报告
-python3 scripts/batch_evaluate.py \
-  --video-dir ./测试视频 \
-  --report-dir ./output \
-  --output ./evaluation_report.md \
-  --single-class
-
-# 3. 生成 HTML 交互式报告
+# 2. 生成 HTML 交互式评估报告（默认）
 python3 scripts/batch_evaluate.py \
   --video-dir ./测试视频 \
   --report-dir ./output \
   --output ./evaluation_report.html \
+  --single-class
+
+# 3. （可选）生成 Markdown 表格报告
+python3 scripts/batch_evaluate.py \
+  --video-dir ./测试视频 \
+  --report-dir ./output \
+  --output ./evaluation_report.md \
   --single-class
 ```
 

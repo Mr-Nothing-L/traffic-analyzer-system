@@ -8,7 +8,7 @@ Usage:
     python scripts/batch_evaluate.py \
         --video-dir /path/to/videos \
         --report-dir /path/to/reports \
-        --output evaluation_result.json
+        --output evaluation_report.html
 
     # With annotation file
     python scripts/batch_evaluate.py \
@@ -16,7 +16,7 @@ Usage:
         --report-dir /path/to/reports \
         --gt-mode annotation_file \
         --annotation-file /path/to/annotations.json \
-        --output evaluation_result.json
+        --output evaluation_report.html
 
     # Single-class mode (only evaluate is_active=true events from config)
     python scripts/batch_evaluate.py \
@@ -24,7 +24,7 @@ Usage:
         --report-dir /path/to/reports \
         --single-class \
         --config-dir ./traffic_analyzer/config \
-        --output evaluation_result.json
+        --output evaluation_report.html
 """
 
 from __future__ import annotations
@@ -1022,8 +1022,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     parser.add_argument(
         "--output",
-        default="evaluation_result.json",
-        help="Path to write evaluation JSON (default: evaluation_result.json).",
+        default="evaluation_report.html",
+        help=(
+            "Output file path. Format is auto-detected from extension: "
+            ".html -> interactive HTML report (default), "
+            ".md -> Markdown table, "
+            ".json -> JSON data."
+        ),
     )
     parser.add_argument(
         "--gt-mode",
