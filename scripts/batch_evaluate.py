@@ -62,6 +62,17 @@ EVENT_NAMES: Dict[int, str] = {
 
 NUM_EVENTS = 10
 
+# Action ID (filename prefix number) -> event_id mapping
+# Based on annotation document v4.5:
+#   1=违法停车->0, 2=应急车道占用->1, 3=交通事故->2, 4=行人出现->3,
+#   5=摩托车出现->4, 6=严重拥堵->5, 7=道路施工->6, 8=车辆逆行/倒车->7,
+#   9=Normal (skip), 10=抛洒物->8, 11=实线变道->9
+ACTION_TO_EVENT_ID = {
+    1: 0, 2: 1, 3: 2, 4: 3, 5: 4,
+    6: 5, 7: 6, 8: 7,
+    10: 8, 11: 9,
+}
+
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -82,14 +93,14 @@ def _setup_logging(log_level: str = "INFO") -> logging.Logger:
 def extract_gt_from_filename(filename: str) -> Set[int]:
     """Extract ground-truth event IDs from a video filename.
 
-    Default pattern: numbers before ``_Event_`` are 1-based event IDs.
+    Default pattern: numbers before ``_Event_`` are action IDs from the
+    annotation document (v4.5).  They map to event_ids via ACTION_TO_EVENT_ID.
     Examples:
-        ``01-02-07-11_Event_65536_...``  -> {0, 1, 6}
-        ``02-04-07-08-10_Event_...``     -> {1, 3, 6, 7, 9}
+        ``01-02-07-11_Event_65536_...``  -> {0, 1, 6, 9}
+        ``02-04-07-08-10_Event_...``     -> {1, 3, 6, 7, 8}
         ``06_Event_...``                  -> {5}
 
-    The number ``11`` does not map to any valid event (max is 10 -> event 9)
-    and is silently ignored.
+    Action ID ``9`` (Normal) and any unknown number are silently skipped.
     """
     # Match the prefix before _Event_
     match = re.match(r"^([\d\-]+)_Event_", filename)
@@ -103,8 +114,8 @@ def extract_gt_from_filename(filename: str) -> Set[int]:
         if not part.isdigit():
             continue
         num = int(part)
-        event_id = num - 1  # 1-based -> 0-based
-        if 0 <= event_id < NUM_EVENTS:
+        event_id = ACTION_TO_EVENT_ID.get(num)
+        if event_id is not None:
             event_ids.add(event_id)
     return event_ids
 
@@ -462,12 +473,11 @@ def format_html_report(
     summary_rows = []
     for eid in range(NUM_EVENTS):
         ev = per_event[str(eid)]
-        total = ev["tp"] + ev["fn"]
         summary_rows.append(
             f"<tr>"
             f"<td>{eid}</td>"
             f"<td>{html.escape(ev['name'])}</td>"
-            f"<td>{total}</td>"
+            f"<td>{ev['gt_count']}</td>"
             f"<td>{ev['tp']}</td>"
             f"<td>{ev['fp']}</td>"
             f"<td>{ev['fn']}</td>"
