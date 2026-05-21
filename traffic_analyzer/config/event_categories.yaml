@@ -63,7 +63,7 @@ event_categories:
     name: "Traffic Accident"
     name_zh: "交通事故"
     description: "车辆碰撞、翻车、起火、散落物等突发事件"
-    detection_mode: "logic_chain"
+    detection_mode: "direct_vlm"
     logic_chain_id: "accident_scene_tag"
     prompt_template_id: "traffic_accident_detection"
     confidence_threshold: 0.7

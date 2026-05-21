@@ -281,8 +281,9 @@ class LogicEngine:
                 "local_vars": context.local_vars,
             }
             try:
+                precondition_expr = " ".join(logic_chain.precondition.split())
                 precondition_met = bool(
-                    eval(logic_chain.precondition, {"__builtins__": {}}, eval_locals)
+                    eval(precondition_expr, {"__builtins__": {}}, eval_locals)
                 )
             except Exception as exc:
                 logger.warning(
