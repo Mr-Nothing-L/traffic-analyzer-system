@@ -101,13 +101,22 @@ def extract_gt_from_filename(filename: str) -> Set[int]:
         ``06_Event_...``                  -> {5}
 
     Action ID ``9`` (Normal) and any unknown number are silently skipped.
-    """
-    # Match the prefix before _Event_
-    match = re.match(r"^([\d\-]+)_Event_", filename)
-    if not match:
-        return set()
 
-    prefix = match.group(1)
+    Supports two filename patterns:
+        ``01-02-08_Event_xxx_...``  -> standard format
+        ``01-02-08_20260514-...``    -> date-stamp format (no _Event_)
+    """
+    # Try standard pattern first: prefix before _Event_
+    match = re.match(r"^([\d\-]+)_Event_", filename)
+    if match:
+        prefix = match.group(1)
+    else:
+        # Fallback: leading digit-dash prefix before any _ that is NOT _Event_
+        # Handles date-stamp filenames like 01-02-08_20260514-173730_前半段.mp4
+        match = re.match(r"^([\d\-]+)_(?!Event_)", filename)
+        if not match:
+            return set()
+        prefix = match.group(1)
     event_ids: Set[int] = set()
     for part in prefix.split("-"):
         part = part.strip()
@@ -1205,8 +1214,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         video_abs = str(video_path.resolve())
         report_abs = str(report_path.resolve())
-        video_uri = f"file://{video_abs}"
-        report_uri = f"file://{report_abs}"
+
+        # Use relative paths for HTML so the report works when packaged and shared
+        try:
+            html_base_dir = output_path.parent.resolve()
+            video_rel = video_path.resolve().relative_to(html_base_dir)
+            report_rel = report_path.resolve().relative_to(html_base_dir)
+            video_uri = str(video_rel)
+            report_uri = str(report_rel)
+        except ValueError:
+            # Fallback to absolute file:// URIs when paths are on different filesystems
+            video_uri = f"file://{video_abs}"
+            report_uri = f"file://{report_abs}"
 
         # Read report content for HTML embedding
         try:
