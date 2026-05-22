@@ -170,8 +170,7 @@ event_categories:
     name: "Lane Change over Solid Line"
     name_zh: "实线变道"
     description: "车辆跨越实线标线变道"
-    detection_mode: "logic_chain"
-    logic_chain_id: "lane_change_solid"
+    detection_mode: "direct_vlm"
     prompt_template_id: "lane_change_solid_detection"
     confidence_threshold: 0.7
     is_active: false
