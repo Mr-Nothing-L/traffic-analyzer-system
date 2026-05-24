@@ -1,276 +1,523 @@
 # Traffic Analyzer / 交通事件分析系统
 
-基于多模态大模型（VLM）的高速公路监控视频交通事件检测框架，支持 **10 类事件识别**，输出二进制编码结果。所有事件检测模式、模板、推断规则均通过 YAML 配置，新增事件无需修改代码。
+[English](#english-version) | [中文](#中文版)
 
 ---
 
-## 支持的事件
+## English Version
 
-| ID | 事件名称 | 检测模式 | 说明 |
+[Back to top](#traffic-analyzer--交通事件分析系统) | [中文](#中文版)
+
+A multi-modal large vision model (VLM) based traffic event detection framework for highway surveillance video. Supports **10 event categories**, outputs a 10-bit binary encoding plus a detailed Markdown analysis report. All event definitions, prompt templates, and adjudication rules are driven by YAML configuration — adding a new event requires zero code changes.
+
+> **Current version: v2.0.0** — Multi-agent expert + adjudication architecture (see [Version Tags](#version-tags)).
+
+---
+
+### Architecture Overview (v2.0.0)
+
+The v2.0.0 architecture replaces the monolithic v1.5 pipeline with a **multi-agent expert layer + single VLM adjudication** design:
+
+```
+Video Input
+    |
+    v
+1. Video Preprocessing
+   - Coarse sampling + precision keyframe extraction
+   - Two-stage sampling (dense early + uniform late)
+    |
+    v
+2. ExpertAgentLayer (10 parallel ExpertAgents)
+   Each ExpertAgent: single-event VLM call -> EventCandidate
+   - Only fact identification (see it, report it)
+   - No filtering or exclusion logic
+    |
+    v
+3. AdjudicationStep (single VLM call)
+   Input: all EventCandidates + keyframes + business rules
+   Output: final EventResults + AuditLog
+   - Resolves conflicts (e.g. accident suppresses parking)
+   - Applies business rules from YAML
+    |
+    v
+4. Report Generation
+   - Markdown report (human-readable, per-step timing)
+   - Binary encoding {bit_0_bit_1_..._bit_9}
+   - Audit log of every inclusion / exclusion decision
+```
+
+**Key improvement over v1.5**: Instead of a single ~30s scene-understanding bottleneck followed by mixed detection modes, all 10 events are detected in parallel by dedicated expert agents, then a single adjudication call resolves conflicts using explicit business rules. This is more accurate, more auditable, and easier to tune.
+
+---
+
+### Supported Events
+
+| ID | Code | Name | is_active |
 |---|---|---|---|
-| 0 | 违法停车 | `direct_vlm` | 单次 VLM 调用直接检测 |
-| 1 | 应急车道占用 | `scene_tag` | 从场景描述标签推断，零 VLM 调用 |
-| 2 | 交通事故 | `logic_chain` | 多步逻辑链，基于场景标签解析 |
-| 3 | 高速公路行人出现 | `scene_tag` | 从 `pedestrian_present` 布尔字段推断 |
-| 4 | 摩托车出现 | `scene_tag` | 从 `non_motor_vehicle_present` 布尔字段推断 |
-| 5 | 严重拥堵 | `direct_vlm` | 单次 VLM 调用直接检测 |
-| 6 | 道路施工 | `direct_vlm` | 单次 VLM 调用直接检测 |
-| 7 | 车辆逆行/倒车 | `logic_chain` | 多步逻辑链，帧对比分析 |
-| 8 | 抛洒物 | `direct_vlm` | 单次 VLM 调用直接检测 |
-| 9 | 实线变道 | `logic_chain` | 多步逻辑链，车道线识别+变道追踪 |
+| 0 | A | Illegal Parking | true |
+| 1 | B | Emergency Lane Occupancy | true |
+| 2 | C | Traffic Accident | true |
+| 3 | D | Person Presence in Highway | true |
+| 4 | E | Motorcycle Presence | true |
+| 5 | F | Heavy Congestion | true |
+| 6 | G | Road Construction | true |
+| 7 | H | Vehicle Reversing | true |
+| 8 | J | Thrown Objects | true |
+| 9 | K | Lane Change over Solid Line | false |
+
+All events use `detection_mode: "expert_agent"` in v2.0.0.
 
 ---
 
-## 三种检测模式
+### Key Features
 
-### 1. `direct_vlm` — 直接 VLM 检测
+#### 1. Expert Agent Layer
 
-为每个事件配置专用 Prompt 模板，单次 VLM 调用完成检测。适合需要直接视觉判断的事件。
+Each active event gets its own **ExpertAgent** — a dedicated VLM call with a specialized prompt. Agents run in parallel via `ThreadPoolExecutor`. Each agent only performs **fact identification** (what it sees) without any filtering. This separation of concerns makes the system modular and debuggable.
 
-- **配置项**: `prompt_template_id` — 引用 `prompt_templates.yaml` 中的模板
-- **优点**: 简单直接
-- **缺点**: 可能误判（如将工程车误判为事故）
+#### 2. Adjudication Step
 
-### 2. `logic_chain` — 多步逻辑链检测
+A **single VLM call** receives all expert candidates, keyframes, and business rules, then outputs:
+- Final `EventResult` for each event (detected / not detected)
+- `AuditLog` recording every inclusion / exclusion decision with reasoning
+- `adjudication_reasoning` explaining the overall decision process
 
-通过 YAML 定义多步骤检测流程（`vlm_call` → `compute` → `condition` → `aggregate`）。适合需要多步推理的复杂事件。
+Business rules are defined in `event_categories.yaml` under `adjudication_rules:` and embedded into the adjudication prompt. Example rules:
+- **Accident suppresses parking** — stationary vehicles in an accident scene are part of the accident, not illegal parking
+- **Construction excludes emergency lane** — vehicles inside a construction zone are not emergency lane violations
+- **Motorcycle excludes emergency lane** — a motorcycle on the shoulder is tagged as "motorcycle presence", not "emergency lane occupancy"
 
-- **配置项**: `logic_chain_id` — 引用 `logic_chains.yaml` 中的逻辑链
-- **示例**: 逆行检测使用 3 步链（VLM 帧对比 → 条件判断 → 结果聚合）
-- **优点**: 结构化推理，可融入先验知识
-- **缺点**: 更多 VLM 调用，延迟更高
+#### 3. Audit Log
 
-### 3. `scene_tag` — 场景标签推断（零 VLM 调用）
+Every event that is excluded during adjudication is recorded with a reason and the triggering rule ID. This makes the system transparent and helps debug false negatives.
 
-完全不调用 VLM，直接从 `scene_understanding` 的结构化输出推断结果。
+```json
+{
+  "event_id": 0,
+  "event_name": "Illegal Parking",
+  "action": "excluded",
+  "reason": "Vehicle is part of an accident scene",
+  "rule_id": "accident_suppresses_parking"
+}
+```
 
-- **配置项**:
-  - `scene_boolean_field` — `SceneInfo` 布尔字段名（如 `pedestrian_present`）
-  - `scene_tag_key` — `scene_description` 中的标签键（如 `应急车道车辆`）
-- **优点**: 零额外 VLM 调用，最快，最可靠
-- **缺点**: 仅适用于可从场景整体分析确定的事件
+#### 4. Config-Driven Design
+
+All of the following are defined in YAML — no code changes needed:
+- Event definitions (`event_categories.yaml`)
+- Prompt templates (`prompt_templates.yaml`)
+- Adjudication rules (`event_categories.yaml`)
+- Legacy logic chains (`logic_chains.yaml`, kept for reference)
 
 ---
 
-## 配置化设计
+### Project Structure
 
-### 事件配置 (`event_categories.yaml`)
-
-每个事件可独立配置检测模式和相关参数：
-
-```yaml
-- event_id: 1
-  name: "Emergency Lane Occupancy"
-  name_zh: "应急车道占用"
-  detection_mode: "scene_tag"
-  scene_tag_key: "应急车道车辆"  # 从 scene_description 标签推断
-  is_active: true
 ```
-
-#### 关闭某个事件检测
-
-将 `is_active` 设为 `false` 即可关闭该事件的检测（保留二进制编码位，节省 VLM 调用）：
-
-```yaml
-- event_id: 9
-  name: "Lane Change over Solid Line"
-  name_zh: "实线变道"
-  # ...
-  is_active: false   # 关闭此事件检测
+traffic_analyzer/
+├── config/
+│   ├── event_categories.yaml      # Event definitions + adjudication_rules
+│   ├── logic_chains.yaml          # Legacy logic chains (kept for reference)
+│   └── prompt_templates.yaml      # VLM Prompt templates + adjudication template
+├── core/
+│   ├── config_manager.py          # Config loading, validation
+│   ├── expert_agent.py            # Single-event detection agent
+│   ├── logic_engine.py            # Logic chain execution engine
+│   ├── pipeline_steps.py          # ExpertAgentLayer + AdjudicationStep
+│   ├── report_generator.py        # Report generation
+│   ├── video_preprocessor.py      # Video frame extraction
+│   └── vlm_engine.py              # VLM wrapper (multi-provider + cache)
+├── models/
+│   └── schemas.py                 # Pydantic models (EventCandidate, AdjudicationResult, AuditEntry)
+├── orchestrator/
+│   └── analysis_orchestrator.py   # 4-step pipeline orchestrator
+├── utils/
+│   └── event_detection.py         # Image selection + response parsing helpers
+└── config/
+    └── .env                       # LLM provider config (API Key, etc.)
 ```
-
-**注意**：不要直接注释掉事件定义，否则二进制编码位数会改变，影响下游解析。使用 `is_active: false` 是正确做法。
-
-### 跨事件推断规则 (`cross_event_inference_rules`)
-
-支持在 YAML 中配置跨事件推断，无需改代码：
-
-```yaml
-cross_event_inference_rules:
-  - rule_id: "parking_to_emergency"
-    target_event_id: 1      # 推断目标：应急车道占用
-    source_event_id: 0      # 源事件：违法停车
-    source_description_keywords: ["shoulder", "emergency", "路肩", "应急"]
-    confidence_multiplier: 0.9
-```
-
-### Prompt 模板 (`prompt_templates.yaml`)
-
-所有 VLM 调用的 Prompt 集中管理，支持 Jinja2 变量替换。`direct_vlm` 事件通过 `prompt_template_id` 引用模板。
 
 ---
 
-## 分析流程
+### Quick Start
+
+#### 1. Configure LLM Provider
+
+```bash
+cp traffic_analyzer/config/.env.example traffic_analyzer/config/.env
+# Edit .env, set API Key and model
+```
+
+Supported environment variables:
+
+| Variable | Description | Default |
+|---|---|---|
+| `LLM_PROVIDER` | VLM provider (`anthropic` / `google` / `aliyun`) | `anthropic` |
+| `LLM_API_KEY` | API Key | - |
+| `LLM_MODEL` | Model name | `claude-sonnet-4-6` |
+| `LLM_MAX_TOKENS` | Max output tokens | `4096` |
+| `LLM_TEMPERATURE` | Sampling temperature | `0.2` |
+| `LLM_TIMEOUT` | API timeout (seconds) | `120` |
+| `LLM_MAX_RETRIES` | Max retry count | `3` |
+| `LLM_ENABLE_CACHE` | Enable VLM result cache | `true` |
+| `LLM_CACHE_MAX_SIZE` | Max cache entries | `128` |
+| `VLM_MAX_FRAMES` | Max frames per VLM call | `10` |
+| `PROMPT_VERSION_{TEMPLATE_ID}` | Force a specific prompt version | - |
+
+#### 2. Install pre-commit hook (recommended)
+
+```bash
+pip install pre-commit
+pre-commit install
+```
+
+Automatically validates config changes on commit to prevent invalid YAML from being committed.
+
+#### 3. Validate Configuration
+
+```bash
+python3 -m traffic_analyzer validate-config \
+  --config-dir ./traffic_analyzer/config
+```
+
+Validates:
+- YAML syntax and structure
+- Event category -> prompt template cross-references
+- Adjudication rule integrity
+- Logic chain step references (for legacy chains)
+
+#### 4. Run Analysis
+
+```bash
+# Basic usage (default 30 frames)
+python3 -m traffic_analyzer analyze \
+  --video ./path/to/video.mp4 \
+  --format markdown \
+  --output ./report.md
+
+# Fast mode (10 frames, for short videos / testing)
+python3 -m traffic_analyzer analyze \
+  --video ./path/to/video.mp4 \
+  --format markdown \
+  --output ./report.md \
+  --min-frames 10
+
+# With CV track cross-validation
+python3 -m traffic_analyzer analyze \
+  --video ./path/to/video.mp4 \
+  --cv-tracks ./tracks.json \
+  --format markdown \
+  --output ./report.md
+```
+
+#### 5. Python API
+
+```python
+from traffic_analyzer.orchestrator.analysis_orchestrator import AnalysisOrchestrator
+
+orch = AnalysisOrchestrator.from_config_dir('traffic_analyzer/config')
+report = orch.analyze('path/to/video.mp4')
+print(report.binary_encoding.encoding_string)
+print(report.event_results)
+```
+
+---
+
+### Batch Inference & Evaluation
+
+Two batch processing scripts are provided in the `scripts/` directory.
+
+#### Batch Inference (`batch_infer.py`)
+
+```bash
+python3 scripts/batch_infer.py \
+  --video-dir ./videos \
+  --output-dir ./reports \
+  --log-dir ./logs \
+  --workers 4 \
+  --format markdown \
+  --min-frames 30
+```
+
+| Parameter | Description | Default |
+|---|---|---|
+| `--video-dir` / `-v` | Input video directory (required) | - |
+| `--output-dir` / `-o` | Output report directory (required) | - |
+| `--config-dir` / `-c` | Config directory | `./traffic_analyzer/config` |
+| `--format` / `-f` | Output format (`markdown` / `json`) | `markdown` |
+| `--min-frames` / `-m` | VLM max input frames | `30` |
+| `--cv-tracks-dir` | CV track JSON directory (optional) | - |
+| `--workers` / `-w` | Parallel workers (ProcessPoolExecutor) | CPU cores |
+| `--log-dir` / `-l` | Per-video log directory | - |
+| `--skip-existing` | Skip videos with existing reports (default) | `true` |
+| `--no-skip-existing` | Force reprocess all videos | - |
+
+#### Batch Evaluation (`batch_evaluate.py`)
+
+```bash
+# Default: interactive HTML report
+python3 scripts/batch_evaluate.py \
+  --video-dir ./videos \
+  --report-dir ./reports \
+  --output evaluation_report.html
+
+# With standalone annotation file
+python3 scripts/batch_evaluate.py \
+  --video-dir ./videos \
+  --report-dir ./reports \
+  --gt-mode annotation_file \
+  --annotation-file ./annotations.json \
+  --output evaluation_report.html
+
+# Markdown table report
+python3 scripts/batch_evaluate.py \
+  --video-dir ./videos \
+  --report-dir ./reports \
+  --output evaluation_report.md
+
+# Single-class mode (only evaluate is_active=true events)
+python3 scripts/batch_evaluate.py \
+  --video-dir ./videos \
+  --report-dir ./reports \
+  --single-class \
+  --config-dir ./traffic_analyzer/config \
+  --output evaluation_report.html
+```
+
+| Parameter | Description | Default |
+|---|---|---|
+| `--video-dir` / `-v` | Video directory (for ground-truth extraction) | - |
+| `--report-dir` / `-r` | Report directory (`.md` or `.json`) | - |
+| `--output` | Output path (`.html` / `.md` / `.json`, auto-detected by extension) | `evaluation_report.html` |
+| `--gt-mode` | Ground-truth source (`filename` / `annotation_file`) | `filename` |
+| `--annotation-file` | Annotation file path (JSON or CSV) | - |
+| `--single-class` | Only evaluate `is_active=true` events | - |
+| `--config-dir` / `-c` | Config directory (for `--single-class`) | `./traffic_analyzer/config` |
+
+**HTML Interactive Report Features:**
+- Left panel: event statistics table + per-video results table (filterable by pass/fail)
+- Right panel: video player + Markdown report preview
+- Click a table row to play the video, click a report link to preview Markdown
+- All data is inline-embedded using `file://` absolute paths — open directly in a browser, no HTTP server needed
+
+**Full Batch Workflow:**
+
+```bash
+# 1. Batch inference (4 parallel workers, save logs)
+python3 scripts/batch_infer.py \
+  --video-dir ./test_videos \
+  --output-dir ./output \
+  --log-dir ./log \
+  --workers 4 \
+  --format markdown
+
+# 2. Generate HTML evaluation report
+python3 scripts/batch_evaluate.py \
+  --video-dir ./test_videos \
+  --report-dir ./output \
+  --output ./evaluation_report.html \
+  --single-class
+
+# 3. (Optional) Generate Markdown table report
+python3 scripts/batch_evaluate.py \
+  --video-dir ./test_videos \
+  --report-dir ./output \
+  --output ./evaluation_report.md \
+  --single-class
+```
+
+---
+
+### Supported VLM Providers
+
+- **Anthropic** (Claude) — default recommended
+- **Google** (Gemini)
+- **Aliyun** (Tongyi Qianwen)
+
+Configure provider and API Key in `.env`.
+
+---
+
+### Tool-Call Style Logging
+
+Runtime output follows modern AI Agent (Cursor / Cline / Claude Code) tool-call trace style:
+
+```
+[INFO] 14:30:00 🔧 tool_call: video_preprocessor.process(video='clip.mp4')
+[INFO] 14:30:03   ↳ result: coarse=20, precision=41 | elapsed=3.0s
+[INFO] 14:30:03 🔧 tool_call: expert_agent.detect(event='Illegal Parking')
+[INFO] 14:30:15   ↳ result: detected=true, confidence=0.92 | elapsed=12.0s
+[INFO] 14:30:15 🔧 tool_call: adjudication.resolve(candidates=10)
+[INFO] 14:30:28   ↳ result: events=3, audit_entries=2 | elapsed=13.0s
+```
+
+Control granularity via `TRAFFIC_ANALYZER_TOOL_LOG_LEVEL`:
+
+| Value | Behavior |
+|---|---|
+| `off` | No tool_call logs |
+| `macro` | Top-level calls only |
+| `mid` | Top-level + nested (default) |
+| `fine` | Reserved for future expansion |
+
+```bash
+TRAFFIC_ANALYZER_TOOL_LOG_LEVEL=off python -m traffic_analyzer ...    # silent
+TRAFFIC_ANALYZER_TOOL_LOG_LEVEL=macro python -m traffic_analyzer ...  # top only
+```
+
+This logging is a **pure display layer** — it does not affect parallelism, performance, or results. The binary encoding output is identical regardless of log level.
+
+---
+
+### Version Tags
+
+| Tag | Branch | Description |
+|---|---|---|
+| `v2.0.0-multi-agent` | `main` | **Current**. Multi-agent expert + adjudication architecture. All 10 events use `expert_agent` mode. Parallel detection + single VLM adjudication with business rules. |
+| `v1.5.0-legacy` | `legacy/v1.5` | Monolithic architecture. SceneUnderstandingStep (~30s bottleneck) + mixed detection modes (direct_vlm parallel, logic_chain sequential, scene_tag zero-VLM) + PostProcessStep with cross-event inference. |
+
+The `legacy/v1.5` branch preserves the old architecture for reference and comparison. All new development happens on `main` (v2.0.0).
+
+---
+
+## 中文版
+
+[回到顶部](#traffic-analyzer--交通事件分析系统) | [English](#english-version)
+
+基于多模态大视觉模型（VLM）的高速公路监控视频交通事件检测框架，支持 **10 类事件识别**，输出 10 位二进制编码 + 详细 Markdown 分析报告。所有事件定义、Prompt 模板、裁决规则均通过 YAML 配置驱动，新增事件无需修改代码。
+
+> **当前版本：v2.0.0** — 多智能体专家 + 裁决层架构（详见 [版本标签说明](#版本标签说明)）。
+
+---
+
+### 架构概览 (v2.0.0)
+
+v2.0.0 架构将 v1.5 的单体流水线替换为 **多智能体专家层 + 单 VLM 裁决** 设计：
 
 ```
 视频输入
     |
     v
 1. 视频预处理
-   - 场景理解帧提取：两段式采样（前 5 秒密集 + 后段均匀），共 20 帧
-   - 精确帧提取：自适应采样关键时刻（4 FPS）
+   - 粗采样 + 精确关键帧提取
+   - 两段式采样（前段密集 + 后段均匀）
     |
     v
-2. 场景理解 (scene_understanding)
-   - 单次综合 VLM 调用，输入 20 帧（前 5 秒密集 + 后段均匀）
-   - 基于规则的方向判断（双向+隔离带 → 默认左来右去）
-   - 输出结构化信息：道路结构、车流方向、天气、
-     pedestrian_present、non_motor_vehicle_present、
-     scene_description 标签（{类别：状态}格式）
+2. ExpertAgentLayer（10 个并行 ExpertAgent）
+   每个 ExpertAgent：单事件 VLM 调用 -> EventCandidate
+   - 仅做事实识别（看到就报）
+   - 不做过滤或排除判断
     |
     v
-3. 事件检测（并行 + 串行）
-   - direct_vlm (4 个事件): 并行批量 VLM 调用
-   - logic_chain: 执行配置的多步逻辑链（串行）
-   - scene_tag: 直接从场景理解输出推断（零 VLM 调用）
+3. AdjudicationStep（单次 VLM 调用）
+   输入：所有 EventCandidate + 关键帧 + 业务规则
+   输出：最终 EventResults + AuditLog
+   - 解决冲突（如事故抑制违停）
+   - 应用 YAML 中定义的业务规则
     |
     v
-4. 后处理
-   - 跨事件推断（配置的推断规则）
-   - 布尔字段推断（scene_tag 事件）
-   - 结构化标签推断（scene_tag 事件）
-    |
-    v
-5. 报告生成
-   - Markdown 报告（人工可读，含每步耗时分析）
-   - 二进制编码 {bit_0_bit_1_..._bit_n}
+4. 报告生成
+   - Markdown 报告（人工可读，含每步耗时）
+   - 二进制编码 {bit_0_bit_1_..._bit_9}
+   - 每条包含/排除决策的审计日志
 ```
+
+**相比 v1.5 的核心改进**：不再依赖单次约 30 秒的场景理解瓶颈 + 混合检测模式，而是让 10 个事件由专用专家代理并行检测，再由单次裁决调用根据显式业务规则解决冲突。准确率更高、可审计性更强、调试更方便。
 
 ---
 
-## 关键优化特性
+### 支持的事件
 
-### 1. 并行 direct_vlm 检测
+| ID | 编码 | 事件名称 | is_active |
+|---|---|---|---|
+| 0 | A | 违法停车 | true |
+| 1 | B | 应急车道占用 | true |
+| 2 | C | 交通事故 | true |
+| 3 | D | 高速公路行人出现 | true |
+| 4 | E | 摩托车出现 | true |
+| 5 | F | 严重拥堵 | true |
+| 6 | G | 道路施工 | true |
+| 7 | H | 车辆逆行/倒车 | true |
+| 8 | J | 抛洒物 | true |
+| 9 | K | 实线变道 | false |
 
-4 个独立的 `direct_vlm` 事件通过 `ThreadPoolExecutor` **并发执行**，将串行的 ~200s 压缩到 ~50s。
-
-### 2. 密集帧场景理解
-
-`scene_understanding` 使用**前 5 秒 @ 2 FPS**（10 帧，0.5s 间隔），而非全视频均匀采样：
-- 车辆位移更小，匹配更准确
-- 不受视频总长度影响
-
-### 3. 基于规则的方向判断
-
-删除容易出错的 6 步运动分析，改用**规则默认值**：
-- **双向主路 + 隔离带** → 左侧来向（toward_bottom），右侧去向（toward_top），置信度 1.0
-- **匝道** → 与主路同向，置信度 0.9
-- **单车道** → 语义判断（车辆大小变化），置信度 0.6-0.8
-
-scene_understanding 耗时从 ~200s 降至 ~30s。
-
-### 4. 像素位移估计（倒车检测）
-
-倒车检测 Prompt 要求 VLM 输出像素级位移估计：
-- 以画面百分比估计特征点坐标变化
-- 位移 > 2% 对角线 → "significant"
-- 覆盖 VLM "看起来没动" 的主观误判
-
-### 5. 可调帧数（`--min-frames`）
-
-通过 CLI 参数控制所有 VLM 调用的输入帧数：
-
-```bash
-python3 -m traffic_analyzer analyze \
-  --video video.mp4 \
-  --min-frames 10        # 最少 10 帧，更快但可能欠采样
-```
-
-默认 30 帧。降低帧数可显著提速（尤其 scene_understanding），但可能影响精度。
-
-### 6. 图像缩放到 720p
-
-上传 VLM 前自动缩放到 720p，减少 ~55% 传输量，避免 API 超时。
-
-### 7. VLM 调用结果缓存
-
-基于图像内容 + Prompt 文本的 SHA-256 哈希缓存，避免重复调用：
-- LRU 淘汰策略，默认最多缓存 128 条
-- 命中时直接返回缓存结果，零 token 消耗
-- 可通过环境变量 `LLM_ENABLE_CACHE=false` 关闭
-
-```python
-# 查看缓存统计
-stats = vlm_engine.get_usage_stats()
-print(f"缓存命中率: {stats['cache_hit_rate']:.1%}")
-print(f"缓存节省调用: {stats['cache_hits']}")
-```
-
-### 8. 可插拔 PipelineStep 架构
-
-将分析流程拆分为独立的 `PipelineStep` 子类，每个步骤自带重试和回退：
-- `SceneUnderstandingStep` — 场景理解（支持 1 次重试 + 空结果回退）
-- `EventDetectionStep` — 事件检测（单事件失败不影响其他事件）
-- `PostProcessStep` — 后处理（支持回退到原始结果）
-
-步骤级别的失败被隔离，不会导致整个 pipeline 崩溃。
-
-### 9. Prompt 版本管理与 A/B 测试
-
-`prompt_templates.yaml` 支持同一 `template_id` 的多个版本：
-
-```yaml
-prompt_templates:
-  - template_id: "direct_event_detection"
-    name: "Direct Detection v1"
-    version: "1.0"
-    user_prompt: "..."
-  - template_id: "direct_event_detection"
-    name: "Direct Detection v2"
-    version: "2.0"
-    user_prompt: "...改进后的prompt..."
-    traffic_percentage: 30   # 30% 流量使用此版本
-```
-
-版本选择优先级：
-1. 环境变量 `PROMPT_VERSION_direct_event_detection=2.0`
-2. A/B 流量分割（`traffic_percentage`）
-3. 默认最高版本号
-
-### 10. 逐步骤耗时日志
-
-分析结束时输出每步耗时分解：
-
-```
-Step timing breakdown:
-  preprocessing:       12.50s
-  scene_understanding:  28.54s
-  event_detection:      54.43s
-  post_processing:       0.00s
-  report_generation:     0.00s
-  TOTAL:               193.12s
-```
+v2.0.0 中所有事件均使用 `detection_mode: "expert_agent"`。
 
 ---
 
-## 项目结构
+### 核心特性
+
+#### 1. 专家代理层 (Expert Agent Layer)
+
+每个激活的事件拥有独立的 **ExpertAgent** —— 一次专用的 VLM 调用，携带针对该事件的专用 Prompt。所有 Agent 通过 `ThreadPoolExecutor` 并行执行。每个 Agent 只负责 **事实识别**（看到什么报什么），不做任何过滤。这种关注点分离使系统模块化且易于调试。
+
+#### 2. 裁决步骤 (Adjudication Step)
+
+**单次 VLM 调用**接收所有专家候选结果、关键帧和业务规则，输出：
+- 每个事件的最终 `EventResult`（检出 / 未检出）
+- `AuditLog` 记录每条包含/排除决策及其理由
+- `adjudication_reasoning` 解释整体决策过程
+
+业务规则在 `event_categories.yaml` 的 `adjudication_rules:` 下定义，并嵌入裁决 Prompt 中。示例规则：
+- **事故优先于违停** —— 事故场景中的静止车辆属于事故的一部分，不应再单独标记为违停
+- **施工区域排除应急车道占用** —— 明确位于施工区域内的车辆不判定为应急车道占用
+- **摩托车排除应急车道占用** —— 应急车道上的摩托车优先判定为"摩托车出现"，避免重复标记
+
+#### 3. 审计日志 (Audit Log)
+
+裁决过程中被排除的每个事件都会记录原因和触发规则的 ID。这使系统透明化，有助于调试漏报。
+
+```json
+{
+  "event_id": 0,
+  "event_name": "违法停车",
+  "action": "excluded",
+  "reason": "车辆属于事故场景的一部分",
+  "rule_id": "accident_suppresses_parking"
+}
+```
+
+#### 4. 配置驱动设计
+
+以下内容全部在 YAML 中定义 —— 无需修改代码：
+- 事件定义（`event_categories.yaml`）
+- Prompt 模板（`prompt_templates.yaml`）
+- 裁决规则（`event_categories.yaml`）
+- 遗留逻辑链（`logic_chains.yaml`，保留作参考）
+
+---
+
+### 项目结构
 
 ```
 traffic_analyzer/
 ├── config/
-│   ├── event_categories.yaml      # 事件定义、检测模式、推断配置
-│   ├── logic_chains.yaml          # 多步逻辑链定义
-│   └── prompt_templates.yaml      # VLM Prompt 模板库（支持多版本）
+│   ├── event_categories.yaml      # 事件定义 + 裁决规则
+│   ├── logic_chains.yaml          # 遗留逻辑链（保留作参考）
+│   └── prompt_templates.yaml      # VLM Prompt 模板 + 裁决模板
 ├── core/
-│   ├── config_manager.py          # 配置加载、验证、热重载
+│   ├── config_manager.py          # 配置加载、校验
+│   ├── expert_agent.py            # 单事件检测代理
 │   ├── logic_engine.py            # 逻辑链执行引擎
-│   ├── pipeline_steps.py          # 可插拔分析步骤（重试/回退）
+│   ├── pipeline_steps.py          # ExpertAgentLayer + AdjudicationStep
 │   ├── report_generator.py        # 报告生成
-│   ├── video_preprocessor.py      # 视频帧提取（coarse + precision）
-│   └── vlm_engine.py              # VLM 调用封装（支持多提供商 + 缓存）
+│   ├── video_preprocessor.py      # 视频帧提取
+│   └── vlm_engine.py              # VLM 封装（多提供商 + 缓存）
 ├── models/
-│   └── schemas.py                 # Pydantic 数据模型
+│   └── schemas.py                 # Pydantic 模型（EventCandidate, AdjudicationResult, AuditEntry）
 ├── orchestrator/
-│   └── analysis_orchestrator.py   # 分析流程编排器
+│   └── analysis_orchestrator.py   # 4 步流水线编排器
+├── utils/
+│   └── event_detection.py         # 图像选择 + 响应解析辅助函数
 └── config/
     └── .env                       # LLM 提供商配置（API Key 等）
 ```
 
 ---
 
-## 快速开始
+### 快速开始
 
-### 1. 配置 LLM 提供商
+#### 1. 配置 LLM 提供商
 
 ```bash
 cp traffic_analyzer/config/.env.example traffic_analyzer/config/.env
@@ -281,7 +528,7 @@ cp traffic_analyzer/config/.env.example traffic_analyzer/config/.env
 
 | 变量 | 说明 | 默认值 |
 |---|---|---|
-| `LLM_PROVIDER` | VLM 提供商 (`anthropic`/`google`/`aliyun`) | `anthropic` |
+| `LLM_PROVIDER` | VLM 提供商 (`anthropic` / `google` / `aliyun`) | `anthropic` |
 | `LLM_API_KEY` | API Key | - |
 | `LLM_MODEL` | 模型名称 | `claude-sonnet-4-6` |
 | `LLM_MAX_TOKENS` | 最大输出 token | `4096` |
@@ -290,11 +537,10 @@ cp traffic_analyzer/config/.env.example traffic_analyzer/config/.env
 | `LLM_MAX_RETRIES` | 最大重试次数 | `3` |
 | `LLM_ENABLE_CACHE` | 启用 VLM 结果缓存 | `true` |
 | `LLM_CACHE_MAX_SIZE` | 缓存最大条目数 | `128` |
-| `SCENE_UNDERSTANDING_MIN_FRAMES` | 场景理解最少帧数 | `30` |
 | `VLM_MAX_FRAMES` | VLM 调用最大帧数 | `10` |
 | `PROMPT_VERSION_{TEMPLATE_ID}` | 强制使用指定 Prompt 版本 | - |
 
-### 2. 安装 pre-commit hook（推荐）
+#### 2. 安装 pre-commit hook（推荐）
 
 ```bash
 pip install pre-commit
@@ -303,7 +549,7 @@ pre-commit install
 
 配置变更时自动校验，防止提交无效配置。
 
-### 3. 验证配置
+#### 3. 验证配置
 
 ```bash
 python3 -m traffic_analyzer validate-config \
@@ -312,11 +558,11 @@ python3 -m traffic_analyzer validate-config \
 
 校验内容包括：
 - YAML 语法和结构
-- 事件类别 → 逻辑链/Prompt 模板的交叉引用
-- 跨事件推断规则的源/目标事件有效性
-- 分支步骤的 `true_next_step` / `false_next_step` 目标存在性
+- 事件类别与 Prompt 模板的交叉引用
+- 裁决规则完整性
+- 逻辑链步骤引用（遗留链）
 
-### 3. 运行分析
+#### 4. 运行分析
 
 ```bash
 # 基本用法（默认 30 帧）
@@ -340,7 +586,7 @@ python3 -m traffic_analyzer analyze \
   --output ./report.md
 ```
 
-### 4. Python API
+#### 5. Python API
 
 ```python
 from traffic_analyzer.orchestrator.analysis_orchestrator import AnalysisOrchestrator
@@ -348,17 +594,16 @@ from traffic_analyzer.orchestrator.analysis_orchestrator import AnalysisOrchestr
 orch = AnalysisOrchestrator.from_config_dir('traffic_analyzer/config')
 report = orch.analyze('path/to/video.mp4')
 print(report.binary_encoding.encoding_string)
+print(report.event_results)
 ```
 
 ---
 
-### 5. 批量推理与评估
+### 批量推理与评估
 
-项目提供两个批量处理脚本，位于 `scripts/` 目录：
+项目提供两个批量处理脚本，位于 `scripts/` 目录。
 
 #### 批量推理 (`batch_infer.py`)
-
-对目录下的所有视频批量执行分析：
 
 ```bash
 python3 scripts/batch_infer.py \
@@ -369,8 +614,6 @@ python3 scripts/batch_infer.py \
   --format markdown \
   --min-frames 30
 ```
-
-参数说明：
 
 | 参数 | 说明 | 默认值 |
 |---|---|---|
@@ -385,11 +628,7 @@ python3 scripts/batch_infer.py \
 | `--skip-existing` | 跳过已有报告的视频（默认启用） | `true` |
 | `--no-skip-existing` | 强制重新处理所有视频 | - |
 
-脚本会自动匹配视频与已存在的报告，跳过已处理的视频（除非加 `--no-skip-existing`）。
-
 #### 批量评估 (`batch_evaluate.py`)
-
-将推理报告与真实标签对比，输出每类事件的精确率、召回率、F1 分数：
 
 ```bash
 # 默认：生成 HTML 交互式报告
@@ -406,19 +645,13 @@ python3 scripts/batch_evaluate.py \
   --annotation-file ./annotations.json \
   --output evaluation_report.html
 
-# 显式指定 Markdown 表格报告
+# Markdown 表格报告
 python3 scripts/batch_evaluate.py \
   --video-dir ./videos \
   --report-dir ./reports \
   --output evaluation_report.md
 
-# 显式指定 JSON 原始数据
-python3 scripts/batch_evaluate.py \
-  --video-dir ./videos \
-  --report-dir ./reports \
-  --output evaluation_result.json
-
-# 单类别模式（只评估 config 中 is_active=true 的事件）
+# 单类别模式（只评估 is_active=true 的事件）
 python3 scripts/batch_evaluate.py \
   --video-dir ./videos \
   --report-dir ./reports \
@@ -426,8 +659,6 @@ python3 scripts/batch_evaluate.py \
   --config-dir ./traffic_analyzer/config \
   --output evaluation_report.html
 ```
-
-参数说明：
 
 | 参数 | 说明 | 默认值 |
 |---|---|---|
@@ -439,38 +670,13 @@ python3 scripts/batch_evaluate.py \
 | `--single-class` | 只评估 `is_active=true` 的事件 | - |
 | `--config-dir` / `-c` | 配置目录（配合 `--single-class`） | `./traffic_analyzer/config` |
 
-**单类别模式 (`--single-class`)**：当某些事件被设为 `is_active: false` 时，这些事件会被完全排除在评估指标之外，避免关闭的事件拉低整体分数。
-
-**输出格式**：根据 `--output` 的文件扩展名自动选择：
-- `.html` — 交互式 HTML 报告（默认，见下文）
-- `.md` — Markdown 表格，含事件汇总 + 逐视频详情表（`file://` 可点击链接）
-- `.json` — 原始 JSON 数据，含每事件和每视频指标
-
-评估结果包含：
-- 每类事件的 TP / FP / FN / 精确率 / 召回率 / F1
-- 宏平均（Macro Average）指标
-- 每个视频的预测 vs 真实标签对照表
-- Markdown 表格格式直接输出到终端
-
-#### HTML 交互式报告
-
-通过 `--output report.html` 生成交互式 HTML 评估报告：
-
-```bash
-python3 scripts/batch_evaluate.py \
-  --video-dir ./videos \
-  --report-dir ./reports \
-  --output evaluation_report.html \
-  --single-class
-```
-
-特性：
-- 左侧：事件统计表 + 逐视频结果表（支持筛选 ✅/❌）
+**HTML 交互式报告特性：**
+- 左侧：事件统计表 + 逐视频结果表（支持筛选 通过/不通过）
 - 右侧：视频播放器 + Markdown 报告预览面板
 - 点击表格行播放视频，点击报告链接预览 Markdown
 - 所有数据内联嵌入，使用 `file://` 绝对路径，可直接双击打开，无需 HTTP 服务器
 
-#### 完整批量工作流示例
+**完整批量工作流示例：**
 
 ```bash
 # 1. 批量推理（4 并行 worker，保存日志）
@@ -481,7 +687,7 @@ python3 scripts/batch_infer.py \
   --workers 4 \
   --format markdown
 
-# 2. 生成 HTML 交互式评估报告（默认）
+# 2. 生成 HTML 交互式评估报告
 python3 scripts/batch_evaluate.py \
   --video-dir ./测试视频 \
   --report-dir ./output \
@@ -498,7 +704,7 @@ python3 scripts/batch_evaluate.py \
 
 ---
 
-## 支持的 VLM 提供商
+### 支持的 VLM 提供商
 
 - **Anthropic** (Claude) — 默认推荐
 - **Google** (Gemini)
@@ -506,35 +712,44 @@ python3 scripts/batch_evaluate.py \
 
 在 `.env` 中配置提供商和 API Key。
 
+---
 
-## Tool-Call 风格日志输出
+### Tool-Call 风格日志输出
 
-运行时会输出类似现代 AI Agent (Cursor / Cline / Claude Code) 的工具调用轨迹日志,例如:
+运行时输出类似现代 AI Agent (Cursor / Cline / Claude Code) 的工具调用轨迹日志：
 
 ```
 [INFO] 14:30:00 🔧 tool_call: video_preprocessor.process(video='clip.mp4')
 [INFO] 14:30:03   ↳ result: coarse=20, precision=41 | elapsed=3.0s
-[INFO] 14:30:03 🔧 tool_call: vlm_engine.scene_understanding(provider='claude', frames=20)
-[INFO] 14:30:31   ↳ result: roads=4, density='normal' | elapsed=28.0s
-[INFO] 14:30:31 🔧 tool_call: reasoning_chain.execute(event='E7', steps=4)
-[INFO] 14:30:31   🔧 step[1/4]: vlm_call.candidate_extraction(provider='claude')
-[INFO] 14:30:39     ↳ result: candidates=2 vehicles | elapsed=8.0s
+[INFO] 14:30:03 🔧 tool_call: expert_agent.detect(event='违法停车')
+[INFO] 14:30:15   ↳ result: detected=true, confidence=0.92 | elapsed=12.0s
+[INFO] 14:30:15 🔧 tool_call: adjudication.resolve(candidates=10)
+[INFO] 14:30:28   ↳ result: events=3, audit_entries=2 | elapsed=13.0s
 ```
 
-通过环境变量 `TRAFFIC_ANALYZER_TOOL_LOG_LEVEL` 切换粒度:
+通过环境变量 `TRAFFIC_ANALYZER_TOOL_LOG_LEVEL` 切换粒度：
 
 | 值 | 行为 |
 |---|---|
 | `off` | 不输出任何 tool_call 日志 |
-| `macro` | 仅顶层调用,不打嵌套 step[i/N] |
-| `mid` | 顶层 + 嵌套 (**默认**) |
-| `fine` | 预留,未来扩展 VLM 单次调用 / schema 校验 |
-
-示例:
+| `macro` | 仅顶层调用 |
+| `mid` | 顶层 + 嵌套（默认） |
+| `fine` | 预留，未来扩展 |
 
 ```bash
 TRAFFIC_ANALYZER_TOOL_LOG_LEVEL=off python -m traffic_analyzer ...    # 关闭
 TRAFFIC_ANALYZER_TOOL_LOG_LEVEL=macro python -m traffic_analyzer ...  # 仅顶层
 ```
 
-此日志是**纯显示层**,不影响并行/性能/结果,关掉后输出二进制编码与开启时完全一致。
+此日志是**纯显示层**，不影响并行/性能/结果。关闭后输出的二进制编码与开启时完全一致。
+
+---
+
+### 版本标签说明
+
+| 标签 | 分支 | 说明 |
+|---|---|---|
+| `v2.0.0-multi-agent` | `main` | **当前版本**。多智能体专家 + 裁决架构。全部 10 个事件使用 `expert_agent` 模式。并行检测 + 单次 VLM 裁决，带业务规则。 |
+| `v1.5.0-legacy` | `legacy/v1.5` | 单体架构。SceneUnderstandingStep（约 30 秒瓶颈）+ 混合检测模式（direct_vlm 并行、logic_chain 串行、scene_tag 零 VLM）+ PostProcessStep 跨事件推断。 |
+
+`legacy/v1.5` 分支保留旧架构供参考和对比。所有新开发在 `main`（v2.0.0）上进行。
