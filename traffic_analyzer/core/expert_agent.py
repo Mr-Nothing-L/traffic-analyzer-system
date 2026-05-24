@@ -131,6 +131,8 @@ class ExpertAgent:
         }
         if context.video_meta is not None:
             context_vars["video_meta"] = context.video_meta.model_dump()
+        if context.scene_understanding is not None:
+            context_vars["scene_understanding"] = context.scene_understanding.model_dump()
 
         # -- 4. VLM call -------------------------------------------------------
         response = self.vlm_engine.call(

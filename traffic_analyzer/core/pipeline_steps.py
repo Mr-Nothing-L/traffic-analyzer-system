@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional
 from traffic_analyzer.core.config_manager import ConfigManager
 from traffic_analyzer.core.expert_agent import ExpertAgent
 from traffic_analyzer.core.vlm_engine import VLMInferenceEngine
+from traffic_analyzer.utils.annotation_spec_loader import AnnotationSpecLoader
 from traffic_analyzer.utils.event_detection import select_event_images as _select_event_images_impl
 from traffic_analyzer.models.schemas import (
     AnalysisContext,
@@ -238,7 +239,7 @@ class AdjudicationStep(PipelineStep):
             raise RuntimeError("Adjudication prompt template 'adjudication' not found")
 
         # 3. Select images
-        images = _select_event_images_impl(context)
+        images = _select_event_images_impl(context, vlm_max_frames=6)
 
         # 4. Build context variables
         candidates_json = json.dumps(
@@ -249,6 +250,7 @@ class AdjudicationStep(PipelineStep):
                     "detected": c.detected,
                     "confidence": c.confidence,
                     "summary": c.summary,
+                    "expert_raw_description": c.raw_vlm_text,
                     "instances": [
                         {
                             "start_time_sec": i.start_time_sec,
@@ -266,14 +268,27 @@ class AdjudicationStep(PipelineStep):
         )
 
         business_rules = "\n".join(
-            f"- [{r.get('rule_id', 'N/A')}] {r.get('name', 'Unnamed')}: "
-            f"{r.get('description', '')} (priority={r.get('priority', 0)})"
+            f"- [{r.rule_id}] {r.name}: "
+            f"{r.description} (priority={r.priority})"
             for r in rules
         ) if rules else "No business rules configured."
+
+        # Load annotation spec (xlsx-derived business rules)
+        annotation_spec_text = ""
+        try:
+            spec_path = self.config_manager.config_dir / "annotation_spec.yaml"
+            if spec_path.exists():
+                spec_loader = AnnotationSpecLoader(str(spec_path))
+                annotation_spec_text = spec_loader.to_prompt_text()
+            else:
+                logger.warning("annotation_spec.yaml not found at %s", spec_path)
+        except Exception as exc:
+            logger.warning("Failed to load annotation_spec.yaml: %s", exc)
 
         context_vars = {
             "candidates_json": candidates_json,
             "business_rules": business_rules,
+            "annotation_spec": annotation_spec_text or "No annotation spec available.",
         }
 
         # 5. Call VLM
@@ -290,13 +305,17 @@ class AdjudicationStep(PipelineStep):
         data = response.parsed_data
 
         # 6. Parse event_results
+        # Build a map from candidate event_id -> raw_vlm_text for expert_raw_description
+        candidate_raw_map = {c.event_id: c.raw_vlm_text for c in candidates}
+
         event_results: List[EventResult] = []
         for er in data.get("event_results", []):
+            eid = er.get("event_id", 0)
             instances = []
             for inst in er.get("instances", []):
                 instances.append(
                     EventInstance(
-                        event_id=er.get("event_id", 0),
+                        event_id=eid,
                         event_name=er.get("event_name", ""),
                         event_name_en=er.get("event_name_en", ""),
                         start_time_sec=inst.get("start_time_sec", 0.0),
@@ -308,7 +327,7 @@ class AdjudicationStep(PipelineStep):
                 )
             event_results.append(
                 EventResult(
-                    event_id=er.get("event_id", 0),
+                    event_id=eid,
                     event_name=er.get("event_name", ""),
                     event_name_en=er.get("event_name_en", ""),
                     detected=er.get("detected", False),
@@ -316,6 +335,7 @@ class AdjudicationStep(PipelineStep):
                     summary=er.get("summary", ""),
                     instances=instances,
                     reasoning=er.get("reasoning", ""),
+                    expert_raw_description=candidate_raw_map.get(eid, ""),
                 )
             )
 
@@ -336,10 +356,24 @@ class AdjudicationStep(PipelineStep):
         for result in event_results:
             context.event_results[result.event_id] = result
 
+        # 8. Parse reasoning_chain
+        reasoning_chain: List[Dict[str, Any]] = []
+        for rc in data.get("reasoning_chain", []):
+            if isinstance(rc, dict):
+                reasoning_chain.append({
+                    "event_id": rc.get("event_id", 0),
+                    "event_name": rc.get("event_name", ""),
+                    "decision": rc.get("decision", ""),
+                    "thought_process": rc.get("thought_process", ""),
+                    "basis": rc.get("basis", ""),
+                })
+
         adjudication_result = AdjudicationResult(
             event_results=event_results,
             audit_log=audit_log,
             adjudication_reasoning=data.get("adjudication_reasoning", ""),
+            reasoning_chain=reasoning_chain,
+            raw_vlm_text=response.raw_text if hasattr(response, "raw_text") else "",
         )
 
         logger.info(
@@ -365,6 +399,7 @@ class AdjudicationStep(PipelineStep):
                     confidence=candidate.confidence,
                     summary=candidate.summary,
                     instances=candidate.instances,
+                    expert_raw_description=candidate.raw_vlm_text,
                 )
             )
             context.event_results[candidate.event_id] = event_results[-1]

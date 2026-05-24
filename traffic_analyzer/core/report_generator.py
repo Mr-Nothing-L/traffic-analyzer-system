@@ -36,6 +36,9 @@ class ReportGenerator:
         usage_stats: Dict[str, Any],
         overall_traffic_description: Optional[str] = None,
         analysis_duration_sec: float = 0.0,
+        adjudication_reasoning: str = "",
+        reasoning_chain: Optional[List[Dict[str, Any]]] = None,
+        audit_log: Optional[List[Any]] = None,
     ) -> Report:
         """
         Build a complete :class:`Report` from analysis artefacts.
@@ -72,9 +75,10 @@ class ReportGenerator:
             scene_info, sorted_results
         )
 
+        from traffic_analyzer.models.schemas import SceneInfo
         return Report(
             video_info=video_meta,
-            scene_summary=scene_info,
+            scene_summary=scene_info or SceneInfo(),
             overall_traffic_description=overall_desc,
             event_results=sorted_results,
             binary_encoding=binary_encoding,
@@ -83,6 +87,9 @@ class ReportGenerator:
             llm_usage_stats=usage_stats,
             analysis_duration_sec=analysis_duration_sec,
             generated_at=datetime.now(),
+            adjudication_reasoning=adjudication_reasoning,
+            reasoning_chain=reasoning_chain or [],
+            audit_log=audit_log or [],
         )
 
     def to_json(self, report: Report) -> str:
@@ -265,6 +272,37 @@ class ReportGenerator:
         lines.append(f"{report.final_classification}")
         lines.append("")
 
+        # ---- Adjudication Details ------------------------------------------
+        lines.append("## 裁决详情")
+        lines.append("")
+        if report.adjudication_reasoning:
+            lines.append("### 总体裁决推理")
+            lines.append(report.adjudication_reasoning)
+            lines.append("")
+
+        if report.reasoning_chain:
+            lines.append("### 逐事件推理链")
+            for rc in report.reasoning_chain:
+                lines.append(f"**事件 {rc['event_id']}: {rc['event_name']}**")
+                lines.append(f"- **决策**: {rc['decision']}")
+                lines.append(f"- **思考过程**: {rc['thought_process']}")
+                lines.append(f"- **决策依据**: {rc['basis']}")
+                lines.append("")
+        else:
+            lines.append("_未记录详细裁决推理链。_")
+            lines.append("")
+
+        if report.audit_log:
+            lines.append("### 审计日志")
+            lines.append("| 事件 | 动作 | 原因 | 规则 |")
+            lines.append("|------|------|------|------|")
+            for entry in report.audit_log:
+                action_icon = "保留" if entry.action == "included" else "**排除**"
+                rule_str = entry.rule_id or "无"
+                lines.append(f"| {entry.event_name} | {action_icon} | {entry.reason} | {rule_str} |")
+            lines.append("")
+        lines.append("")
+
         # ---- Disposal Recommendations --------------------------------------
         lines.append("## 处置建议")
         lines.append("")
@@ -361,7 +399,9 @@ class ReportGenerator:
         parts: List[str] = []
 
         # Scene description
-        if scene_info.scene_description:
+        if scene_info is None:
+            parts.append("暂无场景描述信息。")
+        elif scene_info.scene_description:
             parts.append(scene_info.scene_description)
         else:
             parts.append(
@@ -460,6 +500,18 @@ class ReportGenerator:
             lines.append("#### 分析过程")
             for step in result.analysis_process:
                 lines.append(f"- {step}")
+            lines.append("")
+
+        # 需求1: 展示裁决层对该事件的推理
+        if result.adjudication_reasoning:
+            lines.append("#### 裁决推理")
+            lines.append(result.adjudication_reasoning)
+            lines.append("")
+
+        # 需求3: 展示专家Agent原始自然语言描述
+        if result.expert_raw_description:
+            lines.append("#### 专家原始描述")
+            lines.append(result.expert_raw_description)
             lines.append("")
 
         return lines

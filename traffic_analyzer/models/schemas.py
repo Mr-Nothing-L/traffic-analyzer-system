@@ -268,6 +268,8 @@ class EventResult(BaseModel):
     confidence: float = 0.0
     reasoning: str = ""
     analysis_process: List[str] = Field(default_factory=list)
+    adjudication_reasoning: str = Field(default="", description="裁决层对该事件的详细推理过程")
+    expert_raw_description: str = Field(default="", description="ExpertAgent原始自然语言描述")
 
 
 class EventCandidate(BaseModel):
@@ -279,6 +281,7 @@ class EventCandidate(BaseModel):
     summary: str = ""
     instances: List[EventInstance] = Field(default_factory=list)
     raw_vlm_response: Dict[str, Any] = Field(default_factory=dict)
+    raw_vlm_text: str = Field(default="", description="VLM原始自然语言回复全文")
 
 
 class AuditEntry(BaseModel):
@@ -288,6 +291,8 @@ class AuditEntry(BaseModel):
     action: Literal["included", "excluded"] = "included"
     reason: str = ""
     rule_id: Optional[str] = None
+    reasoning: str = Field(default="", description="详细的裁决思考过程")
+    rule_description: str = Field(default="", description="引用的规则/事件名称详细描述")
 
 
 class AdjudicationResult(BaseModel):
@@ -295,6 +300,11 @@ class AdjudicationResult(BaseModel):
     event_results: List[EventResult] = Field(default_factory=list)
     audit_log: List[AuditEntry] = Field(default_factory=list)
     adjudication_reasoning: str = ""
+    reasoning_chain: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="裁决完整推理链，每条记录包含event_id、event_name、思考过程、决策、依据"
+    )
+    raw_vlm_text: str = Field(default="", description="裁决VLM原始自然语言回复全文")
 
 
 # ---------------------------------------------------------------------------
@@ -437,6 +447,9 @@ class Report(BaseModel):
     llm_usage_stats: Dict[str, Any] = Field(default_factory=dict)
     analysis_duration_sec: float = 0.0
     generated_at: datetime = Field(default_factory=datetime.now)
+    adjudication_reasoning: str = Field(default="", description="总体裁决推理")
+    reasoning_chain: List[Dict[str, Any]] = Field(default_factory=list, description="逐事件推理链")
+    audit_log: List[AuditEntry] = Field(default_factory=list, description="裁决审计日志")
 
 
 # ---------------------------------------------------------------------------

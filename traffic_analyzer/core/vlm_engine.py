@@ -22,7 +22,7 @@ import uuid
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 
-from jinja2 import Template, UndefinedError, StrictUndefined
+from jinja2 import Template, UndefinedError, StrictUndefined, DebugUndefined
 
 # Import SDKs at top level so tests can patch them via the module namespace.
 import anthropic
@@ -576,17 +576,28 @@ class VLMInferenceEngine:
             PromptRenderError: If Jinja2 rendering fails.
         """
         context_vars = context_vars or {}
+        # Ensure commonly referenced template variables have default values
+        # to avoid StrictUndefined errors on conditional checks like {% if x %}
+        defaults = {
+            "scene_understanding": None,
+            "video_meta": None,
+            "keyframes": None,
+            "cv_tracks": None,
+            "candidates_json": None,
+            "business_rules": None,
+        }
+        render_vars = {**defaults, **context_vars}
         try:
             system = (
                 Template(template.system_prompt, undefined=StrictUndefined).render(
-                    **context_vars
+                    **render_vars
                 )
                 if template.system_prompt
                 else ""
             )
             user = (
                 Template(template.user_prompt, undefined=StrictUndefined).render(
-                    **context_vars
+                    **render_vars
                 )
                 if template.user_prompt
                 else ""

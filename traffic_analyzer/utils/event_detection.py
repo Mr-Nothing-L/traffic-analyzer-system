@@ -66,6 +66,7 @@ def parse_expert_response(response: Any, category: EventCategory) -> EventCandid
             summary=str(data.get("summary", "")),
             instances=instances,
             raw_vlm_response=data,
+            raw_vlm_text=response.raw_text if hasattr(response, "raw_text") else "",
         )
 
     return EventCandidate(
@@ -74,6 +75,7 @@ def parse_expert_response(response: Any, category: EventCategory) -> EventCandid
         detected=False,
         summary=f"VLM call failed or returned invalid data: {response.raw_text[:200]}",
         raw_vlm_response={"raw_text": response.raw_text} if hasattr(response, "raw_text") else {},
+        raw_vlm_text=response.raw_text if hasattr(response, "raw_text") else "",
     )
 
 

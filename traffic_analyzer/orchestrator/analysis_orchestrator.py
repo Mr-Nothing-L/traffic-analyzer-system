@@ -16,7 +16,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from traffic_analyzer.core.config_manager import ConfigManager
 from traffic_analyzer.core.external_adapter import ExternalAdapter
@@ -187,10 +187,18 @@ class AnalysisOrchestrator:
         logger.info("[3/5] Adjudication...")
         t0 = time.perf_counter()
         event_results: List[EventResult] = []
+        adj_reasoning = ""
+        adj_reasoning_chain: List[Dict[str, Any]] = []
+        adj_audit_log: List[Any] = []
         if self._adjudication_step:
             adj_result = self._adjudication_step.execute(context)
             if adj_result.success and adj_result.data:
-                event_results = adj_result.data.event_results
+                adj_data = adj_result.data
+                event_results = adj_data.event_results
+                adj_reasoning = adj_data.adjudication_reasoning
+                adj_reasoning_chain = adj_data.reasoning_chain
+                adj_audit_log = adj_data.audit_log
+                logger.info("  Adjudication reasoning: %s", adj_reasoning[:100] + "..." if len(adj_reasoning) > 100 else adj_reasoning)
         else:
             logger.warning("No AdjudicationStep configured, skipping")
         step_times["adjudication"] = time.perf_counter() - t0
@@ -231,6 +239,9 @@ class AnalysisOrchestrator:
                 video_meta=video_meta,
                 usage_stats=usage_stats,
                 analysis_duration_sec=round(0.0, 2),  # placeholder, updated below
+                adjudication_reasoning=adj_reasoning,
+                reasoning_chain=adj_reasoning_chain or None,
+                audit_log=adj_audit_log or None,
             )
             _tc.result(
                 f"binary_code={report.binary_encoding.encoding_string}"
