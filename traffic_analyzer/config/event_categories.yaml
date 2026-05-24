@@ -1,7 +1,7 @@
 # =============================================================================
 # 交通事件类别配置 (Traffic Event Categories)
 # =============================================================================
-# 事件定义 / 检测模式 / Prompt 模板 / 逻辑链 / 推断规则 全部通过 YAML 配置。
+# 事件定义 / 检测模式 / Prompt 模板 / 裁决规则 全部通过 YAML 配置。
 # 新增事件无需改代码，只需在本文件追加并运行 validate-config。
 #
 # 输出格式：二进制编码 {bit_0_bit_1_..._bit_9}
@@ -9,12 +9,11 @@
 # =============================================================================
 
 # -----------------------------------------------------------------------------
-# 三种检测模式速查
+# 检测模式说明
 # -----------------------------------------------------------------------------
-# direct_vlm  → 单次 VLM 调用。必需字段：prompt_template_id
-# logic_chain → YAML 多步链。必需字段：logic_chain_id
-# scene_tag   → 零 VLM，从 scene_understanding 推断。
-#               必需字段：scene_boolean_field 或 scene_tag_key
+# expert_agent → 独立专家 Agent 检测。必需字段：prompt_template_id
+#                每位专家只负责事实识别（看到就报），不做排除判断。
+#                最终排除/冲突裁决由 AdjudicationStep 处理。
 #
 # 关闭事件请用 is_active: false，不要注释整段（保留二进制位数）。
 # -----------------------------------------------------------------------------
@@ -26,7 +25,7 @@ event_categories:
     name: "Illegal Parking"
     name_zh: "违法停车"
     description: "机动车在禁止停车区域静止或停放"
-    detection_mode: "direct_vlm"
+    detection_mode: "expert_agent"
     prompt_template_id: "illegal_parking_detection"
     confidence_threshold: 0.7
     is_active: true
@@ -35,9 +34,6 @@ event_categories:
       1. 只针对机动车——非机动车静止时不判定为违法停车。
       2. 车辆由行驶状态变为静止状态。静止持续时间无需完整体现，视频中只要能看到车辆处于静止/停放状态即可判定。
       3. 事件区域：行车道、应急车道、导流区、路肩。
-      4. 施工区域内车辆停车施工需标注为违法停车。
-      5. 涉及交通事故时，只标注交通事故，不重复标注违法停车。
-      6. 应急车道上的车辆静止时，需同时判定违法停车和应急车道占用（两个事件均触发）。
 
   # --- event_id: 1 | 应急车道占用 (B) ---
   - event_id: 1
@@ -45,7 +41,7 @@ event_categories:
     name: "Emergency Lane Occupancy"
     name_zh: "应急车道占用"
     description: "车辆进入、停止、占用或在应急车道内行驶"
-    detection_mode: "direct_vlm"
+    detection_mode: "expert_agent"
     prompt_template_id: "emergency_lane_occupancy_detection"
     confidence_threshold: 0.7
     is_active: true
@@ -63,8 +59,7 @@ event_categories:
     name: "Traffic Accident"
     name_zh: "交通事故"
     description: "车辆碰撞、翻车、起火、散落物等突发事件"
-    detection_mode: "direct_vlm"
-    logic_chain_id: "accident_scene_tag"
+    detection_mode: "expert_agent"
     prompt_template_id: "traffic_accident_detection"
     confidence_threshold: 0.7
     is_active: true
@@ -78,15 +73,12 @@ event_categories:
     name: "Person Presence in Highway"
     name_zh: "高速公路行人出现"
     description: "行人或滞留驾乘人员出现在高速公路限制区域"
-    detection_mode: "direct_vlm"
+    detection_mode: "expert_agent"
     prompt_template_id: "pedestrian_detection"
     confidence_threshold: 0.7
     is_active: true
-    scene_boolean_field: "pedestrian_present"
-    scene_tag_key: "行人"
     definition: |
       行人出现：高速公路车道、路肩、中央隔离带、匝道等区域行走的普通人或滞留驾乘人员。
-      排除：施工区域内的高可视性服装人员、交警、救援人员、路侧标志牌/阴影/植被误报。
 
   # --- event_id: 4 | 摩托车出现 (E) ---
   - event_id: 4
@@ -94,12 +86,10 @@ event_categories:
     name: "Motorcycle Presence"
     name_zh: "摩托车出现"
     description: "摩托车出现在高速公路上"
-    detection_mode: "direct_vlm"
+    detection_mode: "expert_agent"
     prompt_template_id: "non_motor_vehicle_detection"
     confidence_threshold: 0.7
     is_active: true
-    scene_boolean_field: "non_motor_vehicle_detection"
-    scene_tag_key: "非机动车"
     definition: |
       摩托车出现：两轮/三轮摩托车在高速公路上行驶或静止。
       注意与电动自行车/自行车区分：摩托车有燃油发动机、车把、排气管，骑手通常戴头盔。
@@ -110,7 +100,7 @@ event_categories:
     name: "Heavy Congestion"
     name_zh: "严重拥堵"
     description: "车辆通行能力显著下降、车速明显降低、排队较长的交通状态"
-    detection_mode: "direct_vlm"
+    detection_mode: "expert_agent"
     prompt_template_id: "heavy_congestion_detection"
     confidence_threshold: 0.7
     is_active: true
@@ -124,7 +114,7 @@ event_categories:
     name: "Road Construction"
     name_zh: "道路施工"
     description: "道路施工或维护作业区域"
-    detection_mode: "direct_vlm"
+    detection_mode: "expert_agent"
     prompt_template_id: "road_construction_detection"
     confidence_threshold: 0.7
     is_active: true
@@ -140,14 +130,13 @@ event_categories:
     name: "Vehicle Reversing"
     name_zh: "车辆逆行/倒车"
     description: "车辆移动方向与车道正常流向相反"
-    detection_mode: "logic_chain"
-    logic_chain_id: "vehicle_reversing"
+    detection_mode: "expert_agent"
+    prompt_template_id: "direct_reversing_detection"
     confidence_threshold: 0.8
     is_active: true
     definition: |
       车辆逆行/倒车：车辆移动方向与所在车道正常流向相反。
       判定依据：白倒车灯亮、车辆相对于固定参照物反向移动、车头朝向与正常流向相反。
-      施工区域内车辆往返作业不算逆行/倒车。
 
   # --- event_id: 8 | 抛洒物 (J) ---
   - event_id: 8
@@ -155,7 +144,7 @@ event_categories:
     name: "Thrown Objects"
     name_zh: "抛洒物"
     description: "车道内可能影响通行的遗落异物"
-    detection_mode: "direct_vlm"
+    detection_mode: "expert_agent"
     prompt_template_id: "thrown_object_detection"
     confidence_threshold: 0.7
     is_active: true
@@ -170,7 +159,7 @@ event_categories:
     name: "Lane Change over Solid Line"
     name_zh: "实线变道"
     description: "车辆跨越实线标线变道"
-    detection_mode: "direct_vlm"
+    detection_mode: "expert_agent"
     prompt_template_id: "lane_change_solid_detection"
     confidence_threshold: 0.7
     is_active: false
@@ -179,29 +168,53 @@ event_categories:
       排除：车轮短暂压线但车身仍在原车道；跨越虚线变道；匝道正常汇入。
 
 # =============================================================================
-# 跨事件推断规则
+# 裁决规则 (Adjudication Rules)
 # =============================================================================
-# 规则：源事件被检测到 + description 命中关键词 → 推断目标事件。
-# 推断结果仅在目标事件未被 direct_vlm 检出时才生效（避免重复）。
+# 这些规则嵌入 AdjudicationStep 的 prompt 中，由 VLM 根据业务语义进行裁决。
+# 不是代码执行的硬规则，而是指导 VLM 做出符合业务要求的判断。
 #
 # 字段说明：
-#   target_event_id:    目标事件 ID
-#   source_event_id:    源事件 ID（必须先被检测到）
-#   source_description_keywords: description 中匹配任一关键词即触发
-#   confidence_multiplier: 推断置信度 = 源置信度 × 此系数
-#   description_prefix: 推断实例描述前缀
-#   reasoning:          推断理由（报告中显示）
+#   rule_id:   规则唯一标识
+#   name:      规则名称（供日志使用）
+#   description: 规则详细描述（嵌入 prompt 给 VLM 阅读）
+#   priority:  优先级（数值越大越优先），用于规则排序
 # =============================================================================
 
-cross_event_inference_rules:
-  - rule_id: "parking_to_emergency"
-    name: "违法停车在路肩 -> 应急车道占用"
-    target_event_id: 1
-    source_event_id: 0
-    source_description_keywords: ["shoulder", "emergency", "路肩", "应急"]
-    confidence_multiplier: 0.9
-    description_prefix: "车辆在应急车道/路肩区域停放"
-    reasoning: "违法停车事件检测到车辆在应急车道/路肩区域停放，符合应急车道占用定义。"
+adjudication_rules:
+  - rule_id: "accident_suppresses_parking"
+    name: "事故优先于违停"
+    description: "如果检测到交通事故，则同一区域的违法停车应被排除。事故场景中的静止车辆属于事故的一部分，不应再单独标记为违停。"
+    priority: 100
+
+  - rule_id: "construction_excludes_emergency"
+    name: "施工区域排除应急车道占用"
+    description: "如果车辆明确位于施工区域内（有锥桶、施工车辆、作业人员等标识），则不应判定为应急车道占用。施工车辆/人员有权限使用该区域。"
+    priority: 90
+
+  - rule_id: "motorcycle_excludes_emergency"
+    name: "摩托车排除应急车道占用"
+    description: "当应急车道出现摩托车时，优先判定为'摩托车出现'事件。不应将同一辆摩托车同时标记为应急车道占用（避免重复）。"
+    priority: 80
+
+  - rule_id: "accident_debris_excludes_thrown_object"
+    name: "事故碎片排除抛洒物"
+    description: "如果检测到交通事故，则事故现场散落的碎片、零件等不应判定为抛洒物。这些碎片属于事故的一部分，由事故事件统一覆盖。"
+    priority: 90
+
+  - rule_id: "construction_excludes_reversing"
+    name: "施工区域排除逆行"
+    description: "施工区域内作业的工程车辆（如压路机、洒水车等）的往返移动不属于逆行/倒车。施工区域内正常的施工车辆移动不触发逆行事件。"
+    priority: 85
+
+  - rule_id: "construction_excludes_parking"
+    name: "施工停车排除违停"
+    description: "施工区域内停放的施工车辆（挖掘机、吊车、工程车等）不属于违法停车。只有非施工的普通机动车在施工区域无故停放才考虑违停。"
+    priority: 85
+
+  - rule_id: "emergency_parking_both"
+    name: "应急车道静止触发双事件"
+    description: "当车辆在应急车道上静止停放时，应同时触发'违法停车'和'应急车道占用'两个事件。这两个事件不是互斥的，可以同时存在。"
+    priority: 70
 
 # =============================================================================
 # 自定义事件示例（取消注释即可启用）
@@ -210,7 +223,9 @@ cross_event_inference_rules:
 #   - event_id: 10
 #     event_code: "Z"
 #     name_zh: "动物穿越"
-#     detection_mode: "direct_vlm"
-#     prompt_template_id: "direct_event_detection"
+#     detection_mode: "expert_agent"
+#     prompt_template_id: "animal_crossing_expert"
 #     confidence_threshold: 0.7
 #     is_active: true
+#     definition: |
+#       动物穿越：野生动物或家畜进入高速公路车道区域。

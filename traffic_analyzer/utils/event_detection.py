@@ -4,13 +4,11 @@ from __future__ import annotations
 
 from typing import Any, List
 
-from traffic_analyzer.core.config_manager import ConfigManager
-from traffic_analyzer.core.logic_engine import LogicEngine
 from traffic_analyzer.models.schemas import (
     AnalysisContext,
+    EventCandidate,
     EventCategory,
     EventInstance,
-    EventResult,
 )
 
 
@@ -33,8 +31,13 @@ def select_event_images(context: AnalysisContext, vlm_max_frames: int) -> List[A
     return [img for img in images if img is not None]
 
 
-def parse_direct_vlm_response(response: Any, category: EventCategory) -> EventResult:
-    """Parse a direct_vlm VLM response into an EventResult."""
+def parse_expert_response(response: Any, category: EventCategory) -> EventCandidate:
+    """Parse a VLM response into an EventCandidate.
+
+    This is the unified parser for ExpertAgent responses. It populates
+    EventCandidate (which includes raw_vlm_response) rather than the older
+    EventResult.
+    """
     if response.success and isinstance(response.parsed_data, dict):
         data = response.parsed_data
         detected = bool(data.get("detected", False))
@@ -55,74 +58,24 @@ def parse_direct_vlm_response(response: Any, category: EventCategory) -> EventRe
                             reasoning=str(inst.get("reasoning", "")),
                         )
                     )
-        return EventResult(
+        return EventCandidate(
             event_id=category.event_id,
             event_name=category.name_zh,
             detected=detected,
-            instances=instances,
-            summary=str(data.get("summary", "")),
             confidence=float(data.get("confidence", 0.0)),
+            summary=str(data.get("summary", "")),
+            instances=instances,
+            raw_vlm_response=data,
         )
 
-    return EventResult(
+    return EventCandidate(
         event_id=category.event_id,
         event_name=category.name_zh,
         detected=False,
         summary=f"VLM call failed or returned invalid data: {response.raw_text[:200]}",
+        raw_vlm_response={"raw_text": response.raw_text} if hasattr(response, "raw_text") else {},
     )
 
 
-def detect_logic_chain(
-    category: EventCategory,
-    context: AnalysisContext,
-    config_manager: ConfigManager,
-    logic_engine: LogicEngine,
-) -> EventResult:
-    """Detect an event by executing its configured logic chain."""
-    if not category.logic_chain_id:
-        return EventResult(
-            event_id=category.event_id,
-            event_name=category.name_zh,
-            detected=False,
-            summary="Logic chain ID not configured",
-        )
-
-    logic_chain = config_manager.get_logic_chain(category.logic_chain_id)
-    if not logic_chain:
-        return EventResult(
-            event_id=category.event_id,
-            event_name=category.name_zh,
-            detected=False,
-            summary=f"Logic chain '{category.logic_chain_id}' not found",
-        )
-
-    return logic_engine.execute(logic_chain, context)
-
-def dispatch_sequential_event(
-    category: EventCategory,
-    context: AnalysisContext,
-    config_manager: ConfigManager,
-    logic_engine: LogicEngine,
-) -> EventResult:
-    """Dispatch a single sequential event (logic_chain or scene_tag) to the correct handler.
-
-    This is the unified entry point for non-direct_vlm events. Adding a new
-    detection mode only requires updating this function.
-    """
-    if category.detection_mode == "logic_chain":
-        return detect_logic_chain(category, context, config_manager, logic_engine)
-    elif category.detection_mode == "scene_tag":
-        return EventResult(
-            event_id=category.event_id,
-            event_name=category.name_zh,
-            detected=False,
-            summary="等待场景标签后处理",
-        )
-    else:
-        return EventResult(
-            event_id=category.event_id,
-            event_name=category.name_zh,
-            detected=False,
-            summary=f"Unknown detection mode: {category.detection_mode}",
-        )
-
+# Backward-compatible alias for code that still references the old name.
+parse_direct_vlm_response = parse_expert_response

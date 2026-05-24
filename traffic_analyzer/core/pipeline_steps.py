@@ -2,46 +2,30 @@
 PipelineStep module for the traffic analyzer framework.
 
 Provides a pluggable step-based architecture for the analysis pipeline.
-Each step encapsulates a discrete phase of analysis (scene understanding,
-event detection, post-processing) with built-in retry support.
+Each step encapsulates a discrete phase of analysis (expert agent layer,
+adjudication) with built-in retry support.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from abc import ABC, abstractmethod
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any, Dict, List, Optional
 
 from traffic_analyzer.core.config_manager import ConfigManager
-from traffic_analyzer.core.external_adapter import ExternalAdapter
-from traffic_analyzer.core.logic_engine import LogicEngine, _parse_scene_tags
+from traffic_analyzer.core.expert_agent import ExpertAgent
 from traffic_analyzer.core.vlm_engine import VLMInferenceEngine
-from traffic_analyzer.utils.event_detection import (
-    detect_logic_chain as _detect_logic_chain_impl,
-    dispatch_sequential_event as _dispatch_sequential_event_impl,
-    parse_direct_vlm_response as _parse_direct_vlm_response_impl,
-    select_event_images as _select_event_images_impl,
-)
-from traffic_analyzer.utils.image_overlay import annotate_frame
-from traffic_analyzer.utils.tool_call_logger import tool_call
+from traffic_analyzer.utils.event_detection import select_event_images as _select_event_images_impl
 from traffic_analyzer.models.schemas import (
     AnalysisContext,
-    CrossEventInferenceRule,
-    DirectionAnalysis,
-    DirectionConclusion,
-    ConsistencyCheck,
-    HeadOrientation,
-    EventCategory,
+    AdjudicationResult,
+    AuditEntry,
+    EventCandidate,
     EventInstance,
     EventResult,
-    KeyframeSequence,
-    LogicChain,
-    PromptTemplate,
-    SceneInfo,
-    VehicleMotion,
-    VideoMetadata,
 )
 
 logger = logging.getLogger(__name__)
@@ -161,596 +145,231 @@ class PipelineStep(ABC):
         return None
 
 
-class SceneUnderstandingStep(PipelineStep):
-    """Step 1: Global scene understanding via VLM."""
+class ExpertAgentLayer(PipelineStep):
+    """Step 2: Parallel expert agents for each active event."""
 
-    def __init__(
-        self,
-        config_manager: ConfigManager,
-        vlm_engine: VLMInferenceEngine,
-        max_retries: int = 1,
-    ) -> None:
-        super().__init__("scene_understanding", max_retries=max_retries, fallback_enabled=True)
+    def __init__(self, config_manager, vlm_engine, max_workers=4, max_retries=0):
+        super().__init__("expert_agent_layer", max_retries=max_retries)
         self.config_manager = config_manager
         self.vlm_engine = vlm_engine
+        self.max_workers = max_workers
 
-    def _execute(self, context: AnalysisContext) -> SceneInfo:
-        keyframes = context.keyframes
-        if not keyframes:
-            raise ValueError("No keyframes available for scene understanding")
-
-        try:
-            template = self.config_manager.get_prompt_template("scene_understanding")
-        except KeyError:
-            logger.warning("scene_understanding template not found, using default")
-            template = PromptTemplate(
-                template_id="scene_understanding",
-                name="Scene Understanding",
-                system_prompt="You are a traffic surveillance analyst.",
-                user_prompt="Analyze these video frames and describe the road structure, traffic flow, and conditions.",
-            )
-
-        coarse_frames = keyframes.coarse_frames
-        total_coarse = len(coarse_frames)
-        target_count = 20
-
-        if total_coarse >= target_count:
-            front_count = min(5, total_coarse)
-            front_frames = coarse_frames[:front_count]
-            remaining = coarse_frames[front_count:]
-            back_count = target_count - front_count
-            if remaining and back_count > 0:
-                back_indices = [
-                    front_count + int(i * (len(remaining) - 1) / max(back_count - 1, 1))
-                    for i in range(back_count)
-                ]
-                back_frames = [coarse_frames[i] for i in back_indices]
-            else:
-                back_frames = []
-            raw_frames = (front_frames + back_frames)[:target_count]
-        else:
-            raw_frames = coarse_frames[:]
-            logger.info(
-                "Coarse frames insufficient (%d < %d), using all available",
-                total_coarse,
-                target_count,
-            )
-
-        total = len(raw_frames)
-        logger.info(
-            "Scene understanding: using %d frames (first %d dense + %d uniform tail)",
-            total,
-            min(5, total),
-            max(0, total - 5),
-        )
-        images: List[Any] = []
-        for idx, kf in enumerate(raw_frames):
-            img = kf.image_data or kf.image_path
-            if img is None:
-                continue
-            if idx == 0:
-                label = f"第1帧(最早) | Frame 1/{total} | t={kf.timestamp_sec:.1f}s | [VIDEO START]"
-            elif idx == total - 1:
-                label = f"第{total}帧(最新) | Frame {total}/{total} | t={kf.timestamp_sec:.1f}s | [VIDEO END]"
-            else:
-                label = f"第{idx + 1}帧 | Frame {idx + 1}/{total} | t={kf.timestamp_sec:.1f}s"
-            annotated = annotate_frame(img, label)
-            images.append(annotated)
-
-        response = self.vlm_engine.call(
-            template=template,
-            images=images,
-            context_vars={},
-        )
-
-        if not response.success or not isinstance(response.parsed_data, dict):
-            logger.warning("Scene understanding failed: %s", response.raw_text)
-            raise ResponseParseError("Scene understanding VLM call failed")
-
-        data = response.parsed_data
-        roads = data.get("roads", [])
-        scene_info = SceneInfo(
-            road_count=len(roads),
-            roads=roads,
-            weather=data.get("weather", "unknown"),
-            lighting=data.get("lighting", "unknown"),
-            traffic_density=data.get("traffic_density", "unknown"),
-            total_vehicles_estimate=data.get("total_vehicles_estimate", 0),
-            scene_description=data.get("scene_description", ""),
-            confidence=data.get("confidence", 0.0),
-            pedestrian_present=data.get("pedestrian_present"),
-            non_motor_vehicle_present=data.get("non_motor_vehicle_present"),
-            thrown_object_present=data.get("thrown_object_present"),
-        )
-
-        # Parse direction_analysis if present
-        dir_data = data.get("direction_analysis", {})
-        if dir_data:
-            scene_info = self._parse_direction_analysis(scene_info, dir_data)
-
-        return scene_info
-
-    def _parse_direction_analysis(self, scene_info: SceneInfo, dir_data: Dict[str, Any]) -> SceneInfo:
-        conclusions = dir_data.get("conclusions", [])
-        vehicle_motions = dir_data.get("vehicle_motions", [])
-        updated_count = 0
-
-        for conclusion in conclusions:
-            road_id = conclusion.get("road_id", 0)
-            for road in scene_info.roads:
-                if road.road_id == road_id:
-                    new_dir = conclusion.get("normal_direction", "")
-                    if new_dir and new_dir != "unknown":
-                        road.normal_direction = new_dir
-                        road.direction_confidence = conclusion.get("confidence", 0.0)
-                        updated_count += 1
-                    for motion in vehicle_motions:
-                        if motion.get("road_id") == road_id:
-                            from traffic_analyzer.models.schemas import DirectionEvidence
-                            road.direction_evidence.append(
-                                DirectionEvidence(
-                                    vehicle=motion.get("description", ""),
-                                    movement=motion.get("movement_direction", "unknown"),
-                                    location_earlier=motion.get("displacement", ""),
-                                )
-                            )
-
-        from traffic_analyzer.models.schemas import (
-            DirectionConclusion,
-            VehicleMotion,
-            HeadOrientation,
-            ConsistencyCheck,
-            PerspectiveCheck,
-        )
-        scene_info.direction_analysis = DirectionAnalysis(
-            anchor_points=dir_data.get("anchor_points", []),
-            vehicle_motions=[
-                VehicleMotion(
-                    vehicle_id=m.get("vehicle_id", ""),
-                    description=m.get("description", ""),
-                    displacement=m.get("displacement", ""),
-                    movement_direction=m.get("movement_direction", "unknown"),
-                    road_id=m.get("road_id", 0),
-                )
-                for m in vehicle_motions
-            ],
-            head_orientations=[
-                HeadOrientation(
-                    vehicle_id=h.get("vehicle_id", ""),
-                    head_orientation=h.get("head_orientation", "unknown"),
-                    evidence=h.get("evidence", ""),
-                )
-                for h in dir_data.get("head_orientations", [])
-            ],
-            consistency_check=[
-                ConsistencyCheck(
-                    vehicle_id=c.get("vehicle_id", ""),
-                    movement=c.get("movement", "unknown"),
-                    head_orientation=c.get("head_orientation", "unknown"),
-                    consistent=c.get("consistent", True),
-                    anomaly=c.get("anomaly", False),
-                )
-                for c in dir_data.get("consistency_check", [])
-            ],
-            perspective_check=[
-                PerspectiveCheck(
-                    vehicle_id=p.get("vehicle_id", ""),
-                    size_change=p.get("size_change", ""),
-                    matches_direction=p.get("matches_direction", True),
-                    trajectory_parallel_to_lanes=p.get("trajectory_parallel_to_lanes", True),
-                )
-                for p in dir_data.get("perspective_check", [])
-            ],
-            conclusions=[
-                DirectionConclusion(
-                    road_id=c.get("road_id", 0),
-                    name=c.get("name", ""),
-                    normal_direction=c.get("normal_direction", "unknown"),
-                    confidence=c.get("confidence", 0.0),
-                    evidence_summary=c.get("evidence_summary", ""),
-                )
-                for c in conclusions
-            ],
-        )
-        logger.info(
-            "Direction analysis parsed: updated %d/%d roads",
-            updated_count,
-            len(scene_info.roads),
-        )
-        return scene_info
-
-    def _fallback(self, context: AnalysisContext, error: Optional[Exception]) -> SceneInfo:
-        logger.warning("Scene understanding fallback: returning empty SceneInfo")
-        return SceneInfo()
-
-
-from traffic_analyzer.core.vlm_engine import ResponseParseError
-
-
-class EventDetectionStep(PipelineStep):
-    """Step 2: Detect all configured events (direct_vlm, logic_chain, scene_tag)."""
-
-    def __init__(
-        self,
-        config_manager: ConfigManager,
-        vlm_engine: VLMInferenceEngine,
-        logic_engine: LogicEngine,
-        max_retries: int = 0,
-    ) -> None:
-        super().__init__("event_detection", max_retries=max_retries)
-        self.config_manager = config_manager
-        self.vlm_engine = vlm_engine
-        self.logic_engine = logic_engine
-
-    def _execute(self, context: AnalysisContext) -> List[EventResult]:
+    def _execute(self, context: AnalysisContext) -> List[EventCandidate]:
         event_categories = self.config_manager.get_event_categories()
-        results: List[EventResult] = []
+        expert_categories = [
+            cat for cat in event_categories
+            if cat.is_active and cat.detection_mode == "expert_agent"
+        ]
 
-        direct_vlm_categories: List[EventCategory] = []
-        sequential_categories: List[EventCategory] = []
+        if not expert_categories:
+            logger.info("No active expert_agent categories found")
+            return []
 
-        for category in event_categories:
-            if not category.is_active:
-                continue
-            if category.detection_mode == "direct_vlm":
-                direct_vlm_categories.append(category)
-            else:
-                sequential_categories.append(category)
+        candidates: List[EventCandidate] = []
 
-        # Parallel direct_vlm batch
-        if direct_vlm_categories:
-            results.extend(self._detect_parallel_direct_vlm(direct_vlm_categories, context))
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            future_to_category = {}
+            for category in expert_categories:
+                agent = ExpertAgent(
+                    category=category,
+                    vlm_engine=self.vlm_engine,
+                    config_manager=self.config_manager,
+                )
+                future = executor.submit(agent.detect, context)
+                future_to_category[future] = category
 
-        # Sequential logic_chain / scene_tag
-        for category in sequential_categories:
-            try:
-                if category.detection_mode == "direct_vlm":
-                    # Should not reach here (direct_vlm is handled in parallel batch)
-                    logger.warning("direct_vlm event %s in sequential loop", category.name_zh)
-                    result = EventResult(
+            for future in as_completed(future_to_category):
+                category = future_to_category[future]
+                try:
+                    candidate = future.result()
+                    candidates.append(candidate)
+                    context.event_candidates[candidate.event_id] = candidate
+                    logger.info(
+                        "ExpertAgent[%s]: detected=%s confidence=%.2f",
+                        category.name_zh,
+                        candidate.detected,
+                        candidate.confidence,
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "ExpertAgent[%s] failed: %s",
+                        category.name_zh,
+                        exc,
+                        exc_info=True,
+                    )
+                    error_candidate = EventCandidate(
                         event_id=category.event_id,
                         event_name=category.name_zh,
                         detected=False,
-                        summary="direct_vlm event should be in parallel batch",
+                        summary=f"ExpertAgent error: {exc}",
                     )
-                else:
-                    with tool_call(
-                        "event_detector.detect",
-                        event=category.event_id,
-                        mode=category.detection_mode,
-                    ) as _tc:
-                        result = _dispatch_sequential_event_impl(
-                            category, context, self.config_manager, self.logic_engine
-                        )
-                        _tc.result(
-                            f"detected={result.detected}"
-                        )
-                results.append(result)
-                context.event_results[result.event_id] = result
-            except Exception as exc:
-                logger.error("Event detection failed for %s: %s", category.name_zh, exc, exc_info=True)
-                error_result = EventResult(
-                    event_id=category.event_id,
-                    event_name=category.name_zh,
-                    detected=False,
-                    summary=f"Detection error: {exc}",
-                )
-                results.append(error_result)
-                context.event_results[category.event_id] = error_result
+                    candidates.append(error_candidate)
+                    context.event_candidates[category.event_id] = error_candidate
 
-        return results
+        return candidates
 
-    def _detect_parallel_direct_vlm(
-        self,
-        categories: List[EventCategory],
-        context: AnalysisContext,
-    ) -> List[EventResult]:
-        logger.info("[并行检测] 准备并行检测 %d 个 direct_vlm 事件", len(categories))
-        batch_requests: List[Dict[str, Any]] = []
-        batched_categories: List[EventCategory] = []
-        shared_images = self._get_event_images(context)
 
-        for category in categories:
-            template_id = category.prompt_template_id
-            if not template_id:
-                logger.error("Event %s has no prompt_template_id", category.name_zh)
-                error_result = EventResult(
-                    event_id=category.event_id,
-                    event_name=category.name_zh,
-                    detected=False,
-                    summary="Configuration error: no prompt_template_id",
-                )
-                results.append(error_result)
-                context.event_results[category.event_id] = error_result
-                continue
-            try:
-                template = self.config_manager.get_prompt_template(template_id)
-            except KeyError:
-                logger.error(
-                    "Event %s references unknown prompt_template_id '%s'",
-                    category.name_zh, template_id,
-                )
-                error_result = EventResult(
-                    event_id=category.event_id,
-                    event_name=category.name_zh,
-                    detected=False,
-                    summary=f"Configuration error: prompt template '{template_id}' not found",
-                )
-                results.append(error_result)
-                context.event_results[category.event_id] = error_result
-                continue
+class AdjudicationStep(PipelineStep):
+    """Step 3: Single VLM call to adjudicate all expert candidates."""
 
-            ctx_vars: Dict[str, Any] = {
-                "event_name": category.name_zh,
-                "event_definition": category.definition,
-                "visual_indicators": category.visual_indicators,
-            }
-            if context.scene_understanding:
-                ctx_vars["scene_understanding"] = context.scene_understanding
+    def __init__(self, config_manager, vlm_engine, max_retries=0):
+        super().__init__("adjudication", max_retries=max_retries, fallback_enabled=True)
+        self.config_manager = config_manager
+        self.vlm_engine = vlm_engine
 
-            batch_requests.append({
-                "template": template,
-                "images": shared_images,
-                "context_vars": ctx_vars,
-            })
-            batched_categories.append(category)
+    def _execute(self, context: AnalysisContext) -> AdjudicationResult:
+        candidates = list(context.event_candidates.values())
+        if not candidates:
+            logger.info("No event candidates to adjudicate")
+            return AdjudicationResult()
 
-        if not batch_requests:
-            return []
-
-        batch_start = time.perf_counter()
+        # 1. Load adjudication rules
         try:
-            batch_responses = self.vlm_engine.batch_call(
-                batch_requests,
-                parallel=True,
-                max_workers=min(4, len(batched_categories)),
-            )
+            rules = self.config_manager.get_adjudication_rules()
         except Exception as exc:
-            logger.error("Batch call failed entirely: %s", exc, exc_info=True)
-            # Return error results for all batched categories so the pipeline continues
-            error_results: List[EventResult] = []
-            for category in batched_categories:
-                error_result = EventResult(
-                    event_id=category.event_id,
-                    event_name=category.name_zh,
-                    detected=False,
-                    summary=f"Batch detection error: {exc}",
-                )
-                error_results.append(error_result)
-                context.event_results[category.event_id] = error_result
-            return error_results
-        batch_duration = time.perf_counter() - batch_start
+            logger.warning("Failed to load adjudication rules: %s", exc)
+            rules = []
 
-        if len(batch_responses) != len(batched_categories):
-            logger.error(
-                "Batch response count mismatch: expected %d, got %d",
-                len(batched_categories),
-                len(batch_responses),
+        # 2. Load prompt template
+        try:
+            template = self.config_manager.get_prompt_template("adjudication")
+        except KeyError:
+            logger.error("Adjudication prompt template not found")
+            raise RuntimeError("Adjudication prompt template 'adjudication' not found")
+
+        # 3. Select images
+        images = _select_event_images_impl(context)
+
+        # 4. Build context variables
+        candidates_json = json.dumps(
+            [
+                {
+                    "event_id": c.event_id,
+                    "event_name": c.event_name,
+                    "detected": c.detected,
+                    "confidence": c.confidence,
+                    "summary": c.summary,
+                    "instances": [
+                        {
+                            "start_time_sec": i.start_time_sec,
+                            "end_time_sec": i.end_time_sec,
+                            "description": i.description,
+                            "reasoning": i.reasoning,
+                        }
+                        for i in c.instances
+                    ],
+                }
+                for c in candidates
+            ],
+            ensure_ascii=False,
+            indent=2,
+        )
+
+        business_rules = "\n".join(
+            f"- [{r.get('rule_id', 'N/A')}] {r.get('name', 'Unnamed')}: "
+            f"{r.get('description', '')} (priority={r.get('priority', 0)})"
+            for r in rules
+        ) if rules else "No business rules configured."
+
+        context_vars = {
+            "candidates_json": candidates_json,
+            "business_rules": business_rules,
+        }
+
+        # 5. Call VLM
+        response = self.vlm_engine.call(
+            template=template,
+            images=images,
+            context_vars=context_vars,
+        )
+
+        if not response.success or not isinstance(response.parsed_data, dict):
+            logger.error("Adjudication VLM call failed: %s", response.raw_text)
+            raise RuntimeError(f"Adjudication VLM call failed: {response.raw_text}")
+
+        data = response.parsed_data
+
+        # 6. Parse event_results
+        event_results: List[EventResult] = []
+        for er in data.get("event_results", []):
+            instances = []
+            for inst in er.get("instances", []):
+                instances.append(
+                    EventInstance(
+                        event_id=er.get("event_id", 0),
+                        event_name=er.get("event_name", ""),
+                        event_name_en=er.get("event_name_en", ""),
+                        start_time_sec=inst.get("start_time_sec", 0.0),
+                        end_time_sec=inst.get("end_time_sec", 0.0),
+                        confidence=inst.get("confidence", 0.0),
+                        description=inst.get("description", ""),
+                        reasoning=inst.get("reasoning", ""),
+                    )
+                )
+            event_results.append(
+                EventResult(
+                    event_id=er.get("event_id", 0),
+                    event_name=er.get("event_name", ""),
+                    event_name_en=er.get("event_name_en", ""),
+                    detected=er.get("detected", False),
+                    confidence=er.get("confidence", 0.0),
+                    summary=er.get("summary", ""),
+                    instances=instances,
+                    reasoning=er.get("reasoning", ""),
+                )
             )
 
-        valid_count = 0
-        results: List[EventResult] = []
-        for idx, category in enumerate(batched_categories):
-            if idx >= len(batch_responses):
-                logger.error("[parallel] Missing response for %s", category.name_zh)
-                error_result = EventResult(
-                    event_id=category.event_id,
-                    event_name=category.name_zh,
-                    detected=False,
-                    summary="Batch response missing",
+        # 7. Parse audit_log
+        audit_log: List[AuditEntry] = []
+        for entry in data.get("audit_log", []):
+            audit_log.append(
+                AuditEntry(
+                    event_id=entry.get("event_id", 0),
+                    event_name=entry.get("event_name", ""),
+                    action=entry.get("action", "included"),
+                    reason=entry.get("reason", ""),
+                    rule_id=entry.get("rule_id"),
                 )
-                results.append(error_result)
-                context.event_results[category.event_id] = error_result
-                continue
-
-            resp = batch_responses[idx]
-            detected = (
-                resp.parsed_data.get("detected", False)
-                if resp.success and isinstance(resp.parsed_data, dict)
-                else "N/A"
             )
-            logger.info("[parallel] done: %s, detected=%s", category.name_zh, detected)
-            result = self._parse_direct_vlm_response(resp, category)
-            with tool_call(
-                "event_detector.detect",
-                event=category.event_id,
-                mode="direct_vlm",
-            ) as _tc:
-                _tc.result(
-                    f"detected={result.detected}, "
-                    f"confidence={result.confidence:.2f}"
-                )
-            results.append(result)
+
+        # 8. Store results in context
+        for result in event_results:
             context.event_results[result.event_id] = result
-            if resp.success and isinstance(resp.parsed_data, dict):
-                valid_count += 1
+
+        adjudication_result = AdjudicationResult(
+            event_results=event_results,
+            audit_log=audit_log,
+            adjudication_reasoning=data.get("adjudication_reasoning", ""),
+        )
 
         logger.info(
-            "[parallel] all done: %d/%d events (%.2fs)",
-            valid_count,
-            len(batched_categories),
-            batch_duration,
+            "Adjudication complete: %d event results, %d audit entries",
+            len(event_results),
+            len(audit_log),
         )
-        return results
+        return adjudication_result
 
-    def _get_event_images(self, context: AnalysisContext) -> List[Any]:
-        system_config = self.config_manager._system_config
-        vlm_max_frames = system_config.vlm_max_frames if system_config is not None else 0
-        return _select_event_images_impl(context, vlm_max_frames)
-
-    def _parse_direct_vlm_response(self, response: Any, category: EventCategory) -> EventResult:
-        return _parse_direct_vlm_response_impl(response, category)
-
-    def _detect_logic_chain(self, category: EventCategory, context: AnalysisContext) -> EventResult:
-        return _detect_logic_chain_impl(category, context, self.config_manager, self.logic_engine)
-
-
-class PostProcessStep(PipelineStep):
-    """Step 3: Post-process inferred events (cross-event inference, boolean fields, tags)."""
-
-    def __init__(
-        self,
-        config_manager: ConfigManager,
-        max_retries: int = 0,
-    ) -> None:
-        super().__init__("post_processing", max_retries=max_retries, fallback_enabled=True)
-        self.config_manager = config_manager
-
-    def _execute(self, context: AnalysisContext) -> List[EventResult]:
-        event_results = list(context.event_results.values())
-        scene_info = context.scene_understanding
-        results_by_id = {r.event_id: r for r in event_results}
-
-        # Phase 1: Cross-event inference
-        event_categories = {c.event_id: c for c in self.config_manager.get_event_categories()}
-        for rule in self.config_manager.get_inference_rules():
-            self._apply_cross_event_inference(rule, results_by_id, event_categories)
-
-        # Phase 2: Boolean field inference
-        if scene_info:
-            for cat in self.config_manager.get_event_categories():
-                if cat.detection_mode.value != "scene_tag" or not cat.scene_boolean_field:
-                    continue
-                result = results_by_id.get(cat.event_id)
-                if not result:
-                    continue
-
-                present = getattr(scene_info, cat.scene_boolean_field, None)
-                if present is None:
-                    continue
-
-                if present is False:
-                    result.detected = False
-                    result.confidence = 0.0
-                    result.instances = []
-                    result.summary = f"{cat.name_zh}未检测到（场景理解结构化字段为 False）"
-                    logger.info("%s explicitly FALSE from scene boolean field", cat.name_zh)
-                    continue
-
-                if present is True and not result.detected:
-                    inferred_confidence = 0.65
-                    result.detected = True
-                    result.confidence = max(result.confidence, inferred_confidence)
-                    result.instances = [
-                        EventInstance(
-                            event_id=cat.event_id,
-                            event_name=result.event_name,
-                            event_name_en=result.event_name_en,
-                            start_time_sec=0.0,
-                            end_time_sec=0.0,
-                            confidence=inferred_confidence,
-                            description=f"{cat.name_zh}（由场景理解结构化字段推断）",
-                            reasoning=f"场景理解判断{cat.name_zh}存在。",
-                        )
-                    ]
-                    result.summary = f"{cat.name_zh}（由场景理解推断）"
-                    logger.info("Inferred %s from scene boolean field", cat.name_zh)
-
-        # Phase 3: Structured tag inference
-        if scene_info and scene_info.scene_description:
-            tag_map = _parse_scene_tags(scene_info.scene_description)
-            for cat in self.config_manager.get_event_categories():
-                if cat.detection_mode.value != "scene_tag" or not cat.scene_tag_key:
-                    continue
-                result = results_by_id.get(cat.event_id)
-                if not result:
-                    continue
-
-                if cat.scene_boolean_field and getattr(scene_info, cat.scene_boolean_field, None) is not None:
-                    continue
-
-                tag_value = tag_map.get(cat.scene_tag_key, "")
-
-                if tag_value.startswith("无"):
-                    result.detected = False
-                    result.confidence = 0.0
-                    result.instances = []
-                    result.summary = f"{cat.name_zh}未检测到（scene_description 结构化标签为 无）"
-                    logger.info("%s tag is '%s' — marking not detected", cat.name_zh, tag_value)
-                elif tag_value.startswith("有") and not result.detected:
-                    inferred_confidence = 0.65
-                    result.detected = True
-                    result.confidence = max(result.confidence, inferred_confidence)
-                    result.instances = [
-                        EventInstance(
-                            event_id=cat.event_id,
-                            event_name=result.event_name,
-                            event_name_en=result.event_name_en,
-                            start_time_sec=0.0,
-                            end_time_sec=0.0,
-                            confidence=inferred_confidence,
-                            description=f"{cat.name_zh}（由场景描述推断：{tag_value}）",
-                            reasoning=f"场景描述中 {{{cat.scene_tag_key}：...}} 标签显示存在{cat.name_zh}。",
-                        )
-                    ]
-                    result.summary = f"{cat.name_zh}（由场景描述推断：{tag_value}）"
-                    logger.info("Inferred %s from structured tag: %s", cat.name_zh, tag_value)
-
-        return list(results_by_id.values())
-
-    def _apply_cross_event_inference(
-        self,
-        rule: CrossEventInferenceRule,
-        results_by_id: Dict[int, EventResult],
-        event_categories: Dict[int, EventCategory],
-    ) -> None:
-
-        source_result = results_by_id.get(rule.source_event_id)
-        target_result = results_by_id.get(rule.target_event_id)
-        if not source_result or not target_result:
-            return
-        if not source_result.detected:
-            return
-
-        target_cat = event_categories.get(rule.target_event_id)
-        target_name = target_cat.name_zh if target_cat else target_result.event_name
-
-        inferred_instances: List[EventInstance] = []
-        for inst in source_result.instances:
-            desc = (inst.description or "").lower()
-            if any(kw.lower() in desc for kw in rule.source_description_keywords):
-                inferred_instances.append(
-                    EventInstance(
-                        event_id=rule.target_event_id,
-                        event_name=target_name,
-                        event_name_en=target_result.event_name_en,
-                        start_time_sec=inst.start_time_sec,
-                        end_time_sec=inst.end_time_sec,
-                        confidence=inst.confidence * rule.confidence_multiplier,
-                        description=f"{rule.description_prefix}（源自{inst.description}）",
-                        reasoning=rule.reasoning,
-                    )
+    def _fallback(self, context: AnalysisContext, error: Optional[Exception]) -> AdjudicationResult:
+        """Fallback: return raw expert candidates as EventResults (no filtering)."""
+        logger.warning(
+            "Adjudication fallback: returning raw expert candidates as EventResults (%s)",
+            error,
+        )
+        event_results: List[EventResult] = []
+        for candidate in context.event_candidates.values():
+            event_results.append(
+                EventResult(
+                    event_id=candidate.event_id,
+                    event_name=candidate.event_name,
+                    detected=candidate.detected,
+                    confidence=candidate.confidence,
+                    summary=candidate.summary,
+                    instances=candidate.instances,
                 )
+            )
+            context.event_results[candidate.event_id] = event_results[-1]
 
-        if inferred_instances:
-            # Skip inference if target already has direct_vlm instances (avoid duplication)
-            if target_result.detected and target_result.instances:
-                logger.debug(
-                    "Skipping inference for %s: already detected by direct_vlm "
-                    "with %d instance(s)",
-                    target_name,
-                    len(target_result.instances),
-                )
-                return
-            target_result.detected = True
-            target_result.confidence = max(
-                target_result.confidence,
-                max(i.confidence for i in inferred_instances),
-            )
-            target_result.instances.extend(inferred_instances)
-            source_cat = event_categories.get(rule.source_event_id)
-            source_name = source_cat.name_zh if source_cat else str(rule.source_event_id)
-            target_result.summary = (
-                f"{target_name}（由{source_name}结果推断，"
-                f"共 {len(inferred_instances)} 个实例）"
-            )
-            logger.info(
-                "Inferred %s from event %d (%d instance(s))",
-                target_name,
-                rule.source_event_id,
-                len(inferred_instances),
-            )
-
-    def _fallback(self, context: AnalysisContext, error: Optional[Exception]) -> List[EventResult]:
-        logger.warning("Post-processing fallback: returning unmodified event results")
-        return list(context.event_results.values())
+        return AdjudicationResult(
+            event_results=event_results,
+            adjudication_reasoning=f"Fallback: adjudication failed ({error}). Raw expert candidates returned without filtering.",
+        )

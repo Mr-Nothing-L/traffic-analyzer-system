@@ -24,6 +24,7 @@ class DetectionMode(str, enum.Enum):
     DIRECT_VLM = "direct_vlm"
     LOGIC_CHAIN = "logic_chain"
     SCENE_TAG = "scene_tag"
+    EXPERT_AGENT = "expert_agent"
 
 
 class ConfidenceLevel(str, enum.Enum):
@@ -231,6 +232,14 @@ class CrossEventInferenceRule(BaseModel):
     reasoning: str = ""           # 推断理由
 
 
+class AdjudicationRule(BaseModel):
+    """Business rule for the adjudication step to resolve conflicts among expert agents."""
+    rule_id: str
+    name: str = ""
+    description: str = ""
+    priority: int = Field(50, ge=0, le=1000, description="Priority for rule ordering (higher = more important)")
+
+
 class EventInstance(BaseModel):
     """A single detected event instance."""
     event_id: int
@@ -259,6 +268,33 @@ class EventResult(BaseModel):
     confidence: float = 0.0
     reasoning: str = ""
     analysis_process: List[str] = Field(default_factory=list)
+
+
+class EventCandidate(BaseModel):
+    """Raw detection candidate from an ExpertAgent (before adjudication)."""
+    event_id: int
+    event_name: str
+    detected: bool = False
+    confidence: float = 0.0
+    summary: str = ""
+    instances: List[EventInstance] = Field(default_factory=list)
+    raw_vlm_response: Dict[str, Any] = Field(default_factory=dict)
+
+
+class AuditEntry(BaseModel):
+    """Single exclusion/inclusion decision record from adjudication."""
+    event_id: int
+    event_name: str = ""
+    action: Literal["included", "excluded"] = "included"
+    reason: str = ""
+    rule_id: Optional[str] = None
+
+
+class AdjudicationResult(BaseModel):
+    """Output of the adjudication step."""
+    event_results: List[EventResult] = Field(default_factory=list)
+    audit_log: List[AuditEntry] = Field(default_factory=list)
+    adjudication_reasoning: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -460,6 +496,7 @@ class AnalysisContext(BaseModel):
     scene_understanding: Optional[SceneInfo] = None
     keyframes: Optional[KeyframeSequence] = None
     cv_tracks: Dict[str, Track] = Field(default_factory=dict)
+    event_candidates: Dict[int, EventCandidate] = Field(default_factory=dict)
     event_results: Dict[int, EventResult] = Field(default_factory=dict)
     local_vars: Dict[str, Any] = Field(default_factory=dict)
     llm_call_log: List[LLMCallRecord] = Field(default_factory=list)

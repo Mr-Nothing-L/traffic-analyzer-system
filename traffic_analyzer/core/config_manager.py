@@ -17,6 +17,7 @@ import yaml
 from dotenv import load_dotenv
 
 from traffic_analyzer.models.schemas import (
+    AdjudicationRule,
     CrossEventInferenceRule,
     EventCategory,
     LLMProviderConfig,
@@ -63,6 +64,7 @@ class ConfigManager:
         self._logic_chains: Dict[str, LogicChain] = {}
         self._prompt_templates: Dict[str, PromptTemplate] = {}
         self._inference_rules: Dict[str, CrossEventInferenceRule] = {}
+        self._adjudication_rules: Dict[str, AdjudicationRule] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -107,6 +109,12 @@ class ConfigManager:
             for rule in raw_event_categories.get("cross_event_inference_rules", [])
         }
 
+        # Load adjudication rules
+        self._adjudication_rules = {
+            rule["rule_id"]: AdjudicationRule.model_validate(rule)
+            for rule in raw_event_categories.get("adjudication_rules", [])
+        }
+
         self._logic_chains = {
             chain["chain_id"]: LogicChain.model_validate(chain)
             for chain in raw_logic_chains.get("logic_chains", [])
@@ -148,9 +156,10 @@ class ConfigManager:
         )
 
         logger.info(
-            "Config loaded: %d categories, %d inference rules, %d logic chains, %d prompt templates",
+            "Config loaded: %d categories, %d inference rules, %d adjudication rules, %d logic chains, %d prompt templates",
             len(self._event_categories),
             len(self._inference_rules),
+            len(self._adjudication_rules),
             len(self._logic_chains),
             len(self._prompt_templates),
         )
@@ -255,6 +264,12 @@ class ConfigManager:
             raise RuntimeError("Configuration has not been loaded. Call load_all() first.")
         return list(self._inference_rules.values())
 
+    def get_adjudication_rules(self) -> List[AdjudicationRule]:
+        """Return all configured adjudication rules, ordered by priority (descending)."""
+        if self._system_config is None:
+            raise RuntimeError("Configuration has not been loaded. Call load_all() first.")
+        return sorted(self._adjudication_rules.values(), key=lambda r: r.priority, reverse=True)
+
     def validate_config(self) -> List[str]:
         """Validate cross-references and consistency across config files.
 
@@ -277,42 +292,43 @@ class ConfigManager:
 
         errors: List[str] = []
 
-        # 1. EventCategory -> LogicChain references
-        for cat in self._event_categories.values():
-            if cat.detection_mode.value == "logic_chain":
-                if not cat.logic_chain_id:
-                    errors.append(
-                        f"EventCategory '{cat.name}' (id={cat.event_id}) uses "
-                        f"detection_mode=logic_chain but has no logic_chain_id."
-                    )
-                elif cat.logic_chain_id not in self._logic_chains:
-                    errors.append(
-                        f"EventCategory '{cat.name}' (id={cat.event_id}) references "
-                        f"unknown logic_chain_id '{cat.logic_chain_id}'."
-                    )
-
         # Build a set of all valid template IDs
         valid_template_ids = set(self._prompt_templates.keys())
 
+        # 1. expert_agent events must have prompt_template_id
+        for cat in self._event_categories.values():
+            if cat.detection_mode.value == "expert_agent":
+                if not cat.prompt_template_id:
+                    errors.append(
+                        f"EventCategory '{cat.name}' (id={cat.event_id}) uses "
+                        f"detection_mode=expert_agent but has no prompt_template_id."
+                    )
+                elif cat.prompt_template_id not in valid_template_ids:
+                    errors.append(
+                        f"EventCategory '{cat.name}' (id={cat.event_id}) references "
+                        f"unknown prompt_template_id '{cat.prompt_template_id}'."
+                    )
+
+        # 2. LogicChain internal validation (kept for backward compatibility)
         for chain in self._logic_chains.values():
             step_ids = {step.step_id for step in chain.steps}
 
             for step in chain.steps:
-                # 2. Loop body chain references
+                # Loop body chain references
                 if step.loop_body_chain_id and step.loop_body_chain_id not in self._logic_chains:
                     errors.append(
                         f"LogicChain '{chain.chain_id}' step '{step.step_id}' "
                         f"references unknown loop_body_chain_id '{step.loop_body_chain_id}'."
                     )
 
-                # 3. Prompt template references
+                # Prompt template references
                 if step.prompt_template_id and step.prompt_template_id not in valid_template_ids:
                     errors.append(
                         f"LogicChain '{chain.chain_id}' step '{step.step_id}' "
                         f"references unknown prompt_template_id '{step.prompt_template_id}'."
                     )
 
-                # 4. Output key presence for producing steps
+                # Output key presence for producing steps
                 if step.step_type.value in ("vlm_call", "compute", "cv_fusion", "loop"):
                     if not step.output_key:
                         errors.append(
@@ -320,7 +336,7 @@ class ConfigManager:
                             f"(type={step.step_type.value}) must define an output_key."
                         )
 
-                # 5. Branch target validation
+                # Branch target validation
                 for branch_attr in ("true_next_step", "false_next_step"):
                     target = getattr(step, branch_attr, None)
                     if target and target not in step_ids:
@@ -329,30 +345,7 @@ class ConfigManager:
                             f"{branch_attr} points to unknown step '{target}'."
                         )
 
-        # 6. direct_vlm events must have prompt_template_id
-        for cat in self._event_categories.values():
-            if cat.detection_mode.value == "direct_vlm":
-                if not cat.prompt_template_id:
-                    errors.append(
-                        f"EventCategory '{cat.name}' (id={cat.event_id}) uses "
-                        f"detection_mode=direct_vlm but has no prompt_template_id."
-                    )
-                elif cat.prompt_template_id not in valid_template_ids:
-                    errors.append(
-                        f"EventCategory '{cat.name}' (id={cat.event_id}) references "
-                        f"unknown prompt_template_id '{cat.prompt_template_id}'."
-                    )
-
-        # 7. scene_tag events must have at least one inference source
-        for cat in self._event_categories.values():
-            if cat.detection_mode.value == "scene_tag":
-                if not cat.scene_boolean_field and not cat.scene_tag_key:
-                    errors.append(
-                        f"EventCategory '{cat.name}' (id={cat.event_id}) uses "
-                        f"detection_mode=scene_tag but has neither scene_boolean_field nor scene_tag_key."
-                    )
-
-        # 8. Cross-event inference rule validation
+        # 3. Cross-event inference rule validation
         valid_event_ids = set(self._event_categories.keys())
         for rule in self._inference_rules.values():
             if rule.target_event_id not in valid_event_ids:
@@ -372,7 +365,21 @@ class ConfigManager:
                     f"Inference rule '{rule.rule_id}' has empty source_description_keywords."
                 )
 
-        # 9. Prompt template A/B traffic percentage validation
+        # 4. Adjudication rule validation
+        adjudication_rule_ids: set[str] = set()
+        for rule in self._adjudication_rules.values():
+            if rule.rule_id in adjudication_rule_ids:
+                errors.append(
+                    f"Adjudication rule_id '{rule.rule_id}' is duplicated."
+                )
+            adjudication_rule_ids.add(rule.rule_id)
+            if rule.priority < 0 or rule.priority > 1000:
+                errors.append(
+                    f"Adjudication rule '{rule.rule_id}' has priority {rule.priority} "
+                    f"outside valid range [0, 1000]."
+                )
+
+        # 5. Prompt template A/B traffic percentage validation
         for template_id, versions in self._prompt_templates.items():
             variants_with_traffic = [
                 (v, pt) for v, pt in versions.items() if pt.traffic_percentage is not None
