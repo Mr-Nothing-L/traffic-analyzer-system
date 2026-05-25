@@ -138,20 +138,24 @@ class ReportGenerator:
         # ---- Scene Summary -------------------------------------------------
         sc = report.scene_summary
         lines.append("### 场景概览")
-        lines.append(f"- **天气**: {sc.weather}")
-        lines.append(f"- **光照**: {sc.lighting}")
-        lines.append(f"- **交通密度**: {sc.traffic_density}")
-        lines.append(f"- **道路数量**: {sc.road_count}")
-        lines.append(f"- **预估车辆总数**: {sc.total_vehicles_estimate}")
-        if sc.scene_description:
-            lines.append(f"- **场景描述**: {sc.scene_description}")
-        if sc.pedestrian_present is not None:
-            lines.append(f"- **行人**: {'有' if sc.pedestrian_present else '无'}")
-        if sc.non_motor_vehicle_present is not None:
-            lines.append(f"- **非机动车**: {'有' if sc.non_motor_vehicle_present else '无'}")
-        if sc.thrown_object_present is not None:
-            lines.append(f"- **抛洒物**: {'有' if sc.thrown_object_present else '无'}")
         lines.append("")
+        lines.append("| 属性 | 值 |")
+        lines.append("|------|-----|")
+        lines.append(f"| 天气 | {sc.weather} |")
+        lines.append(f"| 光照 | {sc.lighting} |")
+        lines.append(f"| 交通密度 | {sc.traffic_density} |")
+        lines.append(f"| 道路数量 | {sc.road_count} |")
+        lines.append(f"| 预估车辆总数 | {sc.total_vehicles_estimate} |")
+        if sc.pedestrian_present is not None:
+            lines.append(f"| 行人 | {'有' if sc.pedestrian_present else '无'} |")
+        if sc.non_motor_vehicle_present is not None:
+            lines.append(f"| 非机动车 | {'有' if sc.non_motor_vehicle_present else '无'} |")
+        if sc.thrown_object_present is not None:
+            lines.append(f"| 抛洒物 | {'有' if sc.thrown_object_present else '无'} |")
+        lines.append("")
+        if sc.scene_description:
+            lines.append(f"**场景描述**: {sc.scene_description}")
+            lines.append("")
 
         # ---- Direction Analysis (6-step detailed) ------------------------
         if sc.direction_analysis:
@@ -242,7 +246,7 @@ class ReportGenerator:
                         lines.append(ev_str)
                 lines.append("")
 
-        # ---- Per-Category Analysis -----------------------------------------
+        # ---- Event Summary Table -------------------------------------------
         lines.append("## 事件类别分析")
         lines.append("")
 
@@ -250,6 +254,23 @@ class ReportGenerator:
             lines.append("_未检测到任何事件类别。_")
             lines.append("")
         else:
+            # Summary table for all events
+            lines.append("### 事件检测总览")
+            lines.append("")
+            lines.append("| 事件ID | 事件名称 | 检测结果 | 置信度 | 描述 |")
+            lines.append("|--------|----------|----------|--------|------|")
+            for result in report.event_results:
+                detected_str = "**是**" if result.detected else "否"
+                conf_str = f"{result.confidence:.2f}" if result.confidence else "—"
+                desc = result.summary or (result.instances[0].description if result.instances else "—")
+                # Truncate long descriptions for the summary table
+                if len(desc) > 40:
+                    desc = desc[:37] + "..."
+                lines.append(
+                    f"| {result.event_id} | {result.event_name} | {detected_str} | {conf_str} | {desc} |"
+                )
+            lines.append("")
+
             for result in report.event_results:
                 lines.extend(self._render_event_result(result))
 
@@ -282,12 +303,22 @@ class ReportGenerator:
 
         if report.reasoning_chain:
             lines.append("### 逐事件推理链")
+            lines.append("")
+            lines.append("| 事件ID | 事件名称 | 决策 | 思考过程 | 决策依据 |")
+            lines.append("|--------|----------|------|----------|----------|")
             for rc in report.reasoning_chain:
-                lines.append(f"**事件 {rc['event_id']}: {rc['event_name']}**")
-                lines.append(f"- **决策**: {rc['decision']}")
-                lines.append(f"- **思考过程**: {rc['thought_process']}")
-                lines.append(f"- **决策依据**: {rc['basis']}")
-                lines.append("")
+                eid = rc.get('event_id', '—')
+                ename = rc.get('event_name', '—')
+                decision = rc.get('decision', '—')
+                thought = rc.get('thought_process', '—')
+                basis = rc.get('basis', '—')
+                # Truncate long text for table
+                if len(thought) > 30:
+                    thought = thought[:27] + "..."
+                if len(basis) > 30:
+                    basis = basis[:27] + "..."
+                lines.append(f"| {eid} | {ename} | {decision} | {thought} | {basis} |")
+            lines.append("")
         else:
             lines.append("_未记录详细裁决推理链。_")
             lines.append("")
@@ -463,30 +494,53 @@ class ReportGenerator:
             name_line += f" / {result.event_name_en}"
         lines.append(name_line)
         lines.append("")
-        lines.append(f"- **是否检测到**: {'是' if result.detected else '否'}")
+
+        # Main result info as a compact table
+        lines.append("| 字段 | 内容 |")
+        lines.append("|------|------|")
+        lines.append(f"| 是否检测到 | {'**是**' if result.detected else '否'} |")
+        if result.confidence:
+            lines.append(f"| 置信度 | {result.confidence:.2f} |")
         if result.summary:
-            lines.append(f"- **摘要**: {result.summary}")
+            lines.append(f"| 摘要 | {result.summary} |")
         if result.reasoning:
-            lines.append(f"- **推理过程**: {result.reasoning}")
+            lines.append(f"| 推理过程 | {result.reasoning} |")
         lines.append("")
 
         if result.detected and result.instances:
             lines.append("#### 检测实例")
+            lines.append("")
+            # Instance table header
+            lines.append("| 实例 | 时间区间 | 置信度 | 车辆 | 道路 | 描述 |")
+            lines.append("|------|----------|--------|------|------|------|")
             for idx, inst in enumerate(result.instances, start=1):
-                lines.append(f"**实例 {idx}**")
-                if inst.vehicle_id:
-                    lines.append(f"- **车辆 ID**: {inst.vehicle_id}")
-                if inst.road_id is not None:
-                    lines.append(f"- **道路 ID**: {inst.road_id}")
+                time_range = "—"
+                if inst.start_time_sec or inst.end_time_sec:
+                    time_range = f"{inst.start_time_sec:.1f}s - {inst.end_time_sec:.1f}s"
+                conf = f"{inst.confidence:.2f}" if inst.confidence else "—"
+                vehicle = inst.vehicle_id or "—"
+                road = str(inst.road_id) if inst.road_id is not None else "—"
+                desc = inst.description or "—"
+                if len(desc) > 30:
+                    desc = desc[:27] + "..."
+                lines.append(
+                    f"| {idx} | {time_range} | {conf} | {vehicle} | {road} | {desc} |"
+                )
+            lines.append("")
+
+            # Detailed instance info as bullet points below the table
+            for idx, inst in enumerate(result.instances, start=1):
+                has_detail = (
+                    inst.reasoning
+                    or inst.disposal_suggestion
+                    or inst.evidence_frames
+                )
+                if not has_detail:
+                    continue
+                lines.append(f"**实例 {idx} 详情**")
                 if inst.evidence_frames:
                     frames_str = ", ".join(str(f) for f in inst.evidence_frames)
                     lines.append(f"- **证据帧**: {frames_str}")
-                if inst.start_time_sec or inst.end_time_sec:
-                    lines.append(
-                        f"- **时间区间**: {inst.start_time_sec:.1f}s - {inst.end_time_sec:.1f}s"
-                    )
-                if inst.description:
-                    lines.append(f"- **描述**: {inst.description}")
                 if inst.reasoning:
                     lines.append(f"- **推理过程**: {inst.reasoning}")
                 if inst.disposal_suggestion:
