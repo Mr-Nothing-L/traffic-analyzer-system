@@ -582,7 +582,6 @@ class VLMInferenceEngine:
             "scene_understanding": None,
             "video_meta": None,
             "keyframes": None,
-            "cv_tracks": None,
             "candidates_json": None,
             "business_rules": None,
         }
@@ -766,6 +765,8 @@ class VLMInferenceEngine:
         Returns:
             Tuple of (raw_text, prompt_tokens, completion_tokens, total_tokens, retry_count).
         """
+        # NOTE: This is the sole retry layer for VLM API calls.
+        # PipelineStep no longer performs retries — all retry logic lives here.
         last_error: Optional[Exception] = None
         retry_count = 0
         max_retries = max(1, self.config.max_retries)

@@ -36,7 +36,8 @@ def temp_config_dir(tmp_path: Path) -> Path:
                 "name": "Illegal Parking",
                 "name_zh": "违法停车",
                 "description": "Vehicle stopped illegally.",
-                "detection_mode": "direct_vlm",
+                "detection_mode": "expert_agent",
+                "prompt_template_id": "illegal_parking",
                 "confidence_threshold": 0.7,
                 "is_active": True,
             },
@@ -46,80 +47,37 @@ def temp_config_dir(tmp_path: Path) -> Path:
                 "name": "Emergency Lane Occupancy",
                 "name_zh": "应急车道占用",
                 "description": "Vehicle in emergency lane.",
-                "detection_mode": "logic_chain",
-                "logic_chain_id": "emergency_lane_occupancy",
+                "detection_mode": "expert_agent",
+                "prompt_template_id": "emergency_lane",
                 "confidence_threshold": 0.7,
                 "is_active": True,
             },
         ]
     }
 
-    logic_chains = {
-        "logic_chains": [
-            {
-                "chain_id": "emergency_lane_occupancy",
-                "name": "Emergency Lane Occupancy Detection",
-                "target_event_id": 1,
-                "steps": [
-                    {
-                        "step_id": "EL1",
-                        "step_type": "vlm_call",
-                        "name": "Locate Emergency Lanes",
-                        "prompt_template_id": "emergency_lane_location",
-                        "output_key": "emergency_lane_regions",
-                    },
-                    {
-                        "step_id": "EL2",
-                        "step_type": "vlm_call",
-                        "name": "Track Vehicles",
-                        "prompt_template_id": "emergency_lane_vehicle_tracking",
-                        "output_key": "emergency_vehicles",
-                    },
-                    {
-                        "step_id": "EL3",
-                        "step_type": "condition",
-                        "name": "Check if Any Found",
-                        "condition_expression": "len(emergency_vehicles.vehicles) > 0",
-                        "true_next_step": "EL4",
-                        "false_next_step": "EL5",
-                    },
-                    {
-                        "step_id": "EL4",
-                        "step_type": "aggregate",
-                        "name": "Build Result",
-                        "output_key": "event_result",
-                    },
-                    {
-                        "step_id": "EL5",
-                        "step_type": "aggregate",
-                        "name": "Final Result",
-                        "output_key": "event_result",
-                    },
-                ],
-            }
-        ]
-    }
-
     prompt_templates = {
         "prompt_templates": [
             {
-                "template_id": "emergency_lane_location",
-                "name": "Emergency Lane Location",
-                "system_prompt": "Locate emergency lanes.",
-                "user_prompt": "Find emergency lanes.",
+                "template_id": "illegal_parking",
+                "name": "Illegal Parking",
+                "system_prompt": "Detect illegal parking.",
+                "user_prompt": "Find illegally parked vehicles.",
             },
             {
-                "template_id": "emergency_lane_vehicle_tracking",
-                "name": "Emergency Lane Vehicle Tracking",
-                "system_prompt": "Track vehicles.",
-                "user_prompt": "Track vehicles in emergency lanes.",
+                "template_id": "emergency_lane",
+                "name": "Emergency Lane",
+                "system_prompt": "Detect emergency lane usage.",
+                "user_prompt": "Find vehicles in emergency lanes.",
             },
         ]
     }
 
-    (config_dir / "event_categories.yaml").write_text(yaml.safe_dump(event_categories), encoding="utf-8")
-    (config_dir / "logic_chains.yaml").write_text(yaml.safe_dump(logic_chains), encoding="utf-8")
-    (config_dir / "prompt_templates.yaml").write_text(yaml.safe_dump(prompt_templates), encoding="utf-8")
+    (config_dir / "event_categories.yaml").write_text(
+        yaml.safe_dump(event_categories), encoding="utf-8"
+    )
+    (config_dir / "prompt_templates.yaml").write_text(
+        yaml.safe_dump(prompt_templates), encoding="utf-8"
+    )
 
     return config_dir
 
@@ -146,20 +104,13 @@ class TestLoadAll:
         cats = manager.get_event_categories()
         assert len(cats) == 2
         assert cats[0].event_id == 0
-        assert cats[1].detection_mode == DetectionMode.LOGIC_CHAIN
-
-    def test_logic_chain_lookup(self, manager: ConfigManager) -> None:
-        manager.load_all()
-        chain = manager.get_logic_chain("emergency_lane_occupancy")
-        assert chain is not None
-        assert chain.target_event_id == 1
-        assert len(chain.steps) == 5
+        assert cats[0].detection_mode == DetectionMode.EXPERT_AGENT
 
     def test_prompt_template_lookup(self, manager: ConfigManager) -> None:
         manager.load_all()
-        tmpl = manager.get_prompt_template("emergency_lane_location")
-        assert tmpl.template_id == "emergency_lane_location"
-        assert "Locate emergency lanes" in tmpl.system_prompt
+        tmpl = manager.get_prompt_template("illegal_parking")
+        assert tmpl.template_id == "illegal_parking"
+        assert "Detect illegal parking" in tmpl.system_prompt
 
     def test_missing_prompt_template_raises_key_error(self, manager: ConfigManager) -> None:
         manager.load_all()
@@ -257,8 +208,7 @@ class TestValidateConfig:
         errors = manager.validate_config()
         assert errors == []
 
-    def test_missing_logic_chain_reference(self, temp_config_dir: Path) -> None:
-        # Mutate event category to reference a non-existent chain
+    def test_missing_prompt_template_reference(self, temp_config_dir: Path) -> None:
         cats = {
             "event_categories": [
                 {
@@ -267,125 +217,21 @@ class TestValidateConfig:
                     "name": "Bad Category",
                     "name_zh": "错误类别",
                     "description": "Desc",
-                    "detection_mode": "logic_chain",
-                    "logic_chain_id": "nonexistent_chain",
+                    "detection_mode": "expert_agent",
+                    "prompt_template_id": "missing_template",
                     "confidence_threshold": 0.7,
                     "is_active": True,
                 }
             ]
         }
-        (temp_config_dir / "event_categories.yaml").write_text(yaml.safe_dump(cats), encoding="utf-8")
-
-        mgr = ConfigManager(str(temp_config_dir))
-        mgr.load_all()
-        errors = mgr.validate_config()
-        assert any("nonexistent_chain" in e for e in errors)
-
-    def test_missing_prompt_template_reference(self, temp_config_dir: Path) -> None:
-        chains = {
-            "logic_chains": [
-                {
-                    "chain_id": "bad_chain",
-                    "name": "Bad Chain",
-                    "target_event_id": 99,
-                    "steps": [
-                        {
-                            "step_id": "S1",
-                            "step_type": "vlm_call",
-                            "name": "Step One",
-                            "prompt_template_id": "missing_template",
-                            "output_key": "out",
-                        }
-                    ],
-                }
-            ]
-        }
-        (temp_config_dir / "logic_chains.yaml").write_text(yaml.safe_dump(chains), encoding="utf-8")
+        (temp_config_dir / "event_categories.yaml").write_text(
+            yaml.safe_dump(cats), encoding="utf-8"
+        )
 
         mgr = ConfigManager(str(temp_config_dir))
         mgr.load_all()
         errors = mgr.validate_config()
         assert any("missing_template" in e for e in errors)
-
-    def test_missing_output_key_for_producing_step(self, temp_config_dir: Path) -> None:
-        chains = {
-            "logic_chains": [
-                {
-                    "chain_id": "bad_chain",
-                    "name": "Bad Chain",
-                    "target_event_id": 99,
-                    "steps": [
-                        {
-                            "step_id": "S1",
-                            "step_type": "vlm_call",
-                            "name": "Step One",
-                            "prompt_template_id": "emergency_lane_location",
-                            # output_key intentionally omitted
-                        }
-                    ],
-                }
-            ]
-        }
-        (temp_config_dir / "logic_chains.yaml").write_text(yaml.safe_dump(chains), encoding="utf-8")
-
-        mgr = ConfigManager(str(temp_config_dir))
-        mgr.load_all()
-        errors = mgr.validate_config()
-        assert any("output_key" in e for e in errors)
-
-    def test_invalid_branch_target(self, temp_config_dir: Path) -> None:
-        chains = {
-            "logic_chains": [
-                {
-                    "chain_id": "bad_chain",
-                    "name": "Bad Chain",
-                    "target_event_id": 99,
-                    "steps": [
-                        {
-                            "step_id": "S1",
-                            "step_type": "condition",
-                            "name": "Check",
-                            "condition_expression": "True",
-                            "true_next_step": "S2",
-                            "false_next_step": "S999",
-                        }
-                    ],
-                }
-            ]
-        }
-        (temp_config_dir / "logic_chains.yaml").write_text(yaml.safe_dump(chains), encoding="utf-8")
-
-        mgr = ConfigManager(str(temp_config_dir))
-        mgr.load_all()
-        errors = mgr.validate_config()
-        assert any("false_next_step" in e and "S999" in e for e in errors)
-
-    def test_missing_loop_body_chain(self, temp_config_dir: Path) -> None:
-        chains = {
-            "logic_chains": [
-                {
-                    "chain_id": "bad_chain",
-                    "name": "Bad Chain",
-                    "target_event_id": 99,
-                    "steps": [
-                        {
-                            "step_id": "S1",
-                            "step_type": "loop",
-                            "name": "Loop",
-                            "loop_over_key": "items",
-                            "loop_body_chain_id": "missing_sub_chain",
-                            "output_key": "results",
-                        }
-                    ],
-                }
-            ]
-        }
-        (temp_config_dir / "logic_chains.yaml").write_text(yaml.safe_dump(chains), encoding="utf-8")
-
-        mgr = ConfigManager(str(temp_config_dir))
-        mgr.load_all()
-        errors = mgr.validate_config()
-        assert any("missing_sub_chain" in e for e in errors)
 
 
 # ---------------------------------------------------------------------------
@@ -407,7 +253,8 @@ class TestReload:
                     "name": "Illegal Parking",
                     "name_zh": "违法停车",
                     "description": "Vehicle stopped illegally.",
-                    "detection_mode": "direct_vlm",
+                    "detection_mode": "expert_agent",
+                    "prompt_template_id": "illegal_parking",
                     "confidence_threshold": 0.7,
                     "is_active": True,
                 },
@@ -417,8 +264,8 @@ class TestReload:
                     "name": "Emergency Lane Occupancy",
                     "name_zh": "应急车道占用",
                     "description": "Vehicle in emergency lane.",
-                    "detection_mode": "logic_chain",
-                    "logic_chain_id": "emergency_lane_occupancy",
+                    "detection_mode": "expert_agent",
+                    "prompt_template_id": "emergency_lane",
                     "confidence_threshold": 0.7,
                     "is_active": True,
                 },
@@ -428,13 +275,16 @@ class TestReload:
                     "name": "Traffic Accident",
                     "name_zh": "交通事故",
                     "description": "Collision.",
-                    "detection_mode": "direct_vlm",
+                    "detection_mode": "expert_agent",
+                    "prompt_template_id": "accident",
                     "confidence_threshold": 0.7,
                     "is_active": True,
                 },
             ]
         }
-        (temp_config_dir / "event_categories.yaml").write_text(yaml.safe_dump(cats), encoding="utf-8")
+        (temp_config_dir / "event_categories.yaml").write_text(
+            yaml.safe_dump(cats), encoding="utf-8"
+        )
 
         manager.reload()
         assert len(manager.get_event_categories()) == 3
@@ -454,21 +304,25 @@ class TestEdgeCases:
     def test_empty_yaml_lists(self, tmp_path: Path) -> None:
         config_dir = tmp_path / "config"
         config_dir.mkdir()
-        for fname in ("event_categories.yaml", "logic_chains.yaml", "prompt_templates.yaml"):
-            (config_dir / fname).write_text(yaml.safe_dump({fname.replace(".yaml", ""): []}), encoding="utf-8")
+        for fname in ("event_categories.yaml", "prompt_templates.yaml"):
+            (config_dir / fname).write_text(
+                yaml.safe_dump({fname.replace(".yaml", ""): []}), encoding="utf-8"
+            )
 
         mgr = ConfigManager(str(config_dir))
         config = mgr.load_all()
         assert isinstance(config, SystemConfig)
         assert mgr.get_event_categories() == []
-        assert mgr.get_logic_chain("anything") is None
 
     def test_top_level_not_mapping_raises(self, tmp_path: Path) -> None:
         config_dir = tmp_path / "config"
         config_dir.mkdir()
-        (config_dir / "event_categories.yaml").write_text("- just\n- a\n- list\n", encoding="utf-8")
-        for fname in ("logic_chains.yaml", "prompt_templates.yaml"):
-            (config_dir / fname).write_text(yaml.safe_dump({fname.replace(".yaml", ""): []}), encoding="utf-8")
+        (config_dir / "event_categories.yaml").write_text(
+            "- just\n- a\n- list\n", encoding="utf-8"
+        )
+        (config_dir / "prompt_templates.yaml").write_text(
+            yaml.safe_dump({"prompt_templates": []}), encoding="utf-8"
+        )
 
         mgr = ConfigManager(str(config_dir))
         with pytest.raises(ValueError, match="must be a mapping"):

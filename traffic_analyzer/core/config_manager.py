@@ -21,7 +21,6 @@ from traffic_analyzer.models.schemas import (
     CrossEventInferenceRule,
     EventCategory,
     LLMProviderConfig,
-    LogicChain,
     PromptTemplate,
     SamplingConfig,
     SystemConfig,
@@ -41,13 +40,11 @@ class ConfigManager:
         config_dir: Directory containing YAML configuration files.
         _system_config: Cached ``SystemConfig`` instance.
         _event_categories: Mapping of event_id -> ``EventCategory``.
-        _logic_chains: Mapping of chain_id -> ``LogicChain``.
         _prompt_templates: Mapping of template_id -> ``PromptTemplate``.
     """
 
     _YAML_FILES = {
         "event_categories": "event_categories.yaml",
-        "logic_chains": "logic_chains.yaml",
         "prompt_templates": "prompt_templates.yaml",
     }
 
@@ -61,7 +58,6 @@ class ConfigManager:
         self.config_dir = Path(config_dir).resolve()
         self._system_config: Optional[SystemConfig] = None
         self._event_categories: Dict[int, EventCategory] = {}
-        self._logic_chains: Dict[str, LogicChain] = {}
         self._prompt_templates: Dict[str, PromptTemplate] = {}
         self._inference_rules: Dict[str, CrossEventInferenceRule] = {}
         self._adjudication_rules: Dict[str, AdjudicationRule] = {}
@@ -91,7 +87,6 @@ class ConfigManager:
             self.config_dir = Path(config_dir).resolve()
 
         raw_event_categories = self._load_yaml("event_categories")
-        raw_logic_chains = self._load_yaml("logic_chains")
         raw_prompt_templates = self._load_yaml("prompt_templates")
 
         # Parse .env for LLM settings
@@ -113,11 +108,6 @@ class ConfigManager:
         self._adjudication_rules = {
             rule["rule_id"]: AdjudicationRule.model_validate(rule)
             for rule in raw_event_categories.get("adjudication_rules", [])
-        }
-
-        self._logic_chains = {
-            chain["chain_id"]: LogicChain.model_validate(chain)
-            for chain in raw_logic_chains.get("logic_chains", [])
         }
 
         # Group prompt templates by template_id to support multiple versions
@@ -156,11 +146,10 @@ class ConfigManager:
         )
 
         logger.info(
-            "Config loaded: %d categories, %d inference rules, %d adjudication rules, %d logic chains, %d prompt templates",
+            "Config loaded: %d categories, %d inference rules, %d adjudication rules, %d prompt templates",
             len(self._event_categories),
             len(self._inference_rules),
             len(self._adjudication_rules),
-            len(self._logic_chains),
             len(self._prompt_templates),
         )
 
@@ -171,19 +160,6 @@ class ConfigManager:
         if self._system_config is None:
             raise RuntimeError("Configuration has not been loaded. Call load_all() first.")
         return [self._event_categories[k] for k in sorted(self._event_categories)]
-
-    def get_logic_chain(self, chain_id: str) -> Optional[LogicChain]:
-        """Fetch a logic chain by its unique identifier.
-
-        Args:
-            chain_id: The ``chain_id`` field of the desired ``LogicChain``.
-
-        Returns:
-            The matching ``LogicChain`` or ``None`` if not found.
-        """
-        if self._system_config is None:
-            raise RuntimeError("Configuration has not been loaded. Call load_all() first.")
-        return self._logic_chains.get(chain_id)
 
     def get_prompt_template(
         self,
@@ -274,14 +250,11 @@ class ConfigManager:
         """Validate cross-references and consistency across config files.
 
         Checks performed:
-        1. Every ``EventCategory`` with ``detection_mode == LOGIC_CHAIN`` references
-           an existing ``LogicChain``.
-        2. Every ``logic_chain_id`` referenced inside a ``LogicStep`` (``loop_body_chain_id``)
-           points to an existing chain.
-        3. Every ``prompt_template_id`` referenced by any ``LogicStep`` exists.
-        4. Step ``output_key`` values are non-empty for steps that produce data.
-        5. ``true_next_step`` / ``false_next_step`` references point to existing step IDs
-           within the same chain.
+        1. Every ``EventCategory`` with ``detection_mode == expert_agent`` has a
+           valid ``prompt_template_id``.
+        2. Cross-event inference rules reference valid event IDs.
+        3. Adjudication rules have valid priorities and unique IDs.
+        4. Prompt template A/B traffic percentages sum to 100%.
 
         Returns:
             A list of human-readable error messages. An empty list indicates a
@@ -309,43 +282,7 @@ class ConfigManager:
                         f"unknown prompt_template_id '{cat.prompt_template_id}'."
                     )
 
-        # 2. LogicChain internal validation (kept for backward compatibility)
-        for chain in self._logic_chains.values():
-            step_ids = {step.step_id for step in chain.steps}
-
-            for step in chain.steps:
-                # Loop body chain references
-                if step.loop_body_chain_id and step.loop_body_chain_id not in self._logic_chains:
-                    errors.append(
-                        f"LogicChain '{chain.chain_id}' step '{step.step_id}' "
-                        f"references unknown loop_body_chain_id '{step.loop_body_chain_id}'."
-                    )
-
-                # Prompt template references
-                if step.prompt_template_id and step.prompt_template_id not in valid_template_ids:
-                    errors.append(
-                        f"LogicChain '{chain.chain_id}' step '{step.step_id}' "
-                        f"references unknown prompt_template_id '{step.prompt_template_id}'."
-                    )
-
-                # Output key presence for producing steps
-                if step.step_type.value in ("vlm_call", "compute", "cv_fusion", "loop"):
-                    if not step.output_key:
-                        errors.append(
-                            f"LogicChain '{chain.chain_id}' step '{step.step_id}' "
-                            f"(type={step.step_type.value}) must define an output_key."
-                        )
-
-                # Branch target validation
-                for branch_attr in ("true_next_step", "false_next_step"):
-                    target = getattr(step, branch_attr, None)
-                    if target and target not in step_ids:
-                        errors.append(
-                            f"LogicChain '{chain.chain_id}' step '{step.step_id}' "
-                            f"{branch_attr} points to unknown step '{target}'."
-                        )
-
-        # 3. Cross-event inference rule validation
+        # 2. Cross-event inference rule validation
         valid_event_ids = set(self._event_categories.keys())
         for rule in self._inference_rules.values():
             if rule.target_event_id not in valid_event_ids:
@@ -365,7 +302,7 @@ class ConfigManager:
                     f"Inference rule '{rule.rule_id}' has empty source_description_keywords."
                 )
 
-        # 4. Adjudication rule validation
+        # 3. Adjudication rule validation
         adjudication_rule_ids: set[str] = set()
         for rule in self._adjudication_rules.values():
             if rule.rule_id in adjudication_rule_ids:
@@ -379,7 +316,7 @@ class ConfigManager:
                     f"outside valid range [0, 1000]."
                 )
 
-        # 5. Prompt template A/B traffic percentage validation
+        # 4. Prompt template A/B traffic percentage validation
         for template_id, versions in self._prompt_templates.items():
             variants_with_traffic = [
                 (v, pt) for v, pt in versions.items() if pt.traffic_percentage is not None

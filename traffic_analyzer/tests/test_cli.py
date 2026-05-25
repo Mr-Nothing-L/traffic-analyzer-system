@@ -99,7 +99,6 @@ class TestCmdAnalyze:
         assert ret == 0
         call_args = mock_orchestrator.analyze.call_args[0]
         assert "test.mp4" in call_args[0]
-        assert call_args[1] is None
         mock_print.assert_called_once()
         printed = mock_print.call_args[0][0]
         assert "test.mp4" in printed
@@ -160,29 +159,6 @@ class TestCmdAnalyze:
         assert ret == 1
 
     @patch("traffic_analyzer.cli.Path.exists")
-    def test_analyze_cv_tracks_not_found(self, mock_exists: MagicMock) -> None:
-        # Path.exists is patched as a method, so the mock receives no positional args
-        # when called as Path(path).exists().  Use *args to be safe.
-        def _exists(*args: Any, **kwargs: Any) -> bool:
-            # Path.exists() takes no args; the mock is invoked with no args.
-            # We need to inspect the Path instance indirectly.  Simpler: just
-            # have the video exist and the tracks file not exist via a stateful side effect.
-            return True
-        mock_exists.side_effect = _exists
-        # To actually test the missing tracks file, mock the Path constructor
-        # so we can distinguish paths.
-        with patch("traffic_analyzer.cli.Path") as mock_path_cls:
-            def _make_path(path_str: str) -> MagicMock:
-                p = MagicMock()
-                p.exists.return_value = "missing_tracks.json" not in str(path_str)
-                return p
-            mock_path_cls.side_effect = _make_path
-            parser = build_parser()
-            args = parser.parse_args(["analyze", "--video", "test.mp4", "--cv-tracks", "missing_tracks.json"])
-            ret = cmd_analyze(args)
-            assert ret == 1
-
-    @patch("traffic_analyzer.cli.Path.exists")
     @patch("traffic_analyzer.cli.AnalysisOrchestrator")
     def test_analyze_orchestrator_failure(
         self,
@@ -209,8 +185,9 @@ class TestCmdValidateConfig:
         mock_exists.return_value = True
         mock_manager = MagicMock()
         mock_manager.get_event_categories.return_value = [
-            MagicMock(event_id=0, name="A", detection_mode=MagicMock(value="direct_vlm")),
+            MagicMock(event_id=0, name="A", detection_mode=MagicMock(value="expert_agent")),
         ]
+        mock_manager.validate_config.return_value = []
         mock_config_cls.return_value = mock_manager
 
         parser = build_parser()

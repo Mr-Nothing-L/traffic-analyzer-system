@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import List, Optional, Sequence
 
 from traffic_analyzer.core.config_manager import ConfigManager
+from traffic_analyzer.models.schemas import SceneInfo
 from traffic_analyzer.orchestrator.analysis_orchestrator import AnalysisOrchestrator
 
 
@@ -38,13 +39,6 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         logger.error("Video file not found: %s", video_path)
         return 1
 
-    cv_tracks_path: Optional[str] = None
-    if args.cv_tracks:
-        cv_tracks_path = _resolve_path(args.cv_tracks)
-        if not Path(cv_tracks_path).exists():
-            logger.error("CV tracks file not found: %s", cv_tracks_path)
-            return 1
-
     config_dir = _resolve_path(args.config_dir)
     if not Path(config_dir).is_dir():
         logger.error("Config directory not found: %s", config_dir)
@@ -56,11 +50,32 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     if args.min_frames != 30:
         os.environ["SCENE_UNDERSTANDING_MIN_FRAMES"] = str(args.min_frames)
         os.environ["VLM_MAX_FRAMES"] = str(args.min_frames)
-        logger.info("Max VLM input frames set to %d (scene_understanding + direct_vlm + logic_chain)", args.min_frames)
+        logger.info("Max VLM input frames set to %d (scene_understanding + expert_agent)", args.min_frames)
+
+    # Load external scene understanding if provided
+    scene_understanding: Optional[SceneInfo] = None
+    if args.scene_understanding:
+        su_path = _resolve_path(args.scene_understanding)
+        if not Path(su_path).exists():
+            logger.error("Scene understanding file not found: %s", su_path)
+            return 1
+        try:
+            with open(su_path, "r", encoding="utf-8") as f:
+                scene_understanding = SceneInfo.model_validate(json.load(f))
+            logger.info("Loaded external scene understanding from %s", su_path)
+        except json.JSONDecodeError as exc:
+            logger.error("Invalid JSON in scene understanding file: %s", exc)
+            return 1
+        except Exception as exc:
+            logger.error("Failed to read scene understanding file: %s", exc)
+            return 1
 
     try:
         orchestrator = AnalysisOrchestrator.from_config_dir(config_dir)
-        report = orchestrator.analyze(video_path, cv_tracks_path)
+        report = orchestrator.analyze(
+            video_path,
+            scene_understanding=scene_understanding,
+        )
     except Exception as exc:
         logger.exception("Analysis failed: %s", exc)
         return 1
@@ -149,9 +164,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to the input video file.",
     )
     analyze_parser.add_argument(
-        "--cv-tracks", "-c",
+        "--scene-understanding", "-s",
         default=None,
-        help="Optional path to CV track JSON (merge_tracks.py output).",
+        help="Optional path to external scene understanding JSON file.",
     )
     analyze_parser.add_argument(
         "--config-dir", "-d",

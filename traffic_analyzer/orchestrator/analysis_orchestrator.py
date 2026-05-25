@@ -19,8 +19,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from traffic_analyzer.core.config_manager import ConfigManager
-from traffic_analyzer.core.external_adapter import ExternalAdapter
-from traffic_analyzer.core.logic_engine import LogicEngine
 from traffic_analyzer.core.pipeline_steps import (
     AdjudicationStep,
     ExpertAgentLayer,
@@ -32,6 +30,7 @@ from traffic_analyzer.models.schemas import (
     AnalysisContext,
     EventResult,
     Report,
+    SceneInfo,
     VideoMetadata,
 )
 from traffic_analyzer.utils.tool_call_logger import tool_call
@@ -51,9 +50,7 @@ class AnalysisOrchestrator:
         config_manager: ConfigManager,
         video_preprocessor: VideoPreprocessor,
         vlm_engine: VLMInferenceEngine,
-        logic_engine: LogicEngine,
         report_generator: ReportGenerator,
-        external_adapter: Optional[ExternalAdapter] = None,
         expert_agent_layer: Optional[ExpertAgentLayer] = None,
         adjudication_step: Optional[AdjudicationStep] = None,
     ) -> None:
@@ -63,18 +60,14 @@ class AnalysisOrchestrator:
             config_manager: Loaded configuration manager.
             video_preprocessor: Video preprocessing module.
             vlm_engine: VLM inference engine.
-            logic_engine: Logic chain execution engine.
             report_generator: Report generation module.
-            external_adapter: Optional external CV data adapter.
             expert_agent_layer: Optional custom expert agent layer.
             adjudication_step: Optional custom adjudication step.
         """
         self.config_manager = config_manager
         self.video_preprocessor = video_preprocessor
         self.vlm_engine = vlm_engine
-        self.logic_engine = logic_engine
         self.report_generator = report_generator
-        self.external_adapter = external_adapter
 
         # Pipeline steps (created lazily if not provided)
         self._expert_agent_layer = expert_agent_layer
@@ -104,9 +97,7 @@ class AnalysisOrchestrator:
         )
 
         vlm_engine = VLMInferenceEngine(system_config.llm_provider)
-        logic_engine = LogicEngine(vlm_engine, config_manager)
         report_generator = ReportGenerator()
-        external_adapter = ExternalAdapter()
 
         # Create pipeline steps
         expert_layer = ExpertAgentLayer(config_manager, vlm_engine)
@@ -116,9 +107,7 @@ class AnalysisOrchestrator:
             config_manager=config_manager,
             video_preprocessor=video_preprocessor,
             vlm_engine=vlm_engine,
-            logic_engine=logic_engine,
             report_generator=report_generator,
-            external_adapter=external_adapter,
             expert_agent_layer=expert_layer,
             adjudication_step=adj_step,
         )
@@ -130,13 +119,13 @@ class AnalysisOrchestrator:
     def analyze(
         self,
         video_path: str,
-        cv_tracks_path: Optional[str] = None,
+        scene_understanding: Optional[SceneInfo] = None,
     ) -> Report:
         """Run the full analysis pipeline on a video.
 
         Args:
             video_path: Path to the video file.
-            cv_tracks_path: Optional path to external CV track data JSON.
+            scene_understanding: Optional pre-computed scene understanding.
 
         Returns:
             Complete analysis report.
@@ -148,9 +137,11 @@ class AnalysisOrchestrator:
         analysis_start = time.perf_counter()
         step_times: Dict[str, float] = {}
         context = AnalysisContext(config=self.config_manager.load_all())
+        if scene_understanding is not None:
+            context.scene_understanding = scene_understanding
 
         # Step 1: Video preprocessing
-        logger.info("[1/5] Preprocessing video...")
+        logger.info("[1/4] Preprocessing video...")
         t0 = time.perf_counter()
         with tool_call(
             "video_preprocessor.process",
@@ -171,7 +162,7 @@ class AnalysisOrchestrator:
         context.video_meta = video_meta
 
         # Step 2: Expert Agent Layer
-        logger.info("[2/5] Expert Agent Layer...")
+        logger.info("[2/4] Expert Agent Layer...")
         t0 = time.perf_counter()
         candidates = []
         if self._expert_agent_layer:
@@ -184,7 +175,7 @@ class AnalysisOrchestrator:
         logger.info("  Candidates generated: %d", len(candidates))
 
         # Step 3: Adjudication
-        logger.info("[3/5] Adjudication...")
+        logger.info("[3/4] Adjudication...")
         t0 = time.perf_counter()
         event_results: List[EventResult] = []
         adj_reasoning = ""
@@ -206,26 +197,8 @@ class AnalysisOrchestrator:
         detected_count = sum(1 for r in event_results if r.detected)
         logger.info("  Events detected: %d / %d", detected_count, len(event_results))
 
-        # Step 4: Load CV tracks / Cross-validation
-        logger.info("[4/5] Cross-validating with CV tracks...")
-        t0 = time.perf_counter()
-        if cv_tracks_path and self.external_adapter:
-            with tool_call(
-                "external_adapter.load_cv_tracks",
-                path=os.path.basename(cv_tracks_path),
-            ) as _tc:
-                tracks = self.external_adapter.load_cv_tracks(cv_tracks_path)
-                context.cv_tracks = tracks
-                _tc.result(f"tracks={len(tracks)}")
-            logger.info("  Tracks loaded: %d", len(tracks))
-            event_results = self._cross_validate(event_results, context)
-            context.event_results = {r.event_id: r for r in event_results}
-        else:
-            logger.info("  No CV tracks provided, skipping external validation")
-        step_times["cross_validation"] = time.perf_counter() - t0
-
-        # Step 5: Report generation
-        logger.info("[5/5] Generating report...")
+        # Step 4: Report generation
+        logger.info("[4/4] Generating report...")
         t0 = time.perf_counter()
         usage_stats = self.vlm_engine.get_usage_stats()
         with tool_call(
@@ -269,41 +242,6 @@ class AnalysisOrchestrator:
     # ------------------------------------------------------------------
     # Pipeline steps
     # ------------------------------------------------------------------
-
-    def _cross_validate(
-        self,
-        event_results: List[EventResult],
-        context: AnalysisContext,
-    ) -> List[EventResult]:
-        """Cross-validate VLM results with CV track data."""
-        if not self.external_adapter or not context.cv_tracks:
-            return event_results
-
-        roads = []  # Scene understanding removed; roads no longer available for cross-validation
-        validated_results: List[EventResult] = []
-
-        for result in event_results:
-            if not result.detected or not result.instances:
-                validated_results.append(result)
-                continue
-
-            try:
-                validated_instances = self.external_adapter.cross_validate_direction(
-                    vlm_instances=result.instances,
-                    tracks=context.cv_tracks,
-                    roads=roads,
-                    fps=context.video_meta.fps if context.video_meta else 15.0,
-                )
-                result.instances = validated_instances
-                # Recalculate confidence
-                if validated_instances:
-                    result.confidence = max(i.confidence for i in validated_instances)
-                validated_results.append(result)
-            except Exception as exc:
-                logger.warning("Cross-validation failed for %s: %s", result.event_name, exc)
-                validated_results.append(result)
-
-        return validated_results
 
     @staticmethod
     def _extract_video_meta(video_path: str) -> VideoMetadata:

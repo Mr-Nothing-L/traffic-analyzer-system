@@ -83,7 +83,7 @@ class PipelineStep(ABC):
         ...
 
     def execute(self, context: AnalysisContext) -> StepResult:
-        """Execute the step with retry and timing.
+        """Execute the step with timing and fallback.
 
         Args:
             context: Shared analysis context.
@@ -92,51 +92,31 @@ class PipelineStep(ABC):
             StepResult with success status, data, and timing.
         """
         start = time.perf_counter()
-        last_error: Optional[Exception] = None
-        retries = 0
-
-        for attempt in range(self.max_retries + 1):
-            try:
-                data = self._execute(context)
-                return StepResult(
-                    success=True,
-                    data=data,
-                    duration_sec=time.perf_counter() - start,
-                    retry_count=retries,
-                )
-            except Exception as exc:
-                last_error = exc
-                logger.warning(
-                    "Step '%s' failed (attempt %d/%d): %s",
-                    self.name,
-                    attempt + 1,
-                    self.max_retries + 1,
-                    exc,
-                )
-                if attempt < self.max_retries:
-                    retries += 1
-                    wait = min(2 ** retries, 30)
-                    time.sleep(wait)
-                else:
-                    break
-
-        # All retries exhausted
-        if self.fallback_enabled:
-            logger.info("Step '%s' running fallback", self.name)
-            fallback_data = self._fallback(context, last_error)
+        try:
+            data = self._execute(context)
             return StepResult(
                 success=True,
-                data=fallback_data,
+                data=data,
                 duration_sec=time.perf_counter() - start,
-                retry_count=retries,
+                retry_count=0,
             )
-
-        return StepResult(
-            success=False,
-            error=last_error,
-            duration_sec=time.perf_counter() - start,
-            retry_count=retries,
-        )
+        except Exception as exc:
+            logger.warning("Step '%s' failed: %s", self.name, exc)
+            if self.fallback_enabled:
+                logger.info("Step '%s' running fallback", self.name)
+                fallback_data = self._fallback(context, exc)
+                return StepResult(
+                    success=True,
+                    data=fallback_data,
+                    duration_sec=time.perf_counter() - start,
+                    retry_count=0,
+                )
+            return StepResult(
+                success=False,
+                error=exc,
+                duration_sec=time.perf_counter() - start,
+                retry_count=0,
+            )
 
     def _fallback(self, context: AnalysisContext, error: Optional[Exception]) -> Any:
         """Produce fallback output when the step fails.

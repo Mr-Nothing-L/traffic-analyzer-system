@@ -34,16 +34,6 @@ class ConfidenceLevel(str, enum.Enum):
     LOW = "low"
 
 
-class StepType(str, enum.Enum):
-    """Types of steps in a logic chain."""
-    VLM_CALL = "vlm_call"
-    COMPUTE = "compute"
-    CONDITION = "condition"
-    CV_FUSION = "cv_fusion"
-    LOOP = "loop"
-    AGGREGATE = "aggregate"
-
-
 # ---------------------------------------------------------------------------
 # Video & Frame Models
 # ---------------------------------------------------------------------------
@@ -308,50 +298,6 @@ class AdjudicationResult(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Logic Chain Models
-# ---------------------------------------------------------------------------
-
-class LogicStep(BaseModel):
-    """A single step in a logic chain."""
-    step_id: str
-    step_type: StepType
-    name: str = ""
-    description: str = ""
-    # For VLM_CALL steps
-    prompt_template_id: Optional[str] = None
-    input_images: Optional[List[str]] = None
-    context_vars_mapping: Dict[str, str] = Field(default_factory=dict)
-    output_key: str = ""
-    response_schema: Optional[Dict[str, Any]] = None
-    # For COMPUTE steps
-    compute_expression: Optional[str] = None
-    # For CONDITION steps
-    condition_expression: Optional[str] = None
-    true_next_step: Optional[str] = None
-    false_next_step: Optional[str] = None
-    # For LOOP steps
-    loop_over_key: Optional[str] = None
-    loop_body_chain_id: Optional[str] = None
-    max_iterations: int = 10
-    # For CV_FUSION steps
-    cv_data_source: Optional[str] = None
-    fusion_method: Optional[str] = None
-
-
-class LogicChain(BaseModel):
-    """A configurable multi-step logic chain for hard-case detection."""
-    chain_id: str
-    name: str
-    name_zh: str = ""
-    description: str = ""
-    target_event_id: int
-    precondition: Optional[str] = Field(None, description="Python expression that must evaluate to True for the chain to run. Can reference event_results, scene_understanding, video_meta, keyframes, local_vars.")
-    steps: List[LogicStep]
-    required_context_keys: List[str] = Field(default_factory=list)
-    output_schema: Dict[str, Any] = Field(default_factory=dict)
-
-
-# ---------------------------------------------------------------------------
 # LLM/VLM Models
 # ---------------------------------------------------------------------------
 
@@ -396,24 +342,6 @@ class LLMCallRecord(BaseModel):
     latency_ms: float
     success: bool
     error_message: Optional[str] = None
-
-
-# ---------------------------------------------------------------------------
-# CV Track Models
-# ---------------------------------------------------------------------------
-
-class Track(BaseModel):
-    """Vehicle track from external CV system (e.g. merge_tracks.py)."""
-    track_id: str
-    road_id: Optional[int] = None
-    boxes: List[List[float]] = Field(default_factory=list)
-    enter_frame: int = 0
-    exit_frame: int = 0
-    total_displacement: float = 0.0
-    lifetime_frames: int = 0
-    lifetime_sec: float = 0.0
-    merged_from: List[Dict[str, Any]] = Field(default_factory=list)
-    appearance_feature: Optional[List[float]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -508,7 +436,6 @@ class AnalysisContext(BaseModel):
     config: Optional[SystemConfig] = None
     scene_understanding: Optional[SceneInfo] = None
     keyframes: Optional[KeyframeSequence] = None
-    cv_tracks: Dict[str, Track] = Field(default_factory=dict)
     event_candidates: Dict[int, EventCandidate] = Field(default_factory=dict)
     event_results: Dict[int, EventResult] = Field(default_factory=dict)
     local_vars: Dict[str, Any] = Field(default_factory=dict)

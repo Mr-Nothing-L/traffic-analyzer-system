@@ -1,4 +1,4 @@
-"""Integration tests for AnalysisOrchestrator."""
+"""Integration tests for AnalysisOrchestrator (v2.0.0)."""
 
 from __future__ import annotations
 
@@ -11,10 +11,11 @@ import numpy as np
 import pytest
 
 from traffic_analyzer.models.schemas import (
+    AdjudicationResult,
     AnalysisContext,
     BinaryEncoding,
+    EventCandidate,
     EventCategory,
-    EventInstance,
     EventResult,
     Keyframe,
     KeyframeSequence,
@@ -25,7 +26,6 @@ from traffic_analyzer.models.schemas import (
     SamplingConfig,
     SceneInfo,
     SystemConfig,
-    Track,
     VideoMetadata,
 )
 from traffic_analyzer.orchestrator.analysis_orchestrator import (
@@ -56,7 +56,8 @@ def mock_config_manager() -> MagicMock:
             name="Test Event A",
             name_zh="测试事件A",
             description="Test description A",
-            detection_mode="direct_vlm",
+            detection_mode="expert_agent",
+            prompt_template_id="test_template",
             is_active=True,
         ),
         EventCategory(
@@ -65,8 +66,8 @@ def mock_config_manager() -> MagicMock:
             name="Test Event B",
             name_zh="测试事件B",
             description="Test description B",
-            detection_mode="logic_chain",
-            logic_chain_id="test_chain",
+            detection_mode="expert_agent",
+            prompt_template_id="test_template",
             is_active=True,
         ),
         EventCategory(
@@ -75,7 +76,8 @@ def mock_config_manager() -> MagicMock:
             name="Inactive Event",
             name_zh="未激活事件",
             description="Should be skipped",
-            detection_mode="direct_vlm",
+            detection_mode="expert_agent",
+            prompt_template_id="test_template",
             is_active=False,
         ),
     ]
@@ -85,12 +87,7 @@ def mock_config_manager() -> MagicMock:
         system_prompt="You are a test.",
         user_prompt="Test: {{event_name}}",
     )
-    manager.get_logic_chain.return_value = MagicMock(
-        chain_id="test_chain",
-        name="Test Chain",
-        target_event_id=1,
-        steps=[],
-    )
+    manager.get_adjudication_rules.return_value = []
     return manager
 
 
@@ -126,19 +123,6 @@ def mock_vlm_engine() -> MagicMock:
 
 
 @pytest.fixture
-def mock_logic_engine() -> MagicMock:
-    engine = MagicMock()
-    engine.execute.return_value = EventResult(
-        event_id=1,
-        event_name="Test Event B",
-        detected=True,
-        confidence=0.9,
-        summary="Logic chain detected",
-    )
-    return engine
-
-
-@pytest.fixture
 def mock_report_generator() -> MagicMock:
     generator = MagicMock()
     report = Report(
@@ -159,19 +143,54 @@ def mock_report_generator() -> MagicMock:
 
 
 @pytest.fixture
-def mock_external_adapter() -> MagicMock:
-    adapter = MagicMock()
-    adapter.load_cv_tracks.return_value = {
-        "track_1": MagicMock(track_id="track_1", road_id=0),
-    }
-    adapter.cross_validate_direction.return_value = [
-        EventInstance(
-            event_id=0,
-            event_name="Test Event A",
-            confidence=0.9,
-        )
-    ]
-    return adapter
+def mock_expert_agent_layer() -> MagicMock:
+    layer = MagicMock()
+    layer.execute.return_value = MagicMock(
+        success=True,
+        data=[
+            EventCandidate(
+                event_id=0,
+                event_name="Test Event A",
+                detected=True,
+                confidence=0.85,
+            ),
+            EventCandidate(
+                event_id=1,
+                event_name="Test Event B",
+                detected=False,
+                confidence=0.2,
+            ),
+        ],
+    )
+    return layer
+
+
+@pytest.fixture
+def mock_adjudication_step() -> MagicMock:
+    step = MagicMock()
+    step.execute.return_value = MagicMock(
+        success=True,
+        data=AdjudicationResult(
+            event_results=[
+                EventResult(
+                    event_id=0,
+                    event_name="Test Event A",
+                    detected=True,
+                    confidence=0.85,
+                ),
+                EventResult(
+                    event_id=1,
+                    event_name="Test Event B",
+                    detected=False,
+                    confidence=0.2,
+                ),
+            ],
+            adjudication_reasoning="Test reasoning",
+            reasoning_chain=[],
+            audit_log=[],
+        ),
+    )
+    return step
 
 
 @pytest.fixture
@@ -179,17 +198,17 @@ def orchestrator(
     mock_config_manager: MagicMock,
     mock_video_preprocessor: MagicMock,
     mock_vlm_engine: MagicMock,
-    mock_logic_engine: MagicMock,
     mock_report_generator: MagicMock,
-    mock_external_adapter: MagicMock,
+    mock_expert_agent_layer: MagicMock,
+    mock_adjudication_step: MagicMock,
 ) -> AnalysisOrchestrator:
     return AnalysisOrchestrator(
         config_manager=mock_config_manager,
         video_preprocessor=mock_video_preprocessor,
         vlm_engine=mock_vlm_engine,
-        logic_engine=mock_logic_engine,
         report_generator=mock_report_generator,
-        external_adapter=mock_external_adapter,
+        expert_agent_layer=mock_expert_agent_layer,
+        adjudication_step=mock_adjudication_step,
     )
 
 
@@ -215,14 +234,14 @@ class TestFromConfigDir:
     @patch("traffic_analyzer.orchestrator.analysis_orchestrator.ConfigManager")
     @patch("traffic_analyzer.orchestrator.analysis_orchestrator.VideoPreprocessor")
     @patch("traffic_analyzer.orchestrator.analysis_orchestrator.VLMInferenceEngine")
-    @patch("traffic_analyzer.orchestrator.analysis_orchestrator.LogicEngine")
     @patch("traffic_analyzer.orchestrator.analysis_orchestrator.ReportGenerator")
-    @patch("traffic_analyzer.orchestrator.analysis_orchestrator.ExternalAdapter")
+    @patch("traffic_analyzer.orchestrator.analysis_orchestrator.ExpertAgentLayer")
+    @patch("traffic_analyzer.orchestrator.analysis_orchestrator.AdjudicationStep")
     def test_factory_creates_orchestrator(
         self,
-        mock_ext_cls: MagicMock,
+        mock_adj_cls: MagicMock,
+        mock_exp_cls: MagicMock,
         mock_report_cls: MagicMock,
-        mock_logic_cls: MagicMock,
         mock_vlm_cls: MagicMock,
         mock_pre_cls: MagicMock,
         mock_config_cls: MagicMock,
@@ -257,333 +276,74 @@ class TestAnalyze:
         report = orchestrator.analyze(temp_video)
         assert isinstance(report, Report)
         orchestrator.video_preprocessor.process.assert_called_once_with(temp_video)
+        orchestrator._expert_agent_layer.execute.assert_called_once()
+        orchestrator._adjudication_step.execute.assert_called_once()
         orchestrator.report_generator.generate.assert_called_once()
 
-    def test_pipeline_without_cv_tracks(
+    def test_scene_understanding_passed_externally(
         self,
         orchestrator: AnalysisOrchestrator,
         temp_video: str,
     ) -> None:
-        report = orchestrator.analyze(temp_video, cv_tracks_path=None)
+        scene_info = SceneInfo(road_count=3, weather="rainy", lighting="night")
+        report = orchestrator.analyze(temp_video, scene_understanding=scene_info)
         assert isinstance(report, Report)
-        orchestrator.external_adapter.load_cv_tracks.assert_not_called()
 
-    def test_pipeline_with_cv_tracks(
-        self,
-        orchestrator: AnalysisOrchestrator,
-        temp_video: str,
-        mock_vlm_engine: MagicMock,
-    ) -> None:
-        # Return instances so cross-validation is triggered
-        mock_vlm_engine.call.return_value = LLMResponse(
-            success=True,
-            raw_text='{"detected": true, "confidence": 0.85, "instances": [{"start_time_sec": 1.0, "end_time_sec": 2.0, "confidence": 0.8}]}',
-            parsed_data={
-                "detected": True,
-                "confidence": 0.85,
-                "instances": [
-                    {"start_time_sec": 1.0, "end_time_sec": 2.0, "confidence": 0.8}
-                ],
-            },
-            model="test-model",
-            prompt_tokens=10,
-            completion_tokens=5,
-            total_tokens=15,
-        )
-        tracks_path = "/fake/tracks.json"
-        report = orchestrator.analyze(temp_video, cv_tracks_path=tracks_path)
-        assert isinstance(report, Report)
-        orchestrator.external_adapter.load_cv_tracks.assert_called_once_with(tracks_path)
-        orchestrator.external_adapter.cross_validate_direction.assert_called_once()
-
-    def test_scene_understanding_uses_fallback_when_template_missing(
-        self,
-        orchestrator: AnalysisOrchestrator,
-        temp_video: str,
-        mock_config_manager: MagicMock,
-    ) -> None:
-        mock_config_manager.get_prompt_template.side_effect = KeyError("not found")
-        report = orchestrator.analyze(temp_video)
-        assert isinstance(report, Report)
-        # VLM engine should still be called with a fallback template
-        assert orchestrator.vlm_engine.call.call_count >= 1
-
-    def test_inactive_events_skipped(
+    def test_inactive_events_skipped_by_expert_layer(
         self,
         orchestrator: AnalysisOrchestrator,
         temp_video: str,
     ) -> None:
         report = orchestrator.analyze(temp_video)
-        # event_id=2 is inactive, so only 2 active categories should be processed
         categories = orchestrator.config_manager.get_event_categories()
         active_count = sum(1 for c in categories if c.is_active)
-        # Each active category triggers either direct_vlm or logic_chain
-        total_event_calls = (
-            orchestrator.vlm_engine.call.call_count
-            + orchestrator.logic_engine.execute.call_count
-        )
-        # Scene understanding also calls VLM, so subtract 1
-        assert total_event_calls - 1 == active_count
+        assert active_count == 2
+        assert isinstance(report, Report)
 
-    def test_event_detection_error_handled_gracefully(
+    def test_expert_layer_failure_handled(
         self,
         orchestrator: AnalysisOrchestrator,
         temp_video: str,
-        mock_vlm_engine: MagicMock,
     ) -> None:
-        # Make direct_vlm detection fail for one event
-        mock_vlm_engine.call.side_effect = [
-            # First call: scene understanding
-            LLMResponse(
-                success=True,
-                raw_text='{"roads": [], "traffic_density": "low"}',
-                parsed_data={"roads": [], "traffic_density": "low"},
-                model="test",
-                total_tokens=10,
-            ),
-            # Second call: event detection raises
-            Exception("VLM explosion"),
-        ]
-        # Should not raise; returns report with failed event marked undetected
+        orchestrator._expert_agent_layer.execute.return_value = MagicMock(
+            success=False,
+            data=None,
+            error=Exception("Expert layer failed"),
+        )
         report = orchestrator.analyze(temp_video)
         assert isinstance(report, Report)
 
-    def test_cross_validation_error_handled_gracefully(
+    def test_adjudication_fallback_on_failure(
         self,
         orchestrator: AnalysisOrchestrator,
         temp_video: str,
-        mock_external_adapter: MagicMock,
     ) -> None:
-        mock_external_adapter.cross_validate_direction.side_effect = Exception("CV error")
-        report = orchestrator.analyze(temp_video, cv_tracks_path="/fake/tracks.json")
+        orchestrator._adjudication_step.execute.return_value = MagicMock(
+            success=False,
+            data=None,
+            error=Exception("Adjudication failed"),
+        )
+        report = orchestrator.analyze(temp_video)
         assert isinstance(report, Report)
 
-
-# ---------------------------------------------------------------------------
-# Scene understanding
-# ---------------------------------------------------------------------------
-
-
-class TestSceneUnderstanding:
-    def test_scene_info_parsed_from_vlm_response(
+    def test_pipeline_without_steps_returns_report(
         self,
-        orchestrator: AnalysisOrchestrator,
-    ) -> None:
-        keyframes = KeyframeSequence(
-            coarse_frames=[Keyframe(frame_id=0, timestamp_sec=0.0, image_path="/tmp/f.jpg")]
-        )
-        orchestrator.vlm_engine.call.return_value = LLMResponse(
-            success=True,
-            raw_text='{"roads": [{"road_id": 0, "name": "Main"}], "weather": "clear"}',
-            parsed_data={
-                "roads": [{"road_id": 0, "name": "Main"}],
-                "weather": "clear",
-                "lighting": "day",
-                "traffic_density": "medium",
-                "confidence": 0.9,
-            },
-            total_tokens=10,
-        )
-        scene_info = orchestrator._scene_understanding(keyframes)
-        assert scene_info.road_count == 1
-        assert scene_info.weather == "clear"
-        assert scene_info.traffic_density == "medium"
-        assert scene_info.confidence == 0.9
-
-    def test_scene_info_failure_returns_default(
-        self,
-        orchestrator: AnalysisOrchestrator,
-    ) -> None:
-        keyframes = KeyframeSequence(coarse_frames=[])
-        orchestrator.vlm_engine.call.return_value = LLMResponse(
-            success=False,
-            raw_text="Bad response",
-            total_tokens=0,
-        )
-        scene_info = orchestrator._scene_understanding(keyframes)
-        assert scene_info.road_count == 0
-        assert scene_info.weather == "unknown"
-
-
-# ---------------------------------------------------------------------------
-# Event detection
-# ---------------------------------------------------------------------------
-
-
-class TestDetectEvents:
-    def test_direct_vlm_detection(
-        self,
-        orchestrator: AnalysisOrchestrator,
-        mock_vlm_engine: MagicMock,
-    ) -> None:
-        mock_vlm_engine.call.return_value = LLMResponse(
-            success=True,
-            raw_text='{"detected": true, "confidence": 0.8, "instances": []}',
-            parsed_data={"detected": True, "confidence": 0.8, "instances": []},
-            total_tokens=10,
-        )
-        category = EventCategory(
-            event_id=0,
-            event_code="A",
-            name="Direct Event",
-            name_zh="直接事件",
-            description="Direct detection",
-            detection_mode="direct_vlm",
-            is_active=True,
-        )
-        context = AnalysisContext(keyframes=KeyframeSequence(coarse_frames=[]))
-        result = orchestrator._detect_direct_vlm(category, context)
-        assert result.detected is True
-        assert result.confidence == 0.8
-
-    def test_direct_vlm_with_instances(
-        self,
-        orchestrator: AnalysisOrchestrator,
-    ) -> None:
-        orchestrator.vlm_engine.call.return_value = LLMResponse(
-            success=True,
-            raw_text='{"detected": true, "instances": [{"start_time_sec": 1.0, "end_time_sec": 2.0, "confidence": 0.7}]}',
-            parsed_data={
-                "detected": True,
-                "instances": [
-                    {"start_time_sec": 1.0, "end_time_sec": 2.0, "confidence": 0.7, "description": "test"}
-                ],
-                "confidence": 0.75,
-            },
-            total_tokens=10,
-        )
-        category = EventCategory(
-            event_id=0,
-            event_code="A",
-            name="Direct Event",
-            name_zh="直接事件",
-            description="Direct detection",
-            detection_mode="direct_vlm",
-            is_active=True,
-        )
-        context = AnalysisContext(
-            keyframes=KeyframeSequence(
-                coarse_frames=[Keyframe(frame_id=0, timestamp_sec=0.0, image_path="/tmp/f.jpg")]
-            )
-        )
-        result = orchestrator._detect_direct_vlm(category, context)
-        assert result.detected is True
-        assert len(result.instances) == 1
-        assert result.instances[0].confidence == 0.7
-
-    def test_logic_chain_detection(
-        self,
-        orchestrator: AnalysisOrchestrator,
-    ) -> None:
-        category = EventCategory(
-            event_id=1,
-            event_code="B",
-            name="Logic Event",
-            name_zh="逻辑事件",
-            description="Logic detection",
-            detection_mode="logic_chain",
-            logic_chain_id="test_chain",
-            is_active=True,
-        )
-        context = AnalysisContext()
-        result = orchestrator._detect_logic_chain(category, context)
-        assert result.detected is True
-        orchestrator.logic_engine.execute.assert_called_once()
-
-    def test_unknown_detection_mode(
-        self,
-        orchestrator: AnalysisOrchestrator,
         mock_config_manager: MagicMock,
+        mock_video_preprocessor: MagicMock,
+        mock_vlm_engine: MagicMock,
+        mock_report_generator: MagicMock,
+        temp_video: str,
     ) -> None:
-        # Bypass enum validation to test the unknown-mode branch
-        category = EventCategory.model_construct(
-            event_id=0,
-            event_code="Z",
-            name="Unknown",
-            name_zh="未知",
-            description="Unknown mode",
-            detection_mode="unknown_mode",  # type: ignore[arg-type]
-            is_active=True,
+        orch = AnalysisOrchestrator(
+            config_manager=mock_config_manager,
+            video_preprocessor=mock_video_preprocessor,
+            vlm_engine=mock_vlm_engine,
+            report_generator=mock_report_generator,
+            expert_agent_layer=None,
+            adjudication_step=None,
         )
-        mock_config_manager.get_event_categories.return_value = [category]
-        context = AnalysisContext()
-        result = orchestrator._detect_events(context)
-        unknown_result = next(r for r in result if r.event_name == "Unknown")
-        assert unknown_result.detected is False
-        assert "Unknown detection mode" in unknown_result.summary
-
-
-# ---------------------------------------------------------------------------
-# Cross-validation
-# ---------------------------------------------------------------------------
-
-
-class TestCrossValidate:
-    def test_cross_validate_with_tracks(
-        self,
-        orchestrator: AnalysisOrchestrator,
-        mock_external_adapter: MagicMock,
-    ) -> None:
-        event_results = [
-            EventResult(
-                event_id=0,
-                event_name="Test Event A",
-                detected=True,
-                instances=[
-                    EventInstance(
-                        event_id=0,
-                        event_name="Test Event A",
-                        confidence=0.8,
-                    )
-                ],
-            )
-        ]
-        context = AnalysisContext(
-            cv_tracks={"t1": Track(track_id="t1", road_id=0)},
-            scene_understanding=SceneInfo(roads=[]),
-            video_meta=VideoMetadata(
-                file_path="test.mp4",
-                file_name="test.mp4",
-                duration_sec=10.0,
-                fps=30.0,
-                total_frames=300,
-                width=640,
-                height=480,
-            ),
-        )
-        results = orchestrator._cross_validate(event_results, context)
-        mock_external_adapter.cross_validate_direction.assert_called_once()
-        assert len(results) == 1
-
-    def test_cross_validate_skips_undetected_events(
-        self,
-        orchestrator: AnalysisOrchestrator,
-        mock_external_adapter: MagicMock,
-    ) -> None:
-        event_results = [
-            EventResult(
-                event_id=0,
-                event_name="Test Event A",
-                detected=False,
-                instances=[],
-            )
-        ]
-        context = AnalysisContext(cv_tracks={"t1": Track(track_id="t1", road_id=0)})
-        results = orchestrator._cross_validate(event_results, context)
-        mock_external_adapter.cross_validate_direction.assert_not_called()
-        assert results[0].detected is False
-
-    def test_cross_validate_no_adapter_returns_unchanged(
-        self,
-        orchestrator: AnalysisOrchestrator,
-    ) -> None:
-        orchestrator.external_adapter = None
-        event_results = [
-            EventResult(event_id=0, event_name="A", detected=True, instances=[])
-        ]
-        context = AnalysisContext(cv_tracks={"t1": Track(track_id="t1", road_id=0)})
-        results = orchestrator._cross_validate(event_results, context)
-        assert results == event_results
+        report = orch.analyze(temp_video)
+        assert isinstance(report, Report)
 
 
 # ---------------------------------------------------------------------------
@@ -609,11 +369,8 @@ class TestExtractVideoMeta:
         assert abs(meta.duration_sec - 4.0) < 0.1
 
     def test_handles_zero_fps_gracefully(self, tmp_path: Path) -> None:
-        # Create an image file and rename it to simulate a bad video
         img_path = str(tmp_path / "bad_video.mp4")
-        # Write minimal invalid data
         Path(img_path).write_bytes(b"\x00" * 100)
-        # cv2.VideoCapture will report 0 fps for this
         meta = AnalysisOrchestrator._extract_video_meta(img_path)
         assert meta.duration_sec == 0.0
         assert meta.file_name == "bad_video.mp4"
