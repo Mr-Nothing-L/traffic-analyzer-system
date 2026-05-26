@@ -295,8 +295,9 @@ class AdjudicationStep(PipelineStep):
         data = response.parsed_data
 
         # 6. Parse event_results
-        # Build a map from candidate event_id -> raw_vlm_text for expert_raw_description
+        # Build maps from candidate event_id -> raw_vlm_text / cv_evidence
         candidate_raw_map = {c.event_id: c.raw_vlm_text for c in candidates}
+        candidate_cv_map = {c.event_id: c.cv_evidence for c in candidates}
 
         event_results: List[EventResult] = []
         for er in data.get("event_results", []):
@@ -326,6 +327,7 @@ class AdjudicationStep(PipelineStep):
                     instances=instances,
                     reasoning=er.get("reasoning", ""),
                     expert_raw_description=candidate_raw_map.get(eid, ""),
+                    cv_evidence=candidate_cv_map.get(eid, ""),
                 )
             )
 

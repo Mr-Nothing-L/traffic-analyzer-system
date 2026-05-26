@@ -258,17 +258,16 @@ class ReportGenerator:
             # Summary table for all events
             lines.append("### 事件检测总览")
             lines.append("")
-            lines.append("| 事件ID | 事件名称 | 检测结果 | 置信度 | 描述 |")
-            lines.append("|--------|----------|----------|--------|------|")
+            lines.append("| 事件ID | 事件名称 | 检测结果 | 描述 |")
+            lines.append("|--------|----------|----------|------|")
             for result in report.event_results:
                 detected_str = "**是**" if result.detected else "否"
-                conf_str = f"{result.confidence:.2f}" if result.confidence else "—"
                 desc = result.summary or (result.instances[0].description if result.instances else "—")
                 # Truncate long descriptions for the summary table
                 if len(desc) > 40:
                     desc = desc[:37] + "..."
                 lines.append(
-                    f"| {result.event_id} | {result.event_name} | {detected_str} | {conf_str} | {desc} |"
+                    f"| {result.event_id} | {result.event_name} | {detected_str} | {desc} |"
                 )
             lines.append("")
 
@@ -527,8 +526,6 @@ class ReportGenerator:
         lines.append("| 字段 | 内容 |")
         lines.append("|------|------|")
         lines.append(f"| 是否检测到 | {'**是**' if result.detected else '否'} |")
-        if result.confidence:
-            lines.append(f"| 置信度 | {result.confidence:.2f} |")
         if result.summary:
             lines.append(f"| 摘要 | {result.summary} |")
         if result.reasoning:
@@ -539,20 +536,19 @@ class ReportGenerator:
             lines.append("#### 检测实例")
             lines.append("")
             # Instance table header
-            lines.append("| 实例 | 时间区间 | 置信度 | 车辆 | 道路 | 描述 |")
-            lines.append("|------|----------|--------|------|------|------|")
+            lines.append("| 实例 | 时间区间 | 车辆 | 道路 | 描述 |")
+            lines.append("|------|----------|------|------|------|")
             for idx, inst in enumerate(result.instances, start=1):
                 time_range = "—"
                 if inst.start_time_sec or inst.end_time_sec:
                     time_range = f"{inst.start_time_sec:.1f}s - {inst.end_time_sec:.1f}s"
-                conf = f"{inst.confidence:.2f}" if inst.confidence else "—"
                 vehicle = inst.vehicle_id or "—"
                 road = str(inst.road_id) if inst.road_id is not None else "—"
                 desc = inst.description or "—"
                 if len(desc) > 30:
                     desc = desc[:27] + "..."
                 lines.append(
-                    f"| {idx} | {time_range} | {conf} | {vehicle} | {road} | {desc} |"
+                    f"| {idx} | {time_range} | {vehicle} | {road} | {desc} |"
                 )
             lines.append("")
 
@@ -590,12 +586,18 @@ class ReportGenerator:
             lines.append(result.adjudication_reasoning)
             lines.append("")
 
-        # 对于未检测到的事件，展示清理后的专家分析（自然语言文本）
-        if result.expert_raw_description and not result.detected:
+        # 展示专家原始分析（进入裁决层之前的决策）
+        if result.expert_raw_description:
             cleaned = self._clean_expert_description(result.expert_raw_description)
             if cleaned:
-                lines.append("#### 专家分析")
+                lines.append("#### 专家原始分析")
                 lines.append(cleaned)
                 lines.append("")
+
+        # 展示CV辅助检测证据（如有）
+        if result.cv_evidence:
+            lines.append("#### CV辅助检测证据")
+            lines.append(result.cv_evidence)
+            lines.append("")
 
         return lines

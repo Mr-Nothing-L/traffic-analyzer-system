@@ -200,6 +200,7 @@ class ExpertAgent:
 
         # -- 5. Parse response -------------------------------------------------
         candidate = parse_expert_response(response, self.category)
+        candidate.cv_evidence = cv_evidence  # pass CV evidence through
         logger.debug(
             "ExpertAgent[%s]: detected=%s confidence=%.2f instances=%d",
             self.category.name_zh,

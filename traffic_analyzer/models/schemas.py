@@ -260,6 +260,7 @@ class EventResult(BaseModel):
     analysis_process: List[str] = Field(default_factory=list)
     adjudication_reasoning: str = Field(default="", description="裁决层对该事件的详细推理过程")
     expert_raw_description: str = Field(default="", description="ExpertAgent原始自然语言描述")
+    cv_evidence: str = Field(default="", description="CV帧差检测证据")
 
 
 class EventCandidate(BaseModel):
@@ -272,6 +273,7 @@ class EventCandidate(BaseModel):
     instances: List[EventInstance] = Field(default_factory=list)
     raw_vlm_response: Dict[str, Any] = Field(default_factory=dict)
     raw_vlm_text: str = Field(default="", description="VLM原始自然语言回复全文")
+    cv_evidence: str = Field(default="", description="CV帧差检测证据")
 
 
 class AuditEntry(BaseModel):
