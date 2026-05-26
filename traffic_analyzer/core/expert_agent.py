@@ -17,6 +17,7 @@ from traffic_analyzer.models.schemas import (
     EventCandidate,
     EventCategory,
     EventInstance,
+    PromptTemplate,
 )
 from traffic_analyzer.utils.event_detection import parse_expert_response, select_event_images
 
@@ -123,7 +124,48 @@ class ExpertAgent:
                 summary=f"Failed to load prompt template: {exc}",
             )
 
-        # -- 3. Context variables ----------------------------------------------
+        # -- 3. Inject prior knowledge (scene_understanding rules) -----------
+        # scene_understanding prompt contains universal rules (direction,
+        # emergency lane identification, camera perspective) that all experts
+        # should know.  It is treated as fixed prior knowledge, not a VLM call.
+        prior_knowledge = ""
+        try:
+            prior_template = self.config_manager.get_prompt_template(
+                "scene_understanding"
+            )
+            if prior_template.user_prompt:
+                prior_knowledge = prior_template.user_prompt
+        except (KeyError, RuntimeError):
+            logger.debug(
+                "ExpertAgent[%s]: scene_understanding template not found, "
+                "skipping prior knowledge injection",
+                self.category.name_zh,
+            )
+
+        if prior_knowledge:
+            # Build enhanced template with prior knowledge appended to system_prompt
+            enhanced_system = template.system_prompt
+            if enhanced_system and not enhanced_system.endswith("\n"):
+                enhanced_system += "\n"
+            enhanced_system += (
+                "\n============================================================\n"
+                "先验知识（高速公路监控场景通用规则，直接应用，无需重新推断）\n"
+                "============================================================\n"
+                + prior_knowledge
+            )
+            template = PromptTemplate(
+                template_id=template.template_id,
+                name=template.name,
+                version=template.version,
+                system_prompt=enhanced_system,
+                user_prompt=template.user_prompt,
+                output_format_hint=template.output_format_hint,
+                example_input=template.example_input,
+                example_output=template.example_output,
+                traffic_percentage=template.traffic_percentage,
+            )
+
+        # -- 4. Context variables ----------------------------------------------
         context_vars: Dict[str, Any] = {
             "event_definition": self.category.definition,
             "event_name": self.category.name_zh,
@@ -134,7 +176,16 @@ class ExpertAgent:
         if context.scene_understanding is not None:
             context_vars["scene_understanding"] = context.scene_understanding.model_dump()
 
-        # -- 4. VLM call -------------------------------------------------------
+        # -- 0. CV supplement for reversing detection (event_id=7) ---------------
+        cv_evidence = ""
+        if self.category.event_id == 7:
+            from traffic_analyzer.core.reversing_cv_detector import ReversingCVDetector
+            cv_detector = ReversingCVDetector()
+            cv_result = cv_detector.detect(context)
+            cv_evidence = cv_result.summary
+        context_vars["cv_evidence"] = cv_evidence
+
+        # -- 5. VLM call -------------------------------------------------------
         response = self.vlm_engine.call(
             template=template,
             images=images,
