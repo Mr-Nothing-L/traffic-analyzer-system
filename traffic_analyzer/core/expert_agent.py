@@ -173,8 +173,6 @@ class ExpertAgent:
         }
         if context.video_meta is not None:
             context_vars["video_meta"] = context.video_meta.model_dump()
-        if context.scene_understanding is not None:
-            context_vars["scene_understanding"] = context.scene_understanding.model_dump()
 
         # -- 0. CV supplement for reversing detection (event_id=7) ---------------
         cv_evidence = ""
@@ -183,6 +181,13 @@ class ExpertAgent:
             cv_detector = ReversingCVDetector()
             cv_result = cv_detector.detect(context)
             cv_evidence = cv_result.summary
+            if cv_result.detected:
+                cv_evidence += (
+                    f"\n- 应急车道ROI像素坐标: x={cv_result.roi_bounds[0]}, "
+                    f"y={cv_result.roi_bounds[1]}, "
+                    f"w={cv_result.roi_bounds[2]}, "
+                    f"h={cv_result.roi_bounds[3]}"
+                )
         context_vars["cv_evidence"] = cv_evidence
 
         # -- 5. VLM call -------------------------------------------------------

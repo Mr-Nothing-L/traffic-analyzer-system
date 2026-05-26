@@ -265,10 +265,20 @@ class AdjudicationStep(PipelineStep):
         except Exception as exc:
             logger.warning("Failed to load annotation_spec.yaml: %s", exc)
 
+        # Inject scene understanding prior knowledge for adjudication
+        scene_prior_text = ""
+        try:
+            scene_template = self.config_manager.get_prompt_template("scene_understanding")
+            if scene_template and scene_template.user_prompt:
+                scene_prior_text = scene_template.user_prompt
+        except (KeyError, RuntimeError):
+            logger.debug("scene_understanding template not found for adjudication")
+
         context_vars = {
             "candidates_json": candidates_json,
             "business_rules": business_rules,
             "annotation_spec": annotation_spec_text or "No annotation spec available.",
+            "scene_understanding": scene_prior_text,
         }
 
         # 5. Call VLM

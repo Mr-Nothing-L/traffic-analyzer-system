@@ -8,6 +8,7 @@ event detection results, scene understanding, and video metadata.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -485,6 +486,33 @@ class ReportGenerator:
                 )
         return recommendations
 
+    def _clean_expert_description(self, text: str) -> str:
+        """Remove fenced code blocks and standalone JSON objects from expert text.
+
+        Keeps only natural-language paragraphs.
+        """
+        # 1. Strip fenced code blocks (```json ... ``` or ``` ... ```)
+        cleaned = re.sub(r"```[a-zA-Z]*\n.*?\n```", "", text, flags=re.DOTALL)
+        # Also handle single-backtick fenced blocks that may not have a trailing newline
+        cleaned = re.sub(r"```[a-zA-Z]*.*?```", "", cleaned, flags=re.DOTALL)
+
+        # 2. Remove standalone JSON objects — lines that are just a JSON dict/array
+        lines: List[str] = []
+        for line in cleaned.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            # Skip lines that look like a complete JSON object/array
+            if (stripped.startswith("{") and stripped.endswith("}")) or \
+               (stripped.startswith("[") and stripped.endswith("]")):
+                continue
+            lines.append(line)
+
+        # 3. Collapse multiple blank lines and strip edges
+        text_out = "\n".join(lines).strip()
+        text_out = re.sub(r"\n{3,}", "\n\n", text_out)
+        return text_out
+
     def _render_event_result(self, result: EventResult) -> List[str]:
         """Render a single :class:`EventResult` as Markdown lines."""
         lines: List[str] = []
@@ -556,16 +584,18 @@ class ReportGenerator:
                 lines.append(f"- {step}")
             lines.append("")
 
-        # 需求1: 展示裁决层对该事件的推理
+        # 展示裁决层对该事件的推理
         if result.adjudication_reasoning:
             lines.append("#### 裁决推理")
             lines.append(result.adjudication_reasoning)
             lines.append("")
 
-        # 需求3: 展示专家Agent原始自然语言描述
-        if result.expert_raw_description:
-            lines.append("#### 专家原始描述")
-            lines.append(result.expert_raw_description)
-            lines.append("")
+        # 对于未检测到的事件，展示清理后的专家分析（自然语言文本）
+        if result.expert_raw_description and not result.detected:
+            cleaned = self._clean_expert_description(result.expert_raw_description)
+            if cleaned:
+                lines.append("#### 专家分析")
+                lines.append(cleaned)
+                lines.append("")
 
         return lines

@@ -47,8 +47,10 @@ class ReversingCVDetector:
     MIN_DISPLACEMENT_PX: int = 3
     # Maximum confidence CV can assign (it supplements, not replaces VLM)
     MAX_CV_CONFIDENCE: float = 0.4
-    # Default emergency lane width as fraction of frame width
-    DEFAULT_ROI_WIDTH_FRAC: float = 0.20
+    # Default emergency lane width as fraction of frame width.
+    # Emergency lane is typically ~3.5 m; on a 3-lane highway (~11 m total)
+    # it occupies roughly the left 8-10% of the frame.
+    DEFAULT_ROI_WIDTH_FRAC: float = 0.08
 
     def __init__(
         self,
@@ -232,13 +234,18 @@ class ReversingCVDetector:
         return (0, 0, roi_width, frame_height)
 
     def _get_normal_direction(self, scene_understanding: Optional[SceneInfo]) -> str:
-        """Extract normal flow direction from scene understanding."""
+        """Extract normal flow direction from scene understanding.
+
+        Falls back to default assumption for Chinese highways:
+        left-side road (where emergency lane usually is) = toward_bottom.
+        """
         if scene_understanding and scene_understanding.roads:
-            # Use the first road with a defined direction
             for road in scene_understanding.roads:
                 if road.normal_direction and road.normal_direction != "unknown":
                     return road.normal_direction
-        return "unknown"
+        # Default: left-side emergency lane → left road → toward_bottom
+        logger.debug("ReversingCVDetector: no scene direction, using default toward_bottom")
+        return "toward_bottom"
 
     def _estimate_displacement(
         self,
