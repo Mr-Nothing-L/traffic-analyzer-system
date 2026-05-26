@@ -174,12 +174,14 @@ class ExpertAgent:
         if context.video_meta is not None:
             context_vars["video_meta"] = context.video_meta.model_dump()
 
-        # -- Vehicle tracking supplement for reversing detection (event_id=7) --
+        # -- Vehicle tracking / CV supplement for reversing detection (event_id=7) --
         cv_evidence = ""
         tracking_evidence = ""
         tracking_enabled = False
+        cv_enabled = False
         if self.category.event_id == 7 and context.config is not None:
             tracking_enabled = getattr(context.config, "tracking_enabled", False)
+            cv_enabled = getattr(context.config, "cv_enabled", False)
 
         if self.category.event_id == 7 and tracking_enabled:
             tracker_result = None
@@ -215,11 +217,19 @@ class ExpertAgent:
 
             except Exception as exc:
                 logger.warning("YOLO tracker failed (%s), falling back to CV detector", exc)
-                from traffic_analyzer.core.reversing_cv_detector import ReversingCVDetector
-                cv_detector = ReversingCVDetector()
-                cv_result = cv_detector.detect(context)
-                cv_evidence = cv_result.evidence
-                tracking_evidence = cv_evidence
+                if cv_enabled:
+                    from traffic_analyzer.core.reversing_cv_detector import ReversingCVDetector
+                    cv_detector = ReversingCVDetector()
+                    cv_result = cv_detector.detect(context)
+                    cv_evidence = cv_result.evidence
+                    tracking_evidence = cv_evidence
+
+        elif self.category.event_id == 7 and cv_enabled:
+            from traffic_analyzer.core.reversing_cv_detector import ReversingCVDetector
+            cv_detector = ReversingCVDetector()
+            cv_result = cv_detector.detect(context)
+            cv_evidence = cv_result.evidence
+            tracking_evidence = cv_evidence
 
         context_vars["cv_evidence"] = cv_evidence
         context_vars["tracking_evidence"] = tracking_evidence
