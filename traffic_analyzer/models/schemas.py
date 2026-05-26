@@ -427,6 +427,7 @@ class SystemConfig(BaseModel):
     tracking_target_fps: float = 5.0
     tracking_confidence_threshold: float = 0.3
     tracking_device: str = "cpu"
+    tracking_enabled: bool = False
 
 
 # ---------------------------------------------------------------------------
