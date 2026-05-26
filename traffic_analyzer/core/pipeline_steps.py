@@ -231,6 +231,7 @@ class AdjudicationStep(PipelineStep):
                     "confidence": c.confidence,
                     "summary": c.summary,
                     "expert_raw_description": c.raw_vlm_text,
+                    "tracking_evidence": c.tracking_evidence,
                     "instances": [
                         {
                             "start_time_sec": i.start_time_sec,
@@ -295,9 +296,10 @@ class AdjudicationStep(PipelineStep):
         data = response.parsed_data
 
         # 6. Parse event_results
-        # Build maps from candidate event_id -> raw_vlm_text / cv_evidence
+        # Build maps from candidate event_id -> raw_vlm_text / cv_evidence / tracking_evidence
         candidate_raw_map = {c.event_id: c.raw_vlm_text for c in candidates}
         candidate_cv_map = {c.event_id: c.cv_evidence for c in candidates}
+        candidate_tracking_map = {c.event_id: c.tracking_evidence for c in candidates}
 
         event_results: List[EventResult] = []
         for er in data.get("event_results", []):
@@ -328,6 +330,7 @@ class AdjudicationStep(PipelineStep):
                     reasoning=er.get("reasoning", ""),
                     expert_raw_description=candidate_raw_map.get(eid, ""),
                     cv_evidence=candidate_cv_map.get(eid, ""),
+                    tracking_evidence=candidate_tracking_map.get(eid, ""),
                 )
             )
 

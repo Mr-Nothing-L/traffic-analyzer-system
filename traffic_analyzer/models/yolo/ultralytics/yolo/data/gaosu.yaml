@@ -1,0 +1,8 @@
+# train: /data/gaosu/images/train
+# val: /data/gaosu/images/val
+train: /data/vision-track/yolo_tracking-10.0.46/zj_data/images/train
+val: /data/vision-track/yolo_tracking-10.0.46/zj_data/images/val
+# number of classes
+nc: 3
+# class names
+names: ['car', 'truck', 'bus']
