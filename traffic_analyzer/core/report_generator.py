@@ -516,8 +516,11 @@ class ReportGenerator:
         text_out = "\n".join(lines).strip()
         text_out = re.sub(r"\n{3,}", "\n\n", text_out)
 
-        # 5. Downgrade markdown headings so they don't exceed parent level (####)
-        text_out = self._downgrade_headings(text_out, max_level=4)
+        # 5. Normalize markdown formatting (tables, horizontal rules)
+        text_out = self._normalize_markdown(text_out)
+
+        # 6. Downgrade markdown headings so they don't exceed parent level (#####)
+        text_out = self._downgrade_headings(text_out, max_level=5)
         return text_out
 
     def _strip_json_blocks(self, text: str) -> str:
@@ -570,7 +573,7 @@ class ReportGenerator:
         return "\n".join(result)
 
     def _downgrade_headings(self, text: str, max_level: int) -> str:
-        """Downgrade markdown headings (# → ####) so they don't exceed parent level."""
+        """Downgrade markdown headings (# → #####) so they don't exceed parent level."""
         lines = text.splitlines()
         result: List[str] = []
         for line in lines:
@@ -589,6 +592,41 @@ class ReportGenerator:
                     result.append(new_line)
                     continue
             result.append(line)
+        return "\n".join(result)
+
+    def _normalize_markdown(self, text: str) -> str:
+        """Ensure proper markdown spacing around tables and horizontal rules."""
+        lines = text.splitlines()
+        result: List[str] = []
+        prev_was_table = False
+
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+
+            # Detect table row: starts with | and has at least one more |
+            is_table = stripped.startswith("|") and stripped.count("|") >= 2
+
+            # Detect horizontal rule
+            is_hr = stripped == "---" or stripped == "***" or stripped == "___"
+
+            # Add blank line before table if previous line is not blank and not a table
+            if is_table and result and result[-1].strip() and not prev_was_table:
+                result.append("")
+
+            # Add blank line before and after horizontal rule
+            if is_hr:
+                if result and result[-1].strip():
+                    result.append("")
+                result.append(line)
+                # Add blank line after if next line exists and is not blank
+                if i + 1 < len(lines) and lines[i + 1].strip():
+                    result.append("")
+                prev_was_table = False
+                continue
+
+            result.append(line)
+            prev_was_table = is_table
+
         return "\n".join(result)
 
     def _render_event_result(self, result: EventResult) -> List[str]:
