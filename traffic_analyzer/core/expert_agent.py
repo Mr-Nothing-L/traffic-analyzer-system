@@ -177,7 +177,11 @@ class ExpertAgent:
         # -- Vehicle tracking supplement for reversing detection (event_id=7) --
         cv_evidence = ""
         tracking_evidence = ""
-        if self.category.event_id == 7:
+        tracking_enabled = False
+        if self.category.event_id == 7 and context.config is not None:
+            tracking_enabled = getattr(context.config, "tracking_enabled", False)
+
+        if self.category.event_id == 7 and tracking_enabled:
             tracker_result = None
             try:
                 from traffic_analyzer.core.vehicle_tracker import YOLOVehicleTracker
