@@ -1,0 +1,13 @@
+# Training runs and artifacts
+runs/
+*.pt
+!yolov8n.pt
+
+# ByteTrack/boxmot cache
+__pycache__/
+*.pyc
+
+# Model weights (keep only yolov8n.pt)
+*.onnx
+*.engine
+*.tflite

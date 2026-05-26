@@ -261,6 +261,7 @@ class EventResult(BaseModel):
     adjudication_reasoning: str = Field(default="", description="裁决层对该事件的详细推理过程")
     expert_raw_description: str = Field(default="", description="ExpertAgent原始自然语言描述")
     cv_evidence: str = Field(default="", description="CV帧差检测证据")
+    tracking_evidence: str = Field(default="", description="YOLO车辆跟踪证据")
 
 
 class EventCandidate(BaseModel):
@@ -274,6 +275,7 @@ class EventCandidate(BaseModel):
     raw_vlm_response: Dict[str, Any] = Field(default_factory=dict)
     raw_vlm_text: str = Field(default="", description="VLM原始自然语言回复全文")
     cv_evidence: str = Field(default="", description="CV帧差检测证据")
+    tracking_evidence: str = Field(default="", description="YOLO车辆跟踪证据")
 
 
 class AuditEntry(BaseModel):
@@ -421,6 +423,10 @@ class SystemConfig(BaseModel):
     log_level: str = "INFO"
     scene_understanding_min_frames: int = 30
     vlm_max_frames: int = 10
+    yolo_model_path: str = "traffic_analyzer/models/yolo/yolov8n.pt"
+    tracking_target_fps: float = 5.0
+    tracking_confidence_threshold: float = 0.3
+    tracking_device: str = "cpu"
 
 
 # ---------------------------------------------------------------------------
