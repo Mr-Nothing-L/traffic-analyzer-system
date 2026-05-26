@@ -495,7 +495,12 @@ class ReportGenerator:
         # Also handle single-backtick fenced blocks that may not have a trailing newline
         cleaned = re.sub(r"```[a-zA-Z]*.*?```", "", cleaned, flags=re.DOTALL)
 
-        # 2. Remove standalone JSON objects — lines that are just a JSON dict/array
+        # 2. Remove multi-line JSON objects/arrays
+        # Detect blocks that start with { or [ and end with } or ],
+        # where most lines look like JSON (contain ":", commas, quotes)
+        cleaned = self._strip_json_blocks(cleaned)
+
+        # 3. Remove standalone JSON objects — lines that are just a JSON dict/array
         lines: List[str] = []
         for line in cleaned.splitlines():
             stripped = line.strip()
@@ -507,10 +512,84 @@ class ReportGenerator:
                 continue
             lines.append(line)
 
-        # 3. Collapse multiple blank lines and strip edges
+        # 4. Collapse multiple blank lines and strip edges
         text_out = "\n".join(lines).strip()
         text_out = re.sub(r"\n{3,}", "\n\n", text_out)
+
+        # 5. Downgrade markdown headings so they don't exceed parent level (####)
+        text_out = self._downgrade_headings(text_out, max_level=4)
         return text_out
+
+    def _strip_json_blocks(self, text: str) -> str:
+        """Remove contiguous blocks that look like JSON objects or arrays."""
+        lines = text.splitlines()
+        result: List[str] = []
+        i = 0
+        while i < len(lines):
+            stripped = lines[i].strip()
+            # Detect start of a JSON block
+            if stripped.startswith("{") or stripped.startswith("["):
+                # Try to find where this JSON block ends
+                depth = 0
+                in_string = False
+                escape_next = False
+                block_lines: List[str] = []
+                j = i
+                while j < len(lines):
+                    line = lines[j]
+                    block_lines.append(line)
+                    for ch in line:
+                        if escape_next:
+                            escape_next = False
+                            continue
+                        if ch == "\\":
+                            escape_next = True
+                            continue
+                        if ch == '"' and not in_string:
+                            in_string = True
+                        elif ch == '"' and in_string:
+                            in_string = False
+                        elif not in_string:
+                            if ch in "{[":
+                                depth += 1
+                            elif ch in "}]":
+                                depth -= 1
+                    # End of block: depth back to 0 and line ends with } or ]
+                    if depth == 0 and not in_string:
+                        last_stripped = line.strip()
+                        if last_stripped.endswith("}") or last_stripped.endswith("]"):
+                            break
+                    j += 1
+                else:
+                    # Block didn't close — treat as regular text
+                    result.extend(block_lines)
+                i = j + 1
+                continue
+            result.append(lines[i])
+            i += 1
+        return "\n".join(result)
+
+    def _downgrade_headings(self, text: str, max_level: int) -> str:
+        """Downgrade markdown headings (# → ####) so they don't exceed parent level."""
+        lines = text.splitlines()
+        result: List[str] = []
+        for line in lines:
+            stripped = line.lstrip()
+            if stripped.startswith("#"):
+                # Count leading #
+                level = 0
+                for ch in stripped:
+                    if ch == "#":
+                        level += 1
+                    else:
+                        break
+                if level > 0 and level < max_level:
+                    # Pad to max_level
+                    new_line = "#" * max_level + stripped[level:]
+                    result.append(new_line)
+                    continue
+            result.append(line)
+        return "\n".join(result)
 
     def _render_event_result(self, result: EventResult) -> List[str]:
         """Render a single :class:`EventResult` as Markdown lines."""

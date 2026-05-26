@@ -50,7 +50,7 @@ class ReversingCVDetector:
     # Default emergency lane width as fraction of frame width.
     # Emergency lane is typically ~3.5 m; on a 3-lane highway (~11 m total)
     # it occupies roughly the left 8-10% of the frame.
-    DEFAULT_ROI_WIDTH_FRAC: float = 0.08
+    DEFAULT_ROI_WIDTH_FRAC: float = 0.15
 
     def __init__(
         self,
