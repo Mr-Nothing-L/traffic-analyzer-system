@@ -86,11 +86,44 @@ class ConfigManager:
         if config_dir is not None:
             self.config_dir = Path(config_dir).resolve()
 
-        raw_event_categories = self._load_yaml("event_categories")
-        raw_prompt_templates = self._load_yaml("prompt_templates")
+        # --- event_categories YAML ---
+        try:
+            raw_event_categories = self._load_yaml("event_categories")
+        except (FileNotFoundError, ValueError):
+            raise  # critical config missing or malformed — must fail fast
+        except Exception as exc:
+            logger.error(
+                "[config_manager:load_all] EVENT_CATEGORIES_LOAD_ERROR | file=%s | %s",
+                self._YAML_FILES["event_categories"],
+                exc,
+                exc_info=True,
+            )
+            raw_event_categories = {}
 
-        # Parse .env for LLM settings
-        llm_config = self._load_env_llm_config()
+        # --- prompt_templates YAML ---
+        try:
+            raw_prompt_templates = self._load_yaml("prompt_templates")
+        except (FileNotFoundError, ValueError):
+            raise  # critical config missing or malformed — must fail fast
+        except Exception as exc:
+            logger.error(
+                "[config_manager:load_all] PROMPT_TEMPLATES_LOAD_ERROR | file=%s | %s",
+                self._YAML_FILES["prompt_templates"],
+                exc,
+                exc_info=True,
+            )
+            raw_prompt_templates = {}
+
+        # --- LLM config ---
+        try:
+            llm_config = self._load_env_llm_config()
+        except Exception as exc:
+            logger.error(
+                "[config_manager:load_all] LLM_CONFIG_ERROR | %s",
+                exc,
+                exc_info=True,
+            )
+            llm_config = LLMProviderConfig()
 
         # Build lookup tables
         self._event_categories = {
@@ -139,11 +172,20 @@ class ConfigManager:
             except ValueError:
                 logger.warning("Invalid VLM_MAX_FRAMES value '%s', using default", vlm_max_frames)
 
-        self._system_config = SystemConfig(
-            llm_provider=llm_config,
-            sampling=SamplingConfig(),  # defaults; could be extended via YAML later
-            **system_kwargs,
-        )
+        # --- SystemConfig build ---
+        try:
+            self._system_config = SystemConfig(
+                llm_provider=llm_config,
+                sampling=SamplingConfig(),  # defaults; could be extended via YAML later
+                **system_kwargs,
+            )
+        except Exception as exc:
+            logger.error(
+                "[config_manager:load_all] SYSTEM_CONFIG_ERROR | %s",
+                exc,
+                exc_info=True,
+            )
+            raise
 
         logger.info(
             "Config loaded: %d categories, %d inference rules, %d adjudication rules, %d prompt templates",
@@ -186,53 +228,63 @@ class ConfigManager:
             KeyError: If no template with the given ID exists.
             ValueError: If the requested version is not found.
         """
-        if self._system_config is None:
-            raise RuntimeError("Configuration has not been loaded. Call load_all() first.")
-        if template_id not in self._prompt_templates:
-            raise KeyError(f"Prompt template '{template_id}' not found.")
+        try:
+            if self._system_config is None:
+                raise RuntimeError("Configuration has not been loaded. Call load_all() first.")
+            if template_id not in self._prompt_templates:
+                raise KeyError(f"Prompt template '{template_id}' not found.")
 
-        versions = self._prompt_templates[template_id]
+            versions = self._prompt_templates[template_id]
 
-        # 1. Explicit version parameter
-        if version is not None:
-            if version not in versions:
-                raise ValueError(
-                    f"Prompt template '{template_id}' version '{version}' not found. "
-                    f"Available: {list(versions.keys())}"
-                )
-            return versions[version]
+            # 1. Explicit version parameter
+            if version is not None:
+                if version not in versions:
+                    raise ValueError(
+                        f"Prompt template '{template_id}' version '{version}' not found. "
+                        f"Available: {list(versions.keys())}"
+                    )
+                return versions[version]
 
-        # 2. Environment variable override
-        env_version = os.getenv(f"PROMPT_VERSION_{template_id.upper().replace('-', '_')}")
-        if env_version and env_version in versions:
-            logger.debug("Using env-specified version '%s' for template '%s'", env_version, template_id)
-            return versions[env_version]
+            # 2. Environment variable override
+            env_version = os.getenv(f"PROMPT_VERSION_{template_id.upper().replace('-', '_')}")
+            if env_version and env_version in versions:
+                logger.debug("Using env-specified version '%s' for template '%s'", env_version, template_id)
+                return versions[env_version]
 
-        # 3. A/B traffic split (only when multiple variants have traffic_percentage)
-        variants_with_traffic = [
-            (v, pt) for v, pt in versions.items() if pt.traffic_percentage is not None
-        ]
-        if len(variants_with_traffic) > 1:
-            import random
-            roll = random.randint(1, 100)
-            cumulative = 0
-            for v, pt in sorted(variants_with_traffic, key=lambda x: x[1].traffic_percentage or 0):
-                cumulative += pt.traffic_percentage or 0
-                if roll <= cumulative:
-                    logger.debug("A/B selected version '%s' for template '%s' (roll=%d)", v, template_id, roll)
-                    return pt
-            # Fallback to last variant if roll exceeds cumulative
-            return variants_with_traffic[-1][1]
+            # 3. A/B traffic split (only when multiple variants have traffic_percentage)
+            variants_with_traffic = [
+                (v, pt) for v, pt in versions.items() if pt.traffic_percentage is not None
+            ]
+            if len(variants_with_traffic) > 1:
+                import random
+                roll = random.randint(1, 100)
+                cumulative = 0
+                for v, pt in sorted(variants_with_traffic, key=lambda x: x[1].traffic_percentage or 0):
+                    cumulative += pt.traffic_percentage or 0
+                    if roll <= cumulative:
+                        logger.debug("A/B selected version '%s' for template '%s' (roll=%d)", v, template_id, roll)
+                        return pt
+                # Fallback to last variant if roll exceeds cumulative
+                return variants_with_traffic[-1][1]
 
-        # 4. Default: latest version (semantic version comparison)
-        def _version_key(v: str) -> tuple:
-            try:
-                return tuple(int(x) for x in v.split("."))
-            except ValueError:
-                return (0,)
+            # 4. Default: latest version (semantic version comparison)
+            def _version_key(v: str) -> tuple:
+                try:
+                    return tuple(int(x) for x in v.split("."))
+                except ValueError:
+                    return (0,)
 
-        latest_version = max(versions.keys(), key=_version_key)
-        return versions[latest_version]
+            latest_version = max(versions.keys(), key=_version_key)
+            return versions[latest_version]
+        except Exception as exc:
+            logger.error(
+                "[config_manager:get_prompt_template] TEMPLATE_FETCH_ERROR | template_id=%s version=%s | %s",
+                template_id,
+                version,
+                exc,
+                exc_info=True,
+            )
+            raise
 
     def get_inference_rules(self) -> List[CrossEventInferenceRule]:
         """Return all configured cross-event inference rules."""
@@ -360,15 +412,24 @@ class ConfigManager:
         """
         filename = self._YAML_FILES[key]
         path = self.config_dir / filename
-        if not path.exists():
-            raise FileNotFoundError(f"Required config file not found: {path}")
-        with path.open("r", encoding="utf-8") as fh:
-            data = yaml.safe_load(fh)
-        if data is None:
-            return {}
-        if not isinstance(data, dict):
-            raise ValueError(f"Top-level of {path} must be a mapping, got {type(data).__name__}")
-        return data
+        try:
+            if not path.exists():
+                raise FileNotFoundError(f"Required config file not found: {path}")
+            with path.open("r", encoding="utf-8") as fh:
+                data = yaml.safe_load(fh)
+            if data is None:
+                return {}
+            if not isinstance(data, dict):
+                raise ValueError(f"Top-level of {path} must be a mapping, got {type(data).__name__}")
+            return data
+        except Exception as exc:
+            logger.error(
+                "[config_manager:_load_yaml] YAML_LOAD_ERROR | file=%s | %s",
+                filename,
+                exc,
+                exc_info=True,
+            )
+            raise
 
     def _load_env_llm_config(self) -> LLMProviderConfig:
         """Parse ``.env`` (if present) and return an ``LLMProviderConfig``.
@@ -412,9 +473,8 @@ class ConfigManager:
             if loaded:
                 logger.info("Loaded environment variables from CWD .env")
             else:
-                logger.warning(
-                    "No .env file found. Searched: %s. "
-                    "Ensure you have a .env file in the config directory or project root.",
+                logger.error(
+                    "[config_manager:_load_env_llm_config] ENV_FILE_NOT_FOUND | searched=%s",
                     ", ".join(str(p) for p in candidates),
                 )
 
@@ -457,7 +517,13 @@ class ConfigManager:
                 try:
                     kwargs[attr_name] = cast(val)
                 except (ValueError, TypeError) as exc:
-                    logger.warning("Invalid %s value '%s': %s", env_name, val, exc)
+                    logger.error(
+                        "[config_manager:_load_env_llm_config] ENV_PARSE_ERROR | var=%s value=%s | %s",
+                        env_name,
+                        val,
+                        exc,
+                        exc_info=True,
+                    )
 
         # Boolean flag for cache enable/disable
         cache_enabled = os.getenv("LLM_ENABLE_CACHE")

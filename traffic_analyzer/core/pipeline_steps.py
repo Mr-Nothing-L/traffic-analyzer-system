@@ -173,7 +173,8 @@ class ExpertAgentLayer(PipelineStep):
                     )
                 except Exception as exc:
                     logger.error(
-                        "ExpertAgent[%s] failed: %s",
+                        "[pipeline_steps:ExpertAgentLayer] EXPERT_ERROR | event_id=%d event_name=%s | %s",
+                        category.event_id,
                         category.name_zh,
                         exc,
                         exc_info=True,
@@ -208,14 +209,22 @@ class AdjudicationStep(PipelineStep):
         try:
             rules = self.config_manager.get_adjudication_rules()
         except Exception as exc:
-            logger.warning("Failed to load adjudication rules: %s", exc)
+            logger.error(
+                "[pipeline_steps:AdjudicationStep] RULE_LOAD_ERROR | %s",
+                exc,
+                exc_info=True,
+            )
             rules = []
 
         # 2. Load prompt template
         try:
             template = self.config_manager.get_prompt_template("adjudication")
-        except KeyError:
-            logger.error("Adjudication prompt template not found")
+        except KeyError as exc:
+            logger.error(
+                "[pipeline_steps:AdjudicationStep] TEMPLATE_ERROR | template_id=adjudication | %s",
+                exc,
+                exc_info=True,
+            )
             raise RuntimeError("Adjudication prompt template 'adjudication' not found")
 
         # 3. Select images
@@ -283,14 +292,29 @@ class AdjudicationStep(PipelineStep):
         }
 
         # 5. Call VLM
-        response = self.vlm_engine.call(
-            template=template,
-            images=images,
-            context_vars=context_vars,
-        )
+        try:
+            response = self.vlm_engine.call(
+                template=template,
+                images=images,
+                context_vars=context_vars,
+            )
+        except Exception as exc:
+            logger.error(
+                "[pipeline_steps:AdjudicationStep] VLM_CALL_ERROR | candidates=%d | %s",
+                len(candidates),
+                exc,
+                exc_info=True,
+            )
+            raise RuntimeError(f"Adjudication VLM call failed: {exc}") from exc
 
         if not response.success or not isinstance(response.parsed_data, dict):
-            logger.error("Adjudication VLM call failed: %s", response.raw_text)
+            logger.error(
+                "[pipeline_steps:AdjudicationStep] ADJUDICATION_ERROR | candidates=%d | response.success=%s parsed_data_type=%s | %s",
+                len(candidates),
+                response.success,
+                type(response.parsed_data).__name__ if response.parsed_data is not None else "None",
+                response.raw_text,
+            )
             raise RuntimeError(f"Adjudication VLM call failed: {response.raw_text}")
 
         data = response.parsed_data
@@ -380,9 +404,11 @@ class AdjudicationStep(PipelineStep):
 
     def _fallback(self, context: AnalysisContext, error: Optional[Exception]) -> AdjudicationResult:
         """Fallback: return raw expert candidates as EventResults (no filtering)."""
-        logger.warning(
-            "Adjudication fallback: returning raw expert candidates as EventResults (%s)",
-            error,
+        reason = str(error) if error else "unknown"
+        logger.error(
+            "[pipeline_steps:AdjudicationStep] FALLBACK | reason=%s | returning %d raw candidates",
+            reason,
+            len(context.event_candidates),
         )
         event_results: List[EventResult] = []
         for candidate in context.event_candidates.values():

@@ -8,6 +8,7 @@ event detection results, scene understanding, and video metadata.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -20,6 +21,8 @@ from traffic_analyzer.models.schemas import (
     SceneInfo,
     VideoMetadata,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ReportGenerator:
@@ -63,35 +66,63 @@ class ReportGenerator:
         Report
             Fully populated Pydantic model ready for serialization.
         """
-        # Sort results by event_id for deterministic output
-        sorted_results = sorted(event_results, key=lambda r: r.event_id)
+        try:
+            # Sort results by event_id for deterministic output
+            sorted_results = sorted(event_results, key=lambda r: r.event_id)
 
-        # Determine total categories for binary encoding
-        total_categories = self._infer_total_categories(sorted_results)
+            # Determine total categories for binary encoding
+            total_categories = self._infer_total_categories(sorted_results)
 
-        binary_encoding = self.to_binary_encoding(sorted_results, total_categories)
-        final_classification = self._build_final_classification(binary_encoding)
-        disposal_recommendations = self._build_disposal_recommendations(sorted_results)
-        overall_desc = overall_traffic_description or self._generate_overall_description(
-            scene_info, sorted_results
-        )
+            binary_encoding = self.to_binary_encoding(sorted_results, total_categories)
+            final_classification = self._build_final_classification(binary_encoding)
+            disposal_recommendations = self._build_disposal_recommendations(sorted_results)
+            overall_desc = overall_traffic_description or self._generate_overall_description(
+                scene_info, sorted_results
+            )
 
-        from traffic_analyzer.models.schemas import SceneInfo
-        return Report(
-            video_info=video_meta,
-            scene_summary=scene_info or SceneInfo(),
-            overall_traffic_description=overall_desc,
-            event_results=sorted_results,
-            binary_encoding=binary_encoding,
-            final_classification=final_classification,
-            disposal_recommendations=disposal_recommendations,
-            llm_usage_stats=usage_stats,
-            analysis_duration_sec=analysis_duration_sec,
-            generated_at=datetime.now(),
-            adjudication_reasoning=adjudication_reasoning,
-            reasoning_chain=reasoning_chain or [],
-            audit_log=audit_log or [],
-        )
+            from traffic_analyzer.models.schemas import SceneInfo
+            return Report(
+                video_info=video_meta,
+                scene_summary=scene_info or SceneInfo(),
+                overall_traffic_description=overall_desc,
+                event_results=sorted_results,
+                binary_encoding=binary_encoding,
+                final_classification=final_classification,
+                disposal_recommendations=disposal_recommendations,
+                llm_usage_stats=usage_stats,
+                analysis_duration_sec=analysis_duration_sec,
+                generated_at=datetime.now(),
+                adjudication_reasoning=adjudication_reasoning,
+                reasoning_chain=reasoning_chain or [],
+                audit_log=audit_log or [],
+            )
+        except Exception as exc:
+            logger.error(
+                "[report_generator:generate] GENERATE_ERROR | events=%d | %s",
+                len(event_results),
+                exc,
+                exc_info=True,
+            )
+            from traffic_analyzer.models.schemas import SceneInfo
+            return Report(
+                video_info=video_meta,
+                scene_summary=scene_info or SceneInfo(),
+                overall_traffic_description=f"报告生成过程中发生错误: {exc}",
+                event_results=[],
+                binary_encoding=BinaryEncoding(
+                    encoding_string="error",
+                    event_count=0,
+                    detected_events=[],
+                ),
+                final_classification="报告生成失败，请检查日志。",
+                disposal_recommendations=[],
+                llm_usage_stats=usage_stats,
+                analysis_duration_sec=analysis_duration_sec,
+                generated_at=datetime.now(),
+                adjudication_reasoning=adjudication_reasoning,
+                reasoning_chain=reasoning_chain or [],
+                audit_log=audit_log or [],
+            )
 
     def to_json(self, report: Report) -> str:
         """Serialize *report* to a pretty-printed JSON string."""
@@ -109,6 +140,38 @@ class ReportGenerator:
         4. Final classification with binary encoding explanation
         5. Disposal recommendations
         """
+        try:
+            return self._render_markdown(report)
+        except Exception as exc:
+            logger.error(
+                "[report_generator:to_markdown] RENDER_ERROR | events=%d | %s",
+                len(report.event_results),
+                exc,
+                exc_info=True,
+            )
+            # Fallback: simplified error report
+            vm = report.video_info
+            lines: List[str] = [
+                "# 交通事件分析报告",
+                "",
+                "## 视频信息",
+                f"- **文件名**: {vm.file_name}",
+                f"- **时长**: {vm.duration_sec:.1f} s",
+                "",
+                "---",
+                "",
+                "**报告渲染过程中发生错误，以下为简化输出。**",
+                "",
+                f"错误信息: `{exc}`",
+                "",
+                "---",
+                f"*报告生成时间: {report.generated_at.isoformat()}*",
+                "",
+            ]
+            return "\n".join(lines)
+
+    def _render_markdown(self, report: Report) -> str:
+        """Internal: render report as Markdown (may raise)."""
         lines: List[str] = []
 
         # ---- Title ---------------------------------------------------------
@@ -392,26 +455,40 @@ class ReportGenerator:
         -------
         BinaryEncoding
         """
-        if total_categories <= 0:
-            total_categories = self._infer_total_categories(event_results)
+        try:
+            if total_categories <= 0:
+                total_categories = self._infer_total_categories(event_results)
 
-        detected_map = {r.event_id: r.detected for r in event_results}
-        detected_events: List[int] = []
-        bits: List[str] = []
+            detected_map = {r.event_id: r.detected for r in event_results}
+            detected_events: List[int] = []
+            bits: List[str] = []
 
-        for eid in range(total_categories):
-            if detected_map.get(eid, False):
-                bits.append("1")
-                detected_events.append(eid)
-            else:
-                bits.append("0")
+            for eid in range(total_categories):
+                if detected_map.get(eid, False):
+                    bits.append("1")
+                    detected_events.append(eid)
+                else:
+                    bits.append("0")
 
-        encoding_string = "_".join(bits)
-        return BinaryEncoding(
-            encoding_string=encoding_string,
-            event_count=len(detected_events),
-            detected_events=detected_events,
-        )
+            encoding_string = "_".join(bits)
+            return BinaryEncoding(
+                encoding_string=encoding_string,
+                event_count=len(detected_events),
+                detected_events=detected_events,
+            )
+        except Exception as exc:
+            logger.error(
+                "[report_generator:to_binary_encoding] ENCODING_ERROR | events=%d total_categories=%d | %s",
+                len(event_results),
+                total_categories,
+                exc,
+                exc_info=True,
+            )
+            return BinaryEncoding(
+                encoding_string="error",
+                event_count=0,
+                detected_events=[],
+            )
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -490,38 +567,47 @@ class ReportGenerator:
 
         Keeps only natural-language paragraphs.
         """
-        # 1. Strip fenced code blocks (```json ... ``` or ``` ... ```)
-        cleaned = re.sub(r"```[a-zA-Z]*\n.*?\n```", "", text, flags=re.DOTALL)
-        # Also handle single-backtick fenced blocks that may not have a trailing newline
-        cleaned = re.sub(r"```[a-zA-Z]*.*?```", "", cleaned, flags=re.DOTALL)
+        try:
+            # 1. Strip fenced code blocks (```json ... ``` or ``` ... ```)
+            cleaned = re.sub(r"```[a-zA-Z]*\n.*?\n```", "", text, flags=re.DOTALL)
+            # Also handle single-backtick fenced blocks that may not have a trailing newline
+            cleaned = re.sub(r"```[a-zA-Z]*.*?```", "", cleaned, flags=re.DOTALL)
 
-        # 2. Remove multi-line JSON objects/arrays
-        # Detect blocks that start with { or [ and end with } or ],
-        # where most lines look like JSON (contain ":", commas, quotes)
-        cleaned = self._strip_json_blocks(cleaned)
+            # 2. Remove multi-line JSON objects/arrays
+            # Detect blocks that start with { or [ and end with } or ],
+            # where most lines look like JSON (contain ":", commas, quotes)
+            cleaned = self._strip_json_blocks(cleaned)
 
-        # 3. Remove standalone JSON objects — lines that are just a JSON dict/array
-        lines: List[str] = []
-        for line in cleaned.splitlines():
-            stripped = line.strip()
-            if not stripped:
-                continue
-            # Skip lines that look like a complete JSON object/array
-            if (stripped.startswith("{") and stripped.endswith("}")) or \
-               (stripped.startswith("[") and stripped.endswith("]")):
-                continue
-            lines.append(line)
+            # 3. Remove standalone JSON objects — lines that are just a JSON dict/array
+            lines: List[str] = []
+            for line in cleaned.splitlines():
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                # Skip lines that look like a complete JSON object/array
+                if (stripped.startswith("{") and stripped.endswith("}")) or \
+                   (stripped.startswith("[") and stripped.endswith("]")):
+                    continue
+                lines.append(line)
 
-        # 4. Collapse multiple blank lines and strip edges
-        text_out = "\n".join(lines).strip()
-        text_out = re.sub(r"\n{3,}", "\n\n", text_out)
+            # 4. Collapse multiple blank lines and strip edges
+            text_out = "\n".join(lines).strip()
+            text_out = re.sub(r"\n{3,}", "\n\n", text_out)
 
-        # 5. Normalize markdown formatting (tables, horizontal rules)
-        text_out = self._normalize_markdown(text_out)
+            # 5. Normalize markdown formatting (tables, horizontal rules)
+            text_out = self._normalize_markdown(text_out)
 
-        # 6. Downgrade markdown headings so they don't exceed parent level (#####)
-        text_out = self._downgrade_headings(text_out, max_level=5)
-        return text_out
+            # 6. Downgrade markdown headings so they don't exceed parent level (#####)
+            text_out = self._downgrade_headings(text_out, max_level=5)
+            return text_out
+        except Exception as exc:
+            logger.error(
+                "[report_generator:_clean_expert_description] CLEAN_ERROR | text_len=%d | %s",
+                len(text),
+                exc,
+                exc_info=True,
+            )
+            return text
 
     def _strip_json_blocks(self, text: str) -> str:
         """Remove contiguous blocks that look like JSON objects or arrays."""
@@ -631,90 +717,99 @@ class ReportGenerator:
 
     def _render_event_result(self, result: EventResult) -> List[str]:
         """Render a single :class:`EventResult` as Markdown lines."""
-        lines: List[str] = []
-        status_icon = "✅" if result.detected else "❌"
-        name_line = f"### {status_icon} 事件 {result.event_id}: {result.event_name}"
-        if result.event_name_en:
-            name_line += f" / {result.event_name_en}"
-        lines.append(name_line)
-        lines.append("")
-
-        # Main result info as a compact table
-        lines.append("| 字段 | 内容 |")
-        lines.append("|------|------|")
-        lines.append(f"| 是否检测到 | {'**是**' if result.detected else '否'} |")
-        if result.summary:
-            lines.append(f"| 摘要 | {result.summary} |")
-        if result.reasoning:
-            lines.append(f"| 推理过程 | {result.reasoning} |")
-        lines.append("")
-
-        if result.detected and result.instances:
-            lines.append("#### 检测实例")
-            lines.append("")
-            # Instance table header
-            lines.append("| 实例 | 时间区间 | 车辆 | 道路 | 描述 |")
-            lines.append("|------|----------|------|------|------|")
-            for idx, inst in enumerate(result.instances, start=1):
-                time_range = "—"
-                if inst.start_time_sec or inst.end_time_sec:
-                    time_range = f"{inst.start_time_sec:.1f}s - {inst.end_time_sec:.1f}s"
-                vehicle = inst.vehicle_id or "—"
-                road = str(inst.road_id) if inst.road_id is not None else "—"
-                desc = inst.description or "—"
-                if len(desc) > 30:
-                    desc = desc[:27] + "..."
-                lines.append(
-                    f"| {idx} | {time_range} | {vehicle} | {road} | {desc} |"
-                )
+        try:
+            lines: List[str] = []
+            status_icon = "✅" if result.detected else "❌"
+            name_line = f"### {status_icon} 事件 {result.event_id}: {result.event_name}"
+            if result.event_name_en:
+                name_line += f" / {result.event_name_en}"
+            lines.append(name_line)
             lines.append("")
 
-            # Detailed instance info as bullet points below the table
-            for idx, inst in enumerate(result.instances, start=1):
-                has_detail = (
-                    inst.reasoning
-                    or inst.disposal_suggestion
-                    or inst.evidence_frames
-                )
-                if not has_detail:
-                    continue
-                lines.append(f"**实例 {idx} 详情**")
-                if inst.evidence_frames:
-                    frames_str = ", ".join(str(f) for f in inst.evidence_frames)
-                    lines.append(f"- **证据帧**: {frames_str}")
-                if inst.reasoning:
-                    lines.append(f"- **推理过程**: {inst.reasoning}")
-                if inst.disposal_suggestion:
-                    lines.append(f"- **处置建议**: {inst.disposal_suggestion}")
+            # Main result info as a compact table
+            lines.append("| 字段 | 内容 |")
+            lines.append("|------|------|")
+            lines.append(f"| 是否检测到 | {'**是**' if result.detected else '否'} |")
+            if result.summary:
+                lines.append(f"| 摘要 | {result.summary} |")
+            if result.reasoning:
+                lines.append(f"| 推理过程 | {result.reasoning} |")
+            lines.append("")
+
+            if result.detected and result.instances:
+                lines.append("#### 检测实例")
                 lines.append("")
-        elif result.detected and not result.instances:
-            lines.append("_检测到事件，但无详细实例信息。_")
-            lines.append("")
-
-        if result.analysis_process:
-            lines.append("#### 分析过程")
-            for step in result.analysis_process:
-                lines.append(f"- {step}")
-            lines.append("")
-
-        # 展示裁决层对该事件的推理
-        if result.adjudication_reasoning:
-            lines.append("#### 裁决推理")
-            lines.append(result.adjudication_reasoning)
-            lines.append("")
-
-        # 展示专家原始分析（进入裁决层之前的决策）
-        if result.expert_raw_description:
-            cleaned = self._clean_expert_description(result.expert_raw_description)
-            if cleaned:
-                lines.append("#### 专家原始分析")
-                lines.append(cleaned)
+                # Instance table header
+                lines.append("| 实例 | 时间区间 | 车辆 | 道路 | 描述 |")
+                lines.append("|------|----------|------|------|------|")
+                for idx, inst in enumerate(result.instances, start=1):
+                    time_range = "—"
+                    if inst.start_time_sec or inst.end_time_sec:
+                        time_range = f"{inst.start_time_sec:.1f}s - {inst.end_time_sec:.1f}s"
+                    vehicle = inst.vehicle_id or "—"
+                    road = str(inst.road_id) if inst.road_id is not None else "—"
+                    desc = inst.description or "—"
+                    if len(desc) > 30:
+                        desc = desc[:27] + "..."
+                    lines.append(
+                        f"| {idx} | {time_range} | {vehicle} | {road} | {desc} |"
+                    )
                 lines.append("")
 
-        # 展示CV辅助检测证据（如有）
-        if result.cv_evidence:
-            lines.append("#### CV辅助检测证据")
-            lines.append(result.cv_evidence)
-            lines.append("")
+                # Detailed instance info as bullet points below the table
+                for idx, inst in enumerate(result.instances, start=1):
+                    has_detail = (
+                        inst.reasoning
+                        or inst.disposal_suggestion
+                        or inst.evidence_frames
+                    )
+                    if not has_detail:
+                        continue
+                    lines.append(f"**实例 {idx} 详情**")
+                    if inst.evidence_frames:
+                        frames_str = ", ".join(str(f) for f in inst.evidence_frames)
+                        lines.append(f"- **证据帧**: {frames_str}")
+                    if inst.reasoning:
+                        lines.append(f"- **推理过程**: {inst.reasoning}")
+                    if inst.disposal_suggestion:
+                        lines.append(f"- **处置建议**: {inst.disposal_suggestion}")
+                    lines.append("")
+            elif result.detected and not result.instances:
+                lines.append("_检测到事件，但无详细实例信息。_")
+                lines.append("")
 
-        return lines
+            if result.analysis_process:
+                lines.append("#### 分析过程")
+                for step in result.analysis_process:
+                    lines.append(f"- {step}")
+                lines.append("")
+
+            # 展示裁决层对该事件的推理
+            if result.adjudication_reasoning:
+                lines.append("#### 裁决推理")
+                lines.append(result.adjudication_reasoning)
+                lines.append("")
+
+            # 展示专家原始分析（进入裁决层之前的决策）
+            if result.expert_raw_description:
+                cleaned = self._clean_expert_description(result.expert_raw_description)
+                if cleaned:
+                    lines.append("#### 专家原始分析")
+                    lines.append(cleaned)
+                    lines.append("")
+
+            # 展示CV辅助检测证据（如有）
+            if result.cv_evidence:
+                lines.append("#### CV辅助检测证据")
+                lines.append(result.cv_evidence)
+                lines.append("")
+
+            return lines
+        except Exception as exc:
+            logger.error(
+                "[report_generator:_render_event_result] RENDER_EVENT_ERROR | event_id=%d | %s",
+                result.event_id,
+                exc,
+                exc_info=True,
+            )
+            return [f"[ERROR: 无法渲染事件 {result.event_id} 详情]"]

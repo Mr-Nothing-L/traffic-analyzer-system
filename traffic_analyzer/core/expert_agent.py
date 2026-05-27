@@ -83,8 +83,9 @@ class ExpertAgent:
         images = select_event_images(context, vlm_max_frames)
 
         if not images:
-            logger.warning(
-                "ExpertAgent[%s]: no images available for detection",
+            logger.error(
+                "[expert_agent:detect] NO_IMAGES | event_id=%d event_name=%s",
+                self.category.event_id,
                 self.category.name_zh,
             )
             return EventCandidate(
@@ -96,8 +97,9 @@ class ExpertAgent:
 
         # -- 2. Prompt template ------------------------------------------------
         if not self.category.prompt_template_id:
-            logger.warning(
-                "ExpertAgent[%s]: no prompt_template_id configured",
+            logger.error(
+                "[expert_agent:detect] NO_TEMPLATE | event_id=%d event_name=%s",
+                self.category.event_id,
                 self.category.name_zh,
             )
             return EventCandidate(
@@ -112,10 +114,13 @@ class ExpertAgent:
                 self.category.prompt_template_id
             )
         except (KeyError, RuntimeError) as exc:
-            logger.warning(
-                "ExpertAgent[%s]: failed to load prompt template: %s",
+            logger.error(
+                "[expert_agent:detect] TEMPLATE_LOAD_ERROR | event_id=%d event_name=%s template_id=%s | %s",
+                self.category.event_id,
                 self.category.name_zh,
+                self.category.prompt_template_id,
                 exc,
+                exc_info=True,
             )
             return EventCandidate(
                 event_id=self.category.event_id,
@@ -143,6 +148,12 @@ class ExpertAgent:
             )
 
         if prior_knowledge:
+            logger.info(
+                "[expert_agent:detect] PRIOR_KNOWLEDGE | event_id=%d event_name=%s loaded=True length=%d",
+                self.category.event_id,
+                self.category.name_zh,
+                len(prior_knowledge),
+            )
             # Build enhanced template with prior knowledge appended to system_prompt
             enhanced_system = template.system_prompt
             if enhanced_system and not enhanced_system.endswith("\n"):
@@ -216,7 +227,13 @@ class ExpertAgent:
                 cv_evidence = tracking_evidence  # backward compat
 
             except Exception as exc:
-                logger.warning("YOLO tracker failed (%s), falling back to CV detector", exc)
+                logger.error(
+                    "[expert_agent:detect] YOLO_ERROR | event_id=%d event_name=%s | %s",
+                    self.category.event_id,
+                    self.category.name_zh,
+                    exc,
+                    exc_info=True,
+                )
                 if cv_enabled:
                     from traffic_analyzer.core.reversing_cv_detector import ReversingCVDetector
                     cv_detector = ReversingCVDetector()
@@ -235,12 +252,30 @@ class ExpertAgent:
         context_vars["tracking_evidence"] = tracking_evidence
 
         # -- 5. VLM call -------------------------------------------------------
-        response = self.vlm_engine.call(
-            template=template,
-            images=images,
-            context_vars=context_vars,
-            response_schema=_EXPERT_RESPONSE_SCHEMA,
-        )
+        try:
+            response = self.vlm_engine.call(
+                template=template,
+                images=images,
+                context_vars=context_vars,
+                response_schema=_EXPERT_RESPONSE_SCHEMA,
+            )
+        except Exception as exc:
+            logger.error(
+                "[expert_agent:detect] VLM_ERROR | event_id=%d event_name=%s | %s",
+                self.category.event_id,
+                self.category.name_zh,
+                exc,
+                exc_info=True,
+            )
+            error_candidate = EventCandidate(
+                event_id=self.category.event_id,
+                event_name=self.category.name_zh,
+                detected=False,
+                summary=f"VLM call failed: {exc}",
+            )
+            error_candidate.cv_evidence = cv_evidence
+            error_candidate.tracking_evidence = tracking_evidence
+            return error_candidate
 
         # -- 5. Parse response -------------------------------------------------
         candidate = parse_expert_response(response, self.category)

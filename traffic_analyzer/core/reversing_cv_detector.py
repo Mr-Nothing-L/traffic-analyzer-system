@@ -93,15 +93,29 @@ class ReversingCVDetector:
             return CVDetectionResult(summary="Insufficient frames for motion analysis")
 
         # -- 2. Decode first and last frames -----------------------------------
-        first_frame = self._decode_frame(coarse[0])
-        last_frame = self._decode_frame(coarse[-1])
+        try:
+            first_frame = self._decode_frame(coarse[0])
+            last_frame = self._decode_frame(coarse[-1])
+        except Exception as exc:
+            logger.error(
+                "[reversing_cv_detector:_detect_internal] FRAME_DECODE_ERROR | first=%s last=%s | %s",
+                coarse[0].timestamp_sec if coarse else None,
+                coarse[-1].timestamp_sec if coarse else None,
+                exc,
+                exc_info=True,
+            )
+            return CVDetectionResult(summary="Frame decode failed")
 
         if first_frame is None or last_frame is None:
             logger.warning("ReversingCVDetector: failed to decode frames")
             return CVDetectionResult(summary="Frame decode failed")
 
         if first_frame.shape != last_frame.shape:
-            logger.warning("ReversingCVDetector: frame shape mismatch")
+            logger.error(
+                "[reversing_cv_detector:_detect_internal] SHAPE_MISMATCH | first_shape=%s last_shape=%s",
+                first_frame.shape,
+                last_frame.shape,
+            )
             return CVDetectionResult(summary="Frame shape mismatch")
 
         # -- 3. Determine ROI --------------------------------------------------
@@ -112,14 +126,32 @@ class ReversingCVDetector:
         roi_first = first_frame[roi[1] : roi[1] + roi[3], roi[0] : roi[0] + roi[2]]
         roi_last = last_frame[roi[1] : roi[1] + roi[3], roi[0] : roi[0] + roi[2]]
 
-        diff = cv2.absdiff(roi_first, roi_last)
-        gray_diff = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
-        _, thresh = cv2.threshold(gray_diff, self.diff_threshold, 255, cv2.THRESH_BINARY)
+        try:
+            diff = cv2.absdiff(roi_first, roi_last)
+            gray_diff = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
+            _, thresh = cv2.threshold(gray_diff, self.diff_threshold, 255, cv2.THRESH_BINARY)
+        except Exception as exc:
+            logger.error(
+                "[reversing_cv_detector:_detect_internal] DIFF_ERROR | roi=%s | %s",
+                roi,
+                exc,
+                exc_info=True,
+            )
+            return CVDetectionResult(summary="Difference computation failed")
 
         # -- 5. Find connected components --------------------------------------
-        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
-            thresh, connectivity=8
-        )
+        try:
+            num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
+                thresh, connectivity=8
+            )
+        except Exception as exc:
+            logger.error(
+                "[reversing_cv_detector:_detect_internal] COMPONENTS_ERROR | roi=%s | %s",
+                roi,
+                exc,
+                exc_info=True,
+            )
+            return CVDetectionResult(summary="Difference computation failed")
 
         min_area = int(w * h * self.MIN_CONTOUR_AREA_FRAC)
         significant_components: List[Tuple[int, np.ndarray, float]] = []
@@ -144,14 +176,23 @@ class ReversingCVDetector:
         best_evidence: Optional[Tuple[float, str, float]] = None
 
         for label_id, centroid, area in significant_components:
-            # Create mask for this component
-            component_mask = (labels == label_id).astype(np.uint8) * 255
+            try:
+                # Create mask for this component
+                component_mask = (labels == label_id).astype(np.uint8) * 255
 
-            displacement_px = self._estimate_displacement(
-                roi_first, roi_last, component_mask
-            )
+                displacement_px = self._estimate_displacement(
+                    roi_first, roi_last, component_mask
+                )
 
-            if abs(displacement_px) < self.min_displacement_px:
+                if abs(displacement_px) < self.min_displacement_px:
+                    continue
+            except Exception as exc:
+                logger.error(
+                    "[reversing_cv_detector:_detect_internal] DISPLACEMENT_ERROR | label_id=%d | %s",
+                    label_id,
+                    exc,
+                    exc_info=True,
+                )
                 continue
 
             direction = self._classify_direction(displacement_px, normal_direction)
@@ -199,12 +240,22 @@ class ReversingCVDetector:
 
     def _decode_frame(self, keyframe: Keyframe) -> Optional[np.ndarray]:
         """Decode a Keyframe to an OpenCV BGR image."""
-        if keyframe.image_data is not None:
-            arr = np.frombuffer(keyframe.image_data, dtype=np.uint8)
-            return cv2.imdecode(arr, cv2.IMREAD_COLOR)
-        elif keyframe.image_path is not None:
-            return cv2.imread(keyframe.image_path)
-        return None
+        try:
+            if keyframe.image_data is not None:
+                arr = np.frombuffer(keyframe.image_data, dtype=np.uint8)
+                return cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            elif keyframe.image_path is not None:
+                return cv2.imread(keyframe.image_path)
+            return None
+        except Exception as exc:
+            logger.error(
+                "[reversing_cv_detector:_decode_frame] DECODE_ERROR | has_data=%s has_path=%s | %s",
+                keyframe.image_data is not None,
+                keyframe.image_path is not None,
+                exc,
+                exc_info=True,
+            )
+            return None
 
     def _determine_roi(
         self,
@@ -269,64 +320,72 @@ class ReversingCVDetector:
         Returns:
             Vertical displacement in pixels (positive = downward).
         """
-        # Compute per-pixel difference magnitude in the component region
-        diff = cv2.absdiff(roi_first, roi_last)
-        gray_diff = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
+        try:
+            # Compute per-pixel difference magnitude in the component region
+            diff = cv2.absdiff(roi_first, roi_last)
+            gray_diff = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
 
-        # Weighted centroid of the difference region (component_mask)
-        weights = gray_diff.astype(np.float32) * (component_mask > 0)
-        total_weight = weights.sum()
-        cy_component: Optional[float] = None
-        if total_weight > 1e-6:
-            h = roi_first.shape[0]
-            y_indices = np.arange(h, dtype=np.float32)
-            cy_component = float(np.sum(y_indices * weights.sum(axis=1)) / total_weight)
+            # Weighted centroid of the difference region (component_mask)
+            weights = gray_diff.astype(np.float32) * (component_mask > 0)
+            total_weight = weights.sum()
+            cy_component: Optional[float] = None
+            if total_weight > 1e-6:
+                h = roi_first.shape[0]
+                y_indices = np.arange(h, dtype=np.float32)
+                cy_component = float(np.sum(y_indices * weights.sum(axis=1)) / total_weight)
 
-        # Otsu threshold each frame within the component region
-        _, thresh_first = cv2.threshold(
-            cv2.cvtColor(roi_first, cv2.COLOR_BGR2GRAY),
-            0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU,
-        )
-        _, thresh_last = cv2.threshold(
-            cv2.cvtColor(roi_last, cv2.COLOR_BGR2GRAY),
-            0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU,
-        )
-        thresh_first = cv2.bitwise_and(thresh_first, component_mask)
-        thresh_last = cv2.bitwise_and(thresh_last, component_mask)
+            # Otsu threshold each frame within the component region
+            _, thresh_first = cv2.threshold(
+                cv2.cvtColor(roi_first, cv2.COLOR_BGR2GRAY),
+                0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU,
+            )
+            _, thresh_last = cv2.threshold(
+                cv2.cvtColor(roi_last, cv2.COLOR_BGR2GRAY),
+                0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU,
+            )
+            thresh_first = cv2.bitwise_and(thresh_first, component_mask)
+            thresh_last = cv2.bitwise_and(thresh_last, component_mask)
 
-        cy_first = self._contour_centroid_y(thresh_first)
-        cy_last = self._contour_centroid_y(thresh_last)
+            cy_first = self._contour_centroid_y(thresh_first)
+            cy_last = self._contour_centroid_y(thresh_last)
 
-        if cy_first is not None and cy_last is not None:
-            # Both frames have a detectable object in this component region
-            return cy_last - cy_first
+            if cy_first is not None and cy_last is not None:
+                # Both frames have a detectable object in this component region
+                return cy_last - cy_first
 
-        # Partial detection: one frame has the object, the other doesn't.
-        # The component_mask centroid tells us the position of the missing side.
-        if cy_component is None:
+            # Partial detection: one frame has the object, the other doesn't.
+            # The component_mask centroid tells us the position of the missing side.
+            if cy_component is None:
+                return 0.0
+
+            if cy_first is not None and cy_last is None:
+                # Object was here in first frame, gone in last.
+                # Component centroid is near the NEW location (or the hole).
+                # We need to determine which: compare cy_component to cy_first.
+                # If cy_component > cy_first, the change is below the object
+                #   -> object moved DOWN (positive displacement)
+                # If cy_component < cy_first, the change is above the object
+                #   -> object moved UP (negative displacement)
+                return cy_component - cy_first
+
+            if cy_first is None and cy_last is not None:
+                # Object not here in first frame, appeared in last.
+                # Component centroid is near the OLD location (the hole).
+                # If cy_component > cy_last, the hole is below the new position
+                #   -> object moved UP (negative displacement)
+                # If cy_component < cy_last, the hole is above the new position
+                #   -> object moved DOWN (positive displacement)
+                return cy_last - cy_component
+
+            # Neither frame has a contour in this component — no measurable displacement
             return 0.0
-
-        if cy_first is not None and cy_last is None:
-            # Object was here in first frame, gone in last.
-            # Component centroid is near the NEW location (or the hole).
-            # We need to determine which: compare cy_component to cy_first.
-            # If cy_component > cy_first, the change is below the object
-            #   -> object moved DOWN (positive displacement)
-            # If cy_component < cy_first, the change is above the object
-            #   -> object moved UP (negative displacement)
-            return cy_component - cy_first
-
-        if cy_first is None and cy_last is not None:
-            # Object not here in first frame, appeared in last.
-            # Component centroid is near the OLD location (the hole).
-            # If cy_component > cy_last, the hole is below the new position
-            #   -> object moved UP (negative displacement)
-            # If cy_component < cy_last, the hole is above the new position
-            #   -> object moved DOWN (positive displacement)
-            return cy_last - cy_component
-
-        # Neither frame has a contour in this component — no measurable displacement
-        return 0.0
+        except Exception as exc:
+            logger.error(
+                "[reversing_cv_detector:_estimate_displacement] ESTIMATE_ERROR | %s",
+                exc,
+                exc_info=True,
+            )
+            return 0.0
 
     def _contour_centroid_y(self, binary_mask: np.ndarray) -> Optional[float]:
         """Compute the y-coordinate of the centroid of the largest contour."""
