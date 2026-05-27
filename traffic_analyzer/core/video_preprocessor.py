@@ -169,57 +169,69 @@ class VideoPreprocessor:
         Returns:
             List of extracted Keyframes.
         """
-        original_fps = metadata.fps
-        if original_fps <= 0:
-            return []
+        try:
+            original_fps = metadata.fps
+            if original_fps <= 0:
+                return []
 
-        interval = max(1, int(round(original_fps / target_fps)))
-        keyframes: List[Keyframe] = []
+            interval = max(1, int(round(original_fps / target_fps)))
+            keyframes: List[Keyframe] = []
 
-        start_frame = 0
-        end_frame = metadata.total_frames
+            start_frame = 0
+            end_frame = metadata.total_frames
 
-        if start_sec is not None:
-            start_frame = int(start_sec * original_fps)
-        if end_sec is not None:
-            end_frame = min(int(end_sec * original_fps), metadata.total_frames)
+            if start_sec is not None:
+                start_frame = int(start_sec * original_fps)
+            if end_sec is not None:
+                end_frame = min(int(end_sec * original_fps), metadata.total_frames)
 
-        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+            cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
 
-        current_frame = start_frame
-        local_id = 0
-        while current_frame < end_frame:
-            ret, frame = cap.read()
-            if not ret:
-                break
+            current_frame = start_frame
+            local_id = 0
+            while current_frame < end_frame:
+                ret, frame = cap.read()
+                if not ret:
+                    break
 
-            timestamp = current_frame / original_fps
-            quality = self._compute_quality_score(frame)
+                timestamp = current_frame / original_fps
+                quality = self._compute_quality_score(frame)
 
-            image_path: Optional[str] = None
-            image_data: Optional[bytes] = None
+                image_path: Optional[str] = None
+                image_data: Optional[bytes] = None
 
-            if self.save_debug_frames:
-                image_path = self._save_frame(frame, output_dir, prefix, local_id)
-            else:
-                image_data = self._frame_to_bytes(frame)
+                if self.save_debug_frames:
+                    image_path = self._save_frame(frame, output_dir, prefix, local_id)
+                else:
+                    image_data = self._frame_to_bytes(frame)
 
-            keyframes.append(
-                Keyframe(
-                    frame_id=local_id,
-                    timestamp_sec=timestamp,
-                    image_path=image_path,
-                    image_data=image_data,
-                    quality_score=quality,
-                    is_precision=is_precision,
+                keyframes.append(
+                    Keyframe(
+                        frame_id=local_id,
+                        timestamp_sec=timestamp,
+                        image_path=image_path,
+                        image_data=image_data,
+                        quality_score=quality,
+                        is_precision=is_precision,
+                    )
                 )
+
+                local_id += 1
+                current_frame += interval
+                cap.set(cv2.CAP_PROP_POS_FRAMES, current_frame)
+
+            return keyframes
+        except Exception as exc:
+            logger.error(
+                "[video_preprocessor:_extract_frames_at_fps] EXTRACT_ERROR | video=%s fps=%.1f start=%s end=%s | %s",
+                metadata.file_path,
+                target_fps,
+                start_sec,
+                end_sec,
+                exc,
+                exc_info=True,
             )
-
-            local_id += 1
-            current_frame += interval
-            cap.set(cv2.CAP_PROP_POS_FRAMES, current_frame)
-
-        return keyframes
+            return []
 
     def _detect_motion_segments(
         self,
@@ -249,6 +261,12 @@ class VideoPreprocessor:
             ret2, frame2 = cap.read()
 
             if not ret1 or not ret2:
+                logger.error(
+                    "[video_preprocessor:_detect_motion_segments] FRAME_READ_ERROR | pair=%d ts1=%.1f ts2=%.1f",
+                    i,
+                    ts1,
+                    ts2,
+                )
                 motion_flags.append(False)
                 continue
 
@@ -333,6 +351,10 @@ class VideoPreprocessor:
         for kf in keyframes[1:]:
             frame = _load_frame(kf)
             if frame is None:
+                logger.error(
+                    "[video_preprocessor:_deduplicate_keyframes] FRAME_DECODE_ERROR | frame_id=%d",
+                    kf.frame_id,
+                )
                 continue
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             hist = cv2.calcHist([gray], [0], None, [256], [0, 256])
@@ -401,6 +423,16 @@ class VideoPreprocessor:
                 end_sec=end_sec,
             )
             return keyframes
+        except Exception as exc:
+            logger.error(
+                "[video_preprocessor:extract_segment] SEGMENT_ERROR | video=%s start=%.1f end=%.1f | %s",
+                video_path,
+                start_sec,
+                end_sec,
+                exc,
+                exc_info=True,
+            )
+            return []
         finally:
             cap.release()
 
@@ -442,46 +474,86 @@ class VideoPreprocessor:
             )
 
             # First pass: coarse sampling
-            coarse_frames = self._extract_frames_at_fps(
-                cap=cap,
-                target_fps=self.config.coarse_fps,
-                metadata=metadata,
-                output_dir=output_dir,
-                prefix="coarse",
-                is_precision=False,
-            )
-            coarse_frames = [
-                kf for kf in coarse_frames
-                if kf.quality_score >= self.config.coarse_quality_threshold
-            ]
-            coarse_frames = self._deduplicate_keyframes(coarse_frames)
-            logger.info("Coarse pass: %d frames retained", len(coarse_frames))
+            try:
+                coarse_frames = self._extract_frames_at_fps(
+                    cap=cap,
+                    target_fps=self.config.coarse_fps,
+                    metadata=metadata,
+                    output_dir=output_dir,
+                    prefix="coarse",
+                    is_precision=False,
+                )
+                coarse_frames = [
+                    kf for kf in coarse_frames
+                    if kf.quality_score >= self.config.coarse_quality_threshold
+                ]
+                coarse_frames = self._deduplicate_keyframes(coarse_frames)
+                logger.info("Coarse pass: %d frames retained", len(coarse_frames))
+            except Exception as exc:
+                logger.error(
+                    "[video_preprocessor:process] COARSE_ERROR | video=%s | %s",
+                    video_path,
+                    exc,
+                    exc_info=True,
+                )
+                coarse_frames = []
 
             # Motion analysis
-            motion_segments = self._detect_motion_segments(cap, metadata, coarse_frames)
-            logger.info("Detected %d motion segments", len(motion_segments))
+            try:
+                motion_segments = self._detect_motion_segments(cap, metadata, coarse_frames)
+                logger.info("Detected %d motion segments", len(motion_segments))
+            except Exception as exc:
+                logger.error(
+                    "[video_preprocessor:process] MOTION_ERROR | video=%s | %s",
+                    video_path,
+                    exc,
+                    exc_info=True,
+                )
+                motion_segments = []
 
             # Second pass: precision sampling for motion segments
             precision_frames: List[Keyframe] = []
             for seg_idx, (start, end) in enumerate(motion_segments):
-                seg_frames = self._extract_frames_at_fps(
-                    cap=cap,
-                    target_fps=self.config.precision_fps,
-                    metadata=metadata,
-                    output_dir=output_dir,
-                    prefix=f"precision_seg{seg_idx}",
-                    is_precision=True,
-                    start_sec=start,
-                    end_sec=end,
-                )
-                precision_frames.extend(seg_frames)
+                try:
+                    seg_frames = self._extract_frames_at_fps(
+                        cap=cap,
+                        target_fps=self.config.precision_fps,
+                        metadata=metadata,
+                        output_dir=output_dir,
+                        prefix=f"precision_seg{seg_idx}",
+                        is_precision=True,
+                        start_sec=start,
+                        end_sec=end,
+                    )
+                    precision_frames.extend(seg_frames)
+                except Exception as exc:
+                    logger.error(
+                        "[video_preprocessor:process] PRECISION_ERROR | video=%s segment=%d | %s",
+                        video_path,
+                        seg_idx,
+                        exc,
+                        exc_info=True,
+                    )
+                    continue
 
-            precision_frames = [
-                kf for kf in precision_frames
-                if kf.quality_score >= self.config.precision_quality_threshold
-            ]
-            precision_frames = self._deduplicate_keyframes(precision_frames)
-            logger.info("Precision pass: %d frames retained", len(precision_frames))
+            try:
+                precision_frames = [
+                    kf for kf in precision_frames
+                    if kf.quality_score >= self.config.precision_quality_threshold
+                ]
+                precision_frames = self._deduplicate_keyframes(precision_frames)
+                logger.info("Precision pass: %d frames retained", len(precision_frames))
+            except Exception as exc:
+                logger.error(
+                    "[video_preprocessor:process] DEDUP_ERROR | video=%s | %s",
+                    video_path,
+                    exc,
+                    exc_info=True,
+                )
+                # Fallback: return precision_frames without deduplication/quality filtering
+                # If that also failed, use empty list
+                if precision_frames is None:
+                    precision_frames = []
 
             return KeyframeSequence(
                 coarse_frames=coarse_frames,
@@ -509,43 +581,53 @@ class VideoPreprocessor:
             VideoPreprocessorError: If no keyframes are provided or images
                 cannot be loaded.
         """
-        cols, rows = grid_size
-        max_cells = cols * rows
-        selected = keyframes[:max_cells]
+        try:
+            cols, rows = grid_size
+            max_cells = cols * rows
+            selected = keyframes[:max_cells]
 
-        if not selected:
-            raise VideoPreprocessorError("No keyframes provided for thumbnail grid")
+            if not selected:
+                raise VideoPreprocessorError("No keyframes provided for thumbnail grid")
 
-        images: List[Image.Image] = []
-        for kf in selected:
-            img: Optional[Image.Image] = None
-            if kf.image_data is not None:
-                img = Image.open(io.BytesIO(kf.image_data))
-            elif kf.image_path is not None:
-                img = Image.open(kf.image_path)
-            if img is None:
-                raise VideoPreprocessorError(
-                    f"Cannot load image for keyframe at {kf.timestamp_sec}s"
-                )
-            images.append(img.convert("RGB"))
+            images: List[Image.Image] = []
+            for kf in selected:
+                img: Optional[Image.Image] = None
+                if kf.image_data is not None:
+                    img = Image.open(io.BytesIO(kf.image_data))
+                elif kf.image_path is not None:
+                    img = Image.open(kf.image_path)
+                if img is None:
+                    raise VideoPreprocessorError(
+                        f"Cannot load image for keyframe at {kf.timestamp_sec}s"
+                    )
+                images.append(img.convert("RGB"))
 
-        # Determine cell size from the first image
-        cell_width = max(img.width for img in images)
-        cell_height = max(img.height for img in images)
+            # Determine cell size from the first image
+            cell_width = max(img.width for img in images)
+            cell_height = max(img.height for img in images)
 
-        grid_width = cols * cell_width
-        grid_height = rows * cell_height
-        grid_image = Image.new("RGB", (grid_width, grid_height), (0, 0, 0))
+            grid_width = cols * cell_width
+            grid_height = rows * cell_height
+            grid_image = Image.new("RGB", (grid_width, grid_height), (0, 0, 0))
 
-        for idx, img in enumerate(images):
-            col = idx % cols
-            row = idx // cols
-            # Center the image within the cell
-            x_offset = col * cell_width + (cell_width - img.width) // 2
-            y_offset = row * cell_height + (cell_height - img.height) // 2
-            grid_image.paste(img, (x_offset, y_offset))
+            for idx, img in enumerate(images):
+                col = idx % cols
+                row = idx // cols
+                # Center the image within the cell
+                x_offset = col * cell_width + (cell_width - img.width) // 2
+                y_offset = row * cell_height + (cell_height - img.height) // 2
+                grid_image.paste(img, (x_offset, y_offset))
 
-        return grid_image
+            return grid_image
+        except Exception as exc:
+            logger.error(
+                "[video_preprocessor:generate_thumbnail_grid] GRID_ERROR | keyframes=%d grid=%s | %s",
+                len(keyframes),
+                grid_size,
+                exc,
+                exc_info=True,
+            )
+            raise
 
     def cleanup(self) -> None:
         """Release temporary resources."""

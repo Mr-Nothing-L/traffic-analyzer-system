@@ -124,30 +124,40 @@ def _encode_image_to_base64(image: Any) -> str:
         Base64-encoded PNG data URI.
     """
     try:
-        from PIL import Image as PILImage
-    except ImportError:  # pragma: no cover
-        PILImage = None  # type: ignore[misc,assignment]
-
-    if PILImage is not None and isinstance(image, PILImage.Image):
-        buffer = io.BytesIO()
-        image.save(buffer, format="PNG")
-        data = buffer.getvalue()
-    elif isinstance(image, bytes):
-        data = image
-    elif isinstance(image, (str,)):
-        f = open(image, "rb")
         try:
-            data = f.read()
-        finally:
-            f.close()
-    else:
-        raise TypeError(
-            f"Unsupported image type: {type(image)}. "
-            "Expected PIL Image, bytes, or file path."
-        )
+            from PIL import Image as PILImage
+        except ImportError:  # pragma: no cover
+            PILImage = None  # type: ignore[misc,assignment]
 
-    b64 = base64.b64encode(data).decode("utf-8")
-    return f"data:image/png;base64,{b64}"
+        if PILImage is not None and isinstance(image, PILImage.Image):
+            buffer = io.BytesIO()
+            image.save(buffer, format="PNG")
+            data = buffer.getvalue()
+        elif isinstance(image, bytes):
+            data = image
+        elif isinstance(image, (str,)):
+            f = open(image, "rb")
+            try:
+                data = f.read()
+            finally:
+                f.close()
+        else:
+            raise TypeError(
+                f"Unsupported image type: {type(image)}. "
+                "Expected PIL Image, bytes, or file path."
+            )
+
+        b64 = base64.b64encode(data).decode("utf-8")
+        return f"data:image/png;base64,{b64}"
+    except Exception as exc:
+        image_type = type(image).__name__
+        logger.error(
+            "[vlm_engine:_encode_image_to_base64] ENCODE_FAILED | image_type=%s | %s",
+            image_type,
+            exc,
+            exc_info=True,
+        )
+        raise
 
 
 def _extract_json_from_text(text: str) -> Dict[str, Any]:
@@ -165,41 +175,52 @@ def _extract_json_from_text(text: str) -> Dict[str, Any]:
     Raises:
         ResponseParseError: If no valid JSON is found.
     """
-    text = text.strip()
-    # Try direct parse first
     try:
-        result = json.loads(text)
-        if isinstance(result, dict):
-            return result
-        # VLM sometimes returns a JSON array (e.g. []) instead of an object.
-        # If the array contains a dict as its first element, use that.
-        if isinstance(result, list) and result and isinstance(result[0], dict):
-            return result[0]
-    except json.JSONDecodeError:
-        pass
-
-    # Try to find a JSON object or array block
-    # Look for ```json ... ``` fenced code blocks first
-    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-    if fenced:
+        text = text.strip()
+        # Try direct parse first
         try:
-            return json.loads(fenced.group(1))
+            result = json.loads(text)
+            if isinstance(result, dict):
+                return result
+            # VLM sometimes returns a JSON array (e.g. []) instead of an object.
+            # If the array contains a dict as its first element, use that.
+            if isinstance(result, list) and result and isinstance(result[0], dict):
+                return result[0]
         except json.JSONDecodeError:
             pass
 
-    # Fallback: first top-level { ... } or [ ... ]
-    match = re.search(r"(\{.*\}|\[.*\])", text, re.DOTALL)
-    if match:
-        try:
-            result = json.loads(match.group(1))
-            if isinstance(result, dict):
-                return result
-            if isinstance(result, list) and result and isinstance(result[0], dict):
-                return result[0]
-        except json.JSONDecodeError as exc:
-            raise ResponseParseError(f"Found JSON-like block but failed to parse: {exc}")
+        # Try to find a JSON object or array block
+        # Look for ```json ... ``` fenced code blocks first
+        fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+        if fenced:
+            try:
+                return json.loads(fenced.group(1))
+            except json.JSONDecodeError:
+                pass
 
-    raise ResponseParseError("No JSON object found in response text.")
+        # Fallback: first top-level { ... } or [ ... ]
+        match = re.search(r"(\{.*\}|\[.*\])", text, re.DOTALL)
+        if match:
+            try:
+                result = json.loads(match.group(1))
+                if isinstance(result, dict):
+                    return result
+                if isinstance(result, list) and result and isinstance(result[0], dict):
+                    return result[0]
+            except json.JSONDecodeError as exc:
+                raise ResponseParseError(f"Found JSON-like block but failed to parse: {exc}")
+
+        raise ResponseParseError("No JSON object found in response text.")
+    except ResponseParseError:
+        raise
+    except Exception as exc:
+        logger.error(
+            "[vlm_engine:_extract_json_from_text] PARSE_FAILED | text_len=%d | %s",
+            len(text),
+            exc,
+            exc_info=True,
+        )
+        raise ResponseParseError(f"JSON extraction failed: {exc}") from exc
 
 
 def _validate_schema_basic(data: Dict[str, Any], schema: Dict[str, Any]) -> None:
@@ -586,6 +607,7 @@ class VLMInferenceEngine:
             "business_rules": None,
         }
         render_vars = {**defaults, **context_vars}
+        template_id = getattr(template, "template_id", "unknown")
         try:
             system = (
                 Template(template.system_prompt, undefined=StrictUndefined).render(
@@ -602,8 +624,22 @@ class VLMInferenceEngine:
                 else ""
             )
         except UndefinedError as exc:
+            logger.error(
+                "[vlm_engine:render_prompt] RENDER_ERROR | template_id=%s vars=%s | %s",
+                template_id,
+                sorted(render_vars.keys()),
+                exc,
+                exc_info=True,
+            )
             raise PromptRenderError(f"Undefined variable in prompt template: {exc}")
         except Exception as exc:
+            logger.error(
+                "[vlm_engine:render_prompt] RENDER_ERROR | template_id=%s vars=%s | %s",
+                template_id,
+                sorted(render_vars.keys()),
+                exc,
+                exc_info=True,
+            )
             raise PromptRenderError(f"Prompt rendering failed: {exc}")
         return system, user
 
@@ -654,6 +690,7 @@ class VLMInferenceEngine:
         error_message: Optional[str] = None
         prompt_tokens = completion_tokens = total_tokens = 0
 
+        template_id = getattr(template, "template_id", "unknown")
         try:
             raw_text, prompt_tokens, completion_tokens, total_tokens, retry_count = (
                 self._execute_with_retry(
@@ -666,17 +703,48 @@ class VLMInferenceEngine:
             if response_schema:
                 _validate_schema_basic(parsed_data, response_schema)
             success = True
+        except PromptRenderError as exc:
+            error_message = str(exc)
+            logger.error(
+                "[vlm_engine:call] PROMPT_RENDER_ERROR | template_id=%s images=%d schema=%s | %s",
+                template_id,
+                len(images),
+                "yes" if response_schema else "no",
+                exc,
+                exc_info=True,
+            )
         except ResponseParseError as exc:
             error_message = str(exc)
-            logger.warning("[%s] Response parse error: %s", call_id, exc)
+            logger.error(
+                "[vlm_engine:call] PARSE_ERROR | template_id=%s images=%d schema=%s | %s",
+                template_id,
+                len(images),
+                "yes" if response_schema else "no",
+                exc,
+                exc_info=True,
+            )
         except SchemaValidationError as exc:
             error_message = str(exc)
             raw_text = f"{raw_text}\n\nSchema validation error: {exc}" if raw_text else str(exc)
-            logger.warning("[%s] Schema validation error: %s", call_id, exc)
+            logger.error(
+                "[vlm_engine:call] SCHEMA_ERROR | template_id=%s images=%d schema=%s | %s",
+                template_id,
+                len(images),
+                "yes" if response_schema else "no",
+                exc,
+                exc_info=True,
+            )
         except Exception as exc:
             error_message = str(exc)
             retry_count = getattr(exc, "_retry_count", retry_count)
-            logger.error("[%s] VLM call failed: %s", call_id, exc)
+            logger.error(
+                "[vlm_engine:call] UNEXPECTED_ERROR | template_id=%s images=%d schema=%s | %s",
+                template_id,
+                len(images),
+                "yes" if response_schema else "no",
+                exc,
+                exc_info=True,
+            )
 
         latency_ms = (time.perf_counter() - start_time) * 1000.0
 
@@ -721,38 +789,50 @@ class VLMInferenceEngine:
         images: List[Any],
     ) -> Tuple[str, int, int, int]:
         """Execute a single provider-specific API call (no retry)."""
-        if self.provider == "anthropic":
-            _, kwargs = _build_anthropic_payload(
-                system_prompt,
-                user_prompt,
-                images,
+        try:
+            if self.provider == "anthropic":
+                _, kwargs = _build_anthropic_payload(
+                    system_prompt,
+                    user_prompt,
+                    images,
+                    self.config.model,
+                    self.config.max_tokens,
+                    self.config.temperature,
+                )
+                return _call_anthropic(self._client, kwargs)
+            elif self.provider == "google":
+                contents, kwargs = _build_google_payload(
+                    system_prompt,
+                    user_prompt,
+                    images,
+                    self.config.model,
+                    self.config.max_tokens,
+                    self.config.temperature,
+                )
+                return _call_google(self._client.GenerativeModel(self.config.model), contents, kwargs)
+            elif self.provider == "aliyun":
+                _, kwargs = _build_aliyun_payload(
+                    system_prompt,
+                    user_prompt,
+                    images,
+                    self.config.model,
+                    self.config.max_tokens,
+                    self.config.temperature,
+                )
+                return _call_aliyun(self._client, kwargs)
+            else:
+                raise ProviderNotSupportedError(f"Provider {self.provider} not supported")
+        except ProviderNotSupportedError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "[vlm_engine:_execute_once] PROVIDER_ERROR | provider=%s model=%s | %s",
+                self.provider,
                 self.config.model,
-                self.config.max_tokens,
-                self.config.temperature,
+                exc,
+                exc_info=True,
             )
-            return _call_anthropic(self._client, kwargs)
-        elif self.provider == "google":
-            contents, kwargs = _build_google_payload(
-                system_prompt,
-                user_prompt,
-                images,
-                self.config.model,
-                self.config.max_tokens,
-                self.config.temperature,
-            )
-            return _call_google(self._client.GenerativeModel(self.config.model), contents, kwargs)
-        elif self.provider == "aliyun":
-            _, kwargs = _build_aliyun_payload(
-                system_prompt,
-                user_prompt,
-                images,
-                self.config.model,
-                self.config.max_tokens,
-                self.config.temperature,
-            )
-            return _call_aliyun(self._client, kwargs)
-        else:
-            raise ProviderNotSupportedError(f"Provider {self.provider} not supported")
+            raise
 
     def _execute_with_retry(
         self,
@@ -780,17 +860,25 @@ class VLMInferenceEngine:
                 if attempt < max_retries - 1:
                     retry_count += 1
                     wait_sec = min(2 ** attempt, 30)
-                    logger.warning(
-                        "Retrying VLM call after error: %s (attempt %s/%s)",
-                        exc,
+                    logger.error(
+                        "[vlm_engine:_execute_with_retry] RETRY | attempt=%d/%d wait=%.1fs | error=%s",
                         attempt + 1,
                         max_retries,
+                        wait_sec,
+                        exc,
+                        exc_info=True,
                     )
                     time.sleep(wait_sec)
                 else:
                     break
 
         if last_error is not None:
+            logger.error(
+                "[vlm_engine:_execute_with_retry] MAX_RETRIES_EXCEEDED | attempts=%d last_error=%s",
+                retry_count,
+                last_error,
+                exc_info=True,
+            )
             setattr(last_error, "_retry_count", retry_count)
             raise last_error
         raise RuntimeError("Unknown error during VLM call")
@@ -841,7 +929,14 @@ class VLMInferenceEngine:
                     try:
                         responses[idx] = future.result()
                     except Exception as exc:
-                        logger.error("Batch call future error: %s", exc)
+                        template_id = getattr(requests[idx].get("template"), "template_id", "unknown")
+                        logger.error(
+                            "[vlm_engine:batch_call] FUTURE_ERROR | idx=%d template_id=%s | %s",
+                            idx,
+                            template_id,
+                            exc,
+                            exc_info=True,
+                        )
                         responses[idx] = LLMResponse(
                             success=False,
                             raw_text="",
@@ -851,14 +946,33 @@ class VLMInferenceEngine:
 
         # Sequential execution
         results: List[LLMResponse] = []
-        for req in requests:
-            resp = self.call(
-                template=req["template"],
-                images=req.get("images", []),
-                context_vars=req.get("context_vars"),
-                response_schema=req.get("response_schema"),
-            )
-            results.append(resp)
+        for idx, req in enumerate(requests):
+            try:
+                resp = self.call(
+                    template=req["template"],
+                    images=req.get("images", []),
+                    context_vars=req.get("context_vars"),
+                    response_schema=req.get("response_schema"),
+                )
+                results.append(resp)
+            except Exception as exc:
+                template_id = getattr(req.get("template"), "template_id", "unknown")
+                logger.error(
+                    "[vlm_engine:batch_call] CALL_ERROR | idx=%d template_id=%s images=%d schema=%s | %s",
+                    idx,
+                    template_id,
+                    len(req.get("images", [])),
+                    "yes" if req.get("response_schema") else "no",
+                    exc,
+                    exc_info=True,
+                )
+                results.append(
+                    LLMResponse(
+                        success=False,
+                        raw_text="",
+                        error_message=str(exc),
+                    )
+                )
         return results
 
     # ------------------------------------------------------------------

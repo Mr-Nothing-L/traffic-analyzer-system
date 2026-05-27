@@ -78,12 +78,30 @@ class YOLOVehicleTracker:
 
         # 2. Load model (lazy)
         if self._model is None:
-            self._load_model()
+            try:
+                self._load_model()
+            except Exception as exc:
+                logger.error(
+                    "[vehicle_tracker:_detect_internal] MODEL_LOAD_ERROR | model=%s | %s",
+                    self.model_path,
+                    exc,
+                    exc_info=True,
+                )
+                return TrackingEvidence(error_message=f"Model load failed: {exc}")
 
         # 3. Open video
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            return TrackingEvidence(error_message=f"Cannot open video: {video_path}")
+        try:
+            cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                raise RuntimeError(f"cv2.VideoCapture failed to open: {video_path}")
+        except Exception as exc:
+            logger.error(
+                "[vehicle_tracker:_detect_internal] VIDEO_OPEN_ERROR | video=%s | %s",
+                video_path,
+                exc,
+                exc_info=True,
+            )
+            return TrackingEvidence(error_message=f"Video open failed: {exc}")
 
         original_fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -108,70 +126,89 @@ class YOLOVehicleTracker:
         last_frame_id = -1
 
         while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
+            try:
+                ret, frame = cap.read()
+                if not ret:
+                    break
 
-            if frame_id % interval != 0:
+                if frame_id % interval != 0:
+                    frame_id += 1
+                    continue
+
+                timestamp_sec = frame_id / original_fps if original_fps > 0 else 0.0
+
+                # YOLO predict
+                results = self._model.predict(
+                    frame,
+                    conf=self.confidence_threshold,
+                    classes=list(self.YOLO_VEHICLE_CLASSES.keys()),
+                    verbose=False,
+                    device=self.device,
+                )
+
+                detections = []
+                if results and len(results) > 0:
+                    boxes = results[0].boxes
+                    if boxes is not None:
+                        for i in range(len(boxes)):
+                            xyxy = boxes.xyxy[i].cpu().numpy()
+                            cls_id = int(boxes.cls[i].cpu().item())
+                            conf = float(boxes.conf[i].cpu().item())
+                            detections.append(
+                                {
+                                    "bbox": xyxy,
+                                    "cls": cls_id,
+                                    "conf": conf,
+                                }
+                            )
+
+                # Run tracking
+                active_tracks = self._run_tracking(detections, frame_id)
+
+                # Store track data
+                for track_id, track_data in active_tracks.items():
+                    bbox = track_data["bbox"]  # pixel coords
+                    cls = track_data["cls"]
+                    # Normalize bbox
+                    x1, y1, x2, y2 = bbox
+                    norm_bbox = np.array([
+                        x1 / frame_width,
+                        y1 / frame_height,
+                        x2 / frame_width,
+                        y2 / frame_height,
+                    ])
+                    if track_id not in raw_tracks:
+                        raw_tracks[track_id] = []
+                    raw_tracks[track_id].append((frame_id, timestamp_sec, norm_bbox, cls))
+
+                if first_frame_id < 0:
+                    first_frame_id = frame_id
+                last_frame_id = frame_id
+                frames_processed += 1
+                frame_id += 1
+            except Exception as exc:
+                logger.error(
+                    "[vehicle_tracker:_detect_internal] TRACKING_LOOP_ERROR | frame_id=%d | %s",
+                    frame_id,
+                    exc,
+                    exc_info=True,
+                )
                 frame_id += 1
                 continue
-
-            timestamp_sec = frame_id / original_fps if original_fps > 0 else 0.0
-
-            # YOLO predict
-            results = self._model.predict(
-                frame,
-                conf=self.confidence_threshold,
-                classes=list(self.YOLO_VEHICLE_CLASSES.keys()),
-                verbose=False,
-                device=self.device,
-            )
-
-            detections = []
-            if results and len(results) > 0:
-                boxes = results[0].boxes
-                if boxes is not None:
-                    for i in range(len(boxes)):
-                        xyxy = boxes.xyxy[i].cpu().numpy()
-                        cls_id = int(boxes.cls[i].cpu().item())
-                        conf = float(boxes.conf[i].cpu().item())
-                        detections.append(
-                            {
-                                "bbox": xyxy,
-                                "cls": cls_id,
-                                "conf": conf,
-                            }
-                        )
-
-            # Run tracking
-            active_tracks = self._run_tracking(detections, frame_id)
-
-            # Store track data
-            for track_id, track_data in active_tracks.items():
-                bbox = track_data["bbox"]  # pixel coords
-                cls = track_data["cls"]
-                # Normalize bbox
-                x1, y1, x2, y2 = bbox
-                norm_bbox = np.array([
-                    x1 / frame_width,
-                    y1 / frame_height,
-                    x2 / frame_width,
-                    y2 / frame_height,
-                ])
-                if track_id not in raw_tracks:
-                    raw_tracks[track_id] = []
-                raw_tracks[track_id].append((frame_id, timestamp_sec, norm_bbox, cls))
-
-            if first_frame_id < 0:
-                first_frame_id = frame_id
-            last_frame_id = frame_id
-            frames_processed += 1
-            frame_id += 1
 
         cap.release()
 
         # 7. Build VehicleTrajectory objects
-        vehicles = self._build_vehicles(raw_tracks, frame_width, frame_height)
+        try:
+            vehicles = self._build_vehicles(raw_tracks, frame_width, frame_height)
+        except Exception as exc:
+            logger.error(
+                "[vehicle_tracker:_detect_internal] BUILD_VEHICLES_ERROR | tracks=%d | %s",
+                len(raw_tracks),
+                exc,
+                exc_info=True,
+            )
+            vehicles = []
 
         # 8. Filter to emergency lane ROI
         roi_vehicles = []
@@ -181,7 +218,16 @@ class YOLOVehicleTracker:
 
         # 9. Classify direction per vehicle
         for v in roi_vehicles:
-            self._classify_vehicle_direction(v, normal_direction)
+            try:
+                self._classify_vehicle_direction(v, normal_direction)
+            except Exception as exc:
+                logger.error(
+                    "[vehicle_tracker:_detect_internal] CLASSIFY_ERROR | track_id=%d | %s",
+                    v.track_id,
+                    exc,
+                    exc_info=True,
+                )
+                continue
 
         # 10. Build evidence
         reversing_vehicles = [
@@ -215,98 +261,109 @@ class YOLOVehicleTracker:
 
         Returns: {track_id: {"bbox": np.array, "cls": int}}
         """
-        from scipy.optimize import linear_sum_assignment
+        try:
+            from scipy.optimize import linear_sum_assignment
 
-        # Reset if frame goes backward (new video)
-        if frame_id < self._last_frame_id:
-            self._track_states.clear()
-            self._next_track_id = 1
+            # Reset if frame goes backward (new video)
+            if frame_id < self._last_frame_id:
+                self._track_states.clear()
+                self._next_track_id = 1
 
-        self._last_frame_id = frame_id
+            self._last_frame_id = frame_id
 
-        # Build cost matrix: IOU between existing tracks and new detections
-        track_ids = list(self._track_states.keys())
-        n_tracks = len(track_ids)
-        n_dets = len(detections)
+            # Build cost matrix: IOU between existing tracks and new detections
+            track_ids = list(self._track_states.keys())
+            n_tracks = len(track_ids)
+            n_dets = len(detections)
 
-        if n_tracks == 0:
-            # All detections become new tracks
-            for det in detections:
-                self._track_states[self._next_track_id] = {
-                    "bbox": det["bbox"],
-                    "cls": det["cls"],
-                    "age": 1,
-                    "missed": 0,
+            if n_tracks == 0:
+                # All detections become new tracks
+                for det in detections:
+                    self._track_states[self._next_track_id] = {
+                        "bbox": det["bbox"],
+                        "cls": det["cls"],
+                        "age": 1,
+                        "missed": 0,
+                    }
+                    self._next_track_id += 1
+                return {
+                    tid: {"bbox": s["bbox"], "cls": s["cls"]}
+                    for tid, s in self._track_states.items()
                 }
-                self._next_track_id += 1
-            return {
-                tid: {"bbox": s["bbox"], "cls": s["cls"]}
-                for tid, s in self._track_states.items()
-            }
 
-        if n_dets == 0:
-            # All tracks missed
+            if n_dets == 0:
+                # All tracks missed
+                stale = []
+                for tid in track_ids:
+                    self._track_states[tid]["missed"] += 1
+                    if self._track_states[tid]["missed"] > self.TRACK_BUFFER:
+                        stale.append(tid)
+                for tid in stale:
+                    del self._track_states[tid]
+                return {
+                    tid: {"bbox": s["bbox"], "cls": s["cls"]}
+                    for tid, s in self._track_states.items()
+                }
+
+            # Compute IOU matrix
+            cost_matrix = np.zeros((n_tracks, n_dets))
+            for i, tid in enumerate(track_ids):
+                track_bbox = self._track_states[tid]["bbox"]
+                for j, det in enumerate(detections):
+                    cost_matrix[i, j] = -self._compute_iou(track_bbox, det["bbox"])
+
+            # Hungarian matching
+            row_ind, col_ind = linear_sum_assignment(cost_matrix)
+
+            matched_tracks = set()
+            matched_dets = set()
+
+            for i, j in zip(row_ind, col_ind):
+                iou = -cost_matrix[i, j]
+                if iou >= self.IOU_THRESHOLD:
+                    tid = track_ids[i]
+                    self._track_states[tid]["bbox"] = detections[j]["bbox"]
+                    self._track_states[tid]["cls"] = detections[j]["cls"]
+                    self._track_states[tid]["age"] += 1
+                    self._track_states[tid]["missed"] = 0
+                    matched_tracks.add(tid)
+                    matched_dets.add(j)
+
+            # Unmatched detections -> new tracks
+            for j, det in enumerate(detections):
+                if j not in matched_dets:
+                    self._track_states[self._next_track_id] = {
+                        "bbox": det["bbox"],
+                        "cls": det["cls"],
+                        "age": 1,
+                        "missed": 0,
+                    }
+                    self._next_track_id += 1
+
+            # Unmatched tracks -> increment missed, delete stale
             stale = []
             for tid in track_ids:
-                self._track_states[tid]["missed"] += 1
-                if self._track_states[tid]["missed"] > self.TRACK_BUFFER:
-                    stale.append(tid)
+                if tid not in matched_tracks:
+                    self._track_states[tid]["missed"] += 1
+                    if self._track_states[tid]["missed"] > self.TRACK_BUFFER:
+                        stale.append(tid)
             for tid in stale:
                 del self._track_states[tid]
+
             return {
                 tid: {"bbox": s["bbox"], "cls": s["cls"]}
                 for tid, s in self._track_states.items()
             }
-
-        # Compute IOU matrix
-        cost_matrix = np.zeros((n_tracks, n_dets))
-        for i, tid in enumerate(track_ids):
-            track_bbox = self._track_states[tid]["bbox"]
-            for j, det in enumerate(detections):
-                cost_matrix[i, j] = -self._compute_iou(track_bbox, det["bbox"])
-
-        # Hungarian matching
-        row_ind, col_ind = linear_sum_assignment(cost_matrix)
-
-        matched_tracks = set()
-        matched_dets = set()
-
-        for i, j in zip(row_ind, col_ind):
-            iou = -cost_matrix[i, j]
-            if iou >= self.IOU_THRESHOLD:
-                tid = track_ids[i]
-                self._track_states[tid]["bbox"] = detections[j]["bbox"]
-                self._track_states[tid]["cls"] = detections[j]["cls"]
-                self._track_states[tid]["age"] += 1
-                self._track_states[tid]["missed"] = 0
-                matched_tracks.add(tid)
-                matched_dets.add(j)
-
-        # Unmatched detections -> new tracks
-        for j, det in enumerate(detections):
-            if j not in matched_dets:
-                self._track_states[self._next_track_id] = {
-                    "bbox": det["bbox"],
-                    "cls": det["cls"],
-                    "age": 1,
-                    "missed": 0,
-                }
-                self._next_track_id += 1
-
-        # Unmatched tracks -> increment missed, delete stale
-        stale = []
-        for tid in track_ids:
-            if tid not in matched_tracks:
-                self._track_states[tid]["missed"] += 1
-                if self._track_states[tid]["missed"] > self.TRACK_BUFFER:
-                    stale.append(tid)
-        for tid in stale:
-            del self._track_states[tid]
-
-        return {
-            tid: {"bbox": s["bbox"], "cls": s["cls"]}
-            for tid, s in self._track_states.items()
-        }
+        except Exception as exc:
+            logger.error(
+                "[vehicle_tracker:_run_tracking] TRACKING_ERROR | frame_id=%d n_dets=%d n_tracks=%d | %s",
+                frame_id,
+                len(detections),
+                len(self._track_states),
+                exc,
+                exc_info=True,
+            )
+            return {}
 
     def _build_vehicles(
         self,
@@ -361,80 +418,93 @@ class YOLOVehicleTracker:
         self, vehicle: TrackedVehicle, normal_direction: str
     ) -> None:
         """Classify direction based on step-by-step y displacement majority vote."""
-        positions = vehicle.trajectory.positions
-        if len(positions) < 2:
-            vehicle.direction_classification = "uncertain"
-            vehicle.direction_confidence = 0.0
-            vehicle.summary = f"track_{vehicle.track_id}: {vehicle.vehicle_type}, uncertain (insufficient positions)"
-            return
+        try:
+            positions = vehicle.trajectory.positions
+            if len(positions) < 2:
+                vehicle.direction_classification = "uncertain"
+                vehicle.direction_confidence = 0.0
+                vehicle.summary = f"track_{vehicle.track_id}: {vehicle.vehicle_type}, uncertain (insufficient positions)"
+                return
 
-        # Count up/down votes
-        up_votes = 0
-        down_votes = 0
-        significant_steps = 0
-        net_dy = 0.0
+            # Count up/down votes
+            up_votes = 0
+            down_votes = 0
+            significant_steps = 0
+            net_dy = 0.0
 
-        for i in range(1, len(positions)):
-            dy = positions[i][2] - positions[i - 1][2]
-            net_dy += dy
-            if abs(dy) >= 0.001:
-                significant_steps += 1
-                if dy > 0:
-                    down_votes += 1
-                else:
-                    up_votes += 1
+            for i in range(1, len(positions)):
+                dy = positions[i][2] - positions[i - 1][2]
+                net_dy += dy
+                if abs(dy) >= 0.001:
+                    significant_steps += 1
+                    if dy > 0:
+                        down_votes += 1
+                    else:
+                        up_votes += 1
 
-        if significant_steps == 0:
-            vehicle.direction_classification = "stationary"
-            vehicle.direction_confidence = 0.5
+            if significant_steps == 0:
+                vehicle.direction_classification = "stationary"
+                vehicle.direction_confidence = 0.5
+                vehicle.summary = (
+                    f"track_{vehicle.track_id}: {vehicle.vehicle_type}, stationary, "
+                    f"dy={net_dy:.4f}, speed={vehicle.avg_speed:.4f}, consistency=0.00"
+                )
+                return
+
+            # Majority vote
+            if down_votes > up_votes:
+                dominant = "down"
+                consistency = down_votes / significant_steps
+            elif up_votes > down_votes:
+                dominant = "up"
+                consistency = up_votes / significant_steps
+            else:
+                vehicle.direction_classification = "uncertain"
+                vehicle.direction_confidence = 0.3
+                vehicle.summary = (
+                    f"track_{vehicle.track_id}: {vehicle.vehicle_type}, uncertain (tie), "
+                    f"dy={net_dy:.4f}, speed={vehicle.avg_speed:.4f}, consistency=0.50"
+                )
+                return
+
+            # Map to classification based on normal_direction
+            if normal_direction == "toward_top":
+                # up is normal
+                classification = "reversing" if dominant == "down" else "normal"
+            elif normal_direction == "toward_bottom":
+                # down is normal
+                classification = "reversing" if dominant == "up" else "normal"
+            else:
+                vehicle.direction_classification = "uncertain"
+                vehicle.direction_confidence = 0.3
+                vehicle.summary = (
+                    f"track_{vehicle.track_id}: {vehicle.vehicle_type}, uncertain (unknown normal), "
+                    f"dy={net_dy:.4f}, speed={vehicle.avg_speed:.4f}, consistency={consistency:.2f}"
+                )
+                return
+
+            # Confidence
+            displacement_score = min(abs(net_dy) / self.MIN_DISPLACEMENT_NORM, 1.0)
+            confidence = consistency * 0.5 + displacement_score * 0.5
+
+            vehicle.direction_classification = classification
+            vehicle.direction_confidence = confidence
             vehicle.summary = (
-                f"track_{vehicle.track_id}: {vehicle.vehicle_type}, stationary, "
-                f"dy={net_dy:.4f}, speed={vehicle.avg_speed:.4f}, consistency=0.00"
-            )
-            return
-
-        # Majority vote
-        if down_votes > up_votes:
-            dominant = "down"
-            consistency = down_votes / significant_steps
-        elif up_votes > down_votes:
-            dominant = "up"
-            consistency = up_votes / significant_steps
-        else:
-            vehicle.direction_classification = "uncertain"
-            vehicle.direction_confidence = 0.3
-            vehicle.summary = (
-                f"track_{vehicle.track_id}: {vehicle.vehicle_type}, uncertain (tie), "
-                f"dy={net_dy:.4f}, speed={vehicle.avg_speed:.4f}, consistency=0.50"
-            )
-            return
-
-        # Map to classification based on normal_direction
-        if normal_direction == "toward_top":
-            # up is normal
-            classification = "reversing" if dominant == "down" else "normal"
-        elif normal_direction == "toward_bottom":
-            # down is normal
-            classification = "reversing" if dominant == "up" else "normal"
-        else:
-            vehicle.direction_classification = "uncertain"
-            vehicle.direction_confidence = 0.3
-            vehicle.summary = (
-                f"track_{vehicle.track_id}: {vehicle.vehicle_type}, uncertain (unknown normal), "
+                f"track_{vehicle.track_id}: {vehicle.vehicle_type}, {classification}, "
                 f"dy={net_dy:.4f}, speed={vehicle.avg_speed:.4f}, consistency={consistency:.2f}"
             )
-            return
-
-        # Confidence
-        displacement_score = min(abs(net_dy) / self.MIN_DISPLACEMENT_NORM, 1.0)
-        confidence = consistency * 0.5 + displacement_score * 0.5
-
-        vehicle.direction_classification = classification
-        vehicle.direction_confidence = confidence
-        vehicle.summary = (
-            f"track_{vehicle.track_id}: {vehicle.vehicle_type}, {classification}, "
-            f"dy={net_dy:.4f}, speed={vehicle.avg_speed:.4f}, consistency={consistency:.2f}"
-        )
+        except Exception as exc:
+            logger.error(
+                "[vehicle_tracker:_classify_vehicle_direction] CLASSIFY_ERROR | track_id=%d | %s",
+                vehicle.track_id,
+                exc,
+                exc_info=True,
+            )
+            vehicle.direction_classification = "uncertain"
+            vehicle.direction_confidence = 0.0
+            vehicle.summary = (
+                f"track_{vehicle.track_id}: {vehicle.vehicle_type}, uncertain (classification error)"
+            )
 
     def _compute_iou(self, box1: np.ndarray, box2: np.ndarray) -> float:
         """IOU for xyxy boxes."""

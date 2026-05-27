@@ -28,7 +28,9 @@ from traffic_analyzer.core.video_preprocessor import VideoPreprocessor
 from traffic_analyzer.core.vlm_engine import VLMInferenceEngine
 from traffic_analyzer.models.schemas import (
     AnalysisContext,
+    BinaryEncoding,
     EventResult,
+    KeyframeSequence,
     Report,
     SceneInfo,
     VideoMetadata,
@@ -143,15 +145,25 @@ class AnalysisOrchestrator:
         # Step 1: Video preprocessing
         logger.info("[1/4] Preprocessing video...")
         t0 = time.perf_counter()
-        with tool_call(
-            "video_preprocessor.process",
-            video=os.path.basename(video_path),
-        ) as _tc:
-            keyframes = self.video_preprocessor.process(video_path)
-            _tc.result(
-                f"coarse={len(keyframes.coarse_frames)}, "
-                f"precision={len(keyframes.precision_frames)}"
+        keyframes: KeyframeSequence
+        try:
+            with tool_call(
+                "video_preprocessor.process",
+                video=os.path.basename(video_path),
+            ) as _tc:
+                keyframes = self.video_preprocessor.process(video_path)
+                _tc.result(
+                    f"coarse={len(keyframes.coarse_frames)}, "
+                    f"precision={len(keyframes.precision_frames)}"
+                )
+        except Exception as exc:
+            logger.error(
+                "[orchestrator:analyze] PREPROCESS_ERROR | video=%s | %s",
+                video_path,
+                exc,
+                exc_info=True,
             )
+            keyframes = KeyframeSequence(coarse_frames=[], precision_frames=[])
         step_times["preprocessing"] = time.perf_counter() - t0
         context.keyframes = keyframes
         logger.info("  Coarse frames: %d", len(keyframes.coarse_frames))
@@ -166,9 +178,18 @@ class AnalysisOrchestrator:
         t0 = time.perf_counter()
         candidates = []
         if self._expert_agent_layer:
-            expert_result = self._expert_agent_layer.execute(context)
-            if expert_result.success and expert_result.data:
-                candidates = expert_result.data
+            try:
+                expert_result = self._expert_agent_layer.execute(context)
+                if expert_result.success and expert_result.data:
+                    candidates = expert_result.data
+            except Exception as exc:
+                logger.error(
+                    "[orchestrator:analyze] EXPERT_LAYER_ERROR | video=%s | %s",
+                    video_path,
+                    exc,
+                    exc_info=True,
+                )
+                candidates = []
         else:
             logger.warning("No ExpertAgentLayer configured, skipping")
         step_times["expert_agent_layer"] = time.perf_counter() - t0
@@ -182,14 +203,24 @@ class AnalysisOrchestrator:
         adj_reasoning_chain: List[Dict[str, Any]] = []
         adj_audit_log: List[Any] = []
         if self._adjudication_step:
-            adj_result = self._adjudication_step.execute(context)
-            if adj_result.success and adj_result.data:
-                adj_data = adj_result.data
-                event_results = adj_data.event_results
-                adj_reasoning = adj_data.adjudication_reasoning
-                adj_reasoning_chain = adj_data.reasoning_chain
-                adj_audit_log = adj_data.audit_log
-                logger.info("  Adjudication reasoning: %s", adj_reasoning[:100] + "..." if len(adj_reasoning) > 100 else adj_reasoning)
+            try:
+                adj_result = self._adjudication_step.execute(context)
+                if adj_result.success and adj_result.data:
+                    adj_data = adj_result.data
+                    event_results = adj_data.event_results
+                    adj_reasoning = adj_data.adjudication_reasoning
+                    adj_reasoning_chain = adj_data.reasoning_chain
+                    adj_audit_log = adj_data.audit_log
+                    logger.info("  Adjudication reasoning: %s", adj_reasoning[:100] + "..." if len(adj_reasoning) > 100 else adj_reasoning)
+            except Exception as exc:
+                logger.error(
+                    "[orchestrator:analyze] ADJUDICATION_ERROR | video=%s | %s",
+                    video_path,
+                    exc,
+                    exc_info=True,
+                )
+                # Fallback: convert raw candidates to EventResults
+                event_results = self._fallback(candidates)
         else:
             logger.warning("No AdjudicationStep configured, skipping")
         step_times["adjudication"] = time.perf_counter() - t0
@@ -201,23 +232,40 @@ class AnalysisOrchestrator:
         logger.info("[4/4] Generating report...")
         t0 = time.perf_counter()
         usage_stats = self.vlm_engine.get_usage_stats()
-        with tool_call(
-            "report_generator.generate",
-            formats=["markdown", "json", "binary"],
-            events=len(event_results),
-        ) as _tc:
-            report = self.report_generator.generate(
-                event_results=event_results,
-                scene_info=None,
-                video_meta=video_meta,
-                usage_stats=usage_stats,
-                analysis_duration_sec=round(0.0, 2),  # placeholder, updated below
-                adjudication_reasoning=adj_reasoning,
-                reasoning_chain=adj_reasoning_chain or None,
-                audit_log=adj_audit_log or None,
+        try:
+            with tool_call(
+                "report_generator.generate",
+                formats=["markdown", "json", "binary"],
+                events=len(event_results),
+            ) as _tc:
+                report = self.report_generator.generate(
+                    event_results=event_results,
+                    scene_info=None,
+                    video_meta=video_meta,
+                    usage_stats=usage_stats,
+                    analysis_duration_sec=round(0.0, 2),  # placeholder, updated below
+                    adjudication_reasoning=adj_reasoning,
+                    reasoning_chain=adj_reasoning_chain or None,
+                    audit_log=adj_audit_log or None,
+                )
+                _tc.result(
+                    f"binary_code={report.binary_encoding.encoding_string}"
+                )
+        except Exception as exc:
+            logger.error(
+                "[orchestrator:analyze] REPORT_ERROR | video=%s | %s",
+                video_path,
+                exc,
+                exc_info=True,
             )
-            _tc.result(
-                f"binary_code={report.binary_encoding.encoding_string}"
+            # Fallback: minimal report with error info
+            report = Report(
+                video_info=video_meta,
+                scene_summary=SceneInfo(),
+                event_results=event_results,
+                binary_encoding=BinaryEncoding(),
+                overall_traffic_description=f"[Report generation failed: {exc}]",
+                llm_usage_stats=usage_stats,
             )
         step_times["report_generation"] = time.perf_counter() - t0
         context.final_report = report
@@ -262,6 +310,22 @@ class AnalysisOrchestrator:
                 total_frames=total_frames,
                 width=width,
                 height=height,
+            )
+        except Exception as exc:
+            logger.error(
+                "[orchestrator:_extract_video_meta] META_ERROR | video=%s | %s",
+                video_path,
+                exc,
+                exc_info=True,
+            )
+            return VideoMetadata(
+                file_path=video_path,
+                file_name=Path(video_path).name,
+                duration_sec=0.0,
+                fps=0.0,
+                total_frames=0,
+                width=0,
+                height=0,
             )
         finally:
             cap.release()
