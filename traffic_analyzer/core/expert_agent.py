@@ -174,6 +174,7 @@ class ExpertAgent:
                 example_input=template.example_input,
                 example_output=template.example_output,
                 traffic_percentage=template.traffic_percentage,
+                available_tools=template.available_tools,
             )
 
         # -- 4. Context variables ----------------------------------------------
@@ -251,9 +252,10 @@ class ExpertAgent:
         context_vars["cv_evidence"] = cv_evidence
         context_vars["tracking_evidence"] = tracking_evidence
 
-        # -- 5. VLM call -------------------------------------------------------
+        # -- 5. First VLM call -------------------------------------------------
+        first_response = None
         try:
-            response = self.vlm_engine.call(
+            first_response = self.vlm_engine.call(
                 template=template,
                 images=images,
                 context_vars=context_vars,
@@ -277,8 +279,37 @@ class ExpertAgent:
             error_candidate.tracking_evidence = tracking_evidence
             return error_candidate
 
-        # -- 5. Parse response -------------------------------------------------
-        candidate = parse_expert_response(response, self.category)
+        # -- 6. Check for tool calls -------------------------------------------
+        # If this event has configured tools, try to parse tool calls from response
+        tool_result = None
+        annotated_image = None
+        if self.category.tools and first_response:
+            tool_result, annotated_image = self._execute_tool_calls(
+                first_response, context, images
+            )
+
+        # -- 7. Second VLM call (if tool was called) ---------------------------
+        if tool_result is not None:
+            logger.info(
+                "[expert_agent:detect] TOOL_CALL_EXECUTED | event_id=%d event_name=%s | "
+                "proceeding to second VLM call with tool results",
+                self.category.event_id,
+                self.category.name_zh,
+            )
+            second_candidate = self._second_vlm_call(
+                template=template,
+                first_response=first_response,
+                tool_result=tool_result,
+                annotated_image=annotated_image,
+                images=images,
+                context_vars=context_vars,
+            )
+            second_candidate.cv_evidence = cv_evidence
+            second_candidate.tracking_evidence = tool_result.get("tracking_text", "")
+            return second_candidate
+
+        # -- 8. Parse first response (no tool call) ----------------------------
+        candidate = parse_expert_response(first_response, self.category)
         candidate.cv_evidence = cv_evidence
         candidate.tracking_evidence = tracking_evidence
         logger.debug(
@@ -287,5 +318,237 @@ class ExpertAgent:
             candidate.detected,
             candidate.confidence,
             len(candidate.instances),
+        )
+        return candidate
+
+    def _execute_tool_calls(
+        self,
+        response: Any,
+        context: AnalysisContext,
+        images: List[Any],
+    ) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+        """Parse tool calls from VLM response and execute them.
+
+        Returns:
+            (tool_result_dict, annotated_image_path) or (None, None) if no tool call.
+        """
+        if not response or not hasattr(response, "raw_text"):
+            return None, None
+
+        raw_text = response.raw_text or ""
+        if "<tool_call>" not in raw_text:
+            return None, None
+
+        # Try to import tool router
+        try:
+            from traffic_analyzer.tools.tool_router import ToolRouter, ToolRequest, ToolResponse
+            from traffic_analyzer.tools.tool_registry import get_default_router
+        except ImportError as exc:
+            logger.warning(
+                "[expert_agent:_execute_tool_calls] TOOL_ROUTER_NOT_AVAILABLE | %s",
+                exc,
+            )
+            return None, None
+
+        router = get_default_router()
+        if router is None:
+            logger.warning(
+                "[expert_agent:_execute_tool_calls] DEFAULT_ROUTER_NOT_INITIALIZED"
+            )
+            return None, None
+
+        # Parse tool request from raw_text
+        try:
+            tool_request = ToolRequest.from_json(raw_text)
+        except Exception as exc:
+            logger.warning(
+                "[expert_agent:_execute_tool_calls] PARSE_FAILED | %s",
+                exc,
+            )
+            return None, None
+
+        # Check if the requested tool is in allowed tools list
+        if tool_request.tool_name not in self.category.tools:
+            logger.warning(
+                "[expert_agent:_execute_tool_calls] TOOL_NOT_ALLOWED | "
+                "requested=%s allowed=%s",
+                tool_request.tool_name,
+                self.category.tools,
+            )
+            return None, None
+
+        # Auto-fill video_path from context if not provided
+        if "video_path" in tool_request.arguments:
+            arg_path = tool_request.arguments["video_path"]
+            if arg_path in ("{{video_meta.file_path}}", "", None):
+                if context.video_meta is not None:
+                    tool_request.arguments["video_path"] = context.video_meta.file_path
+                    logger.debug(
+                        "[expert_agent:_execute_tool_calls] AUTO_FILL_VIDEO_PATH | %s",
+                        context.video_meta.file_path,
+                    )
+
+        # Execute tool
+        try:
+            tool_response = router.route(tool_request)
+        except Exception as exc:
+            logger.error(
+                "[expert_agent:_execute_tool_calls] ROUTE_FAILED | tool=%s | %s",
+                tool_request.tool_name,
+                exc,
+                exc_info=True,
+            )
+            return None, None
+
+        if not tool_response.success:
+            logger.warning(
+                "[expert_agent:_execute_tool_calls] TOOL_FAILED | tool=%s error=%s",
+                tool_request.tool_name,
+                tool_response.error,
+            )
+            return None, None
+
+        # Extract annotated image path and tracking data
+        result_data = tool_response.data or {}
+        annotated_image = result_data.get("annotated_image_path")
+
+        # Build tracking text for prompt injection
+        tracking_text = self._format_tracking_result(result_data)
+
+        logger.info(
+            "[expert_agent:_execute_tool_calls] SUCCESS | tool=%s | "
+            "annotated_image=%s displacements=%d",
+            tool_request.tool_name,
+            annotated_image,
+            len(result_data.get("displacements", [])),
+        )
+
+        return {
+            "tool_name": tool_request.tool_name,
+            "result": result_data,
+            "tracking_text": tracking_text,
+        }, annotated_image
+
+    def _format_tracking_result(self, result_data: Dict[str, Any]) -> str:
+        """Format YOLO tracking result into human-readable text for prompt injection."""
+        lines = ["=== YOLO 车辆跟踪结果 ===", ""]
+
+        displacements = result_data.get("displacements", [])
+        if not displacements:
+            lines.append("未检测到车辆跟踪数据。")
+            return "\n".join(lines)
+
+        lines.append(f"共跟踪到 {len(displacements)} 辆车：")
+        lines.append("")
+
+        for disp in displacements:
+            track_id = disp.get("track_id", "?")
+            cls = disp.get("class", "unknown")
+            direction = disp.get("direction_text", "未知")
+            distance = disp.get("distance_pixels", 0)
+            is_stationary = disp.get("is_stationary", False)
+            stationary_str = "静止" if is_stationary else "移动"
+
+            lines.append(
+                f"  track_id={track_id} ({cls}): {stationary_str}, "
+                f"方向={direction}, 总位移={distance:.1f}px"
+            )
+
+        lines.append("")
+        lines.append(
+            "附带的最后一张图是 YOLO 跟踪标注帧，框内蓝色数字为 track_id，"
+            "与上述数据中的 track_id 对应。"
+        )
+
+        return "\n".join(lines)
+
+    def _second_vlm_call(
+        self,
+        template: PromptTemplate,
+        first_response: Any,
+        tool_result: Dict[str, Any],
+        annotated_image: Optional[str],
+        images: List[Any],
+        context_vars: Dict[str, Any],
+    ) -> EventCandidate:
+        """Perform second VLM call with tool results injected.
+
+        Light-weight context: includes first response summary + tool results.
+        """
+        # Build enhanced prompt with tool results
+        enhanced_user = template.user_prompt or ""
+
+        # Add first response context (light-weight)
+        first_text = first_response.raw_text if hasattr(first_response, "raw_text") else ""
+        context_section = (
+            "\n\n============================================================\n"
+            "上下文 — 第一次分析结论\n"
+            "============================================================\n"
+            f"{first_text[:500]}...\n"
+            "\n以上是你之前的分析。现在基于新的跟踪数据，请重新判断。"
+        )
+
+        # Add tool results
+        tool_section = (
+            "\n\n============================================================\n"
+            "工具调用结果 — YOLO 车辆跟踪数据\n"
+            "============================================================\n"
+            f"{tool_result['tracking_text']}\n"
+        )
+
+        enhanced_user += context_section + tool_section
+
+        # Build second template
+        second_template = PromptTemplate(
+            template_id=template.template_id,
+            name=template.name,
+            version=template.version,
+            system_prompt=template.system_prompt,
+            user_prompt=enhanced_user,
+            output_format_hint=template.output_format_hint,
+            example_input=template.example_input,
+            example_output=template.example_output,
+            traffic_percentage=template.traffic_percentage,
+            available_tools=[],  # Don't show tools again in second call
+        )
+
+        # Build image list: original frames + annotated image
+        second_images = list(images)
+        if annotated_image:
+            second_images.append(annotated_image)
+            logger.debug(
+                "[expert_agent:_second_vlm_call] ADDED_ANNOTATED_IMAGE | path=%s",
+                annotated_image,
+            )
+
+        # Second VLM call
+        try:
+            second_response = self.vlm_engine.call(
+                template=second_template,
+                images=second_images,
+                context_vars=context_vars,
+                response_schema=_EXPERT_RESPONSE_SCHEMA,
+            )
+        except Exception as exc:
+            logger.error(
+                "[expert_agent:_second_vlm_call] SECOND_VLM_ERROR | event_id=%d | %s",
+                self.category.event_id,
+                exc,
+                exc_info=True,
+            )
+            # Fallback to first response
+            return parse_expert_response(first_response, self.category)
+
+        # Parse second response
+        candidate = parse_expert_response(second_response, self.category)
+        candidate.raw_vlm_text = (
+            f"[First call]\n{first_response.raw_text}\n\n"
+            f"[Second call with tool results]\n{second_response.raw_text}"
+        )
+        logger.info(
+            "[expert_agent:_second_vlm_call] COMPLETE | event_id=%d detected=%s confidence=%.2f",
+            self.category.event_id,
+            candidate.detected,
+            candidate.confidence,
         )
         return candidate

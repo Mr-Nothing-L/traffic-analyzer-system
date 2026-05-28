@@ -386,6 +386,27 @@ class ConfigManager:
                         f"sum to {total_pct}% (less than 100%, some traffic will fallback to last variant)."
                     )
 
+        # 5. Validate tools referenced in event categories exist in prompt templates
+        for cat in self._event_categories.values():
+            if cat.tools:
+                if cat.prompt_template_id:
+                    template_versions = self._prompt_templates.get(cat.prompt_template_id, {})
+                    if template_versions:
+                        latest_template = max(template_versions.values(), key=lambda t: t.version)
+                        template_tools = set(latest_template.available_tools or [])
+                        for tool_name in cat.tools:
+                            if tool_name not in template_tools:
+                                errors.append(
+                                    f"EventCategory '{cat.name}' (id={cat.event_id}) references "
+                                    f"tool '{tool_name}' not listed in prompt template '{cat.prompt_template_id}' "
+                                    f"available_tools."
+                                )
+                    else:
+                        errors.append(
+                            f"EventCategory '{cat.name}' (id={cat.event_id}) has tools {cat.tools} "
+                            f"but prompt template '{cat.prompt_template_id}' not found."
+                        )
+
         return errors
 
     def reload(self) -> SystemConfig:

@@ -158,7 +158,50 @@ prompt_templates:
       - 像素位移为 "negligible" 时，即使主观印象觉得车辆在动，也**必须判定为静止**。
       - 像素位移为 "significant" 时，即使车辆看起来没动，也**不能判定为静止/停放**。
       - 当像素位移与视觉印象冲突时，**相信像素位移**。
+
+      =============================================================================
+      可用工具 — YOLO 车辆跟踪 (yolo_track_tool)
+      =============================================================================
+
+      当你需要精确判断车辆是否静止时，可以调用此工具获取客观跟踪数据。
+
+      调用方式：在分析过程中，输出以下格式的工具调用请求：
+
+      <tool_call>
+      {
+        "tool_name": "yolo_track_tool",
+        "arguments": {
+          "video_path": "{{video_meta.file_path}}",
+          "stationary_threshold": 5.0,
+          "save_annotated": true
+        }
+      }
+      </tool_call>
+
+      参数说明：
+      - video_path: 视频文件路径（使用提供的 video_meta.file_path）
+      - stationary_threshold: 静止阈值（像素），默认 5.0。违停检测建议用 5.0
+      - save_annotated: 是否保存带框标注图，默认 true
+
+      工具返回：
+      - displacements: 每辆车的位移数据列表
+        - track_id: 车辆唯一 ID（整数）
+        - class: 车辆类别（car, truck, bus 等）
+        - start_pos / end_pos: 起始/结束位置（画面百分比坐标）
+        - displacement_pixels: 像素位移量（dx, dy）
+        - distance_pixels: 总移动距离（像素）
+        - direction_text: 方向描述，如 "dx=+150px, dy=-80px (向右下)"
+        - is_stationary: 是否静止（true/false）
+      - annotated_image_path: 带框+ID 标注的关键帧路径
+
+      使用指引：
+      1. 先观察视频帧，对疑似静止的车辆标记 track_id
+      2. 输出 <tool_call> 调用工具
+      3. 工具返回后，你会收到跟踪数据 + 标注图
+      4. 结合标注图（框内蓝色数字 = track_id）和位移数据做最终判断
+      5. is_stationary=true 且车辆在禁止停车区域 → 判定为违停
     output_format_hint: "JSON"
+    available_tools: ["yolo_track_tool"]
 
   # ---------------------------------------------------------------------------
   # 3. Emergency Lane Occupancy Detection (event_id=1)
@@ -592,6 +635,52 @@ prompt_templates:
         "instances": []
       }
 
+      =============================================================================
+      可用工具 — YOLO 车辆跟踪 (yolo_track_tool)
+      =============================================================================
+
+      当你需要精确判断车辆移动方向（尤其是路径 B 的帧间位移）时，可以调用此工具获取客观跟踪数据。
+
+      调用方式：在分析过程中，输出以下格式的工具调用请求：
+
+      <tool_call>
+      {
+        "tool_name": "yolo_track_tool",
+        "arguments": {
+          "video_path": "{{video_meta.file_path}}",
+          "stationary_threshold": 5.0,
+          "save_annotated": true
+        }
+      }
+      </tool_call>
+
+      参数说明：
+      - video_path: 视频文件路径（使用提供的 video_meta.file_path）
+      - stationary_threshold: 静止阈值（像素），默认 5.0
+      - save_annotated: 是否保存带框标注图，默认 true
+
+      工具返回：
+      - displacements: 每辆车的位移数据列表
+        - track_id: 车辆唯一 ID（整数）
+        - class: 车辆类别（car, truck, bus 等）
+        - start_pos / end_pos: 起始/结束位置（画面百分比坐标）
+        - displacement_pixels: 像素位移量（dx, dy）
+        - distance_pixels: 总移动距离（像素）
+        - direction_text: 方向描述，如 "dx=+150px, dy=-80px (向右下)"
+        - is_stationary: 是否静止（true/false）
+      - annotated_image_path: 带框+ID 标注的关键帧路径
+
+      使用指引：
+      1. 先观察视频帧，对疑似逆行的车辆标记 track_id
+      2. 输出 <tool_call> 调用工具
+      3. 工具返回后，你会收到跟踪数据 + 标注图
+      4. 结合标注图（框内蓝色数字 = track_id）和位移数据做最终判断
+      5. 重点关注 direction_text 中的 dx/dy 符号：
+         - 左侧道路正常流向 toward_bottom（靠近摄像头 = dy>0）
+         - 右侧道路正常流向 toward_top（远离摄像头 = dy<0）
+         - 若位移方向与正常流向相反 → 判定为逆行
+    output_format_hint: "JSON"
+    available_tools: ["yolo_track_tool"]
 
   # ---------------------------------------------------------------------------
   # 10. Thrown Object Detection (event_id=8)
