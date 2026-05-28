@@ -328,6 +328,29 @@ class ToolDefinition(BaseModel):
 
         return schema
 
+    def to_anthropic(self) -> Dict[str, Any]:
+        """
+        生成 Anthropic Native API 格式的工具定义。
+        Anthropic 格式与 OpenAI 类似，但顶层是 name/description/input_schema。
+        """
+        properties: Dict[str, Any] = {}
+        required: List[str] = []
+
+        for param in self.parameters:
+            properties[param.name] = param.to_json_schema()
+            if param.constraints.required:
+                required.append(param.name)
+
+        return {
+            "name": self.name,
+            "description": self.description,
+            "input_schema": {
+                "type": "object",
+                "properties": properties,
+                "required": required,
+            },
+        }
+
     def to_markdown(self) -> str:
         """生成 Markdown 格式的工具说明 (供人类阅读)。"""
         lines = [
