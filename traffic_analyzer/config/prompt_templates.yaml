@@ -600,6 +600,28 @@ prompt_templates:
       - **不要通过车头朝向判断逆行**。VLM 对车头朝向的识别不可靠，必须以工具返回的客观位移数据为准。
       - 位移判断以工具返回的 direction_text 为准，不要手动估算像素位移。
       - 即使车辆看起来很小（远距离）也要检查。
+
+      返回 JSON：
+      {
+        "detected": <true|false>,
+        "instances": [
+          {
+            "start_time_sec": <大致开始时间（秒）>,
+            "end_time_sec": <大致结束时间（秒）>,
+            "evidence_frames": [<帧索引>],
+            "description": "<观察到的内容：车辆类型、颜色、位置、方向描述>",
+            "reasoning": "<简要说明：根据工具返回的 direction_text 判断位移方向与正常流向的对比结果>"
+          }
+        ],
+        "summary": "<总体评估：共检测到几辆逆行车辆，分别位于什么位置>"
+      }
+
+      如果未检测到逆行，返回：
+      {
+        "detected": false,
+        "instances": [],
+        "summary": "未检测到逆行车辆。所有车辆行驶方向与车道正常流向一致。"
+      }
     output_format_hint: "JSON"
     available_tools: ["yolo_track_tool"]
 
