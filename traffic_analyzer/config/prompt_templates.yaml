@@ -107,17 +107,13 @@ prompt_templates:
       {
         "tool_name": "yolo_track_tool",
         "arguments": {
-          "video_path": "{{video_meta.file_path}}",
-          "stationary_threshold": 5.0,
-          "save_annotated": true
+          "video_path": "{{video_meta.file_path}}"
         }
       }
       </tool_call>
 
       参数说明：
       - video_path: 视频文件路径（使用提供的 video_meta.file_path）
-      - stationary_threshold: 静止阈值（像素），默认 5.0。违停检测建议用 5.0
-      - save_annotated: 是否保存带框标注图，默认 true
 
       工具返回：
       - displacements: 每辆车的位移数据列表
@@ -560,17 +556,13 @@ prompt_templates:
       {
         "tool_name": "yolo_track_tool",
         "arguments": {
-          "video_path": "{{video_meta.file_path}}",
-          "stationary_threshold": 5.0,
-          "save_annotated": true
+          "video_path": "{{video_meta.file_path}}"
         }
       }
       </tool_call>
 
       参数说明：
       - video_path: 视频文件路径（使用提供的 video_meta.file_path）
-      - stationary_threshold: 静止阈值（像素），默认 5.0
-      - save_annotated: 是否保存带框标注图，默认 true
 
       工具返回：
       - displacements: 每辆车的位移数据列表
