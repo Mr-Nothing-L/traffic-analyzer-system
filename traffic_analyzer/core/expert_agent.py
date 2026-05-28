@@ -8,7 +8,7 @@ exclusion logic. Adjudication happens later in the pipeline.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from traffic_analyzer.core.config_manager import ConfigManager
 from traffic_analyzer.core.vlm_engine import VLMInferenceEngine
@@ -280,13 +280,26 @@ class ExpertAgent:
             return error_candidate
 
         # -- 6. Check for tool calls -------------------------------------------
-        # If this event has configured tools, try to parse tool calls from response
+        # If this event has configured tools, try Native API first, then fallback to string parsing
         tool_result = None
         annotated_image = None
         if self.category.tools and first_response:
-            tool_result, annotated_image = self._execute_tool_calls(
-                first_response, context, images
+            # Try Native API tool calling first (Anthropic only)
+            native_tool_result = self._execute_native_tool_calls(
+                template, images, context_vars, context
             )
+            if native_tool_result is not None:
+                tool_result, annotated_image = native_tool_result
+                logger.info(
+                    "[expert_agent:detect] NATIVE_TOOL_SUCCESS | event_id=%d event_name=%s",
+                    self.category.event_id,
+                    self.category.name_zh,
+                )
+            else:
+                # Fallback to string-based tool parsing
+                tool_result, annotated_image = self._execute_tool_calls(
+                    first_response, context, images
+                )
 
         # -- 7. Second VLM call (if tool was called) ---------------------------
         if tool_result is not None:
@@ -429,6 +442,216 @@ class ExpertAgent:
             "tracking_text": tracking_text,
         }, annotated_image
 
+    def _execute_native_tool_calls(
+        self,
+        template: Any,
+        images: List[Any],
+        context_vars: Dict[str, Any],
+        context: AnalysisContext,
+    ) -> Optional[Tuple[Dict[str, Any], Optional[str]]]:
+        """
+        Execute tool calls using Anthropic Native API.
+        
+        Returns:
+            (tool_result_dict, annotated_image_path) or None if failed/no tool call.
+        """
+        try:
+            from traffic_analyzer.tools.tool_registry import get_default_router
+            from traffic_analyzer.tools.tool_schema import ToolDefinition
+        except ImportError as exc:
+            logger.debug(
+                "[expert_agent:_execute_native_tool_calls] IMPORT_FAILED | %s",
+                exc,
+            )
+            return None
+        
+        # Get tool definitions for configured tools
+        router = get_default_router()
+        if router is None:
+            logger.debug(
+                "[expert_agent:_execute_native_tool_calls] NO_ROUTER"
+            )
+            return None
+        
+        tool_definitions = []
+        for tool_name in self.category.tools:
+            tool_def = router.get_tool(tool_name)
+            if tool_def is None:
+                logger.warning(
+                    "[expert_agent:_execute_native_tool_calls] TOOL_NOT_FOUND | tool=%s",
+                    tool_name,
+                )
+                continue
+            tool_definitions.append(tool_def.to_anthropic())
+        
+        if not tool_definitions:
+            logger.debug(
+                "[expert_agent:_execute_native_tool_calls] NO_TOOL_DEFS"
+            )
+            return None
+        
+        # First call with tools
+        try:
+            first_response, tool_uses = self.vlm_engine.call_with_tools(
+                template=template,
+                images=images,
+                tool_definitions=tool_definitions,
+                context_vars=context_vars,
+                response_schema=_EXPERT_RESPONSE_SCHEMA,
+            )
+        except Exception as exc:
+            logger.error(
+                "[expert_agent:_execute_native_tool_calls] FIRST_CALL_ERROR | event_id=%d | %s",
+                self.category.event_id,
+                exc,
+                exc_info=True,
+            )
+            return None
+        
+        if not tool_uses:
+            logger.debug(
+                "[expert_agent:_execute_native_tool_calls] NO_TOOL_USES"
+            )
+            return None
+        
+        # Track the last successful tool name for fallback
+        last_tool_name = ""
+        
+        # Execute each tool
+        tool_results = []
+        all_result_data = {}
+        annotated_image = None
+        
+        for tool_use in tool_uses:
+            tool_name = tool_use.get("name", "")
+            tool_id = tool_use.get("id", "")
+            tool_input = tool_use.get("input", {})
+            
+            if tool_name not in self.category.tools:
+                logger.warning(
+                    "[expert_agent:_execute_native_tool_calls] TOOL_NOT_ALLOWED | "
+                    "requested=%s allowed=%s",
+                    tool_name,
+                    self.category.tools,
+                )
+                continue
+            
+            last_tool_name = tool_name
+            
+            # Auto-fill video_path
+            if "video_path" in tool_input:
+                arg_path = tool_input["video_path"]
+                if arg_path in ("{{video_meta.file_path}}", "", None):
+                    if context.video_meta is not None:
+                        tool_input["video_path"] = context.video_meta.file_path
+            
+            # Execute tool
+            try:
+                from traffic_analyzer.tools.tool_router import ToolRequest
+                tool_request = ToolRequest(
+                    tool_name=tool_name,
+                    arguments=tool_input,
+                )
+                tool_response = router.route(tool_request)
+            except Exception as exc:
+                logger.error(
+                    "[expert_agent:_execute_native_tool_calls] EXECUTE_FAILED | tool=%s | %s",
+                    tool_name,
+                    exc,
+                    exc_info=True,
+                )
+                continue
+            
+            if not tool_response.success:
+                logger.warning(
+                    "[expert_agent:_execute_native_tool_calls] TOOL_FAILED | tool=%s error=%s",
+                    tool_name,
+                    tool_response.error,
+                )
+                continue
+            
+            result_data = tool_response.data or {}
+            all_result_data = result_data
+            annotated_image = result_data.get("annotated_image_path")
+            
+            # Format result for VLM
+            tracking_text = self._format_tracking_result(result_data)
+            tool_results.append({
+                "tool_use_id": tool_id,
+                "content": tracking_text,
+            })
+            
+            logger.info(
+                "[expert_agent:_execute_native_tool_calls] TOOL_SUCCESS | tool=%s | "
+                "annotated_image=%s displacements=%d",
+                tool_name,
+                annotated_image,
+                len(result_data.get("displacements", [])),
+            )
+        
+        if not tool_results:
+            logger.debug(
+                "[expert_agent:_execute_native_tool_calls] NO_SUCCESSFUL_TOOLS"
+            )
+            return None
+        
+        # Second call with tool results
+        try:
+            # Build previous messages from first call
+            system_prompt, user_prompt = self.vlm_engine.render_prompt(template, context_vars)
+            
+            # Import the build function from vlm_engine module
+            from traffic_analyzer.core.vlm_engine import _build_anthropic_payload
+            _, kwargs = _build_anthropic_payload(
+                system_prompt,
+                user_prompt,
+                images,
+                self.vlm_engine.config.model,
+                self.vlm_engine.config.max_tokens,
+                self.vlm_engine.config.temperature,
+            )
+            kwargs["tools"] = tool_definitions
+            kwargs["tool_choice"] = {"type": "auto"}
+            
+            # Get messages from first call
+            previous_messages = kwargs.get("messages", [])
+            
+            second_response = self.vlm_engine.call_with_tool_results(
+                template=template,
+                images=images,
+                previous_messages=previous_messages,
+                tool_results=tool_results,
+                context_vars=context_vars,
+                response_schema=_EXPERT_RESPONSE_SCHEMA,
+            )
+        except Exception as exc:
+            logger.error(
+                "[expert_agent:_execute_native_tool_calls] SECOND_CALL_ERROR | event_id=%d | %s",
+                self.category.event_id,
+                exc,
+                exc_info=True,
+            )
+            # Fallback: return first tool result without second call
+            tracking_text = self._format_tracking_result(all_result_data)
+            return {
+                "tool_name": last_tool_name,
+                "result": all_result_data,
+                "tracking_text": tracking_text,
+            }, annotated_image
+        
+        # Parse second response
+        if second_response.success:
+            logger.info(
+                "[expert_agent:_execute_native_tool_calls] SECOND_CALL_SUCCESS | event_id=%d",
+                self.category.event_id,
+            )
+        
+        tracking_text = self._format_tracking_result(all_result_data)
+        return {
+            "tool_name": last_tool_name,
+            "result": all_result_data,
+            "tracking_text": tracking_text,
+        }, annotated_image
     def _format_tracking_result(self, result_data: Dict[str, Any]) -> str:
         """Format YOLO tracking result into human-readable text for prompt injection."""
         lines = ["=== YOLO 车辆跟踪结果 ===", ""]

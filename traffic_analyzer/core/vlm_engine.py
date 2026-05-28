@@ -446,6 +446,40 @@ def _call_anthropic(
     return text, prompt_tokens, completion_tokens, total_tokens
 
 
+def _call_anthropic_with_tools(
+    client: Any,
+    kwargs: Dict[str, Any],
+) -> Tuple[str, List[Dict[str, Any]], int, int, int]:
+    """
+    Call Anthropic with tool support.
+    
+    Returns:
+        (text, tool_use_blocks, prompt_tokens, completion_tokens, total_tokens)
+        tool_use_blocks: list of {"name": str, "id": str, "input": dict}
+    """
+    response = client.messages.create(**kwargs)
+    text = ""
+    tool_uses: List[Dict[str, Any]] = []
+    
+    if response.content:
+        for block in response.content:
+            block_type = getattr(block, "type", None)
+            if block_type == "text":
+                text += block.text
+            elif block_type == "tool_use":
+                tool_uses.append({
+                    "name": getattr(block, "name", ""),
+                    "id": getattr(block, "id", ""),
+                    "input": getattr(block, "input", {}),
+                })
+    
+    usage = response.usage
+    prompt_tokens = getattr(usage, "input_tokens", 0)
+    completion_tokens = getattr(usage, "output_tokens", 0)
+    total_tokens = prompt_tokens + completion_tokens
+    return text, tool_uses, prompt_tokens, completion_tokens, total_tokens
+
+
 def _call_openai(
     client: Any,
     kwargs: Dict[str, Any],
@@ -781,6 +815,234 @@ class VLMInferenceEngine:
                 logger.debug("[cache] STORED key %s... (size=%d)", cache_key[:16], len(self._cache))
 
         return response
+
+    def call_with_tools(
+        self,
+        template: PromptTemplate,
+        images: List[Any],
+        tool_definitions: List[Dict[str, Any]],
+        context_vars: Optional[Dict[str, Any]] = None,
+        response_schema: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[LLMResponse, List[Dict[str, Any]]]:
+        """
+        Execute a VLM call with Anthropic Native API tool support.
+        
+        This method performs a multi-turn conversation:
+        1. User message (prompt + images) + tools definition
+        2. Assistant message with tool_use blocks (or direct text response)
+        3. If tool_use blocks present: User message with tool_result blocks
+        4. Assistant message with final analysis
+        
+        Args:
+            template: Prompt template to render.
+            images: List of images.
+            tool_definitions: List of Anthropic-format tool definitions.
+            context_vars: Variables for Jinja2 prompt rendering.
+            response_schema: Optional JSON schema for basic validation.
+        
+        Returns:
+            (LLMResponse, tool_use_blocks)
+            If tool_use_blocks is non-empty, caller must execute tools and call again.
+        """
+        if self.provider != "anthropic":
+            logger.warning(
+                "[vlm_engine:call_with_tools] FALLBACK | provider=%s not anthropic, using string-based tool parsing",
+                self.provider,
+            )
+            # Fallback to regular call
+            response = self.call(template, images, context_vars, response_schema)
+            return response, []
+        
+        system_prompt, user_prompt = self.render_prompt(template, context_vars)
+        
+        # Build initial message list
+        _, kwargs = _build_anthropic_payload(
+            system_prompt,
+            user_prompt,
+            images,
+            self.config.model,
+            self.config.max_tokens,
+            self.config.temperature,
+        )
+        kwargs["tools"] = tool_definitions
+        kwargs["tool_choice"] = {"type": "auto"}
+        
+        call_id = str(uuid.uuid4())
+        start_time = time.perf_counter()
+        raw_text = ""
+        parsed_data: Dict[str, Any] = {}
+        success = False
+        error_message: Optional[str] = None
+        prompt_tokens = completion_tokens = total_tokens = 0
+        tool_uses: List[Dict[str, Any]] = []
+        
+        template_id = getattr(template, "template_id", "unknown")
+        try:
+            raw_text, tool_uses, prompt_tokens, completion_tokens, total_tokens = (
+                _call_anthropic_with_tools(self._client, kwargs)
+            )
+            
+            # If no tool uses, try to parse JSON from text
+            if not tool_uses:
+                parsed_data = _extract_json_from_text(raw_text)
+                if response_schema:
+                    _validate_schema_basic(parsed_data, response_schema)
+            
+            success = True
+            logger.info(
+                "[vlm_engine:call_with_tools] FIRST_CALL | template_id=%s tool_uses=%d",
+                template_id,
+                len(tool_uses),
+            )
+        except Exception as exc:
+            error_message = str(exc)
+            logger.error(
+                "[vlm_engine:call_with_tools] FIRST_CALL_ERROR | template_id=%s | %s",
+                template_id,
+                exc,
+                exc_info=True,
+            )
+        
+        latency_ms = (time.perf_counter() - start_time) * 1000.0
+        
+        # Update stats
+        with self._cache_lock:
+            self._total_calls += 1
+            self._total_prompt_tokens += prompt_tokens
+            self._total_completion_tokens += completion_tokens
+            self._total_tokens += total_tokens
+            self._total_latency_ms += latency_ms
+            if not success:
+                self._failed_calls += 1
+        
+        response = LLMResponse(
+            success=success,
+            raw_text=raw_text,
+            parsed_data=parsed_data,
+            model=self.config.model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            latency_ms=latency_ms,
+            retry_count=0,
+        )
+        
+        return response, tool_uses
+    
+    def call_with_tool_results(
+        self,
+        template: PromptTemplate,
+        images: List[Any],
+        previous_messages: List[Dict[str, Any]],
+        tool_results: List[Dict[str, Any]],
+        context_vars: Optional[Dict[str, Any]] = None,
+        response_schema: Optional[Dict[str, Any]] = None,
+    ) -> LLMResponse:
+        """
+        Continue conversation with tool results.
+        
+        Args:
+            template: Original prompt template (for system prompt).
+            images: Original images (not used in second call, but kept for consistency).
+            previous_messages: Full message history from first call.
+            tool_results: List of {"tool_use_id": str, "content": str}.
+            context_vars: Variables for Jinja2 prompt rendering.
+            response_schema: Optional JSON schema for basic validation.
+        
+        Returns:
+            LLMResponse with final analysis.
+        """
+        if self.provider != "anthropic":
+            logger.error(
+                "[vlm_engine:call_with_tool_results] ERROR | provider=%s not anthropic",
+                self.provider,
+            )
+            return LLMResponse(
+                success=False,
+                raw_text="",
+                parsed_data={},
+                model=self.config.model,
+                prompt_tokens=0,
+                completion_tokens=0,
+                total_tokens=0,
+                latency_ms=0,
+                retry_count=0,
+            )
+        
+        system_prompt, _ = self.render_prompt(template, context_vars)
+        
+        # Build messages: previous + tool_result
+        messages = list(previous_messages)
+        
+        # Add tool_result message
+        tool_content = []
+        for result in tool_results:
+            tool_content.append({
+                "type": "tool_result",
+                "tool_use_id": result["tool_use_id"],
+                "content": result["content"],
+            })
+        messages.append({"role": "user", "content": tool_content})
+        
+        kwargs = {
+            "model": self.config.model,
+            "max_tokens": self.config.max_tokens,
+            "temperature": self.config.temperature,
+            "messages": messages,
+        }
+        if system_prompt:
+            kwargs["system"] = system_prompt
+        
+        call_id = str(uuid.uuid4())
+        start_time = time.perf_counter()
+        raw_text = ""
+        parsed_data: Dict[str, Any] = {}
+        success = False
+        prompt_tokens = completion_tokens = total_tokens = 0
+        
+        template_id = getattr(template, "template_id", "unknown")
+        try:
+            raw_text, _, prompt_tokens, completion_tokens, total_tokens = (
+                _call_anthropic_with_tools(self._client, kwargs)
+            )
+            parsed_data = _extract_json_from_text(raw_text)
+            if response_schema:
+                _validate_schema_basic(parsed_data, response_schema)
+            success = True
+            logger.info(
+                "[vlm_engine:call_with_tool_results] SECOND_CALL | template_id=%s",
+                template_id,
+            )
+        except Exception as exc:
+            logger.error(
+                "[vlm_engine:call_with_tool_results] SECOND_CALL_ERROR | template_id=%s | %s",
+                template_id,
+                exc,
+                exc_info=True,
+            )
+        
+        latency_ms = (time.perf_counter() - start_time) * 1000.0
+        
+        with self._cache_lock:
+            self._total_calls += 1
+            self._total_prompt_tokens += prompt_tokens
+            self._total_completion_tokens += completion_tokens
+            self._total_tokens += total_tokens
+            self._total_latency_ms += latency_ms
+            if not success:
+                self._failed_calls += 1
+        
+        return LLMResponse(
+            success=success,
+            raw_text=raw_text,
+            parsed_data=parsed_data,
+            model=self.config.model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            latency_ms=latency_ms,
+            retry_count=0,
+        )
 
     def _execute_once(
         self,
