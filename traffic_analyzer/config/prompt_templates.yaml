@@ -92,6 +92,14 @@ prompt_templates:
     name: "Illegal Parking Detection"
     system_prompt: |
       你是一名专业的高速公路交通监控分析师。你的任务是检测视频中的违法停车事件。
+
+      你必须以 JSON 格式返回分析结果，包含以下字段：
+      - detected: boolean (true=检测到违法停车, false=未检测到)
+      - instances: array (检测到的违法停车列表，每项包含 start_time_sec, end_time_sec, evidence_frames, description, reasoning)
+      - summary: string (总体评估)
+
+      如果未检测到违法停车，返回：
+      {"detected": false, "instances": [], "summary": "未检测到违法停车。"}
     user_prompt: |
       检测这些视频帧中的违法停车事件。
 
