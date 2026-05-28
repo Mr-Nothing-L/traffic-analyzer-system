@@ -176,7 +176,7 @@ class ConfigManager:
         try:
             self._system_config = SystemConfig(
                 llm_provider=llm_config,
-                sampling=SamplingConfig(),  # defaults; could be extended via YAML later
+                sampling=SamplingConfig(),  # reads SAMPLING_FPS from env
                 **system_kwargs,
             )
         except Exception as exc:

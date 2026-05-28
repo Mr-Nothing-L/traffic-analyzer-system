@@ -473,91 +473,34 @@ class VideoPreprocessor:
                 metadata.height,
             )
 
-            # First pass: coarse sampling
+            # Single-pass: fixed FPS sampling (no motion detection)
             try:
-                coarse_frames = self._extract_frames_at_fps(
+                all_frames = self._extract_frames_at_fps(
                     cap=cap,
                     target_fps=self.config.coarse_fps,
                     metadata=metadata,
                     output_dir=output_dir,
-                    prefix="coarse",
+                    prefix="frame",
                     is_precision=False,
                 )
-                coarse_frames = [
-                    kf for kf in coarse_frames
+                all_frames = [
+                    kf for kf in all_frames
                     if kf.quality_score >= self.config.coarse_quality_threshold
                 ]
-                coarse_frames = self._deduplicate_keyframes(coarse_frames)
-                logger.info("Coarse pass: %d frames retained", len(coarse_frames))
+                all_frames = self._deduplicate_keyframes(all_frames)
+                logger.info("Fixed FPS sampling: %d frames retained (FPS=%.1f)", len(all_frames), self.config.coarse_fps)
             except Exception as exc:
                 logger.error(
-                    "[video_preprocessor:process] COARSE_ERROR | video=%s | %s",
+                    "[video_preprocessor:process] SAMPLING_ERROR | video=%s | %s",
                     video_path,
                     exc,
                     exc_info=True,
                 )
-                coarse_frames = []
-
-            # Motion analysis
-            try:
-                motion_segments = self._detect_motion_segments(cap, metadata, coarse_frames)
-                logger.info("Detected %d motion segments", len(motion_segments))
-            except Exception as exc:
-                logger.error(
-                    "[video_preprocessor:process] MOTION_ERROR | video=%s | %s",
-                    video_path,
-                    exc,
-                    exc_info=True,
-                )
-                motion_segments = []
-
-            # Second pass: precision sampling for motion segments
-            precision_frames: List[Keyframe] = []
-            for seg_idx, (start, end) in enumerate(motion_segments):
-                try:
-                    seg_frames = self._extract_frames_at_fps(
-                        cap=cap,
-                        target_fps=self.config.precision_fps,
-                        metadata=metadata,
-                        output_dir=output_dir,
-                        prefix=f"precision_seg{seg_idx}",
-                        is_precision=True,
-                        start_sec=start,
-                        end_sec=end,
-                    )
-                    precision_frames.extend(seg_frames)
-                except Exception as exc:
-                    logger.error(
-                        "[video_preprocessor:process] PRECISION_ERROR | video=%s segment=%d | %s",
-                        video_path,
-                        seg_idx,
-                        exc,
-                        exc_info=True,
-                    )
-                    continue
-
-            try:
-                precision_frames = [
-                    kf for kf in precision_frames
-                    if kf.quality_score >= self.config.precision_quality_threshold
-                ]
-                precision_frames = self._deduplicate_keyframes(precision_frames)
-                logger.info("Precision pass: %d frames retained", len(precision_frames))
-            except Exception as exc:
-                logger.error(
-                    "[video_preprocessor:process] DEDUP_ERROR | video=%s | %s",
-                    video_path,
-                    exc,
-                    exc_info=True,
-                )
-                # Fallback: return precision_frames without deduplication/quality filtering
-                # If that also failed, use empty list
-                if precision_frames is None:
-                    precision_frames = []
+                all_frames = []
 
             return KeyframeSequence(
-                coarse_frames=coarse_frames,
-                precision_frames=precision_frames,
+                coarse_frames=all_frames,
+                precision_frames=all_frames,
             )
         finally:
             cap.release()

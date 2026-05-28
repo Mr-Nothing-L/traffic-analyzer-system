@@ -8,6 +8,7 @@ to ensure type safety and validation across the system.
 from __future__ import annotations
 
 import enum
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union
@@ -398,8 +399,8 @@ class Report(BaseModel):
 
 class SamplingConfig(BaseModel):
     """Video sampling configuration."""
-    coarse_fps: float = 1.0
-    precision_fps: float = 4.0
+    coarse_fps: float = Field(default_factory=lambda: float(os.getenv("SAMPLING_FPS", "1.0")))
+    precision_fps: float = Field(default_factory=lambda: float(os.getenv("SAMPLING_FPS", "1.0")))
     coarse_quality_threshold: float = 0.05
     precision_quality_threshold: float = 0.1
     max_precision_segments: int = 10
