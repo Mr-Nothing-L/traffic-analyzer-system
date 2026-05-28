@@ -1,0 +1,49 @@
+version: '3.8'
+
+services:
+  traffic-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.gpu
+    image: traffic-agent:gpu
+    container_name: traffic-agent-gpu
+    
+    tty: true
+    stdin_open: true
+    
+    volumes:
+      - .:/app
+      - /media/wanji/Elements1/大模型应用/高速交通事件Agent测试视频V4:/app/test_videos:ro
+      - /tmp:/tmp
+    
+    working_dir: /app
+    
+    environment:
+      - PYTHONPATH=/app
+      - VLM_PROVIDER=${VLM_PROVIDER:-anthropic}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - ALIYUN_API_KEY=${ALIYUN_API_KEY}
+    
+    # GPU access
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    
+    mem_limit: 8g
+    cpus: '4'
+    restart: unless-stopped
+    
+    networks:
+      - traffic-net
+    
+    command: tail -f /dev/null
+
+networks:
+  traffic-net:
+    driver: bridge
