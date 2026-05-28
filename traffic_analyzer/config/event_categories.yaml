@@ -29,6 +29,7 @@ event_categories:
     prompt_template_id: "illegal_parking_detection"
     confidence_threshold: 0.7
     is_active: true
+    tools: ["yolo_track_tool"]
     definition: |
       违法停车判定规则（与标注文档 v4.5 一致）：
       1. 只针对机动车——非机动车静止时不判定为违法停车。
@@ -134,6 +135,7 @@ event_categories:
     prompt_template_id: "direct_reversing_detection"
     confidence_threshold: 0.8
     is_active: true
+    tools: ["yolo_track_tool"]
     definition: |
       车辆逆行/倒车：车辆移动方向与所在车道正常流向相反。
       判定依据：白倒车灯亮、车辆相对于固定参照物反向移动、车头朝向与正常流向相反。

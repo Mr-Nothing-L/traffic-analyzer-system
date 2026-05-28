@@ -204,6 +204,10 @@ class EventCategory(BaseModel):
     scene_tag_key: Optional[str] = Field(
         None, description="Tag key in scene_description for scene_tag inference (e.g. '行人')"
     )
+    tools: List[str] = Field(
+        default_factory=list,
+        description="List of tool names available to this expert agent (e.g. ['yolo_track_tool'])"
+    )
     is_active: bool = True
 
 
@@ -319,6 +323,10 @@ class PromptTemplate(BaseModel):
     # When multiple variants of the same template_id exist, one is selected
     # based on traffic_percentage. If not set, the latest version is used.
     traffic_percentage: Optional[int] = Field(None, ge=0, le=100)
+    available_tools: List[str] = Field(
+        default_factory=list,
+        description="Tool names available in this prompt context (injected into prompt)"
+    )
 
 
 class LLMResponse(BaseModel):

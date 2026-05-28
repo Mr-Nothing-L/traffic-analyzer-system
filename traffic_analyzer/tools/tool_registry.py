@@ -79,7 +79,7 @@ def _register_yolo_track_tool(router: ToolRouter) -> None:
             "对高速公路监控视频进行车辆/行人/摩托车目标检测和跟踪。"
             "使用 YOLOv8 检测 + ByteTrack 跟踪算法。"
             "输出带跟踪框的关键帧图片，以及每个跟踪目标的位移矢量表。"
-            "适用于分析车辆运动轨迹、检测静止车辆(违停)、统计车流量等场景。"
+            "适用于分析车辆运动轨迹、检测静止车辆(违停)、检测车辆逆行，倒车等场景。"
         ),
         parameters=[
             ToolParameter(
