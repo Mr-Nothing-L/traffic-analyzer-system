@@ -92,15 +92,15 @@ prompt_templates:
     name: "Illegal Parking Detection"
     system_prompt: |
       你是一名专业的高速公路交通监控分析师。你的任务是检测视频中的违法停车事件。
-
+    user_prompt: |
       你必须以 JSON 格式返回分析结果，包含以下字段：
       - detected: boolean (true=检测到违法停车, false=未检测到)
-      - instances: array (检测到的违法停车列表，每项包含 start_time_sec, end_time_sec, evidence_frames, description, reasoning)
+      - instances: array (检测到的违法停车列表)
       - summary: string (总体评估)
 
       如果未检测到违法停车，返回：
       {"detected": false, "instances": [], "summary": "未检测到违法停车。"}
-    user_prompt: |
+
       检测这些视频帧中的违法停车事件。
 
       =============================================================================
@@ -537,15 +537,15 @@ prompt_templates:
     name: "直接逆行/倒车检测"
     system_prompt: |
       你是一名交通监控分析师。你的任务是检测正在倒车或逆行的车辆。
-
+    user_prompt: |
       你必须以 JSON 格式返回分析结果，包含以下字段：
       - detected: boolean (true=检测到逆行, false=未检测到)
-      - instances: array (检测到的逆行车辆列表，每项包含 start_time_sec, end_time_sec, evidence_frames, description, reasoning)
+      - instances: array (检测到的逆行车辆列表)
       - summary: string (总体评估)
 
       如果未检测到逆行，返回：
       {"detected": false, "instances": [], "summary": "未检测到逆行车辆。"}
-    user_prompt: |
+
       上面提供的图片就是你必须分析的视频帧。你可以看到它们——不要声称无法查看图片。将你的全部分析基于这些帧。
 
       检查来自高速公路监控摄像头的这些视频帧。
