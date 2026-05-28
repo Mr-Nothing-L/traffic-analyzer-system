@@ -361,3 +361,217 @@ This logging is a **pure display layer** — it does not affect parallelism, per
 | `v1.5.0-legacy` | `legacy/v1.5` | Monolithic architecture. SceneUnderstandingStep (~30s bottleneck) + mixed detection modes (direct_vlm parallel, logic_chain sequential, scene_tag zero-VLM) + PostProcessStep with cross-event inference. |
 
 The `legacy/v1.5` branch preserves the old architecture for reference and comparison. All new development happens on `main` (v2.0.0).
+
+---
+
+## Custom Tool Development Guide
+
+The system supports extending custom tools via the **Tool Definition Layer (Tool Schema)** + **Tool Router Layer (Tool Router)** architecture, for use by Expert Agents.
+
+### Architecture Overview
+
+```
+Model outputs ToolRequest (JSON/Markdown/XML)
+        ↓
+ToolRouter.route() → Parse and validate parameters
+        ↓
+Match ToolDefinition → Execute handler
+        ↓
+Return ToolResponse (success/data/error + elapsed time)
+```
+
+### Adding a New Tool (3 Steps)
+
+#### Step 1: Implement the Tool Function
+
+Create a new file under `traffic_analyzer/tools/`:
+
+```python
+# traffic_analyzer/tools/my_new_tool.py
+
+import logging
+from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+
+def my_new_tool(
+    video_path: str,
+    param1: float = 0.5,
+    param2: Optional[str] = None,
+) -> dict:
+    """Tool implementation. Returns dict, wrapped by ToolResponse."""
+    logger.info(f"my_new_tool: video={video_path}, param1={param1}")
+    
+    # ... your logic ...
+    
+    return {
+        "success": True,
+        "result": "something",
+        "detail": {"param1": param1, "param2": param2},
+    }
+```
+
+**Key constraints**:
+- Parameter names use snake_case, must exactly match `ToolParameter.name` at registration
+- Return value must be JSON-serializable (dict/list/str/int/float/bool/None)
+- Function can be sync or async (async def), Router auto-detects
+
+#### Step 2: Register in Tool Router Layer
+
+Edit `traffic_analyzer/tools/tool_registry.py`, add registration in `create_router()`:
+
+```python
+def create_router() -> ToolRouter:
+    router = ToolRouter()
+    
+    # Existing tools
+    _register_yolo_track_tool(router)
+    
+    # New tool
+    _register_my_new_tool(router)
+    
+    return router
+```
+
+Then implement the registration function:
+
+```python
+from .my_new_tool import my_new_tool
+from .tool_schema import ParameterType, ToolConstraint, ToolDefinition, ToolParameter, ToolReturn
+
+def _register_my_new_tool(router: ToolRouter) -> None:
+    definition = ToolDefinition(
+        name="my_new_tool",  # Model calls by this name
+        description="Detailed description of what the tool does, for the model. At least 10 chars. Explain purpose, applicable scenarios, input/output.",
+        parameters=[
+            ToolParameter(
+                name="video_path",
+                type=ParameterType.STRING,
+                description="Absolute path to input video (container path)",
+                constraints=ToolConstraint(
+                    required=True,
+                    pattern=r"^/.*\.(mp4|avi|mov|mkv)$",
+                ),
+            ),
+            ToolParameter(
+                name="param1",
+                type=ParameterType.FLOAT,
+                description="Description of param1",
+                constraints=ToolConstraint(
+                    required=False,
+                    min_value=0.0,
+                    max_value=1.0,
+                ),
+                default=0.5,
+            ),
+            ToolParameter(
+                name="param2",
+                type=ParameterType.STRING,
+                description="Description of param2",
+                constraints=ToolConstraint(required=False),
+                default=None,
+            ),
+        ],
+        returns=ToolReturn(
+            type=ParameterType.OBJECT,
+            description="Detailed description of return value, helping the model understand how to use the result",
+        ),
+    )
+    
+    router.register(definition, my_new_tool)
+    logger.info("my_new_tool registered")
+```
+
+**Supported parameter constraints**:
+
+| Constraint | Description | Applicable Types |
+|---|---|---|
+| `required` | Whether the parameter is required | All |
+| `min_value` / `max_value` | Numeric range | integer, float |
+| `min_length` / `max_length` | Length limit | string, array |
+| `pattern` | Regex pattern | string |
+| `enum_values` | Enumerated values | All |
+| `items_type` | Array element type | array |
+
+#### Step 3: Write Tests
+
+Add tests under `tests/tools/`:
+
+```python
+# tests/tools/test_my_new_tool.py
+
+import pytest
+from traffic_analyzer.tools.tool_registry import create_router
+
+
+def test_my_new_tool_registration():
+    """Verify tool is registered"""
+    router = create_router()
+    assert "my_new_tool" in router.list_tools()
+    
+    # Verify parameter definitions
+    definition = router.get_tool("my_new_tool")
+    param_names = [p.name for p in definition.parameters]
+    assert "video_path" in param_names
+
+
+def test_my_new_tool_execution():
+    """Verify tool executes correctly"""
+    router = create_router()
+    resp = router.route(
+        '{"tool_name": "my_new_tool", "arguments": {"video_path": "/data/test.mp4", "param1": 0.8}}'
+    )
+    assert resp.success is True
+    assert resp.data["success"] is True
+
+
+def test_my_new_tool_validation_error():
+    """Verify parameter validation works"""
+    router = create_router()
+    # Missing required parameter
+    resp = router.route('{"tool_name": "my_new_tool", "arguments": {}}')
+    assert resp.success is False
+    assert "Missing required parameter" in resp.error
+```
+
+Run tests:
+
+```bash
+docker-compose exec traffic-agent python3 -m pytest tests/tools/test_my_new_tool.py -v
+```
+
+### How the Model Calls Tools
+
+The Expert Agent's Prompt is injected with available tool JSON Schemas (via `ToolRouter.get_tool_descriptions(format="json")`). The model outputs a call request in this format:
+
+```json
+{
+    "tool_name": "my_new_tool",
+    "arguments": {
+        "video_path": "/data/test_videos/clip.mp4",
+        "param1": 0.8
+    }
+}
+```
+
+Markdown code blocks and XML tags are also supported; the Router parses them automatically.
+
+### Full Example: Video Frame Extraction Tool
+
+See `traffic_analyzer/tools/yolo_track_tool.py` (YOLOv8 + ByteTrack tracking tool) for a complete reference implementation, including:
+- 6 parameter definitions (video_path, conf_threshold, stationary_threshold, etc.)
+- Pixel-level direction description (`dx=+150px, dy=-80px (toward bottom-right)`)
+- Detailed error fallback logging
+- 12 unit tests, all passing
+
+### Tool Layer File Reference
+
+| File | Description |
+|---|---|
+| `traffic_analyzer/tools/tool_schema.py` | Tool Definition Layer: ToolDefinition, ToolParameter, ToolConstraint, ToolRegistry |
+| `traffic_analyzer/tools/tool_router.py` | Tool Router Layer: ToolRequest, ToolResponse, ToolRouter (sync/async/batch) |
+| `traffic_analyzer/tools/tool_registry.py` | Registration Integration: Default Router singleton, registers all built-in tools |
+| `traffic_analyzer/tools/yolo_track_tool.py` | Example Tool: YOLOv8 + ByteTrack object tracking |
+| `tests/tools/test_tool_router.py` | Router Tests: 30 tests covering parsing/validation/execution/error handling |
+| `tests/tools/test_yolo_track_tool.py` | YOLO Tool Tests: 12 tests covering tracking/displacement/direction/integration |
