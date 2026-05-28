@@ -62,3 +62,4 @@ error/
 !README.zh-CN.md
 !requirements.txt
 !analyze.sh
+yolov8n.pt

@@ -1,0 +1,47 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.egg-info
+.pytest_cache
+.venv
+venv
+
+# Videos (large files)
+*.mp4
+*.avi
+*.mov
+*.mkv
+test_videos/
+MP4TEST/
+
+# Output / Logs / Error dumps
+output/
+logs/
+*.log
+error/
+error.zip
+
+# Docs images (keep in container if needed, but large)
+docs/v4.5_images/
+.idea
+*.swp
+
+# Docs images (keep in container if needed, but large)
+docs/v4.5_images/
+
+# Archives
+*.zip
+*.tar.gz
+
+# Node modules (if any)
+node_modules/
+
+# Docker itself
+.dockerignore
+Dockerfile*
+docker-compose*.yml

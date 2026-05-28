@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  traffic-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: traffic-agent:latest
+    container_name: traffic-agent
+    
+    tty: true
+    stdin_open: true
+    
+    volumes:
+      # Mount project code for development (live reload)
+      - .:/data
+      # Mount test videos directory
+      - /media/wanji/Elements/大模型应用/高速交通事件Agent测试视频V4:/data/test_videos:ro
+      # Mount host temp for video I/O
+      - /tmp:/tmp
+    
+    working_dir: /data
+    
+    environment:
+      - PYTHONPATH=/data
+      # API keys passed from host .env
+      - VLM_PROVIDER=${VLM_PROVIDER:-anthropic}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - ALIYUN_API_KEY=${ALIYUN_API_KEY}
+    
+    # Resource limits (adjust as needed)
+    mem_limit: 4g
+    cpus: '4'
+    
+    restart: unless-stopped
+    
+    # Use bridge network (host mode incompatible with Docker Desktop/Mac)
+    networks:
+      - traffic-net
+    
+    command: tail -f /dev/null
+
+  # GPU variant - use with: docker-compose -f docker-compose.yml -f docker-compose.gpu.yml up
+  # or uncomment below and comment out the CPU service above
+
+networks:
+  traffic-net:
+    driver: bridge
