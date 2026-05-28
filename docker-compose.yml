@@ -29,6 +29,10 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY}
       - ALIYUN_API_KEY=${ALIYUN_API_KEY}
+      # Proxy for external API access (clash on host)
+      - HTTP_PROXY=http://172.18.0.1:7897
+      - HTTPS_PROXY=http://172.18.0.1:7897
+      - NO_PROXY=localhost,127.0.0.1,.local
     
     # Resource limits (adjust as needed)
     mem_limit: 4g
@@ -36,15 +40,11 @@ services:
     
     restart: unless-stopped
     
-    # Use bridge network (host mode incompatible with Docker Desktop/Mac)
-    networks:
-      - traffic-net
+    # Host network mode: shares host network stack, no NAT/port mapping needed
+    # Required for proxy access (clash on 127.0.0.1:7897)
+    network_mode: host
     
     command: tail -f /dev/null
 
   # GPU variant - use with: docker-compose -f docker-compose.yml -f docker-compose.gpu.yml up
   # or uncomment below and comment out the CPU service above
-
-networks:
-  traffic-net:
-    driver: bridge
