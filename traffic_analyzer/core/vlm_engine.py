@@ -884,9 +884,20 @@ class VLMInferenceEngine:
             
             # If no tool uses, try to parse JSON from text
             if not tool_uses:
-                parsed_data = _extract_json_from_text(raw_text)
-                if response_schema:
-                    _validate_schema_basic(parsed_data, response_schema)
+                try:
+                    parsed_data = _extract_json_from_text(raw_text)
+                    if response_schema:
+                        _validate_schema_basic(parsed_data, response_schema)
+                except Exception as json_exc:
+                    # JSON parsing failed but no tool uses either
+                    # This might happen if the model returns plain text instead of JSON
+                    # Log warning but don't fail - let caller handle fallback
+                    logger.warning(
+                        "[vlm_engine:call_with_tools] JSON_PARSE_WARNING | template_id=%s | %s",
+                        template_id,
+                        json_exc,
+                    )
+                    # Don't set parsed_data, leave it empty
             else:
                 # Tool use expected: skip JSON parsing, return raw text for tool parsing
                 logger.info(
