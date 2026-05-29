@@ -688,6 +688,7 @@ class ExpertAgent:
         
         # Get tool definitions
         router = get_default_router()
+        logger.info("[expert_agent:_execute_anthropic_native_tools] ROUTER | router=%s", router)
         if router is None:
             logger.debug("[expert_agent:_execute_anthropic_native_tools] NO_ROUTER")
             return None
@@ -695,10 +696,13 @@ class ExpertAgent:
         tool_definitions = []
         for tool_name in self.category.tools:
             tool_def = router.get_tool(tool_name)
+            logger.info("[expert_agent:_execute_anthropic_native_tools] TOOL_LOOKUP | tool=%s def=%s", tool_name, tool_def)
             if tool_def is None:
                 logger.warning("[expert_agent:_execute_anthropic_native_tools] TOOL_NOT_FOUND | tool=%s", tool_name)
                 continue
-            tool_definitions.append(tool_def.to_anthropic())
+            anthropic_def = tool_def.to_anthropic()
+            logger.info("[expert_agent:_execute_anthropic_native_tools] TOOL_DEF | name=%s schema=%s", anthropic_def.get('name'), anthropic_def.get('input_schema',{}).keys())
+            tool_definitions.append(anthropic_def)
         
         if not tool_definitions:
             logger.debug("[expert_agent:_execute_anthropic_native_tools] NO_TOOL_DEFS")
