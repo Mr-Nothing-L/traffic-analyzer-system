@@ -259,12 +259,6 @@ class ExpertAgent:
         annotated_image = None
         
         # If tools configured, use Anthropic Native API directly
-        logger.info(
-            "[expert_agent:detect] TOOL_CHECK | event_id=%d tools=%s provider=%s",
-            self.category.event_id,
-            self.category.tools,
-            self.vlm_engine.provider,
-        )
         if self.category.tools and self.vlm_engine.provider == "anthropic":
             try:
                 native_result = self._execute_anthropic_native_tools(
@@ -689,7 +683,6 @@ class ExpertAgent:
         
         # Get tool definitions
         router = get_default_router()
-        logger.info("[expert_agent:_execute_anthropic_native_tools] ROUTER | router=%s", router)
         if router is None:
             logger.debug("[expert_agent:_execute_anthropic_native_tools] NO_ROUTER")
             return None
@@ -697,13 +690,10 @@ class ExpertAgent:
         tool_definitions = []
         for tool_name in self.category.tools:
             tool_def = router.get_tool(tool_name)
-            logger.info("[expert_agent:_execute_anthropic_native_tools] TOOL_LOOKUP | tool=%s def=%s", tool_name, tool_def)
             if tool_def is None:
                 logger.warning("[expert_agent:_execute_anthropic_native_tools] TOOL_NOT_FOUND | tool=%s", tool_name)
                 continue
-            anthropic_def = tool_def.to_anthropic()
-            logger.info("[expert_agent:_execute_anthropic_native_tools] TOOL_DEF | name=%s schema=%s", anthropic_def.get('name'), anthropic_def.get('input_schema',{}).keys())
-            tool_definitions.append(anthropic_def)
+            tool_definitions.append(tool_def.to_anthropic())
         
         if not tool_definitions:
             logger.debug("[expert_agent:_execute_anthropic_native_tools] NO_TOOL_DEFS")
@@ -739,12 +729,6 @@ class ExpertAgent:
             return None
         
         try:
-            logger.info(
-                "[expert_agent:_execute_anthropic_native_tools] API_CALL | model=%s tools=%d messages=%d",
-                self.vlm_engine.config.model,
-                len(tool_definitions),
-                len(messages),
-            )
             response = client.messages.create(
                 model=self.vlm_engine.config.model,
                 max_tokens=self.vlm_engine.config.max_tokens,
@@ -753,10 +737,6 @@ class ExpertAgent:
                 messages=messages,
                 tools=tool_definitions,
                 tool_choice={"type": "auto"},
-            )
-            logger.info(
-                "[expert_agent:_execute_anthropic_native_tools] API_RESPONSE | blocks=%d",
-                len(response.content),
             )
         except Exception as exc:
             logger.error(
@@ -781,26 +761,14 @@ class ExpertAgent:
                     })
                 elif getattr(block, "type", None) == "text":
                     raw_text += block.text
-            logger.info(
-                "[expert_agent:_execute_anthropic_native_tools] NATIVE_TOOL_USE | count=%d",
-                len(tool_uses),
-            )
         else:
             # No native tool_use — collect text for fallback parsing
             for block in response.content:
                 if getattr(block, "type", None) == "text":
                     raw_text += block.text
-            logger.info(
-                "[expert_agent:_execute_anthropic_native_tools] NO_NATIVE_TOOL | stop_reason=%s text_len=%d",
-                getattr(response, "stop_reason", "unknown"),
-                len(raw_text),
-            )
         
         # Fallback: parse <tool_call> from text if native tool_use not available
         if not tool_uses and "<tool_call>" in raw_text:
-            logger.info(
-                "[expert_agent:_execute_anthropic_native_tools] TOOL_CALL_IN_TEXT | attempting parse",
-            )
             import re
             tool_call_match = re.search(r'<tool_call>\s*(\{.*?\})\s*</tool_call>', raw_text, re.DOTALL)
             if tool_call_match:
@@ -819,9 +787,9 @@ class ExpertAgent:
                     logger.warning("JSON_PARSE_FAILED | %s", exc)
         
         if not tool_uses:
-            logger.info(
-                "[expert_agent:_execute_anthropic_native_tools] NO_TOOL_USES | text_preview=%s",
-                raw_text[:200].replace('\n', ' '),
+            logger.debug(
+                "[expert_agent:_execute_anthropic_native_tools] NO_TOOL_USES | stop_reason=%s",
+                getattr(response, "stop_reason", "unknown"),
             )
             return None
         
@@ -877,7 +845,7 @@ class ExpertAgent:
             })
             
             logger.info(
-                "TOOL_SUCCESS | tool=%s displacements=%d",
+                "[expert_agent:_execute_anthropic_native_tools] TOOL_SUCCESS | tool=%s displacements=%d",
                 tool_name,
                 len(result_data.get("displacements", [])),
             )
@@ -920,7 +888,11 @@ class ExpertAgent:
                 tools=tool_definitions,
             )
         except Exception as exc:
-            logger.error("SECOND_CALL_ERROR | event_id=%d | %s", self.category.event_id, exc)
+            logger.error(
+                "[expert_agent:_execute_anthropic_native_tools] SECOND_CALL_ERROR | event_id=%d | %s",
+                self.category.event_id,
+                exc,
+            )
             tracking_text = self._format_tracking_result(all_result_data)
             return {
                 "tool_name": last_tool_name,
@@ -935,7 +907,7 @@ class ExpertAgent:
                 second_text += block.text
         
         logger.info(
-            "SECOND_CALL_SUCCESS | event_id=%d text_len=%d",
+            "[expert_agent:_execute_anthropic_native_tools] SECOND_CALL_SUCCESS | event_id=%d text_len=%d",
             self.category.event_id,
             len(second_text),
         )
@@ -944,9 +916,9 @@ class ExpertAgent:
         from traffic_analyzer.core.vlm_engine import _extract_json_from_text
         try:
             parsed = _extract_json_from_text(second_text)
-            logger.info("JSON_PARSED | detected=%s", parsed.get("detected", "unknown"))
+            logger.debug("JSON_PARSED | detected=%s", parsed.get("detected", "unknown"))
         except Exception as exc:
-            logger.warning("JSON_PARSE_FAILED | %s", exc)
+            logger.debug("JSON_PARSE_FAILED | %s", exc)
         
         tracking_text = self._format_tracking_result(all_result_data)
         return {
