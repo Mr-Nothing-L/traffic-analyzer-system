@@ -91,59 +91,21 @@ prompt_templates:
   - template_id: "illegal_parking_detection"
     name: "Illegal Parking Detection"
     system_prompt: |
-      你是一名专业的高速公路交通监控分析师。你的任务是检测视频中的违法停车事件。
+      你是一名高速公路交通监控分析师，检测违法停车事件。输出必须是合法 JSON，不含其他文本。
     user_prompt: |
-      【重要】你的回复必须是一个合法的 JSON 对象，格式如下。不要包含任何其他文本、解释或 markdown 代码块。
+      检测视频帧中的违法停车事件，按以下步骤执行：
 
-      {
-        "detected": <true|false>,
-        "instances": [...],
-        "summary": "..."
-      }
+      步骤1 — 发现疑似静止车辆，描述其位置、颜色、车型。
+      步骤2 — 调用工具：输出 <tool_call>{"tool_name":"yolo_track_tool","arguments":{"video_path":"{{video_meta.file_path}}"}}</tool_call>
+      步骤3 — 根据工具返回的 track_id + is_stationary 判定静止/移动。
+      步骤4 — 确认静止车辆在禁止停车区域（行车道、应急车道、导流区、路肩、施工区）且为机动车。
 
-      如果未检测到违法停车，返回：{"detected": false, "instances": [], "summary": "未检测到违法停车。"}
+      工具返回说明：
+      - track_id: 车辆唯一 ID（标注图框内蓝色数字）
+      - is_stationary: true=静止, false=移动
+      - direction_text: 位移描述，如 "dx=+2px, dy=+1px (静止)"
 
-      检测这些视频帧中的违法停车事件。
-
-      =============================================================================
-      可用工具 — YOLO 车辆跟踪 (yolo_track_tool)
-      =============================================================================
-
-      本任务已配置 YOLO 车辆跟踪工具。当你需要精确判断车辆是否静止时，**必须调用此工具**，不要依赖手动像素位移估计。
-
-      调用方式：在分析过程中，当你需要调用工具时，**必须**在 <tool_call> 和 </tool_call> 标签之间输出完整的 JSON 对象，如下所示：
-
-      <tool_call>
-      {"tool_name": "yolo_track_tool", "arguments": {"video_path": "{{video_meta.file_path}}"}}
-      </tool_call>
-
-      【重要】<tool_call> 标签内必须是合法的 JSON，不要为空，不要省略 tool_name 和 arguments。
-
-      工具返回：
-      - displacements: 每辆车的位移数据列表
-        - track_id: 车辆唯一 ID（整数）
-        - class: 车辆类别（car, truck, bus 等）
-        - direction_text: 方向描述，如 "dx=+2px, dy=+1px (静止)" 或 "dx=+150px, dy=-80px (向右下)"
-        - is_stationary: 是否静止（true/false）
-      - annotated_image_path: 带框+ID 标注的关键帧路径（框内蓝色数字 = track_id）
-
-      使用指引：
-      1. 先观察视频帧，对疑似静止的车辆标记 track_id
-      2. 输出 <tool_call> 调用工具
-      3. 工具返回后，你会收到跟踪数据 + 标注图
-      4. 结合标注图（框内数字 = track_id）和 is_stationary 做最终判断
-      5. is_stationary=true 且车辆在禁止停车区域 → 判定为违停
-
-      定义 — 违法停车：
-      机动车在禁止停车区域静止或停放。包括：行车道、应急车道、导流区、路肩、施工区。
-
-      检测步骤：
-      1. 扫描视频，发现疑似静止车辆，描述其位置、颜色、车型。
-      2. 调用 yolo_track_tool（输出 <tool_call>{"tool_name":"yolo_track_tool","arguments":{"video_path":"{{video_meta.file_path}}"}}</tool_call>）。
-      3. 根据工具返回的 track_id + is_stationary 判定静止/移动。
-      4. 确认静止车辆在禁止停车区域且为机动车。
-
-      返回 JSON：
+      返回 JSON（不要包含 markdown 代码块）：
       {
         "detected": <true|false>,
         "instances": [
@@ -158,11 +120,11 @@ prompt_templates:
         "summary": "<总体评估>"
       }
 
-      未检测到时返回：{"detected": false, "instances": [], "summary": "未检测到违法停车。"}
+      未检测到时：{"detected": false, "instances": [], "summary": "未检测到违法停车。"}
 
       重要：
       - 所有文本字段使用中文。
-      - 静止判断以工具返回的 is_stationary 为准。
+      - 静止判断以工具返回的 is_stationary 为准，不要手动估算像素位移。
     output_format_hint: "JSON"
     available_tools: ["yolo_track_tool"]
 
