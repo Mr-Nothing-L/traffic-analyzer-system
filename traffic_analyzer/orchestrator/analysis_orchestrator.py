@@ -247,6 +247,18 @@ class AnalysisOrchestrator:
                     adjudication_reasoning=adj_reasoning,
                     reasoning_chain=adj_reasoning_chain or None,
                     audit_log=adj_audit_log or None,
+                    expert_candidates=[
+                        {
+                            "event_id": c.event_id,
+                            "event_name": c.event_name,
+                            "detected": c.detected,
+                            "confidence": c.confidence,
+                            "summary": c.summary,
+                            "reasoning": c.instances[0].reasoning if c.instances else "",
+                            "raw_vlm_text": c.raw_vlm_text[:500] if c.raw_vlm_text else "",
+                        }
+                        for c in context.event_candidates.values()
+                    ],
                 )
                 _tc.result(
                     f"binary_code={report.binary_encoding.encoding_string}"
