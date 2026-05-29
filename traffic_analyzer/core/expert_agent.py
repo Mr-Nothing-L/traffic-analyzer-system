@@ -1067,8 +1067,11 @@ class ExpertAgent:
 
         # Parse second response
         candidate = parse_expert_response(second_response, self.category)
+        
+        # Build raw_vlm_text (handle None first_response for Native API path)
+        first_text = getattr(first_response, 'raw_text', '[Native API tool call]') if first_response else '[Native API tool call]'
         candidate.raw_vlm_text = (
-            f"[First call]\n{first_response.raw_text}\n\n"
+            f"[First call]\n{first_text}\n\n"
             f"[Second call with tool results]\n{second_response.raw_text}"
         )
         logger.info(
