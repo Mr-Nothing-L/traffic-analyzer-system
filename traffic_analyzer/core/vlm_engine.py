@@ -198,11 +198,23 @@ def _extract_json_from_text(text: str) -> Dict[str, Any]:
             except json.JSONDecodeError:
                 pass
 
-        # Fallback: first top-level { ... } or [ ... ]
-        match = re.search(r"(\{.*\}|\[.*\])", text, re.DOTALL)
-        if match:
+        # Fallback: find all JSON objects and return the second one if available
+        # (VLM sometimes outputs a partial JSON first, then a corrected one)
+        matches = re.findall(r"\{[\s\S]*?\}", text)
+        if len(matches) >= 2:
+            # Try second JSON first (often the corrected one)
+            for candidate in [matches[1], matches[0]]:
+                try:
+                    result = json.loads(candidate)
+                    if isinstance(result, dict):
+                        return result
+                    if isinstance(result, list) and result and isinstance(result[0], dict):
+                        return result[0]
+                except json.JSONDecodeError:
+                    continue
+        elif len(matches) == 1:
             try:
-                result = json.loads(match.group(1))
+                result = json.loads(matches[0])
                 if isinstance(result, dict):
                     return result
                 if isinstance(result, list) and result and isinstance(result[0], dict):
