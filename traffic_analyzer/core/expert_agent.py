@@ -258,6 +258,12 @@ class ExpertAgent:
         annotated_image = None
         
         # If tools configured, use Anthropic Native API directly
+        logger.info(
+            "[expert_agent:detect] TOOL_CHECK | event_id=%d tools=%s provider=%s",
+            self.category.event_id,
+            self.category.tools,
+            self.vlm_engine.provider,
+        )
         if self.category.tools and self.vlm_engine.provider == "anthropic":
             try:
                 native_result = self._execute_anthropic_native_tools(
