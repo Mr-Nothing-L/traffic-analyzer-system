@@ -8,6 +8,7 @@ exclusion logic. Adjudication happens later in the pipeline.
 from __future__ import annotations
 
 import logging
+import json
 from typing import Any, Dict, List, Optional, Tuple
 
 from traffic_analyzer.core.config_manager import ConfigManager
@@ -779,11 +780,36 @@ class ExpertAgent:
                 raw_text += block.text
         
         if not tool_uses:
-            logger.info(
-                "[expert_agent:_execute_anthropic_native_tools] NO_TOOL_USES | text=%s",
-                raw_text[:200],
-            )
-            return None
+            # Check if text contains <tool_call> tags (fallback for models that don't support native tool_use)
+            if "<tool_call>" in raw_text:
+                logger.info(
+                    "[expert_agent:_execute_anthropic_native_tools] TOOL_CALL_IN_TEXT | text_len=%d",
+                    len(raw_text),
+                )
+                # Parse tool call from text
+                import re
+                tool_call_match = re.search(r'<tool_call>\s*(\{.*?\})\s*</tool_call>', raw_text, re.DOTALL)
+                if tool_call_match:
+                    try:
+                        tool_json = json.loads(tool_call_match.group(1))
+                        tool_uses.append({
+                            "name": tool_json.get("tool_name", ""),
+                            "id": "tool_call_from_text",
+                            "input": tool_json.get("arguments", {}),
+                        })
+                        logger.info(
+                            "[expert_agent:_execute_anthropic_native_tools] PARSED_FROM_TEXT | tool=%s",
+                            tool_json.get("tool_name"),
+                        )
+                    except Exception as exc:
+                        logger.warning("JSON_PARSE_FAILED | %s", exc)
+            
+            if not tool_uses:
+                logger.info(
+                    "[expert_agent:_execute_anthropic_native_tools] NO_TOOL_USES | text=%s",
+                    raw_text[:200],
+                )
+                return None
         
         logger.info(
             "[expert_agent:_execute_anthropic_native_tools] TOOL_USES_FOUND | count=%d",
