@@ -950,8 +950,8 @@ class ExpertAgent:
             available_tools=[],  # Don't show tools again in second call
         )
 
-        # Build image list: original frames + annotated image
-        second_images = list(images)
+        # Build image list: only annotated image (not original frames)
+        second_images = []
         if annotated_image:
             second_images.append(annotated_image)
             logger.debug(
