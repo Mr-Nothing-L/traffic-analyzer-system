@@ -43,6 +43,7 @@ class ReportGenerator:
         adjudication_reasoning: str = "",
         reasoning_chain: Optional[List[Dict[str, Any]]] = None,
         audit_log: Optional[List[Any]] = None,
+        expert_candidates: Optional[List[Dict[str, Any]]] = None,
     ) -> Report:
         """
         Build a complete :class:`Report` from analysis artefacts.
@@ -86,6 +87,7 @@ class ReportGenerator:
                 scene_summary=scene_info or SceneInfo(),
                 overall_traffic_description=overall_desc,
                 event_results=sorted_results,
+                expert_candidates=expert_candidates or [],
                 binary_encoding=binary_encoding,
                 final_classification=final_classification,
                 disposal_recommendations=disposal_recommendations,
@@ -335,7 +337,7 @@ class ReportGenerator:
             lines.append("")
 
             for result in report.event_results:
-                lines.extend(self._render_event_result(result))
+                lines.extend(self._render_event_result(result, report.expert_candidates))
 
         # ---- Final Classification ------------------------------------------
         lines.append("## 最终分类")
@@ -715,7 +717,7 @@ class ReportGenerator:
 
         return "\n".join(result)
 
-    def _render_event_result(self, result: EventResult) -> List[str]:
+    def _render_event_result(self, result: EventResult, expert_candidates: Optional[List[Dict[str, Any]]] = None) -> List[str]:
         """Render a single :class:`EventResult` as Markdown lines."""
         try:
             lines: List[str] = []
@@ -726,7 +728,21 @@ class ReportGenerator:
             lines.append(name_line)
             lines.append("")
 
+            # 展示专家原始输出（裁决前）
+            if expert_candidates:
+                candidate = next((c for c in expert_candidates if c.get("event_id") == result.event_id), None)
+                if candidate:
+                    lines.append("#### 专家原始输出（裁决前）")
+                    lines.append(f"- **检测到**: {'是' if candidate.get('detected') else '否'}")
+                    lines.append(f"- **置信度**: {candidate.get('confidence', 0):.2f}")
+                    if candidate.get('summary'):
+                        lines.append(f"- **摘要**: {candidate['summary']}")
+                    if candidate.get('reasoning'):
+                        lines.append(f"- **推理**: {candidate['reasoning']}")
+                    lines.append("")
+
             # Main result info as a compact table
+            lines.append("#### 裁决后结果")
             lines.append("| 字段 | 内容 |")
             lines.append("|------|------|")
             lines.append(f"| 是否检测到 | {'**是**' if result.detected else '否'} |")

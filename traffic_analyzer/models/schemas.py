@@ -383,6 +383,7 @@ class Report(BaseModel):
     scene_summary: SceneInfo
     overall_traffic_description: str = ""
     event_results: List[EventResult] = Field(default_factory=list)
+    expert_candidates: List[Dict[str, Any]] = Field(default_factory=list, description="裁决前专家原始输出，用于debug")
     binary_encoding: BinaryEncoding = Field(default_factory=BinaryEncoding)
     final_classification: str = ""
     disposal_recommendations: List[str] = Field(default_factory=list)
