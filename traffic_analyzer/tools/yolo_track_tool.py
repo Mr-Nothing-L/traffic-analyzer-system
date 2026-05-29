@@ -14,6 +14,7 @@ from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
+import torch
 from ultralytics import YOLO
 
 logger = logging.getLogger(__name__)
@@ -97,7 +98,7 @@ class YoloTrackTool:
         model_path: str = "yolov8n.pt",
         stationary_threshold: float = 5.0,  # 静止阈值(像素)
         conf_threshold: float = 0.3,
-        device: str = "cpu",
+        device: str = "cuda" if torch.cuda.is_available() else "cpu",
     ):
         self.model_path = model_path
         self.stationary_threshold = stationary_threshold
