@@ -267,6 +267,7 @@ class EventResult(BaseModel):
     expert_raw_description: str = Field(default="", description="ExpertAgent原始自然语言描述")
     cv_evidence: str = Field(default="", description="CV帧差检测证据")
     tracking_evidence: str = Field(default="", description="YOLO车辆跟踪证据")
+    tool_results: List[Dict[str, Any]] = Field(default_factory=list, description="工具调用结果列表")
 
 
 class EventCandidate(BaseModel):
@@ -281,6 +282,7 @@ class EventCandidate(BaseModel):
     raw_vlm_text: str = Field(default="", description="VLM原始自然语言回复全文")
     cv_evidence: str = Field(default="", description="CV帧差检测证据")
     tracking_evidence: str = Field(default="", description="YOLO车辆跟踪证据")
+    tool_results: List[Dict[str, Any]] = Field(default_factory=list, description="工具调用结果列表")
 
 
 class AuditEntry(BaseModel):

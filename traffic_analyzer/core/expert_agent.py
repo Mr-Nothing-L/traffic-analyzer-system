@@ -980,6 +980,9 @@ class ExpertAgent:
         # Parse second response
         candidate = parse_expert_response(second_response, self.category)
         
+        # Store tool results for report generation
+        candidate.tool_results = [tool_result] if tool_result else []
+        
         # Build raw_vlm_text (handle None first_response for Native API path)
         first_text = getattr(first_response, 'raw_text', '[Native API tool call]') if first_response else '[Native API tool call]'
         candidate.raw_vlm_text = (
