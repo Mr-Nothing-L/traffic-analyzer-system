@@ -932,6 +932,7 @@ class ExpertAgent:
             "工具调用结果 — YOLO 车辆跟踪数据\n"
             "============================================================\n"
             f"{tool_result['tracking_text']}\n"
+            "\n【重要】基于以上跟踪数据，重新判断并输出 JSON。必须包含 detected 字段。"
         )
 
         enhanced_user += context_section + tool_section
@@ -950,8 +951,13 @@ class ExpertAgent:
             available_tools=[],  # Don't show tools again in second call
         )
 
-        # Build image list: only annotated image (not original frames)
+        # Build image list: annotated image + first/last original frames for context
         second_images = []
+        if images:
+            # Add first and last frame for temporal context
+            second_images.append(images[0])
+            if len(images) > 1:
+                second_images.append(images[-1])
         if annotated_image:
             second_images.append(annotated_image)
             logger.debug(
