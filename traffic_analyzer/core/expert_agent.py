@@ -766,50 +766,64 @@ class ExpertAgent:
             )
             return None
         
-        # Extract tool uses
+        # Extract tool uses (standard Anthropic API)
         tool_uses = []
         raw_text = ""
-        for block in response.content:
-            if getattr(block, "type", None) == "tool_use":
-                tool_uses.append({
-                    "name": getattr(block, "name", ""),
-                    "id": getattr(block, "id", ""),
-                    "input": getattr(block, "input", {}),
-                })
-            elif getattr(block, "type", None) == "text":
-                raw_text += block.text
+        
+        # Check stop_reason first (standard Anthropic pattern)
+        if getattr(response, "stop_reason", None) == "tool_use":
+            for block in response.content:
+                if getattr(block, "type", None) == "tool_use":
+                    tool_uses.append({
+                        "name": getattr(block, "name", ""),
+                        "id": getattr(block, "id", ""),
+                        "input": getattr(block, "input", {}),
+                    })
+                elif getattr(block, "type", None) == "text":
+                    raw_text += block.text
+            logger.info(
+                "[expert_agent:_execute_anthropic_native_tools] NATIVE_TOOL_USE | count=%d",
+                len(tool_uses),
+            )
+        else:
+            # No native tool_use — collect text for fallback parsing
+            for block in response.content:
+                if getattr(block, "type", None) == "text":
+                    raw_text += block.text
+            logger.info(
+                "[expert_agent:_execute_anthropic_native_tools] NO_NATIVE_TOOL | stop_reason=%s text_len=%d",
+                getattr(response, "stop_reason", "unknown"),
+                len(raw_text),
+            )
+        
+        # Fallback: parse <tool_call> from text if native tool_use not available
+        if not tool_uses and "<tool_call>" in raw_text:
+            logger.info(
+                "[expert_agent:_execute_anthropic_native_tools] TOOL_CALL_IN_TEXT | attempting parse",
+            )
+            import re
+            tool_call_match = re.search(r'<tool_call>\s*(\{.*?\})\s*</tool_call>', raw_text, re.DOTALL)
+            if tool_call_match:
+                try:
+                    tool_json = json.loads(tool_call_match.group(1))
+                    tool_uses.append({
+                        "name": tool_json.get("tool_name", ""),
+                        "id": "tool_call_from_text",
+                        "input": tool_json.get("arguments", {}),
+                    })
+                    logger.info(
+                        "[expert_agent:_execute_anthropic_native_tools] PARSED_FROM_TEXT | tool=%s",
+                        tool_json.get("tool_name"),
+                    )
+                except Exception as exc:
+                    logger.warning("JSON_PARSE_FAILED | %s", exc)
         
         if not tool_uses:
-            # Check if text contains <tool_call> tags (fallback for models that don't support native tool_use)
-            if "<tool_call>" in raw_text:
-                logger.info(
-                    "[expert_agent:_execute_anthropic_native_tools] TOOL_CALL_IN_TEXT | text_len=%d",
-                    len(raw_text),
-                )
-                # Parse tool call from text
-                import re
-                tool_call_match = re.search(r'<tool_call>\s*(\{.*?\})\s*</tool_call>', raw_text, re.DOTALL)
-                if tool_call_match:
-                    try:
-                        tool_json = json.loads(tool_call_match.group(1))
-                        tool_uses.append({
-                            "name": tool_json.get("tool_name", ""),
-                            "id": "tool_call_from_text",
-                            "input": tool_json.get("arguments", {}),
-                        })
-                        logger.info(
-                            "[expert_agent:_execute_anthropic_native_tools] PARSED_FROM_TEXT | tool=%s",
-                            tool_json.get("tool_name"),
-                        )
-                    except Exception as exc:
-                        logger.warning("JSON_PARSE_FAILED | %s", exc)
-            
-            if not tool_uses:
-                logger.info(
-                    "[expert_agent:_execute_anthropic_native_tools] NO_TOOL_USES | text=%s",
-                    raw_text[:200],
-                )
-                return None
+            logger.info(
+                "[expert_agent:_execute_anthropic_native_tools] NO_TOOL_USES | text_preview=%s",
+                raw_text[:200].replace('\n', ' '),
+            )
+            return None
         
         logger.info(
             "[expert_agent:_execute_anthropic_native_tools] TOOL_USES_FOUND | count=%d",
