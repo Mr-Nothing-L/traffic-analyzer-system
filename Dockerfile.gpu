@@ -1,21 +1,20 @@
 # ============================================
 # Traffic Agent - Docker Environment (GPU)
-# CUDA 11.4 + Python 3.11 + YOLOv8 + VLM APIs
+# Python 3.11 + YOLOv8 + CUDA 11.4
 # ============================================
 
-FROM nvidia/cuda:11.4.3-cudnn8-runtime-ubuntu20.04
+FROM nvidia/cuda:11.4.3-runtime-ubuntu20.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONPATH=/app
+ENV PYTHONPATH=/data
 
-# Install Python 3.11 + system deps
+# Install Python 3.11 and system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     software-properties-common \
     && add-apt-repository ppa:deadsnakes/ppa \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends \
+    && apt-get update && apt-get install -y --no-install-recommends \
     python3.11 \
     python3.11-pip \
     python3.11-dev \
@@ -32,26 +31,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Use python3.11 as default pip/python
-RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1 \
+# Set python3.11 as default
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 \
     && update-alternatives --install /usr/bin/pip pip /usr/bin/pip3 1
 
 WORKDIR /data
 
 # Copy and install Python dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
 
-# Install YOLOv8 + tracking dependencies (GPU torch with CUDA 11.4)
-RUN pip install --no-cache-dir \
+# Install torch CUDA 11.6 (compatible with CUDA 11.4 driver)
+RUN pip install --no-cache-dir --default-timeout=300 \
+    torch==1.13.1+cu116 torchvision==0.14.1+cu116 --extra-index-url https://download.pytorch.org/whl/cu116 \
+    && pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple \
     ultralytics>=8.0.0 \
-    torch==2.0.1+cu118 \
-    torchvision==0.15.2+cu118 \
-    --extra-index-url https://download.pytorch.org/whl/cu118 \
-    && pip install --no-cache-dir lapx filterpy scipy
+    lapx \
+    filterpy \
+    scipy
 
 # Ensure tools directory is available in PYTHONPATH
-ENV PYTHONPATH=/app:/app/traffic_analyzer/tools:${PYTHONPATH}
+ENV PYTHONPATH=/data:/data/traffic_analyzer/tools:${PYTHONPATH}
 
 # Default: keep container running
 CMD ["tail", "-f", "/dev/null"]
