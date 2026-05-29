@@ -417,7 +417,7 @@ class LLMProviderConfig(BaseModel):
     model: str = "claude-sonnet-4-6"
     max_tokens: int = 4096
     temperature: float = 0.2
-    timeout: float = 120.0
+    timeout: float = 300.0
     max_retries: int = 3
     enable_cache: bool = True
     cache_max_size: int = 128
