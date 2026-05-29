@@ -253,55 +253,65 @@ class ExpertAgent:
         context_vars["tracking_evidence"] = tracking_evidence
 
         # -- 5. First VLM call -------------------------------------------------
+        # If tools are configured, use Native API tool calling (Anthropic only)
+        # Otherwise, use regular call
         first_response = None
-        try:
-            first_response = self.vlm_engine.call(
-                template=template,
-                images=images,
-                context_vars=context_vars,
-                response_schema=_EXPERT_RESPONSE_SCHEMA,
-            )
-        except Exception as exc:
-            logger.error(
-                "[expert_agent:detect] VLM_ERROR | event_id=%d event_name=%s | %s",
-                self.category.event_id,
-                self.category.name_zh,
-                exc,
-                exc_info=True,
-            )
-            error_candidate = EventCandidate(
-                event_id=self.category.event_id,
-                event_name=self.category.name_zh,
-                detected=False,
-                summary=f"VLM call failed: {exc}",
-            )
-            error_candidate.cv_evidence = cv_evidence
-            error_candidate.tracking_evidence = tracking_evidence
-            return error_candidate
-
-        # -- 6. Check for tool calls -------------------------------------------
-        # If this event has configured tools, try Native API first, then fallback to string parsing
         tool_result = None
         annotated_image = None
-        if self.category.tools and first_response:
-            # Try Native API tool calling first (Anthropic only)
-            native_tool_result = self._execute_native_tool_calls(
+        
+        if self.category.tools:
+            # Native API path: single call with tools, then tool execution, then second call
+            native_result = self._execute_native_tool_calls(
                 template, images, context_vars, context
             )
-            if native_tool_result is not None:
-                tool_result, annotated_image = native_tool_result
+            if native_result is not None:
+                tool_result, annotated_image = native_result
                 logger.info(
                     "[expert_agent:detect] NATIVE_TOOL_SUCCESS | event_id=%d event_name=%s",
                     self.category.event_id,
                     self.category.name_zh,
                 )
             else:
-                # Fallback to string-based tool parsing
+                logger.info(
+                    "[expert_agent:detect] NATIVE_TOOL_FAILED | event_id=%d event_name=%s | falling back to regular call",
+                    self.category.event_id,
+                    self.category.name_zh,
+                )
+        
+        # Regular path (no tools or Native API failed)
+        if tool_result is None:
+            try:
+                first_response = self.vlm_engine.call(
+                    template=template,
+                    images=images,
+                    context_vars=context_vars,
+                    response_schema=_EXPERT_RESPONSE_SCHEMA,
+                )
+            except Exception as exc:
+                logger.error(
+                    "[expert_agent:detect] VLM_ERROR | event_id=%d event_name=%s | %s",
+                    self.category.event_id,
+                    self.category.name_zh,
+                    exc,
+                    exc_info=True,
+                )
+                error_candidate = EventCandidate(
+                    event_id=self.category.event_id,
+                    event_name=self.category.name_zh,
+                    detected=False,
+                    summary=f"VLM call failed: {exc}",
+                )
+                error_candidate.cv_evidence = cv_evidence
+                error_candidate.tracking_evidence = tracking_evidence
+                return error_candidate
+            
+            # Check for string-based tool calls in response
+            if self.category.tools and first_response:
                 tool_result, annotated_image = self._execute_tool_calls(
                     first_response, context, images
                 )
 
-        # -- 7. Second VLM call (if tool was called) ---------------------------
+        # -- 6. Second VLM call (if tool was called) ---------------------------
         if tool_result is not None:
             logger.info(
                 "[expert_agent:detect] TOOL_CALL_EXECUTED | event_id=%d event_name=%s | "
