@@ -421,6 +421,7 @@ class AdjudicationStep(PipelineStep):
                     summary=candidate.summary,
                     instances=candidate.instances,
                     expert_raw_description=candidate.raw_vlm_text,
+                    tool_results=candidate.tool_results,
                 )
             )
             context.event_results[candidate.event_id] = event_results[-1]

@@ -734,6 +734,19 @@ class ReportGenerator:
                 lines.append(f"| 摘要 | {result.summary} |")
             if result.reasoning:
                 lines.append(f"| 推理过程 | {result.reasoning} |")
+            # 展示工具调用结果（如果有）
+            if result.tool_results:
+                for tr in result.tool_results:
+                    tool_name = tr.get("tool_name", "unknown")
+                    tool_output = tr.get("output", {})
+                    if tool_name == "yolo_track_tool" and "displacements" in tool_output:
+                        lines.append(f"| 工具调用 | {tool_name} |")
+                        for disp in tool_output["displacements"][:3]:  # 最多展示3辆车
+                            tid = disp.get("track_id", "?")
+                            ist = disp.get("is_stationary", False)
+                            dir_txt = disp.get("direction_text", "")
+                            status = "静止" if ist else "移动"
+                            lines.append(f"| 车辆 {tid} | {status} ({dir_txt}) |")
             lines.append("")
 
             if result.detected and result.instances:

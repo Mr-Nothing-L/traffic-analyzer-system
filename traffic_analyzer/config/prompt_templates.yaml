@@ -133,7 +133,7 @@ prompt_templates:
       1. 先观察视频帧，对疑似静止的车辆标记 track_id
       2. 输出 <tool_call> 调用工具
       3. 工具返回后，你会收到跟踪数据 + 标注图
-      4. 结合标注图（框内蓝色数字 = track_id）和 is_stationary 做最终判断
+      4. 结合标注图（框内数字 = track_id）和 is_stationary 做最终判断
       5. is_stationary=true 且车辆在禁止停车区域 → 判定为违停
 
       定义 — 违法停车：
@@ -147,11 +147,16 @@ prompt_templates:
 
       检查步骤：
       1. 扫描视频帧，识别画面中的每一辆机动车。
-      2. 对疑似静止的车辆，调用 yolo_track_tool 获取客观跟踪数据。
+      2. 对疑似静止的车辆，先描述其特征（位置、颜色、车型），然后调用 yolo_track_tool 获取客观跟踪数据。
       3. 根据工具返回的 is_stationary 判断车辆是否静止（true=静止，false=移动）。
       4. 确认静止车辆所在区域（行车道、应急车道、导流区、路肩）。
       5. 排除非机动车：确认静止车辆是机动车，而非摩托车、电动自行车、自行车。
       6. 施工区域特殊处理：施工区域内的车辆停车需标注为违法停车。
+
+      输出要求（分步骤）：
+      步骤1 — 车辆发现：描述疑似违停车辆的位置、颜色、车型（如"应急车道左侧白色小轿车"）。
+      步骤2 — 工具调用：输出 <tool_call> 调用 yolo_track_tool。
+      步骤3 — 结果分析：根据工具返回的 track_id 和 is_stationary 做判定。
 
       返回 JSON：
       {
@@ -161,11 +166,11 @@ prompt_templates:
             "start_time_sec": <大致开始时间（秒）>,
             "end_time_sec": <大致结束时间（秒）>,
             "evidence_frames": [<帧索引>],
-            "description": "<观察到的内容：车辆类型、颜色、停放位置、状态描述>",
-            "reasoning": "<简要说明：车辆类型确认、静止判断依据（工具返回的 is_stationary 和 track_id）、所在区域、排除规则检查结果>"
+            "description": "<车辆类型、颜色、停放位置>",
+            "reasoning": "<步骤1发现的车辆特征> → 调用工具获取 track_id=X, is_stationary=<true|false>, 位移=<px> → 判定为<静止/移动>车辆 → 位于<区域> → 确认是机动车 → 判定为违停"
           }
         ],
-        "summary": "<总体评估：共检测到几辆违法停车车辆，分别位于什么位置，有无特殊情况>"
+        "summary": "<总体评估>"
       }
 
       如果未检测到违法停车，返回：
