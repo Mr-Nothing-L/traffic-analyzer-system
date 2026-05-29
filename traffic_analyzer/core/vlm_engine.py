@@ -887,13 +887,15 @@ class VLMInferenceEngine:
                 parsed_data = _extract_json_from_text(raw_text)
                 if response_schema:
                     _validate_schema_basic(parsed_data, response_schema)
+            else:
+                # Tool use expected: skip JSON parsing, return raw text for tool parsing
+                logger.info(
+                    "[vlm_engine:call_with_tools] TOOL_USE_DETECTED | template_id=%s tool_uses=%d",
+                    template_id,
+                    len(tool_uses),
+                )
             
             success = True
-            logger.info(
-                "[vlm_engine:call_with_tools] FIRST_CALL | template_id=%s tool_uses=%d",
-                template_id,
-                len(tool_uses),
-            )
         except Exception as exc:
             error_message = str(exc)
             logger.error(
