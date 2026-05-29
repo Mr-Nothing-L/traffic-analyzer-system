@@ -187,69 +187,9 @@ class ExpertAgent:
         if context.video_meta is not None:
             context_vars["video_meta"] = context.video_meta.model_dump()
 
-        # -- Vehicle tracking / CV supplement for reversing detection (event_id=7) --
+        # -- CV evidence (legacy, now handled by yolo_track_tool via Native API) --
         cv_evidence = ""
         tracking_evidence = ""
-        tracking_enabled = False
-        cv_enabled = False
-        if self.category.event_id == 7 and context.config is not None:
-            tracking_enabled = getattr(context.config, "tracking_enabled", False)
-            cv_enabled = getattr(context.config, "cv_enabled", False)
-
-        if self.category.event_id == 7 and tracking_enabled:
-            tracker_result = None
-            try:
-                from traffic_analyzer.core.vehicle_tracker import YOLOVehicleTracker
-
-                cache_key = "vehicle_tracking_evidence"
-                cached = context.get_local(cache_key)
-                if cached is not None:
-                    tracker_result = cached
-                else:
-                    model_path = self.category.yolo_model_path if hasattr(self.category, 'yolo_model_path') else "traffic_analyzer/models/yolo/yolov8n.pt"
-                    target_fps = 5.0
-                    device = "cpu"
-                    conf_thresh = 0.3
-                    if context.config is not None:
-                        model_path = getattr(context.config, 'yolo_model_path', model_path)
-                        target_fps = getattr(context.config, 'tracking_target_fps', target_fps)
-                        device = getattr(context.config, 'tracking_device', device)
-                        conf_thresh = getattr(context.config, 'tracking_confidence_threshold', conf_thresh)
-
-                    tracker = YOLOVehicleTracker(
-                        model_path=model_path,
-                        target_fps=target_fps,
-                        device=device,
-                        confidence_threshold=conf_thresh,
-                    )
-                    tracker_result = tracker.detect(context)
-                    context.set_local(cache_key, tracker_result)
-
-                tracking_evidence = tracker_result.evidence_text or tracker_result.to_prompt_text()
-                cv_evidence = tracking_evidence  # backward compat
-
-            except Exception as exc:
-                logger.error(
-                    "[expert_agent:detect] YOLO_ERROR | event_id=%d event_name=%s | %s",
-                    self.category.event_id,
-                    self.category.name_zh,
-                    exc,
-                    exc_info=True,
-                )
-                if cv_enabled:
-                    from traffic_analyzer.core.reversing_cv_detector import ReversingCVDetector
-                    cv_detector = ReversingCVDetector()
-                    cv_result = cv_detector.detect(context)
-                    cv_evidence = cv_result.evidence
-                    tracking_evidence = cv_evidence
-
-        elif self.category.event_id == 7 and cv_enabled:
-            from traffic_analyzer.core.reversing_cv_detector import ReversingCVDetector
-            cv_detector = ReversingCVDetector()
-            cv_result = cv_detector.detect(context)
-            cv_evidence = cv_result.evidence
-            tracking_evidence = cv_evidence
-
         context_vars["cv_evidence"] = cv_evidence
         context_vars["tracking_evidence"] = tracking_evidence
 
