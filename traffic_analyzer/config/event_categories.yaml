@@ -208,11 +208,6 @@ adjudication_rules:
     description: "施工区域内作业的工程车辆（如压路机、洒水车等）的往返移动不属于逆行/倒车。施工区域内正常的施工车辆移动不触发逆行事件。"
     priority: 85
 
-  - rule_id: "construction_excludes_parking"
-    name: "施工停车排除违停"
-    description: "施工区域内停放的施工车辆（挖掘机、吊车、工程车等）不属于违法停车。只有非施工的普通机动车在施工区域无故停放才考虑违停。"
-    priority: 85
-
   - rule_id: "emergency_parking_both"
     name: "应急车道静止触发双事件"
     description: "当车辆在应急车道上静止停放时，应同时触发'违法停车'和'应急车道占用'两个事件。这两个事件不是互斥的，可以同时存在。"
