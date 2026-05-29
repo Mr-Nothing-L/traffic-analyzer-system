@@ -63,3 +63,16 @@ error/
 !requirements.txt
 !analyze.sh
 yolov8n.pt
+
+# Docker / deployment configs (local only)
+Dockerfile
+Dockerfile.gpu
+Dockerfile.cuda
+docker-compose.yml
+docker-compose.gpu.yml
+
+# Docs images (large binaries)
+docs/v4.5_images/
+
+# HTML artifacts
+architecture_diagram.html
