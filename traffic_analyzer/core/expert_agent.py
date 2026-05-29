@@ -738,6 +738,12 @@ class ExpertAgent:
             return None
         
         try:
+            logger.info(
+                "[expert_agent:_execute_anthropic_native_tools] API_CALL | model=%s tools=%d messages=%d",
+                self.vlm_engine.config.model,
+                len(tool_definitions),
+                len(messages),
+            )
             response = client.messages.create(
                 model=self.vlm_engine.config.model,
                 max_tokens=self.vlm_engine.config.max_tokens,
@@ -746,6 +752,10 @@ class ExpertAgent:
                 messages=messages,
                 tools=tool_definitions,
                 tool_choice={"type": "auto"},
+            )
+            logger.info(
+                "[expert_agent:_execute_anthropic_native_tools] API_RESPONSE | blocks=%d",
+                len(response.content),
             )
         except Exception as exc:
             logger.error(
