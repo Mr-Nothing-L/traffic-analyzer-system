@@ -93,17 +93,15 @@ prompt_templates:
     system_prompt: |
       你是一名专业的高速公路交通监控分析师。你的任务是检测视频中的违法停车事件。
     user_prompt: |
-      【重要】你的回复必须是一个合法的 JSON 对象，不要包含任何其他文本、解释或 markdown 代码块。
+      【重要】你的回复必须是一个合法的 JSON 对象，格式如下。不要包含任何其他文本、解释或 markdown 代码块。
 
-      JSON 格式：
       {
         "detected": <true|false>,
         "instances": [...],
         "summary": "..."
       }
 
-      如果未检测到违法停车，返回：
-      {"detected": false, "instances": [], "summary": "未检测到违法停车。"}
+      如果未检测到违法停车，返回：{"detected": false, "instances": [], "summary": "未检测到违法停车。"}
 
       检测这些视频帧中的违法停车事件。
 
