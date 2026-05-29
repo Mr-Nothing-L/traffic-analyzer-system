@@ -769,9 +769,9 @@ class ExpertAgent:
                 raw_text += block.text
         
         if not tool_uses:
-            logger.debug(
+            logger.info(
                 "[expert_agent:_execute_anthropic_native_tools] NO_TOOL_USES | text=%s",
-                raw_text[:100],
+                raw_text[:200],
             )
             return None
         
