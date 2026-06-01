@@ -117,7 +117,8 @@ class YoloTrackTool:
         try:
             logger.info(f"Loading YOLO model from {self.model_path}")
             self._model = YOLO(self.model_path)
-            logger.info("YOLO model loaded successfully")
+            self._model.to(self.device)
+            logger.info(f"YOLO model loaded successfully on {self.device}")
             return self._model
         except Exception as e:
             logger.error(f"Failed to load YOLO model: {e}")
