@@ -193,11 +193,109 @@ class ExpertAgent:
         context_vars["cv_evidence"] = cv_evidence
         context_vars["tracking_evidence"] = tracking_evidence
 
-        # -- 5. First VLM call -------------------------------------------------
+        # -- 5. Pre-execute YOLO for event 0/7 (direct injection) --------------
+        # For illegal parking (0) and reversing (7), run YOLO directly before
+        # the VLM call and feed annotated frames + tracking data into the prompt.
+        # This eliminates the first tool-call VLM round-trip.
+        if self.category.event_id in (0, 7) and context.video_meta:
+            try:
+                from traffic_analyzer.tools.yolo_track_tool import YoloTrackTool
+                import torch
+
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+                tool = YoloTrackTool(device=device)
+                yolo_result = tool.track(
+                    context.video_meta.file_path, output_dir="/tmp"
+                )
+
+                if yolo_result.success:
+                    result_dict = yolo_result.to_dict()
+                    tracking_text = self._format_tracking_result(result_dict)
+                    context_vars["tracking_evidence"] = tracking_text
+
+                    annotated_image = result_dict.get("annotated_image_path")
+
+                    # Inject tracking data into the user prompt
+                    enhanced_user = template.user_prompt or ""
+                    yolo_section = (
+                        "\n\n============================================================\n"
+                        "YOLO 车辆跟踪数据（已自动获取）\n"
+                        "============================================================\n"
+                        f"{tracking_text}\n"
+                        "\n【重要】基于以上跟踪数据进行分析判断，不要依赖主观视觉估算。"
+                    )
+                    enhanced_user += yolo_section
+
+                    # Rebuild template without tools (data already injected)
+                    template = PromptTemplate(
+                        template_id=template.template_id,
+                        name=template.name,
+                        version=template.version,
+                        system_prompt=template.system_prompt,
+                        user_prompt=enhanced_user,
+                        output_format_hint=template.output_format_hint,
+                        example_input=template.example_input,
+                        example_output=template.example_output,
+                        traffic_percentage=template.traffic_percentage,
+                        available_tools=[],  # no tool calling needed
+                    )
+
+                    # Add annotated image to the image list
+                    if annotated_image:
+                        images.append(annotated_image)
+                        logger.info(
+                            "[expert_agent:detect] PRE_YOLO_IMAGE | event_id=%d path=%s",
+                            self.category.event_id,
+                            annotated_image,
+                        )
+
+                    # Single VLM call — no first/second split needed
+                    logger.info(
+                        "[expert_agent:detect] PRE_YOLO_SINGLE_CALL | event_id=%d event_name=%s",
+                        self.category.event_id,
+                        self.category.name_zh,
+                    )
+                    response = self.vlm_engine.call(
+                        template=template,
+                        images=images,
+                        context_vars=context_vars,
+                        response_schema=_EXPERT_RESPONSE_SCHEMA,
+                    )
+                    candidate = parse_expert_response(response, self.category)
+                    candidate.tracking_evidence = tracking_text
+                    if annotated_image:
+                        candidate.tool_results = [{
+                            "tool_name": "yolo_track_tool",
+                            "result": result_dict,
+                            "tracking_text": tracking_text,
+                        }]
+                    logger.info(
+                        "[expert_agent:detect] PRE_YOLO_COMPLETE | event_id=%d detected=%s conf=%.2f",
+                        self.category.event_id,
+                        candidate.detected,
+                        candidate.confidence,
+                    )
+                    return candidate
+                else:
+                    logger.warning(
+                        "[expert_agent:detect] PRE_YOLO_NO_DATA | event_id=%d msg=%s",
+                        self.category.event_id,
+                        yolo_result.error_message or "no vehicles",
+                    )
+                    context_vars["tracking_evidence"] = "未检测到车辆跟踪数据。"
+            except Exception as exc:
+                logger.warning(
+                    "[expert_agent:detect] PRE_YOLO_FAILED | event_id=%d | %s",
+                    self.category.event_id,
+                    exc,
+                )
+                # Fall through to the normal two-call tool-based path
+
+        # -- 6. First VLM call -------------------------------------------------
         first_response = None
         tool_result = None
         annotated_image = None
-        
+
         # If tools configured, use Anthropic Native API directly
         if self.category.tools and self.vlm_engine.provider == "anthropic":
             try:
@@ -875,7 +973,7 @@ class ExpertAgent:
 
         for disp in displacements:
             track_id = disp.get("track_id", "?")
-            cls = disp.get("class", "unknown")
+            cls = disp.get("class") or disp.get("vehicle_class", "unknown")
             direction = disp.get("direction_text", "未知")
             distance = disp.get("distance_pixels", 0)
             is_stationary = disp.get("is_stationary", False)
