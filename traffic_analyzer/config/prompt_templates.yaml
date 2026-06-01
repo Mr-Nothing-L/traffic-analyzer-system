@@ -119,6 +119,8 @@ prompt_templates:
     user_prompt: |
       检测这些视频帧中的违法停车事件。
 
+      YOLO 车辆跟踪数据已自动提供（见 prompt 末尾的跟踪数据区块）。
+
       定义 — 违法停车：
       机动车在道路上由行驶状态变为静止状态，且持续静止的交通事件。
       - 只针对机动车（摩托车、非机动车不算）
@@ -131,8 +133,8 @@ prompt_templates:
       - 两者可以同时存在：车辆在应急车道上静止 → 既是违停也是应急车道占用
 
       检查步骤：
-        1. 扫描所有道路上的车辆（行车道、应急车道、导流区、路肩）。
-        2. 判断每辆车是否静止。静止判断必须以工具返回的 is_stationary 为准，不要手动估算像素位移。
+        1. 结合视频帧和 YOLO 跟踪数据，扫描所有道路上的车辆。
+        2. 判断每辆车是否静止。静止判断必须以 YOLO 返回的 is_stationary 为准，不要手动估算像素位移。
         3. 对静止车辆，记录：
            - 车辆类型、颜色
            - 所在区域（行车道/应急车道/导流区/路肩）
@@ -153,7 +155,7 @@ prompt_templates:
             "end_time_sec": <秒>,
             "evidence_frames": [<帧>],
             "description": "<区域+颜色+车型+静止状态>",
-            "reasoning": "发现<车辆特征> → 工具返回 track_id=<X>, is_stationary=<true|false>, 位移=<px>, 位于<区域> → 判定为违法停车"
+            "reasoning": "发现<车辆特征> → YOLO track_id=<X>, is_stationary=<true|false>, 位移=<px>, 位于<区域> → 判定为违法停车"
           }
         ],
         "summary": "<总体评估>"
@@ -163,10 +165,10 @@ prompt_templates:
 
       重要：
       - 所有文本字段使用中文。
-      - 静止判断以工具返回的 is_stationary 为准，不要手动估算像素位移。
+      - 静止判断以 YOLO 返回的 is_stationary 为准，不要手动估算像素位移。
       - 重点关注行车道（主车道）上的静止车辆，这是违停与应急车道占用的主要区别。
+      - 附带的最后一张图是 YOLO 跟踪标注帧，框上方白色标签中的数字为 track_id，与跟踪数据中的 track_id 对应。
     output_format_hint: "JSON"
-    available_tools: ["yolo_track_tool"]
 
   # ---------------------------------------------------------------------------
   # 3. Emergency Lane Occupancy Detection (event_id=1)
@@ -476,7 +478,7 @@ prompt_templates:
           - 工程/施工车辆或设备（沥青摊铺机、压路机、水泥搅拌车、挖掘机、自卸卡车、起重机等）
           - 由锥桶/隔离栏布置明确指示的车道封闭或交通引导（区域封闭，引导）
       (B) 在路面上进行**施工作业**的重型设备（如沥青摊铺、路面铣刨、标线施划、放置路锥等，即使没有锥桶，例如夜间铺设仅靠车载箭头板指示）。
-
+      (C) 若工程车仅携带设备和人员形式，但未开始任何施工相关的工作（例如放置锥桶，防止反光板等），则不输出道路施工。
 
       返回 JSON：
       {
@@ -512,23 +514,25 @@ prompt_templates:
     system_prompt: |
       你是一名交通监控分析师，检测逆行/倒车车辆。输出必须是合法 JSON，不含其他文本。
     user_prompt: |
-      检测视频帧中的逆行/倒车车辆，按以下步骤执行：
+      检测视频帧中的逆行/倒车车辆。
 
-      步骤1 — 识别疑似逆行车辆（通常在应急车道或者看似静止），描述其位置、颜色、车型。
-      步骤2 — 调用工具：输出 <tool_call>{"tool_name":"yolo_track_tool","arguments":{"video_path":"{{video_meta.file_path}}"}}</tool_call>
-      步骤3 — 根据工具返回的 track_id + direction_text 判定位移方向。
-      步骤4 — 对比该车所在道路的正常流向，方向相反则判定为逆行，不能依靠视觉判断车辆运动方向或者是否静止。
+      YOLO 车辆跟踪数据已自动提供（见 prompt 末尾的跟踪数据区块），包含每辆车的位移方向、是否静止、track_id 等信息。
+
+      分析步骤：
+        1. 观察视频帧，识别画面中可能逆行的车辆（通常出现在应急车道、路肩或行车道异常位置）。
+        2. 结合 YOLO 跟踪数据中的 track_id、direction_text 和 is_stationary 进行客观判断。
+        3. 对比该车所在道路的正常流向与位移方向，方向相反则判定为逆行。
 
       道路流向规则：
       - 左侧道路（画面下方来车）：正常流向 toward_bottom（靠近摄像头 = dy>0）
       - 右侧道路（画面上方来车）：正常流向 toward_top（远离摄像头 = dy<0）
 
-      工具返回说明：
+      YOLO 数据字段说明：
       - track_id: 车辆唯一 ID（标注图标签 "ID:X" 中的数字）
       - direction_text: 位移描述，如 "dx=+150px, dy=-80px (向右上)"
       - is_stationary: true=静止（静止车辆不判定逆行）
 
-      标注图说明：
+      标注图说明（附带的最后一张图）：
       - 灰色框 = 静止车辆，绿色框 = 移动车辆
       - 框上方白色标签：ID:{track_id} {车型} {置信度}
       - 黄色轨迹线 + 红色方向箭头显示车辆运动路径
@@ -542,7 +546,7 @@ prompt_templates:
             "end_time_sec": <秒>,
             "evidence_frames": [<帧>],
             "description": "<位置+颜色+车型>",
-            "reasoning": "发现<车辆特征> → 工具返回 track_id=<X>, direction_text=<位移> → 位移方向<方向> vs 正常流向<流向> → <一致/相反> → <正常/逆行>"
+            "reasoning": "发现<车辆特征> → YOLO track_id=<X>, direction_text=<位移> → 位移方向<方向> vs 正常流向<流向> → <一致/相反> → <正常/逆行>"
           }
         ],
         "summary": "<总体评估>"
@@ -552,11 +556,11 @@ prompt_templates:
 
       重要：
       - 所有文本字段使用中文。
-      - **不要通过车头朝向判断逆行**，必须以工具返回的客观位移数据为准。
+      - **不要通过车头朝向判断逆行**，必须以 YOLO 返回的客观位移数据为准。
       - 静止车辆（is_stationary=true）不判定逆行。
       - 位移判断以 direction_text 为准，不要手动估算像素位移。
+      - 附带的最后一张图是 YOLO 跟踪标注帧，框上方白色标签中的数字为 track_id，与跟踪数据中的 track_id 对应。
     output_format_hint: "JSON"
-    available_tools: ["yolo_track_tool"]
 
   # ---------------------------------------------------------------------------
   # 10. Thrown Object Detection (event_id=8)
