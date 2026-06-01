@@ -84,12 +84,15 @@ class TrackResult:
 class YoloTrackTool:
     """
     YOLOv8 + ByteTrack 车辆跟踪工具
-    
+
     输出:
     1. 带跟踪框和轨迹的关键帧图片
     2. 每个跟踪ID的位移矢量数据（含像素位移）
     """
-    
+
+    # 类级别模型缓存：同一模型只加载一次，跨实例复用
+    _model_cache: Dict[str, YOLO] = {}
+
     # 车辆类别映射 (COCO)
     VEHICLE_CLASSES = {2: "car", 3: "motorcycle", 5: "bus", 7: "truck"}
     
@@ -110,14 +113,21 @@ class YoloTrackTool:
                    f"stationary_threshold={stationary_threshold}, device={device}")
     
     def _load_model(self) -> Optional[YOLO]:
-        """加载YOLO模型，带错误处理"""
+        """加载YOLO模型，带错误处理和类级别缓存"""
         if self._model is not None:
             return self._model
-        
+
+        # 优先从类缓存中复用已加载的模型
+        if self.model_path in YoloTrackTool._model_cache:
+            self._model = YoloTrackTool._model_cache[self.model_path]
+            logger.info(f"YOLO model reused from cache: {self.model_path}")
+            return self._model
+
         try:
             logger.info(f"Loading YOLO model from {self.model_path}")
             self._model = YOLO(self.model_path)
             self._model.to(self.device)
+            YoloTrackTool._model_cache[self.model_path] = self._model
             logger.info(f"YOLO model loaded successfully on {self.device}")
             return self._model
         except Exception as e:
