@@ -433,7 +433,7 @@ class SystemConfig(BaseModel):
     event_confidence_threshold: float = 0.7
     max_video_length_sec: float = 300.0
     log_level: str = "INFO"
-    scene_understanding_min_frames: int = 30
+    scene_understanding_min_frames: int = 10
     vlm_max_frames: int = 10
     yolo_model_path: str = "traffic_analyzer/models/yolo/yolov8n.pt"
     tracking_target_fps: float = 5.0

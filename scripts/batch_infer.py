@@ -179,8 +179,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument(
         "--min-frames", "-m",
         type=int,
-        default=30,
-        help="Max VLM input frames (default: 30).",
+        default=10,
+        help="Max VLM input frames (default: 10).",
     )
     parser.add_argument(
         "--cv-tracks-dir",

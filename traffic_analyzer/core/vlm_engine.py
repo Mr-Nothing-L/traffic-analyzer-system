@@ -836,6 +836,7 @@ class VLMInferenceEngine:
         tool_definitions: List[Dict[str, Any]],
         context_vars: Optional[Dict[str, Any]] = None,
         response_schema: Optional[Dict[str, Any]] = None,
+        tool_choice: Optional[Dict[str, Any]] = None,
     ) -> Tuple[LLMResponse, List[Dict[str, Any]]]:
         """
         Execute a VLM call with Anthropic Native API tool support.
@@ -878,7 +879,7 @@ class VLMInferenceEngine:
             self.config.temperature,
         )
         kwargs["tools"] = tool_definitions
-        kwargs["tool_choice"] = {"type": "auto"}
+        kwargs["tool_choice"] = tool_choice if tool_choice else {"type": "auto"}
         
         call_id = str(uuid.uuid4())
         start_time = time.perf_counter()

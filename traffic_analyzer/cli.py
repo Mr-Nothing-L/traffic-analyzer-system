@@ -187,8 +187,8 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_parser.add_argument(
         "--min-frames", "-m",
         type=int,
-        default=30,
-        help="Minimum number of frames for scene understanding (default: 30). Lower = faster but less accurate.",
+        default=10,
+        help="Minimum number of frames for scene understanding (default: 10). Lower = faster but less accurate.",
     )
     analyze_parser.set_defaults(func=cmd_analyze)
 

@@ -201,8 +201,10 @@ class ExpertAgent:
         # If tools configured, use Anthropic Native API directly
         if self.category.tools and self.vlm_engine.provider == "anthropic":
             try:
+                # 违停(event_id=0)和逆行/倒车(event_id=7)强制调用YOLO工具
+                force_tool = self.category.event_id in (0, 7)
                 native_result = self._execute_anthropic_native_tools(
-                    template, images, context_vars, context
+                    template, images, context_vars, context, force_tool=force_tool
                 )
                 if native_result is not None:
                     tool_result, annotated_image = native_result
@@ -341,16 +343,13 @@ class ExpertAgent:
             )
             return None, None
 
-        # Auto-fill video_path from context if not provided
-        if "video_path" in tool_request.arguments:
-            arg_path = tool_request.arguments["video_path"]
-            if arg_path in ("{{video_meta.file_path}}", "", None):
-                if context.video_meta is not None:
-                    tool_request.arguments["video_path"] = context.video_meta.file_path
-                    logger.debug(
-                        "[expert_agent:_execute_tool_calls] AUTO_FILL_VIDEO_PATH | %s",
-                        context.video_meta.file_path,
-                    )
+        # Auto-fill video_path — always use the actual video being analyzed
+        if "video_path" in tool_request.arguments and context.video_meta is not None:
+            tool_request.arguments["video_path"] = context.video_meta.file_path
+            logger.debug(
+                "[expert_agent:_execute_tool_calls] AUTO_FILL_VIDEO_PATH | %s",
+                context.video_meta.file_path,
+            )
 
         # Execute tool
         try:
@@ -488,14 +487,11 @@ class ExpertAgent:
                 continue
             
             last_tool_name = tool_name
-            
-            # Auto-fill video_path
-            if "video_path" in tool_input:
-                arg_path = tool_input["video_path"]
-                if arg_path in ("{{video_meta.file_path}}", "", None):
-                    if context.video_meta is not None:
-                        tool_input["video_path"] = context.video_meta.file_path
-            
+
+            # Auto-fill video_path — always use the actual video being analyzed
+            if "video_path" in tool_input and context.video_meta is not None:
+                tool_input["video_path"] = context.video_meta.file_path
+
             # Execute tool
             try:
                 from traffic_analyzer.tools.tool_router import ToolRequest
@@ -610,6 +606,7 @@ class ExpertAgent:
         images: List[Any],
         context_vars: Dict[str, Any],
         context: AnalysisContext,
+        force_tool: bool = False,
     ) -> Optional[Tuple[Dict[str, Any], Optional[str]]]:
         """
         Execute tool calls using Anthropic Native API directly.
@@ -676,7 +673,7 @@ class ExpertAgent:
                 system=system_prompt,
                 messages=messages,
                 tools=tool_definitions,
-                tool_choice={"type": "auto"},
+                tool_choice={"type": "any"} if force_tool else {"type": "auto"},
             )
         except Exception as exc:
             logger.error(
@@ -754,14 +751,11 @@ class ExpertAgent:
                 continue
             
             last_tool_name = tool_name
-            
-            # Auto-fill video_path
-            if "video_path" in tool_input:
-                arg_path = tool_input["video_path"]
-                if arg_path in ("{{video_meta.file_path}}", "", None):
-                    if context.video_meta is not None:
-                        tool_input["video_path"] = context.video_meta.file_path
-            
+
+            # Auto-fill video_path — always use the actual video being analyzed
+            if "video_path" in tool_input and context.video_meta is not None:
+                tool_input["video_path"] = context.video_meta.file_path
+
             # Execute
             try:
                 tool_request = ToolRequest(tool_name=tool_name, arguments=tool_input)
