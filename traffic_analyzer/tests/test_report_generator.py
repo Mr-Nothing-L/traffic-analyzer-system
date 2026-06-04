@@ -78,7 +78,6 @@ def event_results() -> List[EventResult]:
                     road_id=1,
                     start_time_sec=15.0,
                     end_time_sec=22.0,
-                    confidence=0.88,
                     confidence_level=ConfidenceLevel.HIGH,
                     evidence_frames=[375, 400, 425, 550],
                     description="白色轿车在对向车道逆向行驶约 7 秒。",
@@ -87,7 +86,6 @@ def event_results() -> List[EventResult]:
                 )
             ],
             summary="检测到 1 起逆行事件。",
-            confidence=0.88,
             analysis_process=["提取关键帧", "VLM 识别逆行", "轨迹验证"],
         ),
         EventResult(
@@ -96,7 +94,6 @@ def event_results() -> List[EventResult]:
             detected=False,
             instances=[],
             summary="未检测到应急车道占用行为。",
-            confidence=0.15,
             analysis_process=["提取关键帧", "VLM 识别应急车道"],
         ),
         EventResult(
@@ -111,7 +108,6 @@ def event_results() -> List[EventResult]:
                     road_id=0,
                     start_time_sec=45.0,
                     end_time_sec=55.0,
-                    confidence=0.76,
                     confidence_level=ConfidenceLevel.MEDIUM,
                     evidence_frames=[1125, 1150, 1200, 1375],
                     description="黑色 SUV 在限速 80 km/h 路段估算速度约 110 km/h。",
@@ -125,7 +121,6 @@ def event_results() -> List[EventResult]:
                     road_id=0,
                     start_time_sec=80.0,
                     end_time_sec=88.0,
-                    confidence=0.72,
                     confidence_level=ConfidenceLevel.MEDIUM,
                     evidence_frames=[2000, 2050, 2100, 2200],
                     description="银色轿车疑似超速。",
@@ -134,7 +129,6 @@ def event_results() -> List[EventResult]:
                 ),
             ],
             summary="检测到 2 起超速事件。",
-            confidence=0.76,
             analysis_process=["速度估算", "阈值比对"],
         ),
     ]
@@ -481,7 +475,6 @@ class TestDisposalRecommendations:
                     EventInstance(
                         event_id=0,
                         event_name="违法停车",
-                        confidence=0.8,
                         disposal_suggestion="",
                     )
                 ],

@@ -30,7 +30,6 @@ _EXPERT_RESPONSE_SCHEMA: Dict[str, Any] = {
     "required": ["detected"],
     "properties": {
         "detected": {"type": "boolean"},
-        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
         "summary": {"type": "string"},
         "instances": {
             "type": "array",
@@ -187,200 +186,34 @@ class ExpertAgent:
         if context.video_meta is not None:
             context_vars["video_meta"] = context.video_meta.model_dump()
 
-        # -- CV evidence (legacy, now handled by yolo_track_tool via Native API) --
-        cv_evidence = ""
-        tracking_evidence = ""
-        context_vars["cv_evidence"] = cv_evidence
-        context_vars["tracking_evidence"] = tracking_evidence
-
-        # -- 5. Pre-execute YOLO for event 0/7 (direct injection) --------------
-        # For illegal parking (0) and reversing (7), run YOLO directly before
-        # the VLM call and feed annotated frames + tracking data into the prompt.
-        # This eliminates the first tool-call VLM round-trip.
-        if self.category.event_id in (0, 7) and context.video_meta:
-            try:
-                from traffic_analyzer.tools.yolo_track_tool import YoloTrackTool
-                import torch
-
-                device = "cuda" if torch.cuda.is_available() else "cpu"
-                tool = YoloTrackTool(device=device)
-                yolo_result = tool.track(
-                    context.video_meta.file_path, output_dir="/tmp"
-                )
-
-                if yolo_result.success:
-                    result_dict = yolo_result.to_dict()
-                    tracking_text = self._format_tracking_result(result_dict)
-                    context_vars["tracking_evidence"] = tracking_text
-
-                    annotated_image = result_dict.get("annotated_image_path")
-
-                    # Inject tracking data into the user prompt
-                    enhanced_user = template.user_prompt or ""
-                    yolo_section = (
-                        "\n\n============================================================\n"
-                        "YOLO 车辆跟踪数据（已自动获取）\n"
-                        "============================================================\n"
-                        f"{tracking_text}\n"
-                        "\n【重要】基于以上跟踪数据进行分析判断，不要依赖主观视觉估算。"
-                    )
-                    enhanced_user += yolo_section
-
-                    # Rebuild template without tools (data already injected)
-                    template = PromptTemplate(
-                        template_id=template.template_id,
-                        name=template.name,
-                        version=template.version,
-                        system_prompt=template.system_prompt,
-                        user_prompt=enhanced_user,
-                        output_format_hint=template.output_format_hint,
-                        example_input=template.example_input,
-                        example_output=template.example_output,
-                        traffic_percentage=template.traffic_percentage,
-                        available_tools=[],  # no tool calling needed
-                    )
-
-                    # Add annotated image to the image list
-                    if annotated_image:
-                        images.append(annotated_image)
-                        logger.info(
-                            "[expert_agent:detect] PRE_YOLO_IMAGE | event_id=%d path=%s",
-                            self.category.event_id,
-                            annotated_image,
-                        )
-
-                    # Single VLM call — no first/second split needed
-                    logger.info(
-                        "[expert_agent:detect] PRE_YOLO_SINGLE_CALL | event_id=%d event_name=%s",
-                        self.category.event_id,
-                        self.category.name_zh,
-                    )
-                    response = self.vlm_engine.call(
-                        template=template,
-                        images=images,
-                        context_vars=context_vars,
-                        response_schema=_EXPERT_RESPONSE_SCHEMA,
-                    )
-                    candidate = parse_expert_response(response, self.category)
-                    candidate.tracking_evidence = tracking_text
-                    if annotated_image:
-                        candidate.tool_results = [{
-                            "tool_name": "yolo_track_tool",
-                            "result": result_dict,
-                            "tracking_text": tracking_text,
-                        }]
-                    logger.info(
-                        "[expert_agent:detect] PRE_YOLO_COMPLETE | event_id=%d detected=%s conf=%.2f",
-                        self.category.event_id,
-                        candidate.detected,
-                        candidate.confidence,
-                    )
-                    return candidate
-                else:
-                    logger.warning(
-                        "[expert_agent:detect] PRE_YOLO_NO_DATA | event_id=%d msg=%s",
-                        self.category.event_id,
-                        yolo_result.error_message or "no vehicles",
-                    )
-                    context_vars["tracking_evidence"] = "未检测到车辆跟踪数据。"
-            except Exception as exc:
-                logger.warning(
-                    "[expert_agent:detect] PRE_YOLO_FAILED | event_id=%d | %s",
-                    self.category.event_id,
-                    exc,
-                )
-                # Fall through to the normal two-call tool-based path
-
-        # -- 6. First VLM call -------------------------------------------------
-        first_response = None
-        tool_result = None
-        annotated_image = None
-
-        # If tools configured, use Anthropic Native API directly
-        if self.category.tools and self.vlm_engine.provider == "anthropic":
-            try:
-                # 违停(event_id=0)和逆行/倒车(event_id=7)强制调用YOLO工具
-                force_tool = self.category.event_id in (0, 7)
-                native_result = self._execute_anthropic_native_tools(
-                    template, images, context_vars, context, force_tool=force_tool
-                )
-                if native_result is not None:
-                    tool_result, annotated_image = native_result
-                    logger.info(
-                        "[expert_agent:detect] ANTHROPIC_NATIVE_SUCCESS | event_id=%d event_name=%s",
-                        self.category.event_id,
-                        self.category.name_zh,
-                    )
-            except Exception as exc:
-                logger.warning(
-                    "[expert_agent:detect] ANTHROPIC_NATIVE_ERROR | event_id=%d event_name=%s | %s",
-                    self.category.event_id,
-                    self.category.name_zh,
-                    exc,
-                )
-        
-        # Fallback to regular call (no tools or Native API failed)
-        if tool_result is None:
-            try:
-                first_response = self.vlm_engine.call(
-                    template=template,
-                    images=images,
-                    context_vars=context_vars,
-                    response_schema=_EXPERT_RESPONSE_SCHEMA,
-                )
-            except Exception as exc:
-                logger.error(
-                    "[expert_agent:detect] VLM_ERROR | event_id=%d event_name=%s | %s",
-                    self.category.event_id,
-                    self.category.name_zh,
-                    exc,
-                    exc_info=True,
-                )
-                error_candidate = EventCandidate(
-                    event_id=self.category.event_id,
-                    event_name=self.category.name_zh,
-                    detected=False,
-                    summary=f"VLM call failed: {exc}",
-                )
-                error_candidate.cv_evidence = cv_evidence
-                error_candidate.tracking_evidence = tracking_evidence
-                return error_candidate
-            
-            # Check for string-based tool calls in response
-            if self.category.tools and first_response:
-                tool_result, annotated_image = self._execute_tool_calls(
-                    first_response, context, images
-                )
-
-        # -- 6. Second VLM call (if tool was called) ---------------------------
-        if tool_result is not None:
-            logger.info(
-                "[expert_agent:detect] TOOL_CALL_EXECUTED | event_id=%d event_name=%s | "
-                "proceeding to second VLM call with tool results",
-                self.category.event_id,
-                self.category.name_zh,
-            )
-            second_candidate = self._second_vlm_call(
+        # -- 5. VLM call -------------------------------------------------------
+        try:
+            response = self.vlm_engine.call(
                 template=template,
-                first_response=first_response,
-                tool_result=tool_result,
-                annotated_image=annotated_image,
                 images=images,
                 context_vars=context_vars,
+                response_schema=_EXPERT_RESPONSE_SCHEMA,
             )
-            second_candidate.cv_evidence = cv_evidence
-            second_candidate.tracking_evidence = tool_result.get("tracking_text", "")
-            return second_candidate
+        except Exception as exc:
+            logger.error(
+                "[expert_agent:detect] VLM_ERROR | event_id=%d event_name=%s | %s",
+                self.category.event_id,
+                self.category.name_zh,
+                exc,
+                exc_info=True,
+            )
+            return EventCandidate(
+                event_id=self.category.event_id,
+                event_name=self.category.name_zh,
+                detected=False,
+                summary=f"VLM call failed: {exc}",
+            )
 
-        # -- 8. Parse first response (no tool call) ----------------------------
-        candidate = parse_expert_response(first_response, self.category)
-        candidate.cv_evidence = cv_evidence
-        candidate.tracking_evidence = tracking_evidence
+        candidate = parse_expert_response(response, self.category)
         logger.debug(
-            "ExpertAgent[%s]: detected=%s confidence=%.2f instances=%d",
+            "ExpertAgent[%s]: detected=%s instances=%d",
             self.category.name_zh,
             candidate.detected,
-            candidate.confidence,
             len(candidate.instances),
         )
         return candidate
@@ -704,7 +537,6 @@ class ExpertAgent:
         images: List[Any],
         context_vars: Dict[str, Any],
         context: AnalysisContext,
-        force_tool: bool = False,
     ) -> Optional[Tuple[Dict[str, Any], Optional[str]]]:
         """
         Execute tool calls using Anthropic Native API directly.
@@ -771,7 +603,7 @@ class ExpertAgent:
                 system=system_prompt,
                 messages=messages,
                 tools=tool_definitions,
-                tool_choice={"type": "any"} if force_tool else {"type": "auto"},
+                tool_choice={"type": "auto"},
             )
         except Exception as exc:
             logger.error(
@@ -960,8 +792,8 @@ class ExpertAgent:
         }, annotated_image
 
     def _format_tracking_result(self, result_data: Dict[str, Any]) -> str:
-        """Format YOLO tracking result into human-readable text for prompt injection."""
-        lines = ["=== YOLO 车辆跟踪结果 ===", ""]
+        """Format tracking result into human-readable text for prompt injection."""
+        lines = ["=== 跟踪结果 ===", ""]
 
         displacements = result_data.get("displacements", [])
         if not displacements:
@@ -973,22 +805,16 @@ class ExpertAgent:
 
         for disp in displacements:
             track_id = disp.get("track_id", "?")
-            cls = disp.get("class") or disp.get("vehicle_class", "unknown")
-            direction = disp.get("direction_text", "未知")
             distance = disp.get("distance_pixels", 0)
             is_stationary = disp.get("is_stationary", False)
             stationary_str = "静止" if is_stationary else "移动"
 
             lines.append(
-                f"  track_id={track_id} ({cls}): {stationary_str}, "
-                f"方向={direction}, 总位移={distance:.1f}px"
+                f"  track_id={track_id}: {stationary_str}, 总位移={distance:.1f}px"
             )
 
         lines.append("")
-        lines.append(
-            "附带的最后一张图是 YOLO 跟踪标注帧，框内蓝色数字为 track_id，"
-            "与上述数据中的 track_id 对应。"
-        )
+        lines.append("附带的标注图可直接对照图上信息判断。")
 
         return "\n".join(lines)
 
@@ -1015,13 +841,13 @@ class ExpertAgent:
             "上下文 — 第一次分析结论\n"
             "============================================================\n"
             f"{first_text[:500]}...\n"
-            "\n【任务】将上述描述的车辆与标注图上的 track_id 匹配，根据 direction_text 判断是否为逆行。"
+            "\n【任务】将上述描述的车辆与标注图上的信息匹配，判断是否为逆行。"
         )
 
         # Add tool results
         tool_section = (
             "\n\n============================================================\n"
-            "工具调用结果 — YOLO 车辆跟踪数据\n"
+            "工具调用结果 — 跟踪数据\n"
             "============================================================\n"
             f"{tool_result['tracking_text']}\n"
             "\n【重要】基于以上跟踪数据，重新判断并输出 JSON。必须包含 detected 字段。"
@@ -1088,9 +914,8 @@ class ExpertAgent:
             f"[Second call with tool results]\n{second_response.raw_text}"
         )
         logger.info(
-            "[expert_agent:_second_vlm_call] COMPLETE | event_id=%d detected=%s confidence=%.2f",
+            "[expert_agent:_second_vlm_call] COMPLETE | event_id=%d detected=%s",
             self.category.event_id,
             candidate.detected,
-            candidate.confidence,
         )
         return candidate

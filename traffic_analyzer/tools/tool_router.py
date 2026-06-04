@@ -37,10 +37,9 @@ class ToolRequest(BaseModel):
     期望模型输出如下 JSON 结构:
     ```json
     {
-        "tool_name": "yolo_track_tool",
+        "tool_name": "example_tool",
         "arguments": {
-            "video_path": "/data/test_videos/test.mp4",
-            "conf_threshold": 0.5
+            "param1": "value1"
         }
     }
     ```

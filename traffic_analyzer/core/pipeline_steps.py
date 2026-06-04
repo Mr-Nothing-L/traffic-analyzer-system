@@ -31,6 +31,72 @@ from traffic_analyzer.models.schemas import (
 
 logger = logging.getLogger(__name__)
 
+MAX_ADJUDICATION_RETRIES = 5
+
+# JSON schema for adjudication VLM response (forces valid JSON output).
+_ADJUDICATION_RESPONSE_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "required": ["event_results"],
+    "properties": {
+        "event_results": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["event_id", "event_name", "detected"],
+                "properties": {
+                    "event_id": {"type": "integer"},
+                    "event_name": {"type": "string"},
+                    "detected": {"type": "boolean"},
+                    "summary": {"type": "string"},
+                    "instances": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "start_time_sec": {"type": "number"},
+                                "end_time_sec": {"type": "number"},
+                                "evidence_frames": {
+                                    "type": "array",
+                                    "items": {"type": "integer"},
+                                },
+                                "description": {"type": "string"},
+                                "reasoning": {"type": "string"},
+                            },
+                        },
+                    },
+                },
+            },
+        },
+        "audit_log": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "event_id": {"type": "integer"},
+                    "event_name": {"type": "string"},
+                    "action": {"type": "string"},
+                    "reason": {"type": "string"},
+                    "rule_id": {"type": ["string", "null"]},
+                },
+            },
+        },
+        "adjudication_reasoning": {"type": "string"},
+        "reasoning_chain": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "event_id": {"type": "integer"},
+                    "event_name": {"type": "string"},
+                    "decision": {"type": "string"},
+                    "thought_process": {"type": "string"},
+                    "basis": {"type": "string"},
+                },
+            },
+        },
+    },
+}
+
 
 class StepResult:
     """Result of a pipeline step execution."""
@@ -166,10 +232,9 @@ class ExpertAgentLayer(PipelineStep):
                     candidates.append(candidate)
                     context.event_candidates[candidate.event_id] = candidate
                     logger.info(
-                        "ExpertAgent[%s]: detected=%s confidence=%.2f",
+                        "ExpertAgent[%s]: detected=%s",
                         category.name_zh,
                         candidate.detected,
-                        candidate.confidence,
                     )
                 except Exception as exc:
                     logger.error(
@@ -230,37 +295,6 @@ class AdjudicationStep(PipelineStep):
         # 3. Select images
         images = _select_event_images_impl(context, vlm_max_frames=6)
 
-        # 4. Build context variables (lightweight)
-        candidates_json = json.dumps(
-            [
-                {
-                    "event_id": c.event_id,
-                    "event_name": c.event_name,
-                    "detected": c.detected,
-                    "confidence": c.confidence,
-                    "summary": c.summary,
-                    "instances": [
-                        {
-                            "start_time_sec": i.start_time_sec,
-                            "end_time_sec": i.end_time_sec,
-                            "description": i.description,
-                            "reasoning": i.reasoning,
-                        }
-                        for i in c.instances
-                    ],
-                }
-                for c in candidates
-            ],
-            ensure_ascii=False,
-            indent=2,
-        )
-
-        business_rules = "\n".join(
-            f"- [{r.rule_id}] {r.name}: "
-            f"{r.description} (priority={r.priority})"
-            for r in rules
-        ) if rules else "No business rules configured."
-
         # Load annotation spec (xlsx-derived business rules)
         annotation_spec_text = ""
         try:
@@ -273,45 +307,189 @@ class AdjudicationStep(PipelineStep):
         except Exception as exc:
             logger.warning("Failed to load annotation_spec.yaml: %s", exc)
 
-        context_vars = {
-            "candidates_json": candidates_json,
-            "business_rules": business_rules,
-            "annotation_spec": annotation_spec_text or "No annotation spec available.",
-        }
+        business_rules = "\n".join(
+            f"- [{r.rule_id}] {r.name}: "
+            f"{r.description} (priority={r.priority})"
+            for r in rules
+        ) if rules else "No business rules configured."
 
-        # 5. Call VLM
-        try:
-            response = self.vlm_engine.call(
-                template=template,
-                images=images,
-                context_vars=context_vars,
+        previously_missing_event_ids: List[int] = []
+        last_response: Optional[Any] = None
+        last_parsed_data: Dict[str, Any] = {}
+
+        for attempt in range(1, MAX_ADJUDICATION_RETRIES + 1):
+            candidates = list(context.event_candidates.values())
+            candidates_json = json.dumps(
+                [
+                    {
+                        "event_id": c.event_id,
+                        "event_name": c.event_name,
+                        "detected": c.detected,
+                        "summary": c.summary,
+                        "instances": [
+                            {
+                                "start_time_sec": i.start_time_sec,
+                                "end_time_sec": i.end_time_sec,
+                                "description": i.description,
+                                "reasoning": i.reasoning,
+                            }
+                            for i in c.instances
+                        ],
+                    }
+                    for c in candidates
+                ],
+                ensure_ascii=False,
+                indent=2,
             )
+
+            context_vars = {
+                "candidates_json": candidates_json,
+                "business_rules": business_rules,
+                "annotation_spec": annotation_spec_text or "No annotation spec available.",
+                "previously_missing_event_ids": previously_missing_event_ids,
+            }
+
+            try:
+                response = self.vlm_engine.call(
+                    template=template,
+                    images=images,
+                    context_vars=context_vars,
+                    response_schema=_ADJUDICATION_RESPONSE_SCHEMA,
+                )
+            except Exception as exc:
+                logger.error(
+                    "[pipeline_steps:AdjudicationStep] VLM_CALL_ERROR | attempt=%d candidates=%d | %s",
+                    attempt,
+                    len(candidates),
+                    exc,
+                    exc_info=True,
+                )
+                raise RuntimeError(f"Adjudication VLM call failed: {exc}") from exc
+
+            last_response = response
+
+            if not response.success or not isinstance(response.parsed_data, dict):
+                logger.error(
+                    "[pipeline_steps:AdjudicationStep] ADJUDICATION_ERROR | attempt=%d candidates=%d | response.success=%s parsed_data_type=%s | raw_text_len=%d",
+                    attempt,
+                    len(candidates),
+                    response.success,
+                    type(response.parsed_data).__name__ if response.parsed_data is not None else "None",
+                    len(response.raw_text) if response.raw_text else 0,
+                )
+                raise RuntimeError(f"Adjudication VLM call failed: {response.raw_text[:500]}")
+
+            data = response.parsed_data
+            last_parsed_data = data
+
+            event_results_raw = data.get("event_results", [])
+            present_event_ids = {er.get("event_id") for er in event_results_raw if isinstance(er.get("event_id"), int)}
+            expected_event_ids = set(context.event_candidates.keys())
+            missing_event_ids = sorted(expected_event_ids - present_event_ids)
+
+            if not missing_event_ids:
+                logger.info(
+                    "[pipeline_steps:AdjudicationStep] COMPLETE | attempt=%d event_results=%d",
+                    attempt,
+                    len(event_results_raw),
+                )
+                return self._build_adjudication_result(context, data, response)
+
+            logger.warning(
+                "[pipeline_steps:AdjudicationStep] MISSING_EVENTS | attempt=%d missing_event_ids=%s",
+                attempt,
+                missing_event_ids,
+            )
+
+            abnormal_event_ids = [
+                eid for eid in missing_event_ids
+                if self._is_abnormal_candidate(context.event_candidates.get(eid))
+            ]
+
+            if abnormal_event_ids:
+                logger.info(
+                    "[pipeline_steps:AdjudicationStep] RERUN_ABNORMAL_EXPERTS | attempt=%d event_ids=%s",
+                    attempt,
+                    abnormal_event_ids,
+                )
+                for eid in abnormal_event_ids:
+                    category = self._get_category_for_event_id(eid)
+                    if category is None:
+                        logger.warning(
+                            "[pipeline_steps:AdjudicationStep] CATEGORY_NOT_FOUND | event_id=%d",
+                            eid,
+                        )
+                        continue
+                    try:
+                        agent = ExpertAgent(
+                            category=category,
+                            vlm_engine=self.vlm_engine,
+                            config_manager=self.config_manager,
+                        )
+                        new_candidate = agent.detect(context)
+                        context.event_candidates[eid] = new_candidate
+                        logger.info(
+                            "[pipeline_steps:AdjudicationStep] EXPERT_RERUN_SUCCESS | attempt=%d event_id=%d detected=%s",
+                            attempt,
+                            eid,
+                            new_candidate.detected,
+                        )
+                    except Exception as exc:
+                        logger.error(
+                            "[pipeline_steps:AdjudicationStep] EXPERT_RERUN_ERROR | attempt=%d event_id=%d | %s",
+                            attempt,
+                            eid,
+                            exc,
+                            exc_info=True,
+                        )
+                previously_missing_event_ids = []
+                continue
+
+            previously_missing_event_ids = missing_event_ids
+
+        logger.warning(
+            "[pipeline_steps:AdjudicationStep] MAX_RETRIES_REACHED | missing_event_ids=%s | filling from candidates",
+            previously_missing_event_ids,
+        )
+        return self._build_adjudication_result_with_fallback(context, last_parsed_data, last_response)
+
+    @staticmethod
+    def _is_abnormal_candidate(candidate: Optional[EventCandidate]) -> bool:
+        if candidate is None:
+            return True
+        if candidate.summary and candidate.summary.startswith("ExpertAgent error"):
+            return True
+        if not candidate.raw_vlm_response and not candidate.raw_vlm_text:
+            return True
+        if candidate.detected and not candidate.summary:
+            return True
+        if candidate.detected and not candidate.instances:
+            return True
+        return False
+
+    def _get_category_for_event_id(self, event_id: int) -> Optional[Any]:
+        try:
+            for cat in self.config_manager.get_event_categories():
+                if cat.event_id == event_id:
+                    return cat
         except Exception as exc:
             logger.error(
-                "[pipeline_steps:AdjudicationStep] VLM_CALL_ERROR | candidates=%d | %s",
-                len(candidates),
+                "[pipeline_steps:AdjudicationStep] GET_CATEGORY_ERROR | event_id=%d | %s",
+                event_id,
                 exc,
                 exc_info=True,
             )
-            raise RuntimeError(f"Adjudication VLM call failed: {exc}") from exc
+        return None
 
-        if not response.success or not isinstance(response.parsed_data, dict):
-            logger.error(
-                "[pipeline_steps:AdjudicationStep] ADJUDICATION_ERROR | candidates=%d | response.success=%s parsed_data_type=%s | %s",
-                len(candidates),
-                response.success,
-                type(response.parsed_data).__name__ if response.parsed_data is not None else "None",
-                response.raw_text,
-            )
-            raise RuntimeError(f"Adjudication VLM call failed: {response.raw_text}")
-
-        data = response.parsed_data
-
-        # 6. Parse event_results
-        # Build maps from candidate event_id -> raw_vlm_text / cv_evidence / tracking_evidence
+    def _build_adjudication_result(
+        self,
+        context: AnalysisContext,
+        data: Dict[str, Any],
+        response: Any,
+    ) -> AdjudicationResult:
+        candidates = list(context.event_candidates.values())
         candidate_raw_map = {c.event_id: c.raw_vlm_text for c in candidates}
         candidate_cv_map = {c.event_id: c.cv_evidence for c in candidates}
-        candidate_tracking_map = {c.event_id: c.tracking_evidence for c in candidates}
 
         event_results: List[EventResult] = []
         for er in data.get("event_results", []):
@@ -325,7 +503,6 @@ class AdjudicationStep(PipelineStep):
                         event_name_en=er.get("event_name_en", ""),
                         start_time_sec=inst.get("start_time_sec", 0.0),
                         end_time_sec=inst.get("end_time_sec", 0.0),
-                        confidence=inst.get("confidence", 0.0),
                         description=inst.get("description", ""),
                         reasoning=inst.get("reasoning", ""),
                     )
@@ -336,17 +513,14 @@ class AdjudicationStep(PipelineStep):
                     event_name=er.get("event_name", ""),
                     event_name_en=er.get("event_name_en", ""),
                     detected=er.get("detected", False),
-                    confidence=er.get("confidence", 0.0),
                     summary=er.get("summary", ""),
                     instances=instances,
                     reasoning=er.get("reasoning", ""),
                     expert_raw_description=candidate_raw_map.get(eid, ""),
                     cv_evidence=candidate_cv_map.get(eid, ""),
-                    tracking_evidence=candidate_tracking_map.get(eid, ""),
                 )
             )
 
-        # 7. Parse audit_log
         audit_log: List[AuditEntry] = []
         for entry in data.get("audit_log", []):
             audit_log.append(
@@ -359,11 +533,9 @@ class AdjudicationStep(PipelineStep):
                 )
             )
 
-        # 8. Store results in context
         for result in event_results:
             context.event_results[result.event_id] = result
 
-        # 8. Parse reasoning_chain
         reasoning_chain: List[Dict[str, Any]] = []
         for rc in data.get("reasoning_chain", []):
             if isinstance(rc, dict):
@@ -375,7 +547,14 @@ class AdjudicationStep(PipelineStep):
                     "basis": rc.get("basis", ""),
                 })
 
-        adjudication_result = AdjudicationResult(
+        logger.info(
+            "[pipeline_steps:AdjudicationStep] PARSED_RESULTS | event_results=%d detected=%d audit_log=%d",
+            len(event_results),
+            sum(1 for r in event_results if r.detected),
+            len(audit_log),
+        )
+
+        return AdjudicationResult(
             event_results=event_results,
             audit_log=audit_log,
             adjudication_reasoning=data.get("adjudication_reasoning", ""),
@@ -383,12 +562,40 @@ class AdjudicationStep(PipelineStep):
             raw_vlm_text=response.raw_text if hasattr(response, "raw_text") else "",
         )
 
-        logger.info(
-            "Adjudication complete: %d event results, %d audit entries",
-            len(event_results),
-            len(audit_log),
-        )
-        return adjudication_result
+    def _build_adjudication_result_with_fallback(
+        self,
+        context: AnalysisContext,
+        data: Dict[str, Any],
+        response: Any,
+    ) -> AdjudicationResult:
+        result = self._build_adjudication_result(context, data, response)
+        present_event_ids = {r.event_id for r in result.event_results}
+        expected_event_ids = set(context.event_candidates.keys())
+        missing_event_ids = sorted(expected_event_ids - present_event_ids)
+
+        for eid in missing_event_ids:
+            candidate = context.event_candidates.get(eid)
+            if candidate is None:
+                continue
+            fallback_result = EventResult(
+                event_id=candidate.event_id,
+                event_name=candidate.event_name,
+                detected=candidate.detected,
+                summary=candidate.summary,
+                instances=candidate.instances,
+                expert_raw_description=candidate.raw_vlm_text,
+                cv_evidence=candidate.cv_evidence,
+                tool_results=candidate.tool_results,
+            )
+            result.event_results.append(fallback_result)
+            context.event_results[eid] = fallback_result
+            logger.info(
+                "[pipeline_steps:AdjudicationStep] FILLED_MISSING_FROM_CANDIDATE | event_id=%d detected=%s",
+                eid,
+                fallback_result.detected,
+            )
+
+        return result
 
     def _fallback(self, context: AnalysisContext, error: Optional[Exception]) -> AdjudicationResult:
         """Fallback: return raw expert candidates as EventResults (no filtering)."""
@@ -405,7 +612,6 @@ class AdjudicationStep(PipelineStep):
                     event_id=candidate.event_id,
                     event_name=candidate.event_name,
                     detected=candidate.detected,
-                    confidence=candidate.confidence,
                     summary=candidate.summary,
                     instances=candidate.instances,
                     expert_raw_description=candidate.raw_vlm_text,

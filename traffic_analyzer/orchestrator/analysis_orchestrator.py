@@ -252,7 +252,6 @@ class AnalysisOrchestrator:
                             "event_id": c.event_id,
                             "event_name": c.event_name,
                             "detected": c.detected,
-                            "confidence": c.confidence,
                             "summary": c.summary,
                             "reasoning": c.instances[0].reasoning if c.instances else "",
                             "raw_vlm_text": c.raw_vlm_text[:500] if c.raw_vlm_text else "",

@@ -111,8 +111,8 @@ def mock_vlm_engine() -> MagicMock:
     engine = MagicMock()
     engine.call.return_value = LLMResponse(
         success=True,
-        raw_text='{"detected": true, "confidence": 0.85}',
-        parsed_data={"detected": True, "confidence": 0.85},
+        raw_text='{"detected": true}',
+        parsed_data={"detected": True},
         model="test-model",
         prompt_tokens=10,
         completion_tokens=5,
@@ -152,13 +152,11 @@ def mock_expert_agent_layer() -> MagicMock:
                 event_id=0,
                 event_name="Test Event A",
                 detected=True,
-                confidence=0.85,
             ),
             EventCandidate(
                 event_id=1,
                 event_name="Test Event B",
                 detected=False,
-                confidence=0.2,
             ),
         ],
     )
@@ -176,13 +174,11 @@ def mock_adjudication_step() -> MagicMock:
                     event_id=0,
                     event_name="Test Event A",
                     detected=True,
-                    confidence=0.85,
                 ),
                 EventResult(
                     event_id=1,
                     event_name="Test Event B",
                     detected=False,
-                    confidence=0.2,
                 ),
             ],
             adjudication_reasoning="Test reasoning",

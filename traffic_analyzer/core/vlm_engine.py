@@ -160,11 +160,33 @@ def _encode_image_to_base64(image: Any) -> str:
         raise
 
 
+def _repair_json(text: str) -> str:
+    """Fix common VLM JSON syntax errors.
+
+    Handles missing commas between properties and trailing commas.
+    """
+    # Fix 1: missing comma after } or ] before the next property key
+    # e.g.  {"a": 1} "b": 2  ->  {"a": 1}, "b": 2
+    text = re.sub(r'([}\]])(\s*)(")', r'\1,\2\3', text)
+
+    # Fix 2: missing comma after a literal value before the next property key
+    # e.g.  "a": true "b": false  ->  "a": true, "b": false
+    # Matches: string "...", number, true, false, null
+    text = re.sub(r'("(?:[^"\\]|\\.)*"|\d+(?:\.\d+)?|true|false|null)(\s+)(")', r'\1,\2\3', text)
+
+    # Fix 3: trailing commas before } or ]
+    # e.g.  {"a": 1, }  ->  {"a": 1}
+    text = re.sub(r',(\s*[}\]])', r'\1', text)
+
+    return text
+
+
 def _extract_json_from_text(text: str) -> Dict[str, Any]:
     """Extract JSON object from text, with fallback to regex.
 
     Tries strict JSON parsing first, then searches for the first
-    JSON object block via regex.
+    JSON object block via regex.  Also attempts to auto-repair common
+    VLM JSON syntax errors (missing commas, trailing commas).
 
     Args:
         text: Raw text potentially containing JSON.
@@ -214,12 +236,37 @@ def _extract_json_from_text(text: str) -> Dict[str, Any]:
             if merged:
                 return merged
         elif len(matches) == 1:
+            candidate = matches[0]
+            # Try strict parse first
             try:
-                result = json.loads(matches[0])
+                result = json.loads(candidate)
                 if isinstance(result, dict):
                     return result
                 if isinstance(result, list) and result and isinstance(result[0], dict):
                     return result[0]
+            except json.JSONDecodeError:
+                pass
+
+            # Try auto-repair common VLM JSON errors
+            repaired = _repair_json(candidate)
+            try:
+                result = json.loads(repaired)
+                if isinstance(result, dict):
+                    logger.debug(
+                        "[vlm_engine:_extract_json_from_text] JSON_REPAIRED | "
+                        "original_len=%d repaired_len=%d",
+                        len(candidate),
+                        len(repaired),
+                    )
+                    return result
+                if isinstance(result, list) and result and isinstance(result[0], dict):
+                    return result[0]
+            except json.JSONDecodeError:
+                pass
+
+            # Still failed — raise with the original error for clarity
+            try:
+                json.loads(candidate)
             except json.JSONDecodeError as exc:
                 raise ResponseParseError(f"Found JSON-like block but failed to parse: {exc}")
 

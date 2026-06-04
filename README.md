@@ -2,9 +2,9 @@
 
 # Traffic Analyzer
 
-A multi-modal large vision model (VLM) based traffic event detection framework for highway surveillance video. Supports **10 event categories**, outputs a 10-bit binary encoding plus a detailed Markdown analysis report. All event definitions, prompt templates, and adjudication rules are driven by YAML configuration — adding a new event requires zero code changes.
+A multi-modal large vision model (VLM) based traffic event detection framework for highway surveillance video. Supports **10 event categories** (8 active), outputs a 10-bit binary encoding plus a detailed Markdown analysis report. All event definitions, prompt templates, and adjudication rules are driven by YAML configuration — adding a new event requires zero code changes.
 
-> **Current version: v2.0.0** — Multi-agent expert + adjudication architecture (see [Version Tags](#version-tags)).
+> **Current version: v2.0.0** — Pure VLM multi-agent expert + adjudication architecture (see [Version Tags](#version-tags)).
 
 ---
 
@@ -25,11 +25,12 @@ Video Input
    - No filtering or exclusion logic
     |
     v
-3. AdjudicationStep (single VLM call)
-   Input: all EventCandidates + keyframes + business rules
+3. AdjudicationStep (single VLM call, with retry loop)
+   Input: all EventCandidates + keyframes + business rules + annotation spec
    Output: final EventResults + AuditLog
    - Resolves conflicts (e.g. accident suppresses parking)
    - Applies business rules from YAML
+   - Retries up to 5 times if event_results are incomplete
     |
     v
 4. Report Generation
@@ -38,7 +39,7 @@ Video Input
    - Audit log of every inclusion / exclusion decision
 ```
 
-**Key improvement over v1.5**: Instead of a single ~30s scene-understanding bottleneck followed by mixed detection modes, all 10 events are detected in parallel by dedicated expert agents, then a single adjudication call resolves conflicts using explicit business rules. This is more accurate, more auditable, and easier to tune.
+**Key improvement over v1.5**: Instead of a single ~30s scene-understanding bottleneck followed by mixed detection modes, all events are detected in parallel by dedicated expert agents, then a single adjudication call resolves conflicts using explicit business rules. This is more accurate, more auditable, and easier to tune. The v2.0.0 architecture is **pure VLM** — no CV/YOLO components are used.
 
 ---
 
@@ -54,10 +55,10 @@ Video Input
 | 5 | F | Heavy Congestion | true |
 | 6 | G | Road Construction | true |
 | 7 | H | Vehicle Reversing | true |
-| 8 | J | Thrown Objects | true |
+| 8 | J | Thrown Objects | false |
 | 9 | K | Lane Change over Solid Line | false |
 
-All events use `detection_mode: "expert_agent"` in v2.0.0.
+All active events use `detection_mode: "expert_agent"` in v2.0.0. Inactive events (`is_active: false`) are preserved in the binary encoding but skipped during inference.
 
 ---
 
@@ -99,7 +100,23 @@ All of the following are defined in YAML — no code changes needed:
 - Event definitions (`event_categories.yaml`)
 - Prompt templates (`prompt_templates.yaml`)
 - Adjudication rules (`event_categories.yaml`)
+- Annotation spec (`annotation_spec.yaml`)
 - Legacy logic chains (`logic_chains.yaml`, kept for reference)
+
+### 5. Adjudication Retry Loop
+
+The adjudication step runs in a loop of up to **5 attempts**. If the adjudicator's `event_results` are incomplete, the system:
+- Checks whether the corresponding expert outputs are abnormal; if so, re-runs only those experts.
+- Otherwise, re-runs adjudication with a prompt hint listing the events it previously omitted.
+- After 5 attempts, any still-missing events are backfilled from the original expert candidates.
+
+This makes the pipeline robust against sporadic VLM omissions without discarding good expert signals.
+
+### 6. JSON Repair & Sanitization
+
+VLM outputs are automatically hardened before parsing:
+- `_repair_json` in `vlm_engine.py` fixes common syntax errors such as missing commas and trailing commas.
+- `_sanitize_candidate` in `event_detection.py` reconciles inconsistent expert outputs (e.g. `detected=true` paired with content that denies the event).
 
 ---
 
@@ -108,6 +125,7 @@ All of the following are defined in YAML — no code changes needed:
 ```
 traffic_analyzer/
 ├── config/
+│   ├── annotation_spec.yaml       # Annotation spec injected into adjudication prompt
 │   ├── event_categories.yaml      # Event definitions + adjudication_rules
 │   ├── logic_chains.yaml          # Legacy logic chains (kept for reference)
 │   └── prompt_templates.yaml      # VLM Prompt templates + adjudication template
@@ -115,16 +133,16 @@ traffic_analyzer/
 │   ├── config_manager.py          # Config loading, validation
 │   ├── expert_agent.py            # Single-event detection agent
 │   ├── logic_engine.py            # Logic chain execution engine
-│   ├── pipeline_steps.py          # ExpertAgentLayer + AdjudicationStep
+│   ├── pipeline_steps.py          # ExpertAgentLayer + AdjudicationStep (with retry loop)
 │   ├── report_generator.py        # Report generation
 │   ├── video_preprocessor.py      # Video frame extraction
-│   └── vlm_engine.py              # VLM wrapper (multi-provider + cache)
+│   └── vlm_engine.py              # VLM wrapper (multi-provider + cache + JSON repair)
 ├── models/
 │   └── schemas.py                 # Pydantic models (EventCandidate, AdjudicationResult, AuditEntry)
 ├── orchestrator/
 │   └── analysis_orchestrator.py   # 4-step pipeline orchestrator
 ├── utils/
-│   └── event_detection.py         # Image selection + response parsing helpers
+│   └── event_detection.py         # Image selection + response parsing + candidate sanitization
 └── config/
     └── .env                       # LLM provider config (API Key, etc.)
 ```
@@ -187,13 +205,6 @@ python3 -m traffic_analyzer analyze \
   --format markdown \
   --output ./report.md \
   --min-frames 10
-
-# With CV track cross-validation
-python3 -m traffic_analyzer analyze \
-  --video ./path/to/video.mp4 \
-  --cv-tracks ./tracks.json \
-  --format markdown \
-  --output ./report.md
 ```
 
 ### 5. Python API
@@ -230,7 +241,6 @@ python3 scripts/batch_infer.py \
 | `--config-dir` / `-c` | Config directory | `./traffic_analyzer/config` |
 | `--format` / `-f` | Output format (`markdown` / `json`) | `markdown` |
 | `--min-frames` / `-m` | VLM max input frames | `30` |
-| `--cv-tracks-dir` | CV track JSON directory (optional) | - |
 | `--workers` / `-w` | Parallel workers (ProcessPoolExecutor) | CPU cores |
 | `--log-dir` / `-l` | Per-video log directory | - |
 | `--skip-existing` | Skip videos with existing reports (default) | `true` |
@@ -330,7 +340,7 @@ Runtime output follows modern AI Agent tool-call trace style:
 [INFO] 14:30:00 🔧 tool_call: video_preprocessor.process(video='clip.mp4')
 [INFO] 14:30:03   ↳ result: coarse=20, precision=41 | elapsed=3.0s
 [INFO] 14:30:03 🔧 tool_call: expert_agent.detect(event='Illegal Parking')
-[INFO] 14:30:15   ↳ result: detected=true, confidence=0.92 | elapsed=12.0s
+[INFO] 14:30:15   ↳ result: detected=true | elapsed=12.0s
 [INFO] 14:30:15 🔧 tool_call: adjudication.resolve(candidates=10)
 [INFO] 14:30:28   ↳ result: events=3, audit_entries=2 | elapsed=13.0s
 ```
@@ -357,16 +367,26 @@ This logging is a **pure display layer** — it does not affect parallelism, per
 
 | Tag | Branch | Description |
 |---|---|---|
-| `v2.0.0-multi-agent` | `main` | **Current**. Multi-agent expert + adjudication architecture. All 10 events use `expert_agent` mode. Parallel detection + single VLM adjudication with business rules. |
+| `v2.0.0-multi-agent` | `main` | **Current**. Pure VLM multi-agent expert + adjudication architecture. 8 of 10 events are active; inactive events are preserved in the binary encoding but skipped during inference. Parallel detection + single VLM adjudication with business rules, retry loop, JSON repair, and annotation-spec integration. |
 | `v1.5.0-legacy` | `legacy/v1.5` | Monolithic architecture. SceneUnderstandingStep (~30s bottleneck) + mixed detection modes (direct_vlm parallel, logic_chain sequential, scene_tag zero-VLM) + PostProcessStep with cross-event inference. |
 
 The `legacy/v1.5` branch preserves the old architecture for reference and comparison. All new development happens on `main` (v2.0.0).
+
+### Recent Changes on main
+
+- **YOLO fully removed**: the pipeline is now pure VLM; no CV tracking or cross-validation.
+- **Adjudication retry loop**: up to 5 attempts, with targeted expert re-runs and fallback candidate backfill.
+- **Event active flags**: `Thrown Objects` (id=8) and `Lane Change over Solid Line` (id=9) are now inactive.
+- **Confidence field removed**: all schemas and prompts no longer emit or expect `confidence`.
+- **JSON repair & candidate sanitization**: automatic fixing of common VLM JSON errors and inconsistent `detected` flags.
+- **Annotation spec integration**: `annotation_spec.yaml` is injected into the adjudication prompt alongside `event_categories.yaml`.
+- **Evaluation fix**: macro-average denominator uses the actual number of evaluated events; `--single-class` no longer penalizes overall metrics with inactive classes.
 
 ---
 
 ## Custom Tool Development Guide
 
-The system supports extending custom tools via the **Tool Definition Layer (Tool Schema)** + **Tool Router Layer (Tool Router)** architecture, for use by Expert Agents.
+The system provides a small **Tool Definition Layer (Tool Schema)** + **Tool Router Layer (Tool Router)** framework. In v2.0.0 the pipeline is pure VLM and does not invoke tools during inference, but the tool layer is kept for future extensions and utility scripts.
 
 ### Architecture Overview
 
@@ -425,10 +445,7 @@ Edit `traffic_analyzer/tools/tool_registry.py`, add registration in `create_rout
 def create_router() -> ToolRouter:
     router = ToolRouter()
     
-    # Existing tools
-    _register_yolo_track_tool(router)
-    
-    # New tool
+    # Register your tools here
     _register_my_new_tool(router)
     
     return router
@@ -557,14 +574,6 @@ The Expert Agent's Prompt is injected with available tool JSON Schemas (via `Too
 
 Markdown code blocks and XML tags are also supported; the Router parses them automatically.
 
-### Full Example: Video Frame Extraction Tool
-
-See `traffic_analyzer/tools/yolo_track_tool.py` (YOLOv8 + ByteTrack tracking tool) for a complete reference implementation, including:
-- 6 parameter definitions (video_path, conf_threshold, stationary_threshold, etc.)
-- Pixel-level direction description (`dx=+150px, dy=-80px (toward bottom-right)`)
-- Detailed error fallback logging
-- 12 unit tests, all passing
-
 ### Tool Layer File Reference
 
 | File | Description |
@@ -572,6 +581,4 @@ See `traffic_analyzer/tools/yolo_track_tool.py` (YOLOv8 + ByteTrack tracking too
 | `traffic_analyzer/tools/tool_schema.py` | Tool Definition Layer: ToolDefinition, ToolParameter, ToolConstraint, ToolRegistry |
 | `traffic_analyzer/tools/tool_router.py` | Tool Router Layer: ToolRequest, ToolResponse, ToolRouter (sync/async/batch) |
 | `traffic_analyzer/tools/tool_registry.py` | Registration Integration: Default Router singleton, registers all built-in tools |
-| `traffic_analyzer/tools/yolo_track_tool.py` | Example Tool: YOLOv8 + ByteTrack object tracking |
 | `tests/tools/test_tool_router.py` | Router Tests: 30 tests covering parsing/validation/execution/error handling |
-| `tests/tools/test_yolo_track_tool.py` | YOLO Tool Tests: 12 tests covering tracking/displacement/direction/integration |

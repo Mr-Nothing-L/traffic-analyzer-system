@@ -323,6 +323,7 @@ def compute_metrics(
 
     evaluated = 0
     skipped = 0
+    evaluated_event_ids: Set[int] = set()
 
     for pred, gt, mask in zip(
         predictions, ground_truths, single_class_masks or [None] * len(predictions)
@@ -338,6 +339,7 @@ def compute_metrics(
             continue
 
         evaluated += 1
+        evaluated_event_ids.update(events_to_eval)
         for eid in events_to_eval:
             p = eid in pred
             g = eid in gt
@@ -367,15 +369,20 @@ def compute_metrics(
             "f1": round(f1, 4),
         }
 
-    # Macro averages (over all 10 events)
-    macro_precision = sum(per_event[str(eid)]["precision"] for eid in range(NUM_EVENTS)) / NUM_EVENTS
-    macro_recall = sum(per_event[str(eid)]["recall"] for eid in range(NUM_EVENTS)) / NUM_EVENTS
-    macro_f1 = sum(per_event[str(eid)]["f1"] for eid in range(NUM_EVENTS)) / NUM_EVENTS
+    # Macro averages: only over events that were actually evaluated
+    num_evaluated_events = len(evaluated_event_ids)
+    if num_evaluated_events > 0:
+        macro_precision = sum(per_event[str(eid)]["precision"] for eid in evaluated_event_ids) / num_evaluated_events
+        macro_recall = sum(per_event[str(eid)]["recall"] for eid in evaluated_event_ids) / num_evaluated_events
+        macro_f1 = sum(per_event[str(eid)]["f1"] for eid in evaluated_event_ids) / num_evaluated_events
+    else:
+        macro_precision = macro_recall = macro_f1 = 0.0
 
     overall = {
         "macro_precision": round(macro_precision, 4),
         "macro_recall": round(macro_recall, 4),
         "macro_f1": round(macro_f1, 4),
+        "evaluated_events": num_evaluated_events,
     }
 
     return {"per_event": per_event, "overall": overall}, evaluated, skipped
@@ -400,8 +407,9 @@ def format_markdown_table(result: Dict[str, Any]) -> str:
         )
 
     overall = result["overall"]
+    num_eval = overall.get("evaluated_events", NUM_EVENTS)
     lines.append(
-        "| **总体** | **宏平均** | - | - | - | - | "
+        f"| **总体** | **宏平均 (N={num_eval})** | - | - | - | - | "
         f"**{overall['macro_precision']:.4f}** | **{overall['macro_recall']:.4f}** | **{overall['macro_f1']:.4f}** |"
     )
 
@@ -409,6 +417,7 @@ def format_markdown_table(result: Dict[str, Any]) -> str:
     lines.append(f"- 总视频数: {result['total_videos']}")
     lines.append(f"- 已评估视频数: {result['evaluated_videos']}")
     lines.append(f"- 跳过视频数: {result['skipped_videos']}")
+    lines.append(f"- 参与宏平均的事件数: {num_eval}")
     lines.append("")
 
     # Add per-video detail table if available
@@ -477,6 +486,7 @@ def format_html_report(
     per_event = result["per_event"]
     overall = result["overall"]
     per_video = result.get("per_video", [])
+    num_evaluated_events = overall.get("evaluated_events", NUM_EVENTS)
 
     # Summary table rows
     summary_rows = []
@@ -503,9 +513,17 @@ def format_html_report(
         video_name = row["video"]
         pred = row.get("predicted", [])
         gt = row.get("ground_truth", [])
+        pred_active = row.get("predicted_active", pred)
+        gt_active = row.get("ground_truth_active", gt)
         ok = row.get("is_correct", False)
-        pred_text = _ids_to_names(pred, EVENT_NAMES)
-        gt_text = _ids_to_names(gt, EVENT_NAMES)
+        pred_text = _ids_to_names(pred_active, EVENT_NAMES)
+        gt_text = _ids_to_names(gt_active, EVENT_NAMES)
+        # Show full GT as a hint only if it differs from active GT
+        inactive_gt = sorted(set(gt) - set(gt_active))
+        inactive_hint = ""
+        if inactive_gt:
+            inactive_names = _ids_to_names(inactive_gt, EVENT_NAMES)
+            inactive_hint = f'<br><span class="inactive-hint">(已忽略 inactive: {html.escape(inactive_names)})</span>'
 
         video_href = video_paths.get(video_name, "")
         report_href = report_paths.get(video_name, "")
@@ -519,7 +537,7 @@ def format_html_report(
             f'<td><a class="link-video" href="{html.escape(video_href)}">'
             f"{html.escape(video_name)}</a></td>"
             f"<td>{html.escape(pred_text)}</td>"
-            f"<td>{html.escape(gt_text)}</td>"
+            f"<td>{html.escape(gt_text)}{inactive_hint}</td>"
             f'<td><a class="link-report" href="{html.escape(report_href)}">'
             f"{html.escape(Path(report_href).name if report_href else '')}</a></td>"
             f'<td class="status">{status}</td>'
@@ -792,6 +810,11 @@ def format_html_report(
       color: var(--muted);
     }}
     .hint code {{ color: #93c5fd; }}
+    .inactive-hint {{
+      font-size: 0.75rem;
+      color: var(--muted);
+      font-style: italic;
+    }}
     @media (max-width: 1023px) {{
       body {{ overflow: auto; height: auto; }}
       .layout {{ flex-direction: column; overflow: visible; }}
@@ -841,7 +864,7 @@ def format_html_report(
           </tbody>
           <tfoot>
             <tr>
-              <td colspan="2">总体（宏平均）</td>
+              <td colspan="2">总体（宏平均 N={num_evaluated_events}）</td>
               <td>-</td><td>-</td><td>-</td><td>-</td>
               <td>{overall['macro_precision']:.4f}</td>
               <td>{overall['macro_recall']:.4f}</td>
@@ -1093,20 +1116,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     logger = _setup_logging(args.log_level)
 
-    # Load active events for single-class mode
+    # Load active events from config (always used for is_correct filtering;
+    # metrics masking is still controlled by --single-class).
     active_event_ids: Optional[Set[int]] = None
-    if args.single_class:
-        config_dir = Path(args.config_dir).expanduser().resolve()
-        try:
-            active_event_ids = load_active_events_from_config(config_dir)
+    config_dir = Path(args.config_dir).expanduser().resolve()
+    try:
+        active_event_ids = load_active_events_from_config(config_dir)
+        if args.single_class:
             logger.info(
                 "Single-class mode: evaluating %d active events from config: %s",
                 len(active_event_ids),
                 sorted(active_event_ids),
             )
-        except FileNotFoundError as exc:
+    except FileNotFoundError as exc:
+        if args.single_class:
             logger.error("%s", exc)
             return 1
+        logger.warning("Could not load active events from config: %s", exc)
 
     video_dir = Path(args.video_dir).expanduser().resolve()
     report_dir = Path(args.report_dir).expanduser().resolve()
@@ -1210,7 +1236,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # Build per-video extra data for markdown (with absolute paths and names)
         predicted_names = [EVENT_NAMES.get(eid, f"事件{eid}") for eid in sorted(pred)]
         ground_truth_names = [EVENT_NAMES.get(eid, f"事件{eid}") for eid in sorted(gt)]
-        is_correct = pred == gt
+
+        # For "all correct" check, ignore inactive events in both pred and gt
+        if active_event_ids is not None:
+            pred_active = pred & active_event_ids
+            gt_active = gt & active_event_ids
+            is_correct = pred_active == gt_active
+        else:
+            pred_active = pred
+            gt_active = gt
+            is_correct = pred == gt
 
         video_abs = str(video_path.resolve())
         report_abs = str(report_path.resolve())
@@ -1243,6 +1278,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "report_path": report_abs,
             "predicted": sorted(pred),
             "ground_truth": sorted(gt),
+            "predicted_active": sorted(pred_active),
+            "ground_truth_active": sorted(gt_active),
             "predicted_names": predicted_names,
             "ground_truth_names": ground_truth_names,
             "is_correct": is_correct,

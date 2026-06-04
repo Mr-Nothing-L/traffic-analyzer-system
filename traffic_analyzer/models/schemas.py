@@ -207,7 +207,7 @@ class EventCategory(BaseModel):
     )
     tools: List[str] = Field(
         default_factory=list,
-        description="List of tool names available to this expert agent (e.g. ['yolo_track_tool'])"
+        description="List of tool names available to this expert agent"
     )
     is_active: bool = True
 
@@ -244,7 +244,6 @@ class EventInstance(BaseModel):
     road_id: Optional[int] = None
     start_time_sec: float = 0.0
     end_time_sec: float = 0.0
-    confidence: float = 0.0
     confidence_level: ConfidenceLevel = ConfidenceLevel.LOW
     evidence_frames: List[int] = Field(default_factory=list)
     description: str = ""
@@ -260,13 +259,11 @@ class EventResult(BaseModel):
     detected: bool = False
     instances: List[EventInstance] = Field(default_factory=list)
     summary: str = ""
-    confidence: float = 0.0
     reasoning: str = ""
     analysis_process: List[str] = Field(default_factory=list)
     adjudication_reasoning: str = Field(default="", description="裁决层对该事件的详细推理过程")
     expert_raw_description: str = Field(default="", description="ExpertAgent原始自然语言描述")
     cv_evidence: str = Field(default="", description="CV帧差检测证据")
-    tracking_evidence: str = Field(default="", description="YOLO车辆跟踪证据")
     tool_results: List[Dict[str, Any]] = Field(default_factory=list, description="工具调用结果列表")
 
 
@@ -275,13 +272,11 @@ class EventCandidate(BaseModel):
     event_id: int
     event_name: str
     detected: bool = False
-    confidence: float = 0.0
     summary: str = ""
     instances: List[EventInstance] = Field(default_factory=list)
     raw_vlm_response: Dict[str, Any] = Field(default_factory=dict)
     raw_vlm_text: str = Field(default="", description="VLM原始自然语言回复全文")
     cv_evidence: str = Field(default="", description="CV帧差检测证据")
-    tracking_evidence: str = Field(default="", description="YOLO车辆跟踪证据")
     tool_results: List[Dict[str, Any]] = Field(default_factory=list, description="工具调用结果列表")
 
 
@@ -435,10 +430,6 @@ class SystemConfig(BaseModel):
     log_level: str = "INFO"
     scene_understanding_min_frames: int = 10
     vlm_max_frames: int = 10
-    yolo_model_path: str = "traffic_analyzer/models/yolo/yolov8n.pt"
-    tracking_target_fps: float = 5.0
-    tracking_confidence_threshold: float = 0.3
-    tracking_device: str = "cpu"
 
 
 # ---------------------------------------------------------------------------
