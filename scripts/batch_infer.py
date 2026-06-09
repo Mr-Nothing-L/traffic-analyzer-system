@@ -81,6 +81,7 @@ def _run_single(
     min_frames: int,
     cv_tracks_path: Optional[Path],
     log_path: Optional[Path],
+    env: Optional[Dict[str, str]] = None,
 ) -> Tuple[str, bool, str]:
     """Run analysis on a single video via subprocess.
 
@@ -98,6 +99,11 @@ def _run_single(
     if cv_tracks_path:
         cmd += ["--cv-tracks", str(cv_tracks_path)]
 
+    # Merge custom env vars into current environment
+    run_env = os.environ.copy()
+    if env:
+        run_env.update(env)
+
     # Optional per-video log file
     log_fh = None
     if log_path:
@@ -105,6 +111,8 @@ def _run_single(
         log_fh = open(log_path, "w", encoding="utf-8")
         log_fh.write(f"[BEGIN] {video_path.name}\n")
         log_fh.write(f"CMD: {' '.join(cmd)}\n")
+        if env:
+            log_fh.write(f"ENV: {json.dumps(env, ensure_ascii=False)}\n")
         log_fh.flush()
 
     try:
@@ -114,6 +122,7 @@ def _run_single(
             text=True,
             encoding="utf-8",
             timeout=3600,  # 1 hour per video
+            env=run_env,
         )
         if log_fh:
             log_fh.write(f"\n[STDOUT]\n{result.stdout}\n")
@@ -209,6 +218,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         default=None,
         help="Optional directory for per-video log files.",
     )
+    parser.add_argument(
+        "--api-key",
+        default=None,
+        help=(
+            "Optional API key for VLM inference. "
+            "If provided, overrides the LLM_API_KEY / KIMI_API_KEY environment variable. "
+            "If omitted, uses the API key from the environment (default behavior)."
+        ),
+    )
     args = parser.parse_args(argv)
 
     logger = _setup_logging(args.log_level)
@@ -225,6 +243,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 1
 
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Build custom env dict for API key override
+    custom_env: Optional[Dict[str, str]] = None
+    if args.api_key:
+        custom_env = {"LLM_API_KEY": args.api_key, "KIMI_API_KEY": args.api_key}
+        logger.info("Using provided API key (LLM_API_KEY and KIMI_API_KEY overridden)")
+    else:
+        logger.info("Using API key from environment")
 
     videos = _find_videos(video_dir)
     if not videos:
@@ -257,7 +283,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # ------------------------------------------------------------------
     # Build task list (skip already-processed unless --force)
     # ------------------------------------------------------------------
-    tasks: List[Tuple[Path, Path, Path, str, int, Optional[Path], Optional[Path]]] = []
+    tasks: List[Tuple[Path, Path, Path, str, int, Optional[Path], Optional[Path], Optional[Dict[str, str]]]] = []
     for video_path in videos:
         output_path = _build_output_path(video_path, output_dir, args.format)
         if output_path.exists() and not args.force:
@@ -279,6 +305,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         tasks.append((
             video_path, output_path, config_dir,
             args.format, args.min_frames, cv_tracks_path, per_video_log,
+            custom_env,
         ))
 
     to_process = len(tasks)
