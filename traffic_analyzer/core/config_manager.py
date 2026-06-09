@@ -551,4 +551,20 @@ class ConfigManager:
         if cache_enabled is not None:
             kwargs["enable_cache"] = cache_enabled.lower() in ("1", "true", "yes", "on")
 
+        # Disk cache path (cross-process persistent cache)
+        disk_cache_path = os.getenv("TRAFFIC_ANALYZER_DISK_CACHE")
+        if disk_cache_path:
+            kwargs["disk_cache_path"] = disk_cache_path
+
+        disk_cache_max = os.getenv("TRAFFIC_ANALYZER_DISK_CACHE_MAX_ENTRIES")
+        if disk_cache_max is not None:
+            try:
+                kwargs["disk_cache_max_entries"] = int(disk_cache_max)
+            except (ValueError, TypeError) as exc:
+                logger.error(
+                    "[config_manager:_load_env_llm_config] ENV_PARSE_ERROR | var=TRAFFIC_ANALYZER_DISK_CACHE_MAX_ENTRIES value=%s | %s",
+                    disk_cache_max,
+                    exc,
+                )
+
         return LLMProviderConfig(**kwargs)

@@ -417,6 +417,8 @@ class LLMProviderConfig(BaseModel):
     max_retries: int = 3
     enable_cache: bool = True
     cache_max_size: int = 128
+    disk_cache_path: Optional[str] = None
+    disk_cache_max_entries: int = 2000
 
 
 class SystemConfig(BaseModel):

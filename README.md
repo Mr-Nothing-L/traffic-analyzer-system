@@ -169,8 +169,10 @@ Supported environment variables:
 | `LLM_TEMPERATURE` | Sampling temperature | `0.2` |
 | `LLM_TIMEOUT` | API timeout (seconds) | `120` |
 | `LLM_MAX_RETRIES` | Max retry count | `3` |
-| `LLM_ENABLE_CACHE` | Enable VLM result cache | `true` |
-| `LLM_CACHE_MAX_SIZE` | Max cache entries | `128` |
+| `LLM_ENABLE_CACHE` | Enable in-memory VLM result cache (per-process) | `true` |
+| `LLM_CACHE_MAX_SIZE` | Max in-memory cache entries | `128` |
+| `TRAFFIC_ANALYZER_DISK_CACHE` | Path to SQLite disk cache (cross-process) | - |
+| `TRAFFIC_ANALYZER_DISK_CACHE_MAX_ENTRIES` | Max disk cache entries | `2000` |
 | `VLM_MAX_FRAMES` | Max frames per VLM call | `10` |
 | `PROMPT_VERSION_{TEMPLATE_ID}` | Force a specific prompt version | - |
 

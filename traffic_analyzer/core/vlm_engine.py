@@ -20,6 +20,7 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from jinja2 import Template, UndefinedError, StrictUndefined, DebugUndefined
@@ -61,6 +62,144 @@ class ResponseParseError(VLMEngineError):
 
 class SchemaValidationError(VLMEngineError):
     """Raised when parsed response fails schema validation."""
+
+
+# ---------------------------------------------------------------------------
+# Disk Cache (cross-process persistent cache)
+# ---------------------------------------------------------------------------
+
+class DiskCache:
+    """SQLite-backed persistent cache for LLM responses.
+
+    Enables cache hits across subprocess boundaries (e.g. batch_infer)
+    where each video runs in a separate process.
+    """
+
+    def __init__(self, db_path: str, max_entries: int = 2000) -> None:
+        # Resolve relative paths to absolute (subprocess cwd may differ)
+        self.db_path = str(Path(db_path).expanduser().resolve())
+        self.max_entries = max_entries
+        self._local = threading.local()
+        self._init_db()
+
+    def _get_conn(self) -> "sqlite3.Connection":
+        """Return a thread-local SQLite connection."""
+        if not hasattr(self._local, "conn") or self._local.conn is None:
+            import sqlite3
+            self._local.conn = sqlite3.connect(
+                self.db_path,
+                timeout=10.0,
+                check_same_thread=False,
+            )
+            self._local.conn.execute("PRAGMA journal_mode=WAL")
+            self._local.conn.execute("PRAGMA synchronous=NORMAL")
+        return self._local.conn
+
+    def _init_db(self) -> None:
+        import sqlite3
+        import os
+        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+        conn = sqlite3.connect(self.db_path, timeout=10.0)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS vlm_cache (
+                cache_key TEXT PRIMARY KEY,
+                provider TEXT NOT NULL,
+                model TEXT NOT NULL,
+                response_json TEXT NOT NULL,
+                created_at REAL,
+                access_count INTEGER DEFAULT 1,
+                last_accessed REAL
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_vlm_cache_last_accessed
+            ON vlm_cache(last_accessed)
+        """)
+        conn.commit()
+        conn.close()
+
+    def get(self, cache_key: str, provider: str, model: str) -> Optional[LLMResponse]:
+        """Retrieve a cached response if it exists and matches provider/model."""
+        import sqlite3
+        try:
+            conn = self._get_conn()
+            cursor = conn.execute(
+                "SELECT response_json FROM vlm_cache WHERE cache_key = ? AND provider = ? AND model = ?",
+                (cache_key, provider, model),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            # Update access stats
+            now = time.time()
+            conn.execute(
+                "UPDATE vlm_cache SET access_count = access_count + 1, last_accessed = ? WHERE cache_key = ?",
+                (now, cache_key),
+            )
+            conn.commit()
+            data = json.loads(row[0])
+            return LLMResponse(**data)
+        except sqlite3.Error as exc:
+            logger.debug("[DiskCache] GET error: %s", exc)
+            return None
+
+    def set(self, cache_key: str, provider: str, model: str, response: LLMResponse) -> None:
+        """Store a response in the disk cache."""
+        import sqlite3
+        try:
+            conn = self._get_conn()
+            now = time.time()
+            response_json = json.dumps(response.model_dump(), default=str)
+            conn.execute(
+                """INSERT OR REPLACE INTO vlm_cache
+                   (cache_key, provider, model, response_json, created_at, access_count, last_accessed)
+                   VALUES (?, ?, ?, ?, ?, 1, ?)""",
+                (cache_key, provider, model, response_json, now, now),
+            )
+            conn.commit()
+            # Prune if over max_entries
+            self._prune(conn)
+        except sqlite3.Error as exc:
+            logger.debug("[DiskCache] SET error: %s", exc)
+
+    def _prune(self, conn: "sqlite3.Connection") -> None:
+        """Remove oldest entries if over max_entries."""
+        import sqlite3
+        try:
+            cursor = conn.execute("SELECT COUNT(*) FROM vlm_cache")
+            count = cursor.fetchone()[0]
+            if count > self.max_entries:
+                to_delete = count - self.max_entries
+                conn.execute(
+                    "DELETE FROM vlm_cache WHERE cache_key IN ("
+                    "SELECT cache_key FROM vlm_cache ORDER BY last_accessed ASC LIMIT ?"
+                    ")",
+                    (to_delete,),
+                )
+                conn.commit()
+        except sqlite3.Error:
+            pass
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Return disk cache statistics."""
+        import sqlite3
+        try:
+            conn = self._get_conn()
+            cursor = conn.execute("SELECT COUNT(*), SUM(access_count) FROM vlm_cache")
+            row = cursor.fetchone()
+            return {
+                "disk_cache_enabled": True,
+                "disk_cache_path": self.db_path,
+                "disk_cache_entries": row[0] or 0,
+                "disk_cache_total_hits": row[1] or 0,
+            }
+        except sqlite3.Error as exc:
+            return {
+                "disk_cache_enabled": True,
+                "disk_cache_path": self.db_path,
+                "disk_cache_error": str(exc),
+            }
 
 
 # ---------------------------------------------------------------------------
@@ -646,6 +785,20 @@ class VLMInferenceEngine:
         self._cache_misses: int = 0
         self._cache_lock = threading.Lock()
 
+        # Disk cache (cross-process persistent cache)
+        self._disk_cache: Optional[DiskCache] = None
+        self._disk_cache_hits: int = 0
+        disk_cache_path = getattr(config, "disk_cache_path", None)
+        if disk_cache_path:
+            try:
+                self._disk_cache = DiskCache(
+                    db_path=disk_cache_path,
+                    max_entries=getattr(config, "disk_cache_max_entries", 2000),
+                )
+                logger.info("[VLMInferenceEngine] Disk cache enabled: %s", disk_cache_path)
+            except Exception as exc:
+                logger.warning("[VLMInferenceEngine] Disk cache init failed: %s", exc)
+
     def _init_client(self) -> None:
         """Initialize the underlying SDK client based on provider."""
         # Create an http client that bypasses system proxies to avoid
@@ -761,7 +914,7 @@ class VLMInferenceEngine:
         """
         system_prompt, user_prompt = self.render_prompt(template, context_vars)
 
-        # --- Cache lookup ---
+        # --- Cache lookup (memory first, then disk) ---
         cache_key = ""
         if self._cache_enabled:
             cache_key = _compute_cache_key(system_prompt, user_prompt, images)
@@ -771,9 +924,22 @@ class VLMInferenceEngine:
                     self._cache_hits += 1
                     # Move to end (most recently used)
                     self._cache.move_to_end(cache_key)
-                    logger.debug("[cache] HIT for key %s... (%d cached)", cache_key[:16], len(self._cache))
+                    logger.debug("[cache] MEM HIT for key %s... (%d cached)", cache_key[:16], len(self._cache))
                     return copy.deepcopy(cached)
                 self._cache_misses += 1
+
+            # Memory miss — try disk cache
+            if self._disk_cache is not None:
+                disk_cached = self._disk_cache.get(cache_key, self.provider, self.config.model)
+                if disk_cached is not None:
+                    self._disk_cache_hits += 1
+                    # Promote to memory cache
+                    with self._cache_lock:
+                        self._cache[cache_key] = copy.deepcopy(disk_cached)
+                        while len(self._cache) > self._cache_max_size:
+                            self._cache.popitem(last=False)
+                    logger.debug("[cache] DISK HIT for key %s...", cache_key[:16])
+                    return copy.deepcopy(disk_cached)
 
         call_id = str(uuid.uuid4())
         start_time = time.perf_counter()
@@ -872,7 +1038,11 @@ class VLMInferenceEngine:
                 # Evict oldest if over capacity
                 while len(self._cache) > self._cache_max_size:
                     self._cache.popitem(last=False)
-                logger.debug("[cache] STORED key %s... (size=%d)", cache_key[:16], len(self._cache))
+                logger.debug("[cache] MEM STORED key %s... (size=%d)", cache_key[:16], len(self._cache))
+            # Also write to disk cache for cross-process sharing
+            if self._disk_cache is not None:
+                self._disk_cache.set(cache_key, self.provider, self.config.model, response)
+                logger.debug("[cache] DISK STORED key %s...", cache_key[:16])
 
         return response
 
@@ -1322,7 +1492,8 @@ class VLMInferenceEngine:
             Dictionary with total calls, tokens, latency, retries, and failures.
         """
         total_cache_lookups = self._cache_hits + self._cache_misses
-        return {
+        total_disk_lookups = total_cache_lookups + self._disk_cache_hits
+        stats = {
             "provider": self.provider,
             "model": self.config.model,
             "total_calls": self._total_calls,
@@ -1343,7 +1514,14 @@ class VLMInferenceEngine:
             "cache_hit_rate": round(
                 self._cache_hits / max(total_cache_lookups, 1), 4
             ),
+            "disk_cache_hits": self._disk_cache_hits,
+            "combined_cache_hit_rate": round(
+                (self._cache_hits + self._disk_cache_hits) / max(total_disk_lookups, 1), 4
+            ),
         }
+        if self._disk_cache is not None:
+            stats.update(self._disk_cache.get_stats())
+        return stats
 
     # ------------------------------------------------------------------
     # Audit helper
