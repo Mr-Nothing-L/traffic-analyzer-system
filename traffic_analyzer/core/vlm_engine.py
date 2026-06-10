@@ -422,6 +422,74 @@ def _extract_json_from_text(text: str) -> Dict[str, Any]:
         raise ResponseParseError(f"JSON extraction failed: {exc}") from exc
 
 
+def _is_retryable_error(exc: Exception) -> bool:
+    """Return True if *exc* is a transient error worth retrying.
+
+    Retryable: rate limits, connection issues, timeouts, server-side 5xx.
+    Non-retryable: auth errors, bad requests, parse/validation errors.
+    """
+    # Our own exceptions — never retry
+    if isinstance(exc, (PromptRenderError, ResponseParseError, SchemaValidationError)):
+        return False
+
+    # Unwrap wrapped exceptions (e.g. SDK wrappers, chained causes)
+    cause = getattr(exc, "__cause__", None) or getattr(exc, "__context__", None)
+    candidates = [exc]
+    if cause is not None:
+        candidates.append(cause)
+
+    for candidate in candidates:
+        # OpenAI SDK errors
+        if isinstance(candidate, openai.RateLimitError):
+            return True
+        if isinstance(candidate, openai.APIConnectionError):
+            return True
+        if isinstance(candidate, openai.APITimeoutError):
+            return True
+        if isinstance(candidate, openai.InternalServerError):
+            return True
+        if isinstance(candidate, openai.APIStatusError):
+            # 5xx server errors are retryable; 4xx client errors are not
+            status = getattr(candidate, "status_code", None) or 0
+            if status >= 500:
+                return True
+            # Explicit non-retryable OpenAI client errors
+            if isinstance(
+                candidate,
+                (openai.AuthenticationError, openai.BadRequestError, openai.NotFoundError),
+            ):
+                return False
+            # Other 4xx — don't retry by default
+            if 400 <= status < 500:
+                return False
+
+        # Anthropic SDK errors (use getattr for safety in case SDK version differs)
+        anthropic_rate_limit = getattr(anthropic, "RateLimitError", None)
+        anthropic_timeout = getattr(anthropic, "APITimeoutError", None)
+        anthropic_auth = getattr(anthropic, "AuthenticationError", None)
+        anthropic_bad_request = getattr(anthropic, "BadRequestError", None)
+        if anthropic_rate_limit and isinstance(candidate, anthropic_rate_limit):
+            return True
+        if anthropic_timeout and isinstance(candidate, anthropic_timeout):
+            return True
+        if anthropic_auth and isinstance(candidate, anthropic_auth):
+            return False
+        if anthropic_bad_request and isinstance(candidate, anthropic_bad_request):
+            return False
+
+        # httpx timeouts
+        if isinstance(candidate, httpx.TimeoutException):
+            return True
+
+        # Generic Python network / timeout errors
+        if isinstance(candidate, (ConnectionError, TimeoutError)):
+            return True
+
+    # Default: if we can't classify it, be conservative and don't retry
+    # (avoids burning API quota on unknown errors)
+    return False
+
+
 def _validate_schema_basic(data: Dict[str, Any], schema: Dict[str, Any]) -> None:
     """Perform basic key-check validation against a JSON schema.
 
@@ -1363,6 +1431,18 @@ class VLMInferenceEngine:
                 return (*result, retry_count)
             except Exception as exc:
                 last_error = exc
+                if not _is_retryable_error(exc):
+                    # Non-retryable error — re-raise immediately to avoid
+                    # wasting API calls on errors that will never succeed.
+                    logger.error(
+                        "[vlm_engine:_execute_with_retry] NON_RETRYABLE | attempt=%d/%d | error=%s",
+                        attempt + 1,
+                        max_retries,
+                        exc,
+                        exc_info=True,
+                    )
+                    setattr(last_error, "_retry_count", retry_count)
+                    raise last_error
                 if attempt < max_retries - 1:
                     retry_count += 1
                     wait_sec = min(2 ** attempt, 30)

@@ -524,8 +524,15 @@ class ConfigManager:
             if specific_base_url:
                 kwargs["base_url"] = specific_base_url
 
+        # Provider-specific model overrides generic LLM_MODEL
+        provider = kwargs.get("provider") or os.getenv("LLM_PROVIDER", "")
+        if provider:
+            specific_model = os.getenv(f"{provider.upper()}_MODEL")
+            if specific_model:
+                kwargs["model"] = specific_model
+
         if model := os.getenv("LLM_MODEL"):
-            kwargs["model"] = model
+            kwargs.setdefault("model", model)
 
         for env_name, attr_name, cast in (
             ("LLM_MAX_TOKENS", "max_tokens", int),
