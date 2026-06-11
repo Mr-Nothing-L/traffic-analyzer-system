@@ -327,6 +327,8 @@ class AnalysisOrchestrator:
             analysis_duration_sec=0.0,
             overall_traffic_description=f"视频被预处理筛除: {reject_reason}",
         )
+        report.rejected = True
+        report.reject_reason = reject_reason
         # Store prefilter checks in context for debugging
         if checks:
             logger.info("[orchestrator:analyze] PREFILTER_CHECKS | %s", checks)

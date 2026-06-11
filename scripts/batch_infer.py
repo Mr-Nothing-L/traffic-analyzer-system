@@ -103,13 +103,14 @@ def _run_single(
     cv_tracks_path: Optional[Path],
     log_path: Optional[Path],
     env: Optional[Dict[str, str]] = None,
-) -> Tuple[str, bool, str, bool]:
+) -> Tuple[str, bool, str, bool, bool]:
     """Run analysis on a single video via subprocess.
 
-    Returns (video_name, success, message, is_fatal) for aggregation by the
-    main process.  *is_fatal* is True when the error indicates the API is
-    unusable (quota exhausted, auth failed, etc.) and batch processing should
-    stop immediately.
+    Returns (video_name, success, message, is_fatal, is_rejected) for
+    aggregation by the main process.
+
+    - *is_fatal*     → True when the API is unusable (quota/auth); stops batch.
+    - *is_rejected*  → True when the video failed the prefilter; no md saved.
 
     Per-video logs are written to *log_path* when provided.
     """
@@ -156,6 +157,15 @@ def _run_single(
             log_fh.write(f"\n[EXIT CODE] {result.returncode}\n")
             log_fh.flush()
 
+        if result.returncode == 2:
+            # Exit code 2 = prefilter rejection (no output file was written)
+            msg = "REJECTED by prefilter"
+            if result.stderr:
+                msg += f" — {result.stderr[:200]}"
+            if log_fh:
+                log_fh.write(f"[END] {msg}\n")
+            return video_path.name, False, msg, False, True
+
         if result.returncode != 0:
             msg = f"FAILED (exit {result.returncode})"
             if result.stderr:
@@ -166,22 +176,22 @@ def _run_single(
                 output_path.unlink(missing_ok=True)
             if log_fh:
                 log_fh.write(f"[END] {msg}\n")
-            return video_path.name, False, msg, is_fatal
+            return video_path.name, False, msg, is_fatal, False
 
         msg = f"OK -> {output_path.name}"
         if log_fh:
             log_fh.write(f"[END] {msg}\n")
-        return video_path.name, True, msg, False
+        return video_path.name, True, msg, False, False
     except subprocess.TimeoutExpired:
         msg = "FAILED (timeout after 3600s)"
         if log_fh:
             log_fh.write(f"[END] {msg}\n")
-        return video_path.name, False, msg, False
+        return video_path.name, False, msg, False, False
     except Exception as exc:
         msg = f"FAILED ({exc})"
         if log_fh:
             log_fh.write(f"[END] {msg}\n")
-        return video_path.name, False, msg, False
+        return video_path.name, False, msg, False, False
     finally:
         if log_fh:
             log_fh.close()
@@ -295,6 +305,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     total = len(videos)
     processed = 0
+    rejected = 0
     failed = 0
     skipped = 0
 
@@ -353,10 +364,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if fatal_stopped:
                 break
             logger.info("[%d/%d] Processing: %s", idx, to_process, task[0].name)
-            name, success, msg, is_fatal = _run_single(*task)
+            name, success, msg, is_fatal, is_rejected = _run_single(*task)
             if success:
                 processed += 1
                 logger.info("[%d/%d] DONE: %s", idx, to_process, msg)
+            elif is_rejected:
+                rejected += 1
+                logger.info("[%d/%d] REJECTED: %s — %s", idx, to_process, name, msg)
             else:
                 failed += 1
                 logger.error("[%d/%d] FAILED: %s — %s", idx, to_process, name, msg)
@@ -383,10 +397,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                             f.cancel()
                     break
                 completed += 1
-                name, success, msg, is_fatal = future.result()
+                name, success, msg, is_fatal, is_rejected = future.result()
                 if success:
                     processed += 1
                     logger.info("[%d/%d] DONE: %s", completed, to_process, msg)
+                elif is_rejected:
+                    rejected += 1
+                    logger.info("[%d/%d] REJECTED: %s — %s", completed, to_process, name, msg)
                 else:
                     failed += 1
                     logger.error("[%d/%d] FAILED: %s — %s", completed, to_process, name, msg)
@@ -408,6 +425,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     logger.info("Batch inference complete.")
     logger.info("  Total videos:    %d", total)
     logger.info("  Processed:       %d", processed)
+    logger.info("  Rejected:        %d", rejected)
     logger.info("  Skipped:         %d", skipped)
     logger.info("  Failed:          %d", failed)
     logger.info("  Elapsed time:    %.1f s", elapsed)
@@ -417,16 +435,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if fatal_stopped:
         print(
             f"\n{total} videos scanned, {processed} processed, "
-            f"{failed} failed (fatal API error), {skipped} skipped, "
-            f"{to_process - processed - failed} unprocessed"
+            f"{rejected} rejected, {failed} failed (fatal API error), "
+            f"{skipped} skipped, {to_process - processed - rejected - failed} unprocessed"
         )
     else:
         print(
             f"\n{total} videos scanned, {processed} processed, "
-            f"{failed} failed, {skipped} skipped"
+            f"{rejected} rejected, {failed} failed, {skipped} skipped"
         )
 
-    return 0 if failed == 0 else 1
+    return 0 if (failed == 0 and not fatal_stopped) else 1
 
 
 if __name__ == "__main__":

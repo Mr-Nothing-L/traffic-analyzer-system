@@ -396,6 +396,8 @@ class Report(BaseModel):
     adjudication_reasoning: str = Field(default="", description="总体裁决推理")
     reasoning_chain: List[Dict[str, Any]] = Field(default_factory=list, description="逐事件推理链")
     audit_log: List[AuditEntry] = Field(default_factory=list, description="裁决审计日志")
+    rejected: bool = Field(default=False, description="True if video was rejected by prefilter")
+    reject_reason: str = Field(default="", description="Reason for prefilter rejection")
 
 
 # ---------------------------------------------------------------------------

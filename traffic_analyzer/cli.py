@@ -80,6 +80,15 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         logger.exception("Analysis failed: %s", exc)
         return 1
 
+    # Prefilter rejection — don't save any output file
+    if report.rejected:
+        logger.info(
+            "Video rejected by prefilter: %s | reason=%s | no report saved",
+            video_path,
+            report.reject_reason,
+        )
+        return 2
+
     # Serialize report
     fmt = args.format.lower()
     if fmt == "json":
