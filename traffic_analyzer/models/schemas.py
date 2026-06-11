@@ -75,6 +75,13 @@ class KeyframeSequence(BaseModel):
     segment_frames: Dict[str, List[Keyframe]] = Field(default_factory=dict)
 
 
+class PrefilterResult(BaseModel):
+    """Result of video prefilter checks."""
+    should_process: bool = True
+    reason: str = ""
+    checks: Dict[str, Any] = Field(default_factory=dict)
+
+
 # ---------------------------------------------------------------------------
 # Scene Understanding
 # ---------------------------------------------------------------------------
@@ -403,6 +410,11 @@ class SamplingConfig(BaseModel):
     precision_quality_threshold: float = 0.1
     max_precision_segments: int = 10
     segment_padding_sec: float = 2.0
+    prefilter_enabled: bool = Field(default_factory=lambda: os.getenv("PREFILTER_ENABLE", "false").lower() == "true")
+    prefilter_brightness_threshold: float = Field(default_factory=lambda: float(os.getenv("PREFILTER_BRIGHTNESS_THRESHOLD", "50.0")))
+    prefilter_min_bitrate: int = Field(default_factory=lambda: int(os.getenv("PREFILTER_MIN_BITRATE", "10000")))
+    prefilter_min_duration_sec: float = Field(default_factory=lambda: float(os.getenv("PREFILTER_MIN_DURATION_SEC", "5.0")))
+    prefilter_max_duration_sec: float = Field(default_factory=lambda: float(os.getenv("PREFILTER_MAX_DURATION_SEC", "15.0")))
 
 
 class LLMProviderConfig(BaseModel):

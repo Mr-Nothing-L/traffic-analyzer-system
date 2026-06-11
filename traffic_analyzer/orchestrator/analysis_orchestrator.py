@@ -24,7 +24,7 @@ from traffic_analyzer.core.pipeline_steps import (
     ExpertAgentLayer,
 )
 from traffic_analyzer.core.report_generator import ReportGenerator
-from traffic_analyzer.core.video_preprocessor import VideoPreprocessor
+from traffic_analyzer.core.video_preprocessor import VideoPrefilterError, VideoPreprocessor
 from traffic_analyzer.core.vlm_engine import VLMInferenceEngine
 from traffic_analyzer.models.schemas import (
     AnalysisContext,
@@ -142,6 +142,10 @@ class AnalysisOrchestrator:
         if scene_understanding is not None:
             context.scene_understanding = scene_understanding
 
+        # Extract video metadata early (needed for prefilter reject report)
+        video_meta = self._extract_video_meta(video_path)
+        context.video_meta = video_meta
+
         # Step 1: Video preprocessing
         logger.info("[1/4] Preprocessing video...")
         t0 = time.perf_counter()
@@ -156,6 +160,15 @@ class AnalysisOrchestrator:
                     f"coarse={len(keyframes.coarse_frames)}, "
                     f"precision={len(keyframes.precision_frames)}"
                 )
+        except VideoPrefilterError as exc:
+            logger.warning(
+                "[orchestrator:analyze] PREFILTER_REJECT | video=%s | reason=%s",
+                video_path,
+                exc,
+            )
+            return self._generate_reject_report(
+                video_meta, str(exc), getattr(exc, "checks", None)
+            )
         except Exception as exc:
             logger.error(
                 "[orchestrator:analyze] PREPROCESS_ERROR | video=%s | %s",
@@ -168,10 +181,6 @@ class AnalysisOrchestrator:
         context.keyframes = keyframes
         logger.info("  Coarse frames: %d", len(keyframes.coarse_frames))
         logger.info("  Precision frames: %d", len(keyframes.precision_frames))
-
-        # Extract video metadata early
-        video_meta = self._extract_video_meta(video_path)
-        context.video_meta = video_meta
 
         # Step 2: Expert Agent Layer
         logger.info("[2/4] Expert Agent Layer...")
@@ -296,6 +305,27 @@ class AnalysisOrchestrator:
         logger.info("Analysis complete in %.2f s. Binary encoding: %s", analysis_duration_sec, report.binary_encoding.encoding_string)
         logger.info("=" * 60)
 
+        return report
+
+    def _generate_reject_report(
+        self,
+        video_meta: VideoMetadata,
+        reject_reason: str,
+        checks: Optional[Dict[str, Any]] = None,
+    ) -> Report:
+        """Generate a report for a video rejected by prefilter."""
+        usage_stats = self.vlm_engine.get_usage_stats()
+        report = self.report_generator.generate(
+            event_results=[],
+            scene_info=None,
+            video_meta=video_meta,
+            usage_stats=usage_stats,
+            analysis_duration_sec=0.0,
+            overall_traffic_description=f"视频被预处理筛除: {reject_reason}",
+        )
+        # Store prefilter checks in context for debugging
+        if checks:
+            logger.info("[orchestrator:analyze] PREFILTER_CHECKS | %s", checks)
         return report
 
     # ------------------------------------------------------------------

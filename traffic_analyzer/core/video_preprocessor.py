@@ -16,7 +16,7 @@ import os
 import tempfile
 import uuid
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -36,6 +36,14 @@ class VideoPreprocessorError(Exception):
     """Base exception for video preprocessing errors."""
 
     pass
+
+
+class VideoPrefilterError(VideoPreprocessorError):
+    """Raised when a video fails the prefilter checks."""
+
+    def __init__(self, message: str, checks: Dict[str, Any] = None) -> None:
+        super().__init__(message)
+        self.checks = checks or {}
 
 
 class VideoPreprocessor:
@@ -436,6 +444,62 @@ class VideoPreprocessor:
         finally:
             cap.release()
 
+    def _check_night_scene(self, cap: cv2.VideoCapture) -> Tuple[bool, str, float]:
+        """Check if video first frame is too dark (night scene).
+
+        Returns: (passed, reason, brightness)
+        """
+        ret, frame = cap.read()
+        if not ret or frame is None:
+            return False, "无法读取视频第一帧", 0.0
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        brightness = float(np.mean(gray))
+        if brightness < self.config.prefilter_brightness_threshold:
+            return False, f"夜间场景(亮度={brightness:.1f} < {self.config.prefilter_brightness_threshold})", brightness
+        return True, "", brightness
+
+    def _check_bitrate(self, metadata: VideoMetadata) -> Tuple[bool, str]:
+        if metadata.bitrate < self.config.prefilter_min_bitrate:
+            return False, f"比特率过低({metadata.bitrate} < {self.config.prefilter_min_bitrate})"
+        return True, ""
+
+    def _check_duration(self, metadata: VideoMetadata) -> Tuple[bool, str]:
+        if metadata.duration_sec <= self.config.prefilter_min_duration_sec:
+            return False, f"时长过短({metadata.duration_sec:.1f}s <= {self.config.prefilter_min_duration_sec}s)"
+        if metadata.duration_sec >= self.config.prefilter_max_duration_sec:
+            return False, f"时长过长({metadata.duration_sec:.1f}s >= {self.config.prefilter_max_duration_sec}s)"
+        return True, ""
+
+    def _prefilter(self, video_path: str, metadata: VideoMetadata, cap: cv2.VideoCapture) -> "PrefilterResult":
+        from traffic_analyzer.models.schemas import PrefilterResult
+
+        if not self.config.prefilter_enabled:
+            return PrefilterResult(should_process=True)
+
+        checks: Dict[str, Any] = {}
+
+        # Check duration
+        passed, reason = self._check_duration(metadata)
+        checks["duration"] = {"passed": passed, "value": metadata.duration_sec}
+        if not passed:
+            return PrefilterResult(should_process=False, reason=reason, checks=checks)
+
+        # Check bitrate
+        passed, reason = self._check_bitrate(metadata)
+        checks["bitrate"] = {"passed": passed, "value": metadata.bitrate}
+        if not passed:
+            return PrefilterResult(should_process=False, reason=reason, checks=checks)
+
+        # Check night scene (brightness)
+        # Need to reset cap to frame 0 since we haven't read any frames yet in process()
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        passed, reason, brightness = self._check_night_scene(cap)
+        checks["brightness"] = {"passed": passed, "value": brightness}
+        if not passed:
+            return PrefilterResult(should_process=False, reason=reason, checks=checks)
+
+        return PrefilterResult(should_process=True, checks=checks)
+
     def process(self, video_path: str) -> KeyframeSequence:
         """
         Process a video with two-pass sampling and return keyframes.
@@ -462,6 +526,19 @@ class VideoPreprocessor:
 
         try:
             metadata = self._extract_metadata(video_path, cap)
+
+            # Prefilter check
+            if self.config.prefilter_enabled:
+                prefilter_result = self._prefilter(video_path, metadata, cap)
+                if not prefilter_result.should_process:
+                    logger.warning(
+                        "[video_preprocessor:process] PREFILTER_REJECT | video=%s | reason=%s | checks=%s",
+                        metadata.file_name,
+                        prefilter_result.reason,
+                        prefilter_result.checks,
+                    )
+                    raise VideoPrefilterError(prefilter_result.reason, prefilter_result.checks)
+
             output_dir = self._ensure_output_dir(video_path)
 
             logger.info(
