@@ -25,7 +25,7 @@ from traffic_analyzer.core.pipeline_steps import (
 )
 from traffic_analyzer.core.report_generator import ReportGenerator
 from traffic_analyzer.core.video_preprocessor import VideoPrefilterError, VideoPreprocessor
-from traffic_analyzer.core.vlm_engine import VLMInferenceEngine
+from traffic_analyzer.core.vlm_engine import FatalAPIError, VLMInferenceEngine
 from traffic_analyzer.models.schemas import (
     AnalysisContext,
     BinaryEncoding,
@@ -191,6 +191,8 @@ class AnalysisOrchestrator:
                 expert_result = self._expert_agent_layer.execute(context)
                 if expert_result.success and expert_result.data:
                     candidates = expert_result.data
+            except FatalAPIError:
+                raise
             except Exception as exc:
                 logger.error(
                     "[orchestrator:analyze] EXPERT_LAYER_ERROR | video=%s | %s",
@@ -221,6 +223,8 @@ class AnalysisOrchestrator:
                     adj_reasoning_chain = adj_data.reasoning_chain
                     adj_audit_log = adj_data.audit_log
                     logger.info("  Adjudication reasoning: %s", adj_reasoning[:100] + "..." if len(adj_reasoning) > 100 else adj_reasoning)
+            except FatalAPIError:
+                raise
             except Exception as exc:
                 logger.error(
                     "[orchestrator:analyze] ADJUDICATION_ERROR | video=%s | %s",

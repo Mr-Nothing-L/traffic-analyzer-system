@@ -64,6 +64,14 @@ class SchemaValidationError(VLMEngineError):
     """Raised when parsed response fails schema validation."""
 
 
+class FatalAPIError(VLMEngineError):
+    """Raised when the API is unusable (quota exhausted, auth failed, etc.).
+
+    This error propagates through all fallback layers to signal batch_infer
+    that subsequent videos will also fail — processing should stop immediately.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Disk Cache (cross-process persistent cache)
 # ---------------------------------------------------------------------------
@@ -487,6 +495,43 @@ def _is_retryable_error(exc: Exception) -> bool:
 
     # Default: if we can't classify it, be conservative and don't retry
     # (avoids burning API quota on unknown errors)
+    return False
+
+
+def _is_fatal_api_error(exc: Exception) -> bool:
+    """Return True if *exc* means the API is unusable and will not recover.
+
+    Fatal errors should stop batch processing immediately to avoid wasting
+    quota on retries and subsequent videos.
+    """
+    cause = getattr(exc, "__cause__", None) or getattr(exc, "__context__", None)
+    candidates = [exc]
+    if cause is not None:
+        candidates.append(cause)
+
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        # OpenAI SDK — auth / permission / quota
+        if isinstance(
+            candidate,
+            (openai.AuthenticationError, openai.PermissionDeniedError),
+        ):
+            return True
+        # Anthropic SDK — auth
+        anthropic_auth = getattr(anthropic, "AuthenticationError", None)
+        if anthropic_auth and isinstance(candidate, anthropic_auth):
+            return True
+        # Check error message for quota / balance / billing keywords
+        msg = str(candidate).lower()
+        fatal_keywords = (
+            "quota", "insufficient", "balance", "billing", "exhausted",
+            "unauthorized", "invalid api key", "access denied",
+            "余额", "配额", "欠费", "未授权", "无效的",
+        )
+        if any(kw in msg for kw in fatal_keywords):
+            return True
+
     return False
 
 
@@ -1063,6 +1108,9 @@ class VLMInferenceEngine:
                 exc_info=True,
             )
         except Exception as exc:
+            # Fatal API errors (quota/auth) must propagate up to stop batch processing
+            if _is_fatal_api_error(exc):
+                raise FatalAPIError(f"API unusable: {exc}") from exc
             error_message = str(exc)
             retry_count = getattr(exc, "_retry_count", retry_count)
             logger.error(
@@ -1180,7 +1228,7 @@ class VLMInferenceEngine:
             raw_text, tool_uses, prompt_tokens, completion_tokens, total_tokens = (
                 _call_anthropic_with_tools(self._client, kwargs)
             )
-            
+
             # If no tool uses, try to parse JSON from text
             if not tool_uses:
                 try:
@@ -1204,8 +1252,10 @@ class VLMInferenceEngine:
                     template_id,
                     len(tool_uses),
                 )
-            
+
             success = True
+        except FatalAPIError:
+            raise
         except Exception as exc:
             error_message = str(exc)
             logger.error(
@@ -1325,6 +1375,8 @@ class VLMInferenceEngine:
                 "[vlm_engine:call_with_tool_results] SECOND_CALL | template_id=%s",
                 template_id,
             )
+        except FatalAPIError:
+            raise
         except Exception as exc:
             logger.error(
                 "[vlm_engine:call_with_tool_results] SECOND_CALL_ERROR | template_id=%s | %s",

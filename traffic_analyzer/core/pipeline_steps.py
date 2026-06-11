@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional
 
 from traffic_analyzer.core.config_manager import ConfigManager
 from traffic_analyzer.core.expert_agent import ExpertAgent
-from traffic_analyzer.core.vlm_engine import VLMInferenceEngine
+from traffic_analyzer.core.vlm_engine import FatalAPIError, VLMInferenceEngine
 from traffic_analyzer.utils.annotation_spec_loader import AnnotationSpecLoader
 from traffic_analyzer.utils.event_detection import select_event_images as _select_event_images_impl
 from traffic_analyzer.models.schemas import (
@@ -166,6 +166,8 @@ class PipelineStep(ABC):
                 duration_sec=time.perf_counter() - start,
                 retry_count=0,
             )
+        except FatalAPIError:
+            raise
         except Exception as exc:
             logger.warning("Step '%s' failed: %s", self.name, exc)
             if self.fallback_enabled:
@@ -236,6 +238,8 @@ class ExpertAgentLayer(PipelineStep):
                         category.name_zh,
                         candidate.detected,
                     )
+                except FatalAPIError:
+                    raise
                 except Exception as exc:
                     logger.error(
                         "[pipeline_steps:ExpertAgentLayer] EXPERT_ERROR | event_id=%d event_name=%s | %s",
@@ -356,6 +360,8 @@ class AdjudicationStep(PipelineStep):
                     context_vars=context_vars,
                     response_schema=_ADJUDICATION_RESPONSE_SCHEMA,
                 )
+            except FatalAPIError:
+                raise
             except Exception as exc:
                 logger.error(
                     "[pipeline_steps:AdjudicationStep] VLM_CALL_ERROR | attempt=%d candidates=%d | %s",
@@ -434,6 +440,8 @@ class AdjudicationStep(PipelineStep):
                             eid,
                             new_candidate.detected,
                         )
+                    except FatalAPIError:
+                        raise
                     except Exception as exc:
                         logger.error(
                             "[pipeline_steps:AdjudicationStep] EXPERT_RERUN_ERROR | attempt=%d event_id=%d | %s",

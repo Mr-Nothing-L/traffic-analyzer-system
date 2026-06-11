@@ -25,6 +25,27 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 
+# Substrings that indicate a fatal API error (quota/auth/billing).
+# If seen in stderr, batch_infer stops processing subsequent videos.
+_FATAL_API_MARKERS = (
+    "FatalAPIError",
+    "AuthenticationError",
+    "PermissionDeniedError",
+    "quota",
+    "Unauthorized",
+    "insufficient",
+    "余额",
+    "配额",
+    "欠费",
+)
+
+
+def _is_fatal_api_error(stderr: str) -> bool:
+    """Return True if stderr contains a fatal API error marker."""
+    text = stderr.lower()
+    return any(marker.lower() in text for marker in _FATAL_API_MARKERS)
+
+
 def _setup_logging(log_level: str = "INFO") -> logging.Logger:
     """Configure root logger and return a named logger."""
     logging.basicConfig(
@@ -82,10 +103,14 @@ def _run_single(
     cv_tracks_path: Optional[Path],
     log_path: Optional[Path],
     env: Optional[Dict[str, str]] = None,
-) -> Tuple[str, bool, str]:
+) -> Tuple[str, bool, str, bool]:
     """Run analysis on a single video via subprocess.
 
-    Returns (video_name, success, message) for aggregation by the main process.
+    Returns (video_name, success, message, is_fatal) for aggregation by the
+    main process.  *is_fatal* is True when the error indicates the API is
+    unusable (quota exhausted, auth failed, etc.) and batch processing should
+    stop immediately.
+
     Per-video logs are written to *log_path* when provided.
     """
     cmd = [
@@ -135,24 +160,28 @@ def _run_single(
             msg = f"FAILED (exit {result.returncode})"
             if result.stderr:
                 msg += f" — {result.stderr[:200]}"
+            is_fatal = _is_fatal_api_error(result.stderr or "")
+            if is_fatal and output_path.exists():
+                # Remove any partially-written output from a fatal-error run
+                output_path.unlink(missing_ok=True)
             if log_fh:
                 log_fh.write(f"[END] {msg}\n")
-            return video_path.name, False, msg
+            return video_path.name, False, msg, is_fatal
 
         msg = f"OK -> {output_path.name}"
         if log_fh:
             log_fh.write(f"[END] {msg}\n")
-        return video_path.name, True, msg
+        return video_path.name, True, msg, False
     except subprocess.TimeoutExpired:
         msg = "FAILED (timeout after 3600s)"
         if log_fh:
             log_fh.write(f"[END] {msg}\n")
-        return video_path.name, False, msg
+        return video_path.name, False, msg, False
     except Exception as exc:
         msg = f"FAILED ({exc})"
         if log_fh:
             log_fh.write(f"[END] {msg}\n")
-        return video_path.name, False, msg
+        return video_path.name, False, msg, False
     finally:
         if log_fh:
             log_fh.close()
@@ -316,34 +345,63 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # ------------------------------------------------------------------
     start_time = time.time()
 
+    fatal_stopped = False
+
     if args.workers <= 1 or to_process == 1:
         # Serial execution
         for idx, task in enumerate(tasks, start=1):
+            if fatal_stopped:
+                break
             logger.info("[%d/%d] Processing: %s", idx, to_process, task[0].name)
-            name, success, msg = _run_single(*task)
+            name, success, msg, is_fatal = _run_single(*task)
             if success:
                 processed += 1
                 logger.info("[%d/%d] DONE: %s", idx, to_process, msg)
             else:
                 failed += 1
                 logger.error("[%d/%d] FAILED: %s — %s", idx, to_process, name, msg)
+                if is_fatal:
+                    fatal_stopped = True
+                    logger.critical(
+                        "FATAL API ERROR detected — stopping batch processing. "
+                        "Remaining %d videos skipped.",
+                        to_process - idx,
+                    )
     else:
         # Parallel execution via ProcessPoolExecutor
         with ProcessPoolExecutor(max_workers=args.workers) as executor:
-            future_to_name = {
-                executor.submit(_run_single, *task): task[0].name
+            future_to_task = {
+                executor.submit(_run_single, *task): task
                 for task in tasks
             }
             completed = 0
-            for future in as_completed(future_to_name):
+            for future in as_completed(future_to_task):
+                if fatal_stopped:
+                    # Cancel remaining futures where possible
+                    for f in future_to_task:
+                        if not f.done():
+                            f.cancel()
+                    break
                 completed += 1
-                name, success, msg = future.result()
+                name, success, msg, is_fatal = future.result()
                 if success:
                     processed += 1
                     logger.info("[%d/%d] DONE: %s", completed, to_process, msg)
                 else:
                     failed += 1
                     logger.error("[%d/%d] FAILED: %s — %s", completed, to_process, name, msg)
+                    if is_fatal:
+                        fatal_stopped = True
+                        remaining = to_process - completed
+                        logger.critical(
+                            "FATAL API ERROR detected — stopping batch processing. "
+                            "Remaining %d videos skipped.",
+                            remaining,
+                        )
+                        # Cancel futures that haven't started yet
+                        for f in future_to_task:
+                            if not f.running() and not f.done():
+                                f.cancel()
 
     elapsed = time.time() - start_time
     logger.info("=" * 50)
@@ -356,7 +414,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     logger.info("=" * 50)
 
     # Print concise summary to stdout as well
-    print(f"\n{total}/{total} videos scanned, {processed} processed, {failed} failed, {skipped} skipped")
+    if fatal_stopped:
+        print(
+            f"\n{total} videos scanned, {processed} processed, "
+            f"{failed} failed (fatal API error), {skipped} skipped, "
+            f"{to_process - processed - failed} unprocessed"
+        )
+    else:
+        print(
+            f"\n{total} videos scanned, {processed} processed, "
+            f"{failed} failed, {skipped} skipped"
+        )
 
     return 0 if failed == 0 else 1
 

@@ -12,7 +12,7 @@ import json
 from typing import Any, Dict, List, Optional, Tuple
 
 from traffic_analyzer.core.config_manager import ConfigManager
-from traffic_analyzer.core.vlm_engine import VLMInferenceEngine
+from traffic_analyzer.core.vlm_engine import FatalAPIError, VLMInferenceEngine
 from traffic_analyzer.models.schemas import (
     AnalysisContext,
     EventCandidate,
@@ -194,6 +194,9 @@ class ExpertAgent:
                 context_vars=context_vars,
                 response_schema=_EXPERT_RESPONSE_SCHEMA,
             )
+        except FatalAPIError:
+            # Propagate fatal API errors (quota/auth) to stop batch processing
+            raise
         except Exception as exc:
             logger.error(
                 "[expert_agent:detect] VLM_ERROR | event_id=%d event_name=%s | %s",
