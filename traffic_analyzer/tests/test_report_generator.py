@@ -232,6 +232,29 @@ class TestGenerate:
         assert report.binary_encoding.event_count == 0
         assert "未检测到显著交通事件" in report.overall_traffic_description
 
+    def test_total_categories_enforces_fixed_width(
+        self,
+        generator: ReportGenerator,
+        scene_info: SceneInfo,
+        video_meta: VideoMetadata,
+        usage_stats: Dict[str, Any],
+    ) -> None:
+        """When total_categories is supplied, encoding width must match it exactly."""
+        results = [
+            EventResult(event_id=2, event_name="Event 2", detected=True),
+            EventResult(event_id=4, event_name="Event 4", detected=False),
+        ]
+        report = generator.generate(
+            event_results=results,
+            scene_info=scene_info,
+            video_meta=video_meta,
+            usage_stats=usage_stats,
+            total_categories=10,
+        )
+        assert report.binary_encoding.encoding_string == "0_0_1_0_0_0_0_0_0_0"
+        assert report.binary_encoding.detected_events == [2]
+        assert report.binary_encoding.event_count == 1
+
 
 class TestToJson:
     def test_json_roundtrip(

@@ -44,6 +44,7 @@ class ReportGenerator:
         reasoning_chain: Optional[List[Dict[str, Any]]] = None,
         audit_log: Optional[List[Any]] = None,
         expert_candidates: Optional[List[Dict[str, Any]]] = None,
+        total_categories: Optional[int] = None,
     ) -> Report:
         """
         Build a complete :class:`Report` from analysis artefacts.
@@ -72,9 +73,9 @@ class ReportGenerator:
             sorted_results = sorted(event_results, key=lambda r: r.event_id)
 
             # Determine total categories for binary encoding
-            total_categories = self._infer_total_categories(sorted_results)
+            effective_total = total_categories if total_categories is not None and total_categories > 0 else self._infer_total_categories(sorted_results)
 
-            binary_encoding = self.to_binary_encoding(sorted_results, total_categories)
+            binary_encoding = self.to_binary_encoding(sorted_results, effective_total)
             final_classification = self._build_final_classification(binary_encoding)
             disposal_recommendations = self._build_disposal_recommendations(sorted_results)
             overall_desc = overall_traffic_description or self._generate_overall_description(

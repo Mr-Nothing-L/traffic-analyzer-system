@@ -28,6 +28,7 @@ from traffic_analyzer.models.schemas import (
     SystemConfig,
     VideoMetadata,
 )
+from traffic_analyzer.core.pipeline_steps import AdjudicationStep, ExpertAgentLayer
 from traffic_analyzer.orchestrator.analysis_orchestrator import (
     AnalysisOrchestrator,
     OrchestratorError,
@@ -276,6 +277,17 @@ class TestAnalyze:
         orchestrator._adjudication_step.execute.assert_called_once()
         orchestrator.report_generator.generate.assert_called_once()
 
+    def test_total_categories_passed_to_report_generator(
+        self,
+        orchestrator: AnalysisOrchestrator,
+        temp_video: str,
+    ) -> None:
+        """Orchestrator must pass configured total category count to ReportGenerator."""
+        report = orchestrator.analyze(temp_video)
+        assert isinstance(report, Report)
+        call_kwargs = orchestrator.report_generator.generate.call_args.kwargs
+        assert call_kwargs.get("total_categories") == 3
+
     def test_scene_understanding_passed_externally(
         self,
         orchestrator: AnalysisOrchestrator,
@@ -370,3 +382,86 @@ class TestExtractVideoMeta:
         meta = AnalysisOrchestrator._extract_video_meta(img_path)
         assert meta.duration_sec == 0.0
         assert meta.file_name == "bad_video.mp4"
+
+
+# ---------------------------------------------------------------------------
+# Pipeline step unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestAdjudicationStep:
+    def test_filters_inactive_and_hallucinated_event_ids(self) -> None:
+        """AdjudicationStep must only return active event IDs from config."""
+        config_manager = MagicMock()
+        config_manager.get_active_event_categories.return_value = [
+            EventCategory(
+                event_id=0,
+                event_code="A",
+                name="Active A",
+                name_zh="活跃A",
+                description="Active.",
+                detection_mode="expert_agent",
+                prompt_template_id="tpl",
+                is_active=True,
+            ),
+            EventCategory(
+                event_id=1,
+                event_code="B",
+                name="Active B",
+                name_zh="活跃B",
+                description="Active.",
+                detection_mode="expert_agent",
+                prompt_template_id="tpl",
+                is_active=True,
+            ),
+        ]
+        config_manager.get_adjudication_rules.return_value = []
+        config_manager.get_prompt_template.return_value = PromptTemplate(
+            template_id="adjudication",
+            name="Adjudication",
+            system_prompt="",
+            user_prompt="",
+        )
+        config_manager.config_dir = Path("/fake/config")
+
+        vlm_response = MagicMock()
+        vlm_response.success = True
+        vlm_response.parsed_data = {
+            "event_results": [
+                {"event_id": 0, "event_name": "Active A", "detected": True, "summary": "yes"},
+                {"event_id": 1, "event_name": "Active B", "detected": False, "summary": "no"},
+                {"event_id": 2, "event_name": "Inactive C", "detected": True, "summary": "hallucinated"},
+                {"event_id": 10, "event_name": "Unknown", "detected": True, "summary": "hallucinated"},
+            ],
+            "audit_log": [
+                {"event_id": 0, "event_name": "Active A", "action": "included", "reason": "", "rule_id": None},
+                {"event_id": 2, "event_name": "Inactive C", "action": "excluded", "reason": "", "rule_id": None},
+            ],
+            "reasoning_chain": [
+                {"event_id": 0, "event_name": "Active A", "decision": "保留", "thought_process": "", "basis": ""},
+                {"event_id": 10, "event_name": "Unknown", "decision": "保留", "thought_process": "", "basis": ""},
+            ],
+            "adjudication_reasoning": "test",
+        }
+        vlm_response.raw_text = ""
+
+        vlm_engine = MagicMock()
+        vlm_engine.call.return_value = vlm_response
+
+        step = AdjudicationStep(config_manager, vlm_engine)
+        context = AnalysisContext()
+        context.event_candidates[0] = EventCandidate(
+            event_id=0, event_name="Active A", detected=True, summary="yes"
+        )
+        context.event_candidates[1] = EventCandidate(
+            event_id=1, event_name="Active B", detected=False, summary="no"
+        )
+
+        result = step.execute(context)
+        assert result.success
+        assert result.data is not None
+        adjudication_result = result.data
+        result_ids = {r.event_id for r in adjudication_result.event_results}
+        assert result_ids == {0, 1}
+        assert all(r.event_id in {0, 1} for r in adjudication_result.audit_log)
+        assert all(rc["event_id"] in {0, 1} for rc in adjudication_result.reasoning_chain)

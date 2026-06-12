@@ -204,10 +204,10 @@ class ExpertAgentLayer(PipelineStep):
         self.max_workers = max_workers
 
     def _execute(self, context: AnalysisContext) -> List[EventCandidate]:
-        event_categories = self.config_manager.get_event_categories()
+        active_categories = self.config_manager.get_active_event_categories()
         expert_categories = [
-            cat for cat in event_categories
-            if cat.is_active and cat.detection_mode == "expert_agent"
+            cat for cat in active_categories
+            if cat.detection_mode == "expert_agent"
         ]
 
         if not expert_categories:
@@ -495,13 +495,30 @@ class AdjudicationStep(PipelineStep):
         data: Dict[str, Any],
         response: Any,
     ) -> AdjudicationResult:
+        # Determine active event IDs at execution time
+        try:
+            active_categories = self.config_manager.get_active_event_categories()
+            active_event_ids = {cat.event_id for cat in active_categories}
+        except Exception as exc:
+            logger.error(
+                "[pipeline_steps:AdjudicationStep] ACTIVE_CATEGORIES_ERROR | %s",
+                exc,
+                exc_info=True,
+            )
+            active_event_ids = set(context.event_candidates.keys())
+
         candidates = list(context.event_candidates.values())
         candidate_raw_map = {c.event_id: c.raw_vlm_text for c in candidates}
         candidate_cv_map = {c.event_id: c.cv_evidence for c in candidates}
 
+        # Build event_results, filtering to active event IDs only
         event_results: List[EventResult] = []
+        present_active_ids: set[int] = set()
         for er in data.get("event_results", []):
             eid = er.get("event_id", 0)
+            if eid not in active_event_ids:
+                continue
+            present_active_ids.add(eid)
             instances = []
             for inst in er.get("instances", []):
                 instances.append(
@@ -529,11 +546,52 @@ class AdjudicationStep(PipelineStep):
                 )
             )
 
+        # Fill any missing active event IDs from candidates
+        missing_active_ids = sorted(active_event_ids - present_active_ids)
+        for eid in missing_active_ids:
+            candidate = context.event_candidates.get(eid)
+            if candidate is not None:
+                event_results.append(
+                    EventResult(
+                        event_id=candidate.event_id,
+                        event_name=candidate.event_name,
+                        detected=candidate.detected,
+                        summary=candidate.summary,
+                        instances=candidate.instances,
+                        expert_raw_description=candidate.raw_vlm_text,
+                        cv_evidence=candidate.cv_evidence,
+                        tool_results=candidate.tool_results,
+                    )
+                )
+                logger.info(
+                    "[pipeline_steps:AdjudicationStep] FILLED_MISSING_ACTIVE | event_id=%d detected=%s",
+                    eid,
+                    candidate.detected,
+                )
+            else:
+                # No candidate available — create a default undetected result
+                event_results.append(
+                    EventResult(
+                        event_id=eid,
+                        event_name="",
+                        detected=False,
+                        summary="",
+                    )
+                )
+                logger.warning(
+                    "[pipeline_steps:AdjudicationStep] FILLED_MISSING_ACTIVE_NO_CANDIDATE | event_id=%d",
+                    eid,
+                )
+
+        # Filter audit_log to active event IDs only
         audit_log: List[AuditEntry] = []
         for entry in data.get("audit_log", []):
+            eid = entry.get("event_id", 0)
+            if eid not in active_event_ids:
+                continue
             audit_log.append(
                 AuditEntry(
-                    event_id=entry.get("event_id", 0),
+                    event_id=eid,
                     event_name=entry.get("event_name", ""),
                     action=entry.get("action", "included"),
                     reason=entry.get("reason", ""),
@@ -544,11 +602,15 @@ class AdjudicationStep(PipelineStep):
         for result in event_results:
             context.event_results[result.event_id] = result
 
+        # Filter reasoning_chain to active event IDs only
         reasoning_chain: List[Dict[str, Any]] = []
         for rc in data.get("reasoning_chain", []):
             if isinstance(rc, dict):
+                eid = rc.get("event_id", 0)
+                if eid not in active_event_ids:
+                    continue
                 reasoning_chain.append({
-                    "event_id": rc.get("event_id", 0),
+                    "event_id": eid,
                     "event_name": rc.get("event_name", ""),
                     "decision": rc.get("decision", ""),
                     "thought_process": rc.get("thought_process", ""),
@@ -556,10 +618,11 @@ class AdjudicationStep(PipelineStep):
                 })
 
         logger.info(
-            "[pipeline_steps:AdjudicationStep] PARSED_RESULTS | event_results=%d detected=%d audit_log=%d",
+            "[pipeline_steps:AdjudicationStep] PARSED_RESULTS | event_results=%d detected=%d audit_log=%d active_ids=%s",
             len(event_results),
             sum(1 for r in event_results if r.detected),
             len(audit_log),
+            sorted(active_event_ids),
         )
 
         return AdjudicationResult(
@@ -578,7 +641,19 @@ class AdjudicationStep(PipelineStep):
     ) -> AdjudicationResult:
         result = self._build_adjudication_result(context, data, response)
         present_event_ids = {r.event_id for r in result.event_results}
-        expected_event_ids = set(context.event_candidates.keys())
+
+        # Use active event IDs as the expected set
+        try:
+            active_categories = self.config_manager.get_active_event_categories()
+            expected_event_ids = {cat.event_id for cat in active_categories}
+        except Exception as exc:
+            logger.error(
+                "[pipeline_steps:AdjudicationStep] ACTIVE_CATEGORIES_FALLBACK_ERROR | %s",
+                exc,
+                exc_info=True,
+            )
+            expected_event_ids = set(context.event_candidates.keys())
+
         missing_event_ids = sorted(expected_event_ids - present_event_ids)
 
         for eid in missing_event_ids:

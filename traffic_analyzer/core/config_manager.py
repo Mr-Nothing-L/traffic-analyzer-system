@@ -203,6 +203,22 @@ class ConfigManager:
             raise RuntimeError("Configuration has not been loaded. Call load_all() first.")
         return [self._event_categories[k] for k in sorted(self._event_categories)]
 
+    def get_active_event_categories(self) -> List[EventCategory]:
+        """Return only event categories with ``is_active=True``, ordered by ``event_id``."""
+        if self._system_config is None:
+            raise RuntimeError("Configuration has not been loaded. Call load_all() first.")
+        return [
+            self._event_categories[k]
+            for k in sorted(self._event_categories)
+            if self._event_categories[k].is_active
+        ]
+
+    def get_total_event_categories(self) -> int:
+        """Return the total number of configured event categories (including inactive)."""
+        if self._system_config is None:
+            raise RuntimeError("Configuration has not been loaded. Call load_all() first.")
+        return len(self._event_categories)
+
     def get_prompt_template(
         self,
         template_id: str,

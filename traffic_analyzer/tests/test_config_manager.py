@@ -106,6 +106,72 @@ class TestLoadAll:
         assert cats[0].event_id == 0
         assert cats[0].detection_mode == DetectionMode.EXPERT_AGENT
 
+    def test_active_event_categories_and_total(self, tmp_path: Path) -> None:
+        """Active-only helpers must respect is_active and preserve total count."""
+        config_dir = tmp_path / "config"
+        config_dir.mkdir()
+        event_categories = {
+            "event_categories": [
+                {
+                    "event_id": 0,
+                    "event_code": "A",
+                    "name": "Active A",
+                    "name_zh": "活跃A",
+                    "description": "Active event.",
+                    "detection_mode": "expert_agent",
+                    "prompt_template_id": "tpl",
+                    "is_active": True,
+                },
+                {
+                    "event_id": 1,
+                    "event_code": "B",
+                    "name": "Inactive B",
+                    "name_zh": "未激活B",
+                    "description": "Inactive event.",
+                    "detection_mode": "expert_agent",
+                    "prompt_template_id": "tpl",
+                    "is_active": False,
+                },
+                {
+                    "event_id": 2,
+                    "event_code": "C",
+                    "name": "Active C",
+                    "name_zh": "活跃C",
+                    "description": "Active event.",
+                    "detection_mode": "expert_agent",
+                    "prompt_template_id": "tpl",
+                    "is_active": True,
+                },
+            ]
+        }
+        prompt_templates = {
+            "prompt_templates": [
+                {
+                    "template_id": "tpl",
+                    "name": "TPL",
+                    "system_prompt": "s",
+                    "user_prompt": "u",
+                }
+            ]
+        }
+        (config_dir / "event_categories.yaml").write_text(
+            yaml.safe_dump(event_categories), encoding="utf-8"
+        )
+        (config_dir / "prompt_templates.yaml").write_text(
+            yaml.safe_dump(prompt_templates), encoding="utf-8"
+        )
+
+        mgr = ConfigManager(str(config_dir))
+        mgr.load_all()
+
+        all_cats = mgr.get_event_categories()
+        active_cats = mgr.get_active_event_categories()
+
+        assert len(all_cats) == 3
+        assert len(active_cats) == 2
+        assert [cat.event_id for cat in active_cats] == [0, 2]
+        assert mgr.get_total_event_categories() == 3
+
     def test_prompt_template_lookup(self, manager: ConfigManager) -> None:
         manager.load_all()
         tmpl = manager.get_prompt_template("illegal_parking")

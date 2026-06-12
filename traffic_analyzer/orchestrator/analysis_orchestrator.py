@@ -245,6 +245,7 @@ class AnalysisOrchestrator:
         logger.info("[4/4] Generating report...")
         t0 = time.perf_counter()
         usage_stats = self.vlm_engine.get_usage_stats()
+        total_categories = len(self.config_manager.get_event_categories())
         try:
             with tool_call(
                 "report_generator.generate",
@@ -271,6 +272,7 @@ class AnalysisOrchestrator:
                         }
                         for c in context.event_candidates.values()
                     ],
+                    total_categories=total_categories,
                 )
                 _tc.result(
                     f"binary_code={report.binary_encoding.encoding_string}"
