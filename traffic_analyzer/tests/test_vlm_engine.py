@@ -10,8 +10,9 @@ from __future__ import annotations
 import json
 import time
 from typing import Any, Dict, List
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, ANY
 
+import httpx
 import pytest
 
 from traffic_analyzer.core.vlm_engine import (
@@ -111,20 +112,23 @@ def test_unsupported_provider_raises() -> None:
 def test_init_anthropic(mock_anthropic: MagicMock, anthropic_config: LLMProviderConfig) -> None:
     engine = VLMInferenceEngine(anthropic_config)
     assert engine.provider == "anthropic"
-    mock_anthropic.assert_called_once_with(api_key="test-anthropic-key", timeout=30.0)
+    mock_anthropic.assert_called_once_with(
+        api_key="test-anthropic-key", http_client=ANY
+    )
 
 
-@patch("traffic_analyzer.core.vlm_engine.openai.OpenAI")
-def test_init_openai(mock_openai: MagicMock, openai_config: LLMProviderConfig) -> None:
-    engine = VLMInferenceEngine(openai_config)
-    assert engine.provider == "openai"
-    mock_openai.assert_called_once_with(api_key="test-openai-key", timeout=30.0)
+@patch("traffic_analyzer.core.vlm_engine.anthropic.Anthropic")
+def test_init_openai_raises(mock_anthropic: MagicMock, openai_config: LLMProviderConfig) -> None:
+    with pytest.raises(ProviderNotSupportedError):
+        VLMInferenceEngine(openai_config)
 
 
-@patch("traffic_analyzer.core.vlm_engine.genai.configure")
-@patch("traffic_analyzer.core.vlm_engine.genai")
+@patch("google.generativeai.configure")
+@patch("google.generativeai.GenerativeModel")
 def test_init_google(
-    mock_genai: MagicMock, mock_configure: MagicMock, google_config: LLMProviderConfig
+    mock_generative_model: MagicMock,
+    mock_configure: MagicMock,
+    google_config: LLMProviderConfig,
 ) -> None:
     engine = VLMInferenceEngine(google_config)
     assert engine.provider == "google"
@@ -138,7 +142,7 @@ def test_init_aliyun(mock_openai: MagicMock, aliyun_config: LLMProviderConfig) -
     mock_openai.assert_called_once_with(
         api_key="test-aliyun-key",
         base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
-        timeout=30.0,
+        http_client=ANY,
     )
 
 
@@ -281,9 +285,9 @@ def test_call_anthropic_retry_then_success(
     fake_usage = MagicMock(input_tokens=10, output_tokens=2)
     fake_response.usage = fake_usage
 
-    # First call raises, second succeeds
+    # First call raises a retryable error, second succeeds
     mock_client.messages.create.side_effect = [
-        Exception("Transient error"),
+        httpx.TimeoutException("Transient error"),
         fake_response,
     ]
 
@@ -303,13 +307,14 @@ def test_call_anthropic_all_retries_exhausted(
 ) -> None:
     mock_client = MagicMock()
     mock_anthropic_cls.return_value = mock_client
-    mock_client.messages.create.side_effect = Exception("Persistent failure")
+    mock_client.messages.create.side_effect = httpx.TimeoutException("Persistent failure")
 
     engine = VLMInferenceEngine(anthropic_config)
     resp = engine.call(simple_template, images=[], context_vars={"description": "x"})
 
     assert resp.success is False
-    assert resp.retry_count == 1  # max_retries=2 means 1 retry after first failure
+    # max_retries=2 means 2 attempts total (initial + 1 retry), retry_count=1
+    assert resp.retry_count == 1
 
 
 @patch("traffic_analyzer.core.vlm_engine.anthropic.Anthropic")
@@ -341,33 +346,13 @@ def test_call_anthropic_schema_validation_failure(
 
 
 # ---------------------------------------------------------------------------
-# OpenAI call flow
+# OpenAI provider is not supported — aliased to aliyun
 # ---------------------------------------------------------------------------
 
 
-@patch("traffic_analyzer.core.vlm_engine.openai.OpenAI")
-def test_call_openai_success(
-    mock_openai_cls: MagicMock,
-    openai_config: LLMProviderConfig,
-    simple_template: PromptTemplate,
-) -> None:
-    mock_client = MagicMock()
-    mock_openai_cls.return_value = mock_client
-
-    fake_choice = MagicMock()
-    fake_choice.message.content = json.dumps({"result": "ok"})
-    fake_response = MagicMock()
-    fake_response.choices = [fake_choice]
-    fake_response.usage = MagicMock(prompt_tokens=8, completion_tokens=4, total_tokens=12)
-    mock_client.chat.completions.create.return_value = fake_response
-
-    engine = VLMInferenceEngine(openai_config)
-    resp = engine.call(simple_template, images=[], context_vars={"description": "y"})
-
-    assert resp.success is True
-    assert resp.parsed_data == {"result": "ok"}
-    assert resp.prompt_tokens == 8
-    assert resp.total_tokens == 12
+def test_openai_provider_not_supported(openai_config: LLMProviderConfig) -> None:
+    with pytest.raises(ProviderNotSupportedError):
+        VLMInferenceEngine(openai_config)
 
 
 # ---------------------------------------------------------------------------
@@ -375,16 +360,16 @@ def test_call_openai_success(
 # ---------------------------------------------------------------------------
 
 
-@patch("traffic_analyzer.core.vlm_engine.genai.configure")
-@patch("traffic_analyzer.core.vlm_engine.genai")
+@patch("google.generativeai.configure")
+@patch("google.generativeai.GenerativeModel")
 def test_call_google_success(
-    mock_genai: MagicMock,
+    mock_generative_model: MagicMock,
     mock_configure: MagicMock,
     google_config: LLMProviderConfig,
     simple_template: PromptTemplate,
 ) -> None:
     mock_model_instance = MagicMock()
-    mock_genai.GenerativeModel.return_value = mock_model_instance
+    mock_generative_model.return_value = mock_model_instance
 
     fake_response = MagicMock()
     fake_response.parts = [MagicMock(text=json.dumps({"google_result": 42}))]
@@ -438,7 +423,7 @@ def test_call_aliyun_success(
 
 
 @patch("traffic_analyzer.core.vlm_engine.openai.OpenAI")
-def test_batch_call_sequential(mock_openai_cls: MagicMock, openai_config: LLMProviderConfig) -> None:
+def test_batch_call_sequential(mock_openai_cls: MagicMock, aliyun_config: LLMProviderConfig) -> None:
     mock_client = MagicMock()
     mock_openai_cls.return_value = mock_client
 
@@ -452,7 +437,7 @@ def test_batch_call_sequential(mock_openai_cls: MagicMock, openai_config: LLMPro
 
     mock_client.chat.completions.create.side_effect = [_make_response(0), _make_response(1)]
 
-    engine = VLMInferenceEngine(openai_config)
+    engine = VLMInferenceEngine(aliyun_config)
     template = PromptTemplate(
         template_id="batch", name="Batch", system_prompt="", user_prompt="{{ idx }}"
     )
@@ -468,7 +453,7 @@ def test_batch_call_sequential(mock_openai_cls: MagicMock, openai_config: LLMPro
 
 
 @patch("traffic_analyzer.core.vlm_engine.openai.OpenAI")
-def test_batch_call_parallel(mock_openai_cls: MagicMock, openai_config: LLMProviderConfig) -> None:
+def test_batch_call_parallel(mock_openai_cls: MagicMock, aliyun_config: LLMProviderConfig) -> None:
     mock_client = MagicMock()
     mock_openai_cls.return_value = mock_client
 
@@ -482,7 +467,7 @@ def test_batch_call_parallel(mock_openai_cls: MagicMock, openai_config: LLMProvi
 
     mock_client.chat.completions.create.side_effect = [_make_response(0), _make_response(1)]
 
-    engine = VLMInferenceEngine(openai_config)
+    engine = VLMInferenceEngine(aliyun_config)
     template = PromptTemplate(
         template_id="batch", name="Batch", system_prompt="", user_prompt="{{ idx }}"
     )
@@ -504,7 +489,7 @@ def test_batch_call_parallel(mock_openai_cls: MagicMock, openai_config: LLMProvi
 
 
 @patch("traffic_analyzer.core.vlm_engine.openai.OpenAI")
-def test_get_usage_stats(mock_openai_cls: MagicMock, openai_config: LLMProviderConfig) -> None:
+def test_get_usage_stats(mock_openai_cls: MagicMock, aliyun_config: LLMProviderConfig) -> None:
     mock_client = MagicMock()
     mock_openai_cls.return_value = mock_client
 
@@ -515,7 +500,7 @@ def test_get_usage_stats(mock_openai_cls: MagicMock, openai_config: LLMProviderC
     resp.usage = MagicMock(prompt_tokens=10, completion_tokens=5, total_tokens=15)
     mock_client.chat.completions.create.return_value = resp
 
-    engine = VLMInferenceEngine(openai_config)
+    engine = VLMInferenceEngine(aliyun_config)
     template = PromptTemplate(template_id="t", name="T", user_prompt="hi")
     engine.call(template, images=[], context_vars={})
 
@@ -534,7 +519,7 @@ def test_get_usage_stats(mock_openai_cls: MagicMock, openai_config: LLMProviderC
 
 
 @patch("traffic_analyzer.core.vlm_engine.openai.OpenAI")
-def test_create_call_record(mock_openai_cls: MagicMock, openai_config: LLMProviderConfig) -> None:
+def test_create_call_record(mock_openai_cls: MagicMock, aliyun_config: LLMProviderConfig) -> None:
     mock_client = MagicMock()
     mock_openai_cls.return_value = mock_client
 
@@ -545,12 +530,12 @@ def test_create_call_record(mock_openai_cls: MagicMock, openai_config: LLMProvid
     resp.usage = MagicMock(prompt_tokens=3, completion_tokens=2, total_tokens=5)
     mock_client.chat.completions.create.return_value = resp
 
-    engine = VLMInferenceEngine(openai_config)
+    engine = VLMInferenceEngine(aliyun_config)
     template = PromptTemplate(template_id="audit", name="Audit", user_prompt="x")
     llm_resp = engine.call(template, images=[], context_vars={})
 
     record = engine.create_call_record("audit", llm_resp)
     assert record.template_id == "audit"
-    assert record.model == openai_config.model
+    assert record.model == aliyun_config.model
     assert record.prompt_tokens == 3
     assert record.success is True

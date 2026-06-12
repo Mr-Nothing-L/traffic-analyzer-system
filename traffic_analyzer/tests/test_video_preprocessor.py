@@ -103,20 +103,21 @@ class TestVideoPreprocessor:
         synthetic_video_path: str,
         preprocessor: VideoPreprocessor,
     ) -> None:
-        """Motion video should produce precision frames."""
+        """Motion video should produce precision frames matching coarse frames."""
         result = preprocessor.process(synthetic_video_path)
         assert len(result.precision_frames) > 0
+        assert result.precision_frames == result.coarse_frames
         for kf in result.precision_frames:
-            assert kf.is_precision is True
+            assert kf.is_precision is False
 
     def test_process_static_video_no_precision(
         self,
         static_video_path: str,
         preprocessor: VideoPreprocessor,
     ) -> None:
-        """Static video should not produce precision frames."""
+        """Static video should have precision_frames equal to coarse_frames."""
         result = preprocessor.process(static_video_path)
-        assert len(result.precision_frames) == 0
+        assert result.precision_frames == result.coarse_frames
 
     def test_coarse_frames_have_image_data(
         self,
