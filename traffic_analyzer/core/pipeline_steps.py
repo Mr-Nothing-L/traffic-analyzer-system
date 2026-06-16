@@ -297,7 +297,10 @@ class AdjudicationStep(PipelineStep):
             raise RuntimeError("Adjudication prompt template 'adjudication' not found")
 
         # 3. Select images
-        images = _select_event_images_impl(context, vlm_max_frames=6)
+        vlm_max_frames = 6
+        if context.config is not None:
+            vlm_max_frames = context.config.vlm_max_frames
+        images = _select_event_images_impl(context, vlm_max_frames=vlm_max_frames)
 
         # Load annotation spec (xlsx-derived business rules)
         annotation_spec_text = ""

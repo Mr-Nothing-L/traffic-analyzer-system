@@ -18,7 +18,7 @@ from typing import Generator
 import pytest
 import yaml
 
-from traffic_analyzer.core.config_manager import ConfigManager
+from traffic_analyzer.core.config_manager import ConfigManager, ConfigValidationError
 from traffic_analyzer.models.schemas import DetectionMode, SystemConfig
 
 
@@ -72,11 +72,34 @@ def temp_config_dir(tmp_path: Path) -> Path:
         ]
     }
 
+    annotation_spec = {
+        "annotation_spec": {
+            "version": "1.0",
+            "events": [
+                {
+                    "event_id": 0,
+                    "action_label": "机动车违停",
+                    "description": "车辆在道路上静止。",
+                    "boundary_conditions": ["只针对机动车"],
+                },
+                {
+                    "event_id": 1,
+                    "action_label": "机动车占用应急车道",
+                    "description": "车辆占用应急车道。",
+                    "boundary_conditions": ["只针对机动车"],
+                },
+            ],
+        }
+    }
+
     (config_dir / "event_categories.yaml").write_text(
         yaml.safe_dump(event_categories), encoding="utf-8"
     )
     (config_dir / "prompt_templates.yaml").write_text(
         yaml.safe_dump(prompt_templates), encoding="utf-8"
+    )
+    (config_dir / "annotation_spec.yaml").write_text(
+        yaml.safe_dump(annotation_spec), encoding="utf-8"
     )
 
     return config_dir
@@ -290,14 +313,59 @@ class TestValidateConfig:
                 }
             ]
         }
+        annotation_spec = {
+            "annotation_spec": {
+                "version": "1.0",
+                "events": [
+                    {
+                        "event_id": 0,
+                        "action_label": "Bad Category",
+                        "description": "Desc",
+                        "boundary_conditions": [],
+                    }
+                ],
+            }
+        }
         (temp_config_dir / "event_categories.yaml").write_text(
             yaml.safe_dump(cats), encoding="utf-8"
+        )
+        (temp_config_dir / "annotation_spec.yaml").write_text(
+            yaml.safe_dump(annotation_spec), encoding="utf-8"
         )
 
         mgr = ConfigManager(str(temp_config_dir))
         mgr.load_all()
         errors = mgr.validate_config()
         assert any("missing_template" in e for e in errors)
+
+    def test_annotation_spec_event_id_mismatch(self, temp_config_dir: Path) -> None:
+        annotation_spec = {
+            "annotation_spec": {
+                "version": "1.0",
+                "events": [
+                    {
+                        "event_id": 0,
+                        "action_label": "机动车违停",
+                        "description": "desc",
+                        "boundary_conditions": [],
+                    },
+                    {
+                        "event_id": 99,
+                        "action_label": "不存在的事件",
+                        "description": "desc",
+                        "boundary_conditions": [],
+                    },
+                ],
+            }
+        }
+        (temp_config_dir / "annotation_spec.yaml").write_text(
+            yaml.safe_dump(annotation_spec), encoding="utf-8"
+        )
+
+        mgr = ConfigManager(str(temp_config_dir))
+        mgr.load_all()
+        with pytest.raises(ConfigValidationError, match="event IDs do not match"):
+            mgr.validate_config()
 
 
 # ---------------------------------------------------------------------------

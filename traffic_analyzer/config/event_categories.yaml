@@ -62,7 +62,7 @@ event_categories:
     detection_mode: "expert_agent"
     prompt_template_id: "traffic_accident_detection"
     confidence_threshold: 0.7
-    is_active: true
+    is_active: false
     definition: |
       交通事故包括：车辆碰撞、翻车、起火/冒烟、路面散落物、动物进入车道等。
       注意：单独车辆机械故障（无碰撞、无人员伤亡、无财产损失）不算事故。

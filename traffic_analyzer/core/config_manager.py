@@ -29,6 +29,10 @@ from traffic_analyzer.models.schemas import (
 logger = logging.getLogger(__name__)
 
 
+class ConfigValidationError(ValueError):
+    """Raised when configuration files fail cross-validation checks."""
+
+
 class ConfigManager:
     """Manages loading, validation, and hot-reloading of framework configuration.
 
@@ -318,25 +322,70 @@ class ConfigManager:
         """Validate cross-references and consistency across config files.
 
         Checks performed:
-        1. Every ``EventCategory`` with ``detection_mode == expert_agent`` has a
+        1. ``annotation_spec.yaml`` event IDs exactly match
+           ``event_categories.yaml`` event IDs.
+        2. Every ``EventCategory`` with ``detection_mode == expert_agent`` has a
            valid ``prompt_template_id``.
-        2. Cross-event inference rules reference valid event IDs.
-        3. Adjudication rules have valid priorities and unique IDs.
-        4. Prompt template A/B traffic percentages sum to 100%.
+        3. Cross-event inference rules reference valid event IDs.
+        4. Adjudication rules have valid priorities and unique IDs.
+        5. Prompt template A/B traffic percentages sum to 100%.
 
         Returns:
             A list of human-readable error messages. An empty list indicates a
             fully valid configuration.
+
+        Raises:
+            ConfigValidationError: If ``annotation_spec.yaml`` is missing or its
+                event IDs do not match ``event_categories.yaml``.
         """
         if self._system_config is None:
             raise RuntimeError("Configuration has not been loaded. Call load_all() first.")
 
         errors: List[str] = []
 
+        # 1. annotation_spec.yaml event IDs must match event_categories.yaml
+        annotation_spec_path = self.config_dir / "annotation_spec.yaml"
+        if not annotation_spec_path.exists():
+            raise ConfigValidationError(
+                f"Required config file not found for cross-validation: {annotation_spec_path}"
+            )
+        try:
+            with annotation_spec_path.open("r", encoding="utf-8") as fh:
+                annotation_data = yaml.safe_load(fh) or {}
+        except Exception as exc:
+            raise ConfigValidationError(
+                f"Failed to parse {annotation_spec_path}: {exc}"
+            ) from exc
+
+        annotation_events = annotation_data.get("annotation_spec", {}).get("events", [])
+        annotation_event_ids = {
+            ev["event_id"]
+            for ev in annotation_events
+            if isinstance(ev, dict) and "event_id" in ev
+        }
+        category_event_ids = set(self._event_categories.keys())
+
+        if annotation_event_ids != category_event_ids:
+            missing_in_annotation = sorted(category_event_ids - annotation_event_ids)
+            extra_in_annotation = sorted(annotation_event_ids - category_event_ids)
+            details = []
+            if missing_in_annotation:
+                details.append(
+                    f"event_categories.yaml has event_ids not in annotation_spec.yaml: {missing_in_annotation}"
+                )
+            if extra_in_annotation:
+                details.append(
+                    f"annotation_spec.yaml has event_ids not in event_categories.yaml: {extra_in_annotation}"
+                )
+            raise ConfigValidationError(
+                "annotation_spec.yaml event IDs do not match event_categories.yaml event IDs. "
+                + "; ".join(details)
+            )
+
         # Build a set of all valid template IDs
         valid_template_ids = set(self._prompt_templates.keys())
 
-        # 1. expert_agent events must have prompt_template_id
+        # 2. expert_agent events must have prompt_template_id
         for cat in self._event_categories.values():
             if cat.detection_mode.value == "expert_agent":
                 if not cat.prompt_template_id:
@@ -350,7 +399,7 @@ class ConfigManager:
                         f"unknown prompt_template_id '{cat.prompt_template_id}'."
                     )
 
-        # 2. Cross-event inference rule validation
+        # 3. Cross-event inference rule validation
         valid_event_ids = set(self._event_categories.keys())
         for rule in self._inference_rules.values():
             if rule.target_event_id not in valid_event_ids:
@@ -370,7 +419,7 @@ class ConfigManager:
                     f"Inference rule '{rule.rule_id}' has empty source_description_keywords."
                 )
 
-        # 3. Adjudication rule validation
+        # 4. Adjudication rule validation
         adjudication_rule_ids: set[str] = set()
         for rule in self._adjudication_rules.values():
             if rule.rule_id in adjudication_rule_ids:
@@ -384,7 +433,7 @@ class ConfigManager:
                     f"outside valid range [0, 1000]."
                 )
 
-        # 4. Prompt template A/B traffic percentage validation
+        # 5. Prompt template A/B traffic percentage validation
         for template_id, versions in self._prompt_templates.items():
             variants_with_traffic = [
                 (v, pt) for v, pt in versions.items() if pt.traffic_percentage is not None
@@ -402,7 +451,7 @@ class ConfigManager:
                         f"sum to {total_pct}% (less than 100%, some traffic will fallback to last variant)."
                     )
 
-        # 5. Validate tools referenced in event categories exist in prompt templates
+        # 6. Validate tools referenced in event categories exist in prompt templates
         for cat in self._event_categories.values():
             if cat.tools:
                 if cat.prompt_template_id:

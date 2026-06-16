@@ -115,7 +115,7 @@ def _run_single(
     Per-video logs are written to *log_path* when provided.
     """
     cmd = [
-        sys.executable, "-m", "traffic_analyzer", "analyze",
+        "/usr/bin/python3", "-m", "traffic_analyzer", "analyze",
         "--video", str(video_path),
         "--config-dir", str(config_dir),
         "--format", fmt,

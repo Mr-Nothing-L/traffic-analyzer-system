@@ -10,6 +10,12 @@ Usage:
         --report-dir /path/to/reports \
         --output evaluation_report.html
 
+    # Multiple video/report directory pairs are aggregated into one report
+    python scripts/batch_evaluate.py \
+        --video-dir /path/to/videos1 /path/to/videos2 \
+        --report-dir /path/to/reports1 /path/to/reports2 \
+        --output evaluation_report.html
+
     # With annotation file
     python scripts/batch_evaluate.py \
         --video-dir /path/to/videos \
@@ -41,7 +47,7 @@ import sys
 
 import yaml
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 
 # ---------------------------------------------------------------------------
@@ -297,6 +303,8 @@ def compute_metrics(
     predictions: List[Set[int]],
     ground_truths: List[Set[int]],
     single_class_masks: Optional[List[Optional[Set[int]]]] = None,
+    active_event_ids: Optional[Set[int]] = None,
+    include_normal: bool = False,
 ) -> Tuple[Dict[str, Any], int, int]:
     """Compute per-event and overall metrics.
 
@@ -310,6 +318,12 @@ def compute_metrics(
         Optional list of event masks. When an entry is a set, only those
         event IDs are evaluated for that video; all others are forced to false.
         When an entry is None, all events are evaluated.
+    active_event_ids:
+        Set of event IDs considered active. Required when include_normal=True
+        to determine which predictions/truths count as "normal" (empty active set).
+    include_normal:
+        If True, add a pseudo "normal" class to the metrics. A video is considered
+        normal when its active event set is empty.
 
     Returns
     -------
@@ -323,7 +337,7 @@ def compute_metrics(
 
     evaluated = 0
     skipped = 0
-    evaluated_event_ids: Set[int] = set()
+    evaluated_event_ids: Set[Union[int, str]] = set()
 
     for pred, gt, mask in zip(
         predictions, ground_truths, single_class_masks or [None] * len(predictions)
@@ -369,12 +383,58 @@ def compute_metrics(
             "f1": round(f1, 4),
         }
 
-    # Macro averages: only over events that were actually evaluated
+    normal_tp = normal_fp = normal_fn = 0
+    if include_normal and active_event_ids is not None:
+        for pred, gt in zip(predictions, ground_truths):
+            pred_active = pred & active_event_ids
+            gt_active = gt & active_event_ids
+            if not gt_active and not pred_active:
+                normal_tp += 1
+            elif not gt_active and pred_active:
+                normal_fn += 1
+            elif gt_active and not pred_active:
+                normal_fp += 1
+
+        normal_gt_count = normal_tp + normal_fp
+        normal_precision = normal_tp / (normal_tp + normal_fp) if (normal_tp + normal_fp) > 0 else 0.0
+        normal_recall = normal_tp / (normal_tp + normal_fn) if (normal_tp + normal_fn) > 0 else 0.0
+        normal_f1 = (
+            2 * normal_precision * normal_recall / (normal_precision + normal_recall)
+            if (normal_precision + normal_recall) > 0 else 0.0
+        )
+        per_event["normal"] = {
+            "name": "无事件 (normal)",
+            "gt_count": normal_gt_count,
+            "tp": normal_tp,
+            "fp": normal_fp,
+            "fn": normal_fn,
+            "precision": round(normal_precision, 4),
+            "recall": round(normal_recall, 4),
+            "f1": round(normal_f1, 4),
+        }
+        evaluated_event_ids.add("normal")
+
+    # Keep ints first, then "normal", so sorting is stable and readable
+    sorted_evaluated_event_ids: List[Union[int, str]] = sorted(
+        eid for eid in evaluated_event_ids if isinstance(eid, int)
+    )
+    if "normal" in evaluated_event_ids:
+        sorted_evaluated_event_ids.append("normal")
     num_evaluated_events = len(evaluated_event_ids)
-    if num_evaluated_events > 0:
-        macro_precision = sum(per_event[str(eid)]["precision"] for eid in evaluated_event_ids) / num_evaluated_events
-        macro_recall = sum(per_event[str(eid)]["recall"] for eid in evaluated_event_ids) / num_evaluated_events
-        macro_f1 = sum(per_event[str(eid)]["f1"] for eid in evaluated_event_ids) / num_evaluated_events
+
+    # Macro averages: only over events that have ground-truth support or any
+    # predictions/errors. Classes with zero support should not drag down the macro
+    # average, because their precision/recall are undefined (not 0).
+    def _has_support(eid: Union[int, str]) -> bool:
+        info = per_event[str(eid)]
+        return info["gt_count"] > 0 or info["tp"] > 0 or info["fp"] > 0 or info["fn"] > 0
+
+    macro_event_ids = [eid for eid in sorted_evaluated_event_ids if _has_support(eid)]
+    num_macro_events = len(macro_event_ids)
+    if num_macro_events > 0:
+        macro_precision = sum(per_event[str(eid)]["precision"] for eid in macro_event_ids) / num_macro_events
+        macro_recall = sum(per_event[str(eid)]["recall"] for eid in macro_event_ids) / num_macro_events
+        macro_f1 = sum(per_event[str(eid)]["f1"] for eid in macro_event_ids) / num_macro_events
     else:
         macro_precision = macro_recall = macro_f1 = 0.0
 
@@ -383,7 +443,31 @@ def compute_metrics(
         "macro_recall": round(macro_recall, 4),
         "macro_f1": round(macro_f1, 4),
         "evaluated_events": num_evaluated_events,
+        "evaluated_event_ids": sorted_evaluated_event_ids,
+        "macro_evaluated_events": num_macro_events,
+        "macro_evaluated_event_ids": macro_event_ids,
     }
+
+    # Micro averages: aggregate TP/FP/FN across all evaluated events
+    total_tp = sum(tp[eid] for eid in sorted_evaluated_event_ids if isinstance(eid, int))
+    total_fp = sum(fp[eid] for eid in sorted_evaluated_event_ids if isinstance(eid, int))
+    total_fn = sum(fn[eid] for eid in sorted_evaluated_event_ids if isinstance(eid, int))
+    if include_normal and "normal" in evaluated_event_ids:
+        total_tp += normal_tp
+        total_fp += normal_fp
+        total_fn += normal_fn
+    micro_precision = total_tp / (total_tp + total_fp) if (total_tp + total_fp) > 0 else 0.0
+    micro_recall = total_tp / (total_tp + total_fn) if (total_tp + total_fn) > 0 else 0.0
+    micro_f1 = (
+        2 * micro_precision * micro_recall / (micro_precision + micro_recall)
+        if (micro_precision + micro_recall) > 0 else 0.0
+    )
+    overall["total_tp"] = total_tp
+    overall["total_fp"] = total_fp
+    overall["total_fn"] = total_fn
+    overall["micro_precision"] = round(micro_precision, 4)
+    overall["micro_recall"] = round(micro_recall, 4)
+    overall["micro_f1"] = round(micro_f1, 4)
 
     return {"per_event": per_event, "overall": overall}, evaluated, skipped
 
@@ -399,18 +483,25 @@ def format_markdown_table(result: Dict[str, Any]) -> str:
     lines.append("|--------|----------|------|----|----|----|--------|--------|--------|")
 
     per_event = result["per_event"]
-    for eid in range(NUM_EVENTS):
+    overall = result["overall"]
+    evaluated_event_ids = overall.get("evaluated_event_ids", list(range(NUM_EVENTS)))
+    for eid in evaluated_event_ids:
         info = per_event[str(eid)]
+        display_id = "-" if eid == "normal" else str(eid)
         lines.append(
-            f"| {eid} | {info['name']} | {info['gt_count']} | {info['tp']} | {info['fp']} | {info['fn']} | "
+            f"| {display_id} | {info['name']} | {info['gt_count']} | {info['tp']} | {info['fp']} | {info['fn']} | "
             f"{info['precision']:.4f} | {info['recall']:.4f} | {info['f1']:.4f} |"
         )
 
-    overall = result["overall"]
-    num_eval = overall.get("evaluated_events", NUM_EVENTS)
+    num_eval = overall.get("macro_evaluated_events", overall.get("evaluated_events", NUM_EVENTS))
     lines.append(
         f"| **总体** | **宏平均 (N={num_eval})** | - | - | - | - | "
         f"**{overall['macro_precision']:.4f}** | **{overall['macro_recall']:.4f}** | **{overall['macro_f1']:.4f}** |"
+    )
+    # Micro average row
+    lines.append(
+        f"| - | **微平均** | {overall['total_tp'] + overall['total_fp']} | {overall['total_tp']} | {overall['total_fp']} | {overall['total_fn']} | "
+        f"**{overall['micro_precision']:.4f}** | **{overall['micro_recall']:.4f}** | **{overall['micro_f1']:.4f}** |"
     )
 
     lines.append("")
@@ -474,6 +565,7 @@ def _ids_to_names(ids: List[int], event_names: Dict[int, str]) -> str:
 def format_html_report(
     result: Dict[str, Any],
     video_paths: Dict[str, str],
+    video_abs_paths: Dict[str, str],
     report_paths: Dict[str, str],
     report_contents: Dict[str, str],
 ) -> str:
@@ -486,15 +578,17 @@ def format_html_report(
     per_event = result["per_event"]
     overall = result["overall"]
     per_video = result.get("per_video", [])
-    num_evaluated_events = overall.get("evaluated_events", NUM_EVENTS)
+    num_evaluated_events = overall.get("macro_evaluated_events", overall.get("evaluated_events", NUM_EVENTS))
+    evaluated_event_ids = overall.get("evaluated_event_ids", list(range(NUM_EVENTS)))
 
     # Summary table rows
     summary_rows = []
-    for eid in range(NUM_EVENTS):
+    for eid in evaluated_event_ids:
         ev = per_event[str(eid)]
+        display_id = "-" if eid == "normal" else str(eid)
         summary_rows.append(
             f"<tr>"
-            f"<td>{eid}</td>"
+            f"<td>{display_id}</td>"
             f"<td>{html.escape(ev['name'])}</td>"
             f"<td>{ev['gt_count']}</td>"
             f"<td>{ev['tp']}</td>"
@@ -526,16 +620,18 @@ def format_html_report(
             inactive_hint = f'<br><span class="inactive-hint">(已忽略 inactive: {html.escape(inactive_names)})</span>'
 
         video_href = video_paths.get(video_name, "")
+        video_abs = video_abs_paths.get(video_name, "")
         report_href = report_paths.get(video_name, "")
         row_class = "row-ok" if ok else "row-fail"
         status = "✅" if ok else "❌"
 
         detail_rows.append(
             f'<tr class="{row_class}" data-video="{html.escape(video_href, quote=True)}" '
+            f'data-video-abs="{html.escape(video_abs, quote=True)}" '
             f'data-report="{html.escape(report_href, quote=True)}">'
             f"<td>{i}</td>"
-            f'<td><a class="link-video" href="{html.escape(video_href)}">'
-            f"{html.escape(video_name)}</a></td>"
+            f'<td><span class="link-video">{html.escape(video_name)}</span> '
+            f'<button type="button" class="copy-path-btn" title="复制绝对路径">📋</button></td>'
             f"<td>{html.escape(pred_text)}</td>"
             f"<td>{html.escape(gt_text)}{inactive_hint}</td>"
             f'<td><a class="link-report" href="{html.escape(report_href)}">'
@@ -665,7 +761,16 @@ def format_html_report(
     .status {{ font-size: 1.1rem; text-align: center; }}
     a {{ color: #60a5fa; text-decoration: none; }}
     a:hover {{ text-decoration: underline; }}
-    tfoot td {{ font-weight: 600; background: #243044; }}
+    .copy-path-btn {{
+      background: transparent;
+      border: none;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 0.85rem;
+      margin-left: 0.35rem;
+      padding: 0.1rem 0.2rem;
+    }}
+    .copy-path-btn:hover {{ color: var(--accent); }}
     .panel-tabs {{
       flex-shrink: 0;
       display: flex;
@@ -846,6 +951,7 @@ def format_html_report(
       <span>已评估: {result['evaluated_videos']}</span>
       <span>跳过: {result['skipped_videos']}</span>
       <span>宏平均 F1: <strong>{overall['macro_f1']:.4f}</strong></span>
+      <span>微平均 F1: <strong>{overall['micro_f1']:.4f}</strong></span>
     </div>
   </header>
   <div class="layout">
@@ -869,6 +975,16 @@ def format_html_report(
               <td>{overall['macro_precision']:.4f}</td>
               <td>{overall['macro_recall']:.4f}</td>
               <td><strong>{overall['macro_f1']:.4f}</strong></td>
+            </tr>
+            <tr>
+              <td colspan="2">总体（微平均）</td>
+              <td>{overall['total_tp'] + overall['total_fp']}</td>
+              <td>{overall['total_tp']}</td>
+              <td>{overall['total_fp']}</td>
+              <td>{overall['total_fn']}</td>
+              <td>{overall['micro_precision']:.4f}</td>
+              <td>{overall['micro_recall']:.4f}</td>
+              <td><strong>{overall['micro_f1']:.4f}</strong></td>
             </tr>
           </tfoot>
         </table>
@@ -1009,13 +1125,24 @@ def format_html_report(
       }});
     }});
 
-    document.querySelectorAll('a.link-video').forEach(a => {{
-      a.addEventListener('click', (e) => {{
-        e.preventDefault();
+    document.querySelectorAll('.link-video').forEach(el => {{
+      el.addEventListener('click', (e) => {{
         e.stopPropagation();
-        const tr = a.closest('tr');
-        selectRow(tr);
-        playVideo(a.getAttribute('href'), a.textContent);
+      }});
+    }});
+
+    document.querySelectorAll('.copy-path-btn').forEach(btn => {{
+      btn.addEventListener('click', (e) => {{
+        e.stopPropagation();
+        const tr = btn.closest('tr');
+        const absPath = tr.dataset.videoAbs;
+        if (absPath) {{
+          navigator.clipboard.writeText(absPath).then(() => {{
+            const old = btn.textContent;
+            btn.textContent = '✓';
+            setTimeout(() => btn.textContent = old, 1200);
+          }}).catch(() => {{}});
+        }}
       }});
     }});
 
@@ -1062,12 +1189,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument(
         "--video-dir", "-v",
         required=True,
-        help="Directory containing video files (for ground-truth extraction).",
+        nargs="+",
+        help="Directory(ies) containing video files (for ground-truth extraction). "
+             "Must match --report-dir one-to-one.",
     )
     parser.add_argument(
         "--report-dir", "-r",
         required=True,
-        help="Directory containing inference reports.",
+        nargs="+",
+        help="Directory(ies) containing inference reports. "
+             "Must match --video-dir one-to-one.",
     )
     parser.add_argument(
         "--output",
@@ -1096,6 +1227,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help=(
             "Single-class mode: only evaluate events with is_active=true in "
             "event_categories.yaml. All inactive events are excluded from metrics."
+        ),
+    )
+    parser.add_argument(
+        "--normal", "-n",
+        action="store_true",
+        help=(
+            "在指标中额外计算并输出 '无事件 (normal)' 类别。"
+            "需要同时加载了 active_event_ids（通过 --single-class 或 --config-dir）才能正确计算。"
+            "默认不输出 normal。"
         ),
     )
     parser.add_argument(
@@ -1134,16 +1274,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return 1
         logger.warning("Could not load active events from config: %s", exc)
 
-    video_dir = Path(args.video_dir).expanduser().resolve()
-    report_dir = Path(args.report_dir).expanduser().resolve()
+    video_dirs = [Path(d).expanduser().resolve() for d in args.video_dir]
+    report_dirs = [Path(d).expanduser().resolve() for d in args.report_dir]
     output_path = Path(args.output).expanduser().resolve()
 
-    if not video_dir.is_dir():
-        logger.error("Video directory not found: %s", video_dir)
+    if len(video_dirs) != len(report_dirs):
+        logger.error(
+            "--video-dir and --report-dir must have the same number of entries "
+            "(got %d video dirs and %d report dirs)",
+            len(video_dirs), len(report_dirs),
+        )
         return 1
-    if not report_dir.is_dir():
-        logger.error("Report directory not found: %s", report_dir)
-        return 1
+
+    for d in video_dirs:
+        if not d.is_dir():
+            logger.error("Video directory not found: %s", d)
+            return 1
+    for d in report_dirs:
+        if not d.is_dir():
+            logger.error("Report directory not found: %s", d)
+            return 1
 
     # Load annotations if needed
     annotations: Optional[Dict[str, Set[int]]] = None
@@ -1158,17 +1308,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         annotations = load_annotations(annotation_path)
         logger.info("Loaded annotations for %d videos from %s", len(annotations), annotation_path)
 
-    # Find all reports
-    report_paths = sorted(
-        p for p in report_dir.iterdir()
-        if p.is_file() and p.suffix.lower() in (".md", ".json")
-    )
-    if not report_paths:
-        logger.error("No report files (.md or .json) found in %s", report_dir)
-        return 1
-
-    logger.info("Found %d report(s) in %s", len(report_paths), report_dir)
-
     predictions: List[Set[int]] = []
     ground_truths: List[Set[int]] = []
     single_class_masks: List[Optional[Set[int]]] = []
@@ -1178,127 +1317,154 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     per_video_extra: List[Dict[str, Any]] = []
     # For HTML report: absolute file:// paths and embedded report contents
     video_paths_map: Dict[str, str] = {}
+    video_abs_paths_map: Dict[str, str] = {}
     report_paths_map: Dict[str, str] = {}
     report_contents_map: Dict[str, str] = {}
 
-    for report_path in report_paths:
-        # Determine corresponding video name
-        # Report stem may be same as video stem (e.g., video.mp4 -> video.md)
-        report_stem = report_path.stem
+    total_report_count = 0
 
-        # Try to find matching video
-        video_path: Optional[Path] = None
-        for ext in (".mp4", ".avi", ".mov", ".mkv", ".wmv"):
-            candidate = video_dir / (report_stem + ext)
-            if candidate.exists():
-                video_path = candidate
-                break
-
-        # Also try stripping common suffixes from report name
-        if video_path is None:
-            for suffix in ("_report", "_tool_call_report", "_tool_call_report_v2"):
-                if report_stem.endswith(suffix):
-                    base = report_stem[: -len(suffix)]
-                    for ext in (".mp4", ".avi", ".mov", ".mkv", ".wmv"):
-                        candidate = video_dir / (base + ext)
-                        if candidate.exists():
-                            video_path = candidate
-                            break
-                    if video_path:
-                        break
-
-        if video_path is None:
-            logger.warning("No matching video found for report: %s", report_path.name)
-            skipped_videos.append(report_path.name)
+    for video_dir, report_dir in zip(video_dirs, report_dirs):
+        # Find all reports in this pair
+        report_paths = sorted(
+            p for p in report_dir.iterdir()
+            if p.is_file() and p.suffix.lower() in (".md", ".json")
+        )
+        total_report_count += len(report_paths)
+        if not report_paths:
+            logger.warning("No report files (.md or .json) found in %s", report_dir)
             continue
 
-        # Extract prediction
-        pred = extract_pred(report_path)
+        logger.info("Found %d report(s) in %s", len(report_paths), report_dir)
 
-        # Extract ground truth
-        if annotations is not None:
-            gt = annotations.get(video_path.name, set())
-            if video_path.name not in annotations:
-                logger.warning("No annotation for video: %s", video_path.name)
-        else:
-            gt = extract_gt_from_filename(video_path.name)
+        for report_path in report_paths:
+            # Determine corresponding video name
+            # Report stem may be same as video stem (e.g., video.mp4 -> video.md)
+            report_stem = report_path.stem
 
-        # Single-class mask (from config is_active)
-        mask: Optional[Set[int]] = None
-        if args.single_class:
-            mask = active_event_ids
+            # Try to find matching video
+            video_path: Optional[Path] = None
+            for ext in (".mp4", ".avi", ".mov", ".mkv", ".wmv"):
+                candidate = video_dir / (report_stem + ext)
+                if candidate.exists():
+                    video_path = candidate
+                    break
 
-        predictions.append(pred)
-        ground_truths.append(gt)
-        single_class_masks.append(mask)
-        video_names.append(video_path.name)
+            # Also try stripping common suffixes from report name
+            if video_path is None:
+                for suffix in ("_report", "_tool_call_report", "_tool_call_report_v2"):
+                    if report_stem.endswith(suffix):
+                        base = report_stem[: -len(suffix)]
+                        for ext in (".mp4", ".avi", ".mov", ".mkv", ".wmv"):
+                            candidate = video_dir / (base + ext)
+                            if candidate.exists():
+                                video_path = candidate
+                                break
+                        if video_path:
+                            break
 
-        # Build per-video extra data for markdown (with absolute paths and names)
-        predicted_names = [EVENT_NAMES.get(eid, f"事件{eid}") for eid in sorted(pred)]
-        ground_truth_names = [EVENT_NAMES.get(eid, f"事件{eid}") for eid in sorted(gt)]
+            if video_path is None:
+                logger.warning("No matching video found for report: %s", report_path.name)
+                skipped_videos.append(report_path.name)
+                continue
 
-        # For "all correct" check, ignore inactive events in both pred and gt
-        if active_event_ids is not None:
-            pred_active = pred & active_event_ids
-            gt_active = gt & active_event_ids
-            is_correct = pred_active == gt_active
-        else:
-            pred_active = pred
-            gt_active = gt
-            is_correct = pred == gt
+            # Extract prediction
+            pred = extract_pred(report_path)
 
-        video_abs = str(video_path.resolve())
-        report_abs = str(report_path.resolve())
+            # Extract ground truth
+            if annotations is not None:
+                gt = annotations.get(video_path.name, set())
+                if video_path.name not in annotations:
+                    logger.warning("No annotation for video: %s", video_path.name)
+            else:
+                gt = extract_gt_from_filename(video_path.name)
 
-        # Use relative paths for HTML so the report works when packaged and shared
-        try:
-            html_base_dir = output_path.parent.resolve()
-            video_rel = video_path.resolve().relative_to(html_base_dir)
-            report_rel = report_path.resolve().relative_to(html_base_dir)
-            video_uri = str(video_rel)
-            report_uri = str(report_rel)
-        except ValueError:
-            # Fallback to absolute file:// URIs when paths are on different filesystems
-            video_uri = f"file://{video_abs}"
-            report_uri = f"file://{report_abs}"
+            # Single-class mask (from config is_active)
+            mask: Optional[Set[int]] = None
+            if args.single_class:
+                mask = active_event_ids
 
-        # Read report content for HTML embedding
-        try:
-            report_text = report_path.read_text(encoding="utf-8")
-        except Exception:
-            report_text = ""
+            predictions.append(pred)
+            ground_truths.append(gt)
+            single_class_masks.append(mask)
+            video_names.append(video_path.name)
 
-        video_paths_map[video_path.name] = video_uri
-        report_paths_map[video_path.name] = report_uri
-        report_contents_map[video_path.name] = report_text
+            # Build per-video extra data for markdown (with absolute paths and names)
+            predicted_names = [EVENT_NAMES.get(eid, f"事件{eid}") for eid in sorted(pred)]
+            ground_truth_names = [EVENT_NAMES.get(eid, f"事件{eid}") for eid in sorted(gt)]
 
-        per_video_extra.append({
-            "video": video_path.name,
-            "video_path": video_abs,
-            "report_path": report_abs,
-            "predicted": sorted(pred),
-            "ground_truth": sorted(gt),
-            "predicted_active": sorted(pred_active),
-            "ground_truth_active": sorted(gt_active),
-            "predicted_names": predicted_names,
-            "ground_truth_names": ground_truth_names,
-            "is_correct": is_correct,
-            "mask": sorted(mask) if mask else None,
-        })
+            # For "all correct" check, ignore inactive events in both pred and gt
+            if active_event_ids is not None:
+                pred_active = pred & active_event_ids
+                gt_active = gt & active_event_ids
+                is_correct = pred_active == gt_active
+            else:
+                pred_active = pred
+                gt_active = gt
+                is_correct = pred == gt
 
-        logger.debug("%s: pred=%s, gt=%s", video_path.name, pred, gt)
+            video_abs = str(video_path.resolve())
+            report_abs = str(report_path.resolve())
 
-    total_videos = len(report_paths)
+            # Use relative paths for HTML so the report works when packaged and shared
+            try:
+                html_base_dir = str(output_path.parent.resolve())
+                video_rel = os.path.relpath(str(video_path.resolve()), html_base_dir)
+                report_rel = os.path.relpath(str(report_path.resolve()), html_base_dir)
+                video_uri = Path(video_rel).as_posix()
+                report_uri = Path(report_rel).as_posix()
+            except ValueError:
+                # Fallback to absolute file:// URIs when paths are on different filesystems
+                video_uri = f"file://{video_abs}"
+                report_uri = f"file://{report_abs}"
+
+            # Read report content for HTML embedding
+            try:
+                report_text = report_path.read_text(encoding="utf-8")
+            except Exception:
+                report_text = ""
+
+            video_paths_map[video_path.name] = video_uri
+            video_abs_paths_map[video_path.name] = video_abs
+            report_paths_map[video_path.name] = report_uri
+            report_contents_map[video_path.name] = report_text
+
+            per_video_extra.append({
+                "video": video_path.name,
+                "video_path": video_abs,
+                "report_path": report_abs,
+                "predicted": sorted(pred),
+                "ground_truth": sorted(gt),
+                "predicted_active": sorted(pred_active),
+                "ground_truth_active": sorted(gt_active),
+                "predicted_names": predicted_names,
+                "ground_truth_names": ground_truth_names,
+                "is_correct": is_correct,
+                "mask": sorted(mask) if mask else None,
+            })
+
+            logger.debug("%s: pred=%s, gt=%s", video_path.name, pred, gt)
+
+    total_videos = total_report_count
     evaluated_videos = len(predictions)
-    skipped_count = total_videos - evaluated_videos
+    skipped_count = len(skipped_videos)
 
     if evaluated_videos == 0:
         logger.error("No videos could be evaluated.")
         return 1
 
     # Compute metrics
+    # normal 类别仅在 --normal 显式开启时才计算
+    if args.normal and active_event_ids is None:
+        logger.warning(
+            "--normal 已指定但未加载 active_event_ids (config 不可用), "
+            "跳过 normal 类别计算。"
+        )
     metrics, eval_count, skip_count = compute_metrics(
-        predictions, ground_truths, single_class_masks
+        predictions,
+        ground_truths,
+        single_class_masks,
+        active_event_ids=active_event_ids if args.single_class else None,
+        include_normal=args.normal and active_event_ids is not None,
     )
 
     result = {
@@ -1330,7 +1496,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # For HTML output, build interactive report with inline embedded data
         html_result = {**result, "per_video": per_video_extra}
         html_content = format_html_report(
-            html_result, video_paths_map, report_paths_map, report_contents_map
+            html_result, video_paths_map, video_abs_paths_map, report_paths_map, report_contents_map
         )
         output_path.write_text(html_content, encoding="utf-8")
     else:

@@ -444,8 +444,12 @@ class SystemConfig(BaseModel):
     event_confidence_threshold: float = 0.7
     max_video_length_sec: float = 300.0
     log_level: str = "INFO"
-    scene_understanding_min_frames: int = 10
-    vlm_max_frames: int = 10
+    scene_understanding_min_frames: int = Field(
+        default_factory=lambda: int(os.getenv("SCENE_UNDERSTANDING_MIN_FRAMES", "10"))
+    )
+    vlm_max_frames: int = Field(
+        default_factory=lambda: int(os.getenv("VLM_MAX_FRAMES", "10"))
+    )
 
 
 # ---------------------------------------------------------------------------
