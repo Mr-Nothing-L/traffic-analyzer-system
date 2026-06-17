@@ -332,6 +332,10 @@ class PromptTemplate(BaseModel):
         default_factory=list,
         description="Tool names available in this prompt context (injected into prompt)"
     )
+    enable_far_object_enhancement: bool = Field(
+        default=False,
+        description="Whether this template supports far-distance object enhancement preprocessing"
+    )
 
 
 class LLMResponse(BaseModel):

@@ -825,6 +825,31 @@ class ReportGenerator:
                 lines.append(result.cv_evidence)
                 lines.append("")
 
+            # 展示远距离非机动车增强合成图（如有）
+            if result.event_id == 4 and expert_candidates:
+                candidate = next(
+                    (c for c in expert_candidates if c.get("event_id") == result.event_id),
+                    None,
+                )
+                if candidate:
+                    composite_path = candidate.get("raw_vlm_response", {}).get("composite_image_path")
+                    if composite_path:
+                        lines.append("#### 远距离非机动车增强证据")
+                        lines.append(f"**远距离增强合成图**: `{composite_path}`")
+                        lines.append("")
+                        lines.append(f"![远距离非机动车增强]({composite_path})")
+                        lines.append("")
+
+                    motion_composite_path = candidate.get("raw_vlm_response", {}).get("motion_composite_image_path")
+                    if motion_composite_path:
+                        if not composite_path:
+                            lines.append("#### 远距离非机动车增强证据")
+                            lines.append("")
+                        lines.append(f"**运动反射验证合成图**: `{motion_composite_path}`")
+                        lines.append("")
+                        lines.append(f"![运动反射验证]({motion_composite_path})")
+                        lines.append("")
+
             return lines
         except Exception as exc:
             logger.error(

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import json
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from traffic_analyzer.core.config_manager import ConfigManager
@@ -21,8 +22,20 @@ from traffic_analyzer.models.schemas import (
     PromptTemplate,
 )
 from traffic_analyzer.utils.event_detection import parse_expert_response, select_event_images
+from traffic_analyzer.utils.far_non_motor_enhancer import (
+    compute_bbox_area_px,
+    create_composite,
+    create_motion_comparison_composite,
+    is_bbox_large_enough,
+    load_image,
+)
 
 logger = logging.getLogger(__name__)
+
+# Directory where far-distance non-motor vehicle composite images are saved.
+_FAR_ENHANCEMENT_OUTPUT_DIR = Path(
+    "/media/wanji/Elements/大模型应用/高速交通事件Agent测试视频V4/output/tmp_img"
+)
 
 # JSON schema expected from the VLM for expert-agent responses.
 _EXPERT_RESPONSE_SCHEMA: Dict[str, Any] = {
@@ -48,6 +61,32 @@ _EXPERT_RESPONSE_SCHEMA: Dict[str, Any] = {
             },
         },
     },
+}
+
+# JSON schema for the far-distance non-motor vehicle per-frame ROI detection.
+_ROI_DETECTION_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "required": ["bbox_norm"],
+    "properties": {
+        "bbox_norm": {
+            "anyOf": [
+                {"type": "array", "items": {"type": "number"}},
+                {"type": "null"},
+            ]
+        },
+        "reason": {"type": "string"},
+    },
+}
+
+# JSON schema for the adjacent-frame motion reflection verification.
+_MOTION_VERIFICATION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "is_moving": {"type": "boolean"},
+        "reason": {"type": "string"},
+    },
+    "required": ["is_moving", "reason"],
+    "additionalProperties": False,
 }
 
 
@@ -129,6 +168,13 @@ class ExpertAgent:
                 summary=f"Failed to load prompt template: {exc}",
             )
 
+        # Decide whether to use the far-distance non-motor vehicle enhancement
+        # path before the template is possibly mutated by prior-knowledge injection.
+        enable_far_enhancement = (
+            self.category.event_id == 4
+            and getattr(template, "enable_far_object_enhancement", False)
+        )
+
         # -- 3. Inject prior knowledge (scene_understanding rules) -----------
         # scene_understanding prompt contains universal rules (direction,
         # emergency lane identification, camera perspective) that all experts
@@ -175,6 +221,7 @@ class ExpertAgent:
                 example_output=template.example_output,
                 traffic_percentage=template.traffic_percentage,
                 available_tools=template.available_tools,
+                enable_far_object_enhancement=template.enable_far_object_enhancement,
             )
 
         # -- 4. Context variables ----------------------------------------------
@@ -186,7 +233,23 @@ class ExpertAgent:
         if context.video_meta is not None:
             context_vars["video_meta"] = context.video_meta.model_dump()
 
-        # -- 5. VLM call -------------------------------------------------------
+        # -- 5. Far-distance non-motor vehicle enhancement (event_id=4 only) -----
+        if enable_far_enhancement:
+            enhanced_candidate = self._detect_with_far_enhancement(
+                context=context,
+                images=images,
+                template=template,
+                context_vars=context_vars,
+            )
+            if enhanced_candidate is not None:
+                return enhanced_candidate
+            logger.info(
+                "[expert_agent:detect] FAR_ENHANCEMENT_FALLBACK | event_id=%d event_name=%s",
+                self.category.event_id,
+                self.category.name_zh,
+            )
+
+        # -- 6. VLM call -------------------------------------------------------
         try:
             response = self.vlm_engine.call(
                 template=template,
@@ -220,6 +283,360 @@ class ExpertAgent:
             len(candidate.instances),
         )
         return candidate
+
+    def _detect_with_far_enhancement(
+        self,
+        context: AnalysisContext,
+        images: List[Any],
+        template: PromptTemplate,
+        context_vars: Dict[str, Any],
+    ) -> Optional[EventCandidate]:
+        """Run the per-frame far-distance non-motor vehicle enhancement flow.
+
+        Each input keyframe is processed individually. The VLM returns a distant
+        non-motor vehicle bbox for that frame. If the bbox is valid (area >= 80 px),
+        a composite is generated immediately and passed to the final classifier.
+        On the first detected composite the function returns early with the
+        candidate and far-enhancement metadata.
+
+        If no valid candidate is found after all frames are exhausted, a
+        detected=False EventCandidate is returned. Fatal API errors are re-raised.
+        """
+        if context.video_meta is None:
+            logger.warning(
+                "[expert_agent:_detect_with_far_enhancement] NO_VIDEO_META | event_id=%d",
+                self.category.event_id,
+            )
+            return None
+
+        logger.info(
+            "[expert_agent:_detect_with_far_enhancement] START | event_id=%d event_name=%s frames=%d",
+            self.category.event_id,
+            self.category.name_zh,
+            len(images),
+        )
+
+        try:
+            roi_template = self.config_manager.get_prompt_template(
+                "far_non_motor_roi_detection"
+            )
+        except (KeyError, RuntimeError) as exc:
+            logger.warning(
+                "[expert_agent:_detect_with_far_enhancement] ROI_TEMPLATE_ERROR | event_id=%d | %s",
+                self.category.event_id,
+                exc,
+            )
+            return None
+
+        video_stem = Path(context.video_meta.file_path).stem
+        output_dir = _FAR_ENHANCEMENT_OUTPUT_DIR
+        try:
+            output_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            logger.error(
+                "[expert_agent:_detect_with_far_enhancement] OUTPUT_DIR_ERROR | event_id=%d path=%s | %s",
+                self.category.event_id,
+                output_dir,
+                exc,
+                exc_info=True,
+            )
+            return None
+
+        attempted_final = False
+
+        for global_index, frame in enumerate(images):
+            try:
+                roi_response = self.vlm_engine.call(
+                    template=roi_template,
+                    images=[frame],
+                    context_vars=context_vars,
+                    response_schema=_ROI_DETECTION_SCHEMA,
+                )
+            except FatalAPIError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "[expert_agent:_detect_with_far_enhancement] ROI_CALL_ERROR | event_id=%d frame=%d | %s",
+                    self.category.event_id,
+                    global_index,
+                    exc,
+                )
+                continue
+
+            if not roi_response.success or not isinstance(roi_response.parsed_data, dict):
+                logger.warning(
+                    "[expert_agent:_detect_with_far_enhancement] ROI_PARSE_ERROR | event_id=%d frame=%d success=%s",
+                    self.category.event_id,
+                    global_index,
+                    roi_response.success,
+                )
+                continue
+
+            parsed = roi_response.parsed_data
+            bbox_norm = parsed.get("bbox_norm")
+            reason = parsed.get("reason", "")
+
+            if bbox_norm is None:
+                logger.info(
+                    "[expert_agent:_detect_with_far_enhancement] NO_CANDIDATE | event_id=%d frame=%d reason=%s",
+                    self.category.event_id,
+                    global_index,
+                    reason,
+                )
+                continue
+
+            if not isinstance(bbox_norm, list) or len(bbox_norm) != 4:
+                logger.warning(
+                    "[expert_agent:_detect_with_far_enhancement] INVALID_BBOX | event_id=%d frame=%d bbox=%s",
+                    self.category.event_id,
+                    global_index,
+                    bbox_norm,
+                )
+                continue
+
+            try:
+                frame_pil = load_image(frame)
+                img_width, img_height = frame_pil.size
+                bbox_area = compute_bbox_area_px(bbox_norm, img_width, img_height)
+                if not is_bbox_large_enough(bbox_norm, img_width, img_height, min_area_px=80):
+                    logger.info(
+                        "[expert_agent:_detect_with_far_enhancement] ROI_TOO_SMALL | event_id=%d frame=%d area_px=%d < 80",
+                        self.category.event_id,
+                        global_index,
+                        bbox_area,
+                    )
+                    continue
+            except Exception as exc:
+                logger.warning(
+                    "[expert_agent:_detect_with_far_enhancement] SIZE_CHECK_ERROR | event_id=%d frame=%d | %s",
+                    self.category.event_id,
+                    global_index,
+                    exc,
+                )
+                continue
+
+            logger.info(
+                "[expert_agent:_detect_with_far_enhancement] FRAME_CANDIDATE | event_id=%d frame=%d area_px=%d reason=%s",
+                self.category.event_id,
+                global_index,
+                bbox_area,
+                reason,
+            )
+
+            output_path = str(
+                output_dir / f"{video_stem}_frame_{global_index}_composite.jpg"
+            )
+            logger.info(
+                "[expert_agent:_detect_with_far_enhancement] COMPOSITE | event_id=%d frame=%d output_path=%s",
+                self.category.event_id,
+                global_index,
+                output_path,
+            )
+
+            try:
+                create_composite(frame, bbox_norm, output_path=output_path)
+            except Exception as exc:
+                logger.error(
+                    "[expert_agent:_detect_with_far_enhancement] COMPOSITE_ERROR | event_id=%d frame=%d | %s",
+                    self.category.event_id,
+                    global_index,
+                    exc,
+                    exc_info=True,
+                )
+                continue
+
+            try:
+                final_response = self.vlm_engine.call(
+                    template=template,
+                    images=[output_path],
+                    context_vars=context_vars,
+                    response_schema=_EXPERT_RESPONSE_SCHEMA,
+                )
+                attempted_final = True
+            except FatalAPIError:
+                raise
+            except Exception as exc:
+                logger.error(
+                    "[expert_agent:_detect_with_far_enhancement] FINAL_CALL_ERROR | event_id=%d frame=%d | %s",
+                    self.category.event_id,
+                    global_index,
+                    exc,
+                    exc_info=True,
+                )
+                continue
+
+            candidate = parse_expert_response(final_response, self.category)
+            if candidate.detected:
+                candidate.raw_vlm_response["composite_image_path"] = output_path
+                candidate.raw_vlm_response["far_enhancement"] = {
+                    "selected_frame_index": global_index,
+                    "bbox_norm": bbox_norm,
+                    "reason": reason,
+                }
+                logger.info(
+                    "[expert_agent:_detect_with_far_enhancement] COMPLETE | event_id=%d detected=True frame=%d composite=%s",
+                    self.category.event_id,
+                    global_index,
+                    output_path,
+                )
+                return candidate
+
+            logger.info(
+                "[expert_agent:_detect_with_far_enhancement] CLASSIFIER_NEGATIVE | event_id=%d frame=%d composite=%s",
+                self.category.event_id,
+                global_index,
+                output_path,
+            )
+
+            # ---- Adjacent-frame motion reflection verification -------------------
+            if global_index == len(images) - 1:
+                adjacent_index = global_index - 1
+            else:
+                adjacent_index = global_index + 1
+            adjacent_frame = images[adjacent_index]
+
+            motion_composite_path = str(
+                output_dir / f"{video_stem}_frame_{global_index}_motion_{adjacent_index}.jpg"
+            )
+            logger.info(
+                "[expert_agent:_detect_with_far_enhancement] MOTION_COMPOSITE | event_id=%d frame=%d adjacent=%d output_path=%s",
+                self.category.event_id,
+                global_index,
+                adjacent_index,
+                motion_composite_path,
+            )
+
+            try:
+                create_motion_comparison_composite(
+                    frame, adjacent_frame, bbox_norm, output_path=motion_composite_path
+                )
+            except Exception as exc:
+                logger.error(
+                    "[expert_agent:_detect_with_far_enhancement] MOTION_COMPOSITE_ERROR | event_id=%d frame=%d adjacent=%d | %s",
+                    self.category.event_id,
+                    global_index,
+                    adjacent_index,
+                    exc,
+                    exc_info=True,
+                )
+                continue
+
+            try:
+                motion_template = self.config_manager.get_prompt_template(
+                    "far_non_motor_motion_verification"
+                )
+            except (KeyError, RuntimeError) as exc:
+                logger.warning(
+                    "[expert_agent:_detect_with_far_enhancement] MOTION_TEMPLATE_ERROR | event_id=%d frame=%d adjacent=%d | %s",
+                    self.category.event_id,
+                    global_index,
+                    adjacent_index,
+                    exc,
+                )
+                continue
+
+            try:
+                motion_response = self.vlm_engine.call(
+                    template=motion_template,
+                    images=[motion_composite_path],
+                    context_vars=context_vars,
+                    response_schema=_MOTION_VERIFICATION_SCHEMA,
+                )
+            except FatalAPIError:
+                raise
+            except Exception as exc:
+                logger.error(
+                    "[expert_agent:_detect_with_far_enhancement] MOTION_CALL_ERROR | event_id=%d frame=%d adjacent=%d | %s",
+                    self.category.event_id,
+                    global_index,
+                    adjacent_index,
+                    exc,
+                    exc_info=True,
+                )
+                continue
+
+            if not motion_response.success or not isinstance(motion_response.parsed_data, dict):
+                logger.warning(
+                    "[expert_agent:_detect_with_far_enhancement] MOTION_PARSE_ERROR | event_id=%d frame=%d adjacent=%d success=%s",
+                    self.category.event_id,
+                    global_index,
+                    adjacent_index,
+                    motion_response.success,
+                )
+                continue
+
+            motion_data = motion_response.parsed_data
+            is_moving = bool(motion_data.get("is_moving", False))
+            motion_reason = str(motion_data.get("reason", ""))
+
+            if not is_moving:
+                logger.info(
+                    "[expert_agent:_detect_with_far_enhancement] MOTION_REJECT | event_id=%d frame=%d adjacent=%d reason=%s",
+                    self.category.event_id,
+                    global_index,
+                    adjacent_index,
+                    motion_reason,
+                )
+                continue
+
+            raw_response = dict(candidate.raw_vlm_response)
+            raw_response["composite_image_path"] = output_path
+            raw_response["far_enhancement"] = {
+                "selected_frame_index": global_index,
+                "bbox_norm": bbox_norm,
+                "reason": reason,
+            }
+            raw_response["motion_verification"] = {
+                "is_moving": True,
+                "reason": motion_reason,
+            }
+            raw_response["motion_composite_image_path"] = motion_composite_path
+
+            # Build a concrete instance so that adjudication sees supporting evidence
+            # rather than an empty instance list.
+            instance = EventInstance(
+                event_id=self.category.event_id,
+                event_name=self.category.name_zh,
+                start_time_sec=0.0,
+                end_time_sec=0.0,
+                evidence_frames=[global_index, adjacent_index],
+                description=f"第 {global_index} 帧红色方框内发现远距离小型移动目标，经与第 {adjacent_index} 帧同一位置对比，目标发生位移：{motion_reason}",
+                reasoning=f"ROI 检测在 frame={global_index} 发现疑似非机动车候选；最终分类器因目标模糊 initially 返回负例。经相邻帧运动反射验证，目标在两帧间发生移动（{motion_reason}），排除静态路面设施/反光点/护栏阴影等误报源，判定为移动中的摩托车/非机动车。",
+                confidence_level="low",
+            )
+            motion_candidate = EventCandidate(
+                event_id=self.category.event_id,
+                event_name=self.category.name_zh,
+                detected=True,
+                summary=f"检测到摩托车/非机动车：经相邻帧运动反射验证，frame={global_index} 与 frame={adjacent_index} 中红色方框内目标发生移动，疑似远距离两轮/三轮车辆，位于道路区域。",
+                instances=[instance],
+                raw_vlm_response=raw_response,
+                raw_vlm_text=motion_response.raw_text,
+            )
+            logger.info(
+                "[expert_agent:_detect_with_far_enhancement] MOTION_ACCEPT | event_id=%d frame=%d adjacent=%d reason=%s",
+                self.category.event_id,
+                global_index,
+                adjacent_index,
+                motion_reason,
+            )
+            return motion_candidate
+
+        logger.info(
+            "[expert_agent:_detect_with_far_enhancement] NO_VALID_CANDIDATES | event_id=%d",
+            self.category.event_id,
+        )
+        # If at least one composite was generated and classified as negative, we have
+        # exhausted the enhancement path and should report detected=False. Otherwise,
+        # no valid bbox candidate was ever found, so fall back to the original path.
+        if attempted_final:
+            return EventCandidate(
+                detected=False,
+                event_id=self.category.event_id,
+                event_name=self.category.name_zh,
+                summary="未检测到非机动车及两轮/三轮异常车辆。",
+            )
+        return None
 
     def _execute_tool_calls(
         self,

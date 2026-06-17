@@ -269,6 +269,7 @@ class AnalysisOrchestrator:
                             "summary": c.summary,
                             "reasoning": c.instances[0].reasoning if c.instances else "",
                             "raw_vlm_text": c.raw_vlm_text[:500] if c.raw_vlm_text else "",
+                            "raw_vlm_response": c.raw_vlm_response,
                         }
                         for c in context.event_candidates.values()
                     ],

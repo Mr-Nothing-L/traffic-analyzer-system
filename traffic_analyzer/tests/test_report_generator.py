@@ -528,3 +528,128 @@ class TestDisposalRecommendations:
             usage_stats=usage_stats,
         )
         assert report.disposal_recommendations == []
+
+
+class TestFarEnhancementEvidence:
+    def test_composite_image_embedded_for_event_id_4(
+        self,
+        generator: ReportGenerator,
+        scene_info: SceneInfo,
+        video_meta: VideoMetadata,
+        usage_stats: Dict[str, Any],
+    ) -> None:
+        """Markdown should embed the far-distance non-motor composite image."""
+        composite_path = "/tmp/test_video_frame_2_composite.jpg"
+        results = [
+            EventResult(
+                event_id=4,
+                event_name="摩托车出现",
+                detected=True,
+                instances=[
+                    EventInstance(
+                        event_id=4,
+                        event_name="摩托车出现",
+                        description="distant motorcycle",
+                    )
+                ],
+            ),
+        ]
+        expert_candidates = [
+            {
+                "event_id": 4,
+                "event_name": "摩托车出现",
+                "detected": True,
+                "summary": "detected",
+                "raw_vlm_response": {"composite_image_path": composite_path},
+            }
+        ]
+        report = generator.generate(
+            event_results=results,
+            scene_info=scene_info,
+            video_meta=video_meta,
+            usage_stats=usage_stats,
+            expert_candidates=expert_candidates,
+        )
+        md = generator.to_markdown(report)
+
+        assert "#### 远距离非机动车增强证据" in md
+        assert f"**远距离增强合成图**: `{composite_path}`" in md
+        assert f"![远距离非机动车增强]({composite_path})" in md
+
+    def test_motion_composite_image_embedded_for_event_id_4(
+        self,
+        generator: ReportGenerator,
+        scene_info: SceneInfo,
+        video_meta: VideoMetadata,
+        usage_stats: Dict[str, Any],
+    ) -> None:
+        """Markdown should embed both the far-distance composite and motion reflection composite."""
+        composite_path = "/tmp/test_video_frame_2_composite.jpg"
+        motion_path = "/tmp/test_video_frame_2_motion_3.jpg"
+        results = [
+            EventResult(
+                event_id=4,
+                event_name="摩托车出现",
+                detected=True,
+                instances=[
+                    EventInstance(
+                        event_id=4,
+                        event_name="摩托车出现",
+                        description="distant motorcycle",
+                    )
+                ],
+            ),
+        ]
+        expert_candidates = [
+            {
+                "event_id": 4,
+                "event_name": "摩托车出现",
+                "detected": True,
+                "summary": "detected",
+                "raw_vlm_response": {
+                    "composite_image_path": composite_path,
+                    "motion_composite_image_path": motion_path,
+                },
+            }
+        ]
+        report = generator.generate(
+            event_results=results,
+            scene_info=scene_info,
+            video_meta=video_meta,
+            usage_stats=usage_stats,
+            expert_candidates=expert_candidates,
+        )
+        md = generator.to_markdown(report)
+
+        assert "#### 远距离非机动车增强证据" in md
+        assert f"**远距离增强合成图**: `{composite_path}`" in md
+        assert f"![远距离非机动车增强]({composite_path})" in md
+        assert f"**运动反射验证合成图**: `{motion_path}`" in md
+        assert f"![运动反射验证]({motion_path})" in md
+
+    def test_no_composite_section_without_composite_path(
+        self,
+        generator: ReportGenerator,
+        scene_info: SceneInfo,
+        video_meta: VideoMetadata,
+        usage_stats: Dict[str, Any],
+    ) -> None:
+        """No composite section should appear when the candidate lacks the path."""
+        results = [
+            EventResult(
+                event_id=4,
+                event_name="摩托车出现",
+                detected=False,
+            ),
+        ]
+        report = generator.generate(
+            event_results=results,
+            scene_info=scene_info,
+            video_meta=video_meta,
+            usage_stats=usage_stats,
+            expert_candidates=[{"event_id": 4, "detected": False}],
+        )
+        md = generator.to_markdown(report)
+
+        assert "远距离非机动车增强证据" not in md
+        assert "composite" not in md.lower()
