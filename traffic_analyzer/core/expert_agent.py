@@ -33,9 +33,8 @@ from traffic_analyzer.utils.far_non_motor_enhancer import (
 logger = logging.getLogger(__name__)
 
 # Directory where far-distance non-motor vehicle composite images are saved.
-_FAR_ENHANCEMENT_OUTPUT_DIR = Path(
-    "/media/wanji/Elements/大模型应用/高速交通事件Agent测试视频V4/output/tmp_img"
-)
+# Kept relative to the project root so it works across local dev, CI and Docker.
+_FAR_ENHANCEMENT_OUTPUT_DIR = Path("./output/tmp_img")
 
 # JSON schema expected from the VLM for expert-agent responses.
 _EXPERT_RESPONSE_SCHEMA: Dict[str, Any] = {
