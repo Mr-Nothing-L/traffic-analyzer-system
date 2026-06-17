@@ -476,6 +476,12 @@ class AnalysisContext(BaseModel):
     local_vars: Dict[str, Any] = Field(default_factory=dict)
     llm_call_log: List[LLMCallRecord] = Field(default_factory=list)
     final_report: Optional[Report] = None
+    output_dir: Optional[str] = Field(
+        default=None,
+        description="Directory where the final report will be written. "
+                    "Used to place auxiliary assets (e.g. far-enhancement "
+                    "composites) next to the report so markdown references resolve.",
+    )
 
     def set_local(self, key: str, value: Any) -> None:
         """Set a local variable for logic chain execution."""

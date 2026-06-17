@@ -72,9 +72,11 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
     try:
         orchestrator = AnalysisOrchestrator.from_config_dir(config_dir)
+        report_output_dir = str(Path(output_path).parent) if output_path else None
         report = orchestrator.analyze(
             video_path,
             scene_understanding=scene_understanding,
+            output_dir=report_output_dir,
         )
     except Exception as exc:
         logger.exception("Analysis failed: %s", exc)

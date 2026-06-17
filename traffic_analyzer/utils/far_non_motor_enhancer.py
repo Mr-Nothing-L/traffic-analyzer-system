@@ -10,7 +10,7 @@ Only PIL / numpy / cv2 are used; no ML detection models.
 from __future__ import annotations
 
 import io
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import cv2
 import numpy as np
@@ -46,6 +46,37 @@ def compute_enlarged_bbox(bbox_norm: List[float], scale: float = 2.0) -> List[fl
     ny2 = min(1.0, cy + new_h / 2.0)
 
     return [nx1, ny1, nx2, ny2]
+
+
+def compute_bbox_aspect_ratio(bbox_norm: List[float]) -> float:
+    """计算归一化 bbox 的宽高比 width / height。
+
+    Args:
+        bbox_norm: [x1, y1, x2, y2]，取值范围 [0.0, 1.0]
+
+    Returns:
+        宽高比，若高度为 0 则返回 float('inf')
+    """
+    x1, y1, x2, y2 = bbox_norm
+    h = y2 - y1
+    if h <= 0:
+        return float("inf")
+    return (x2 - x1) / h
+
+
+def is_bbox_aspect_valid_for_non_motor(
+    bbox_norm: List[float], max_ratio: float = 1.0
+) -> bool:
+    """判断 bbox 宽高比是否符合非机动车先验（高度 > 宽度，即 ratio < 1.0）。
+
+    Args:
+        bbox_norm: [x1, y1, x2, y2]
+        max_ratio: 允许的最大宽高比，默认 1.0
+
+    Returns:
+        True 如果 width/height < max_ratio，否则 False
+    """
+    return compute_bbox_aspect_ratio(bbox_norm) < max_ratio
 
 
 def load_image(frame: Union[np.ndarray, bytes, Image.Image]) -> Image.Image:
@@ -289,10 +320,13 @@ def create_motion_comparison_composite(
     Processing steps:
       1. Compute ``enlarged_bbox`` for each frame using ``scale``.
       2. Crop the enlarged ROI from both frames.
-      3. Resize the adjacent-frame crop to match the current-frame crop size.
-      4. Draw a red rectangle (3 px) around the original bbox and a yellow
+      3. Upscale the current-frame crop so its height approaches the original
+         frame height (at least half the frame height or 4x the crop height,
+         capped at the frame height), preserving aspect ratio.
+      4. Resize the adjacent-frame crop to the same panel size.
+      5. Draw a red rectangle (3 px) around the original bbox and a yellow
          crosshair at its center on each panel.
-      5. Compose: left = current frame panel, right = adjacent frame panel,
+      6. Compose: left = current frame panel, right = adjacent frame panel,
          separated by a 3 px white vertical line.
 
     Args:
@@ -324,9 +358,15 @@ def create_motion_comparison_composite(
     if current_crop.size[0] <= 0 or current_crop.size[1] <= 0:
         raise ValueError("Enlarged bbox produced an empty current-frame crop")
 
-    panel_size = current_crop.size
-    resample = Image.NEAREST if panel_size[1] < 50 else Image.LANCZOS
+    crop_w, crop_h = current_crop.size
 
+    # Upscale so the panel is clearly visible but not larger than the frame.
+    target_height = min(current_h, max(current_h // 2, crop_h * 4))
+    target_width = int(round(crop_w * target_height / crop_h))
+
+    resample = Image.NEAREST if crop_h < 50 else Image.LANCZOS
+
+    panel_size = (target_width, target_height)
     current_panel = current_crop.resize(panel_size, resample)
     adjacent_panel = adjacent_crop.resize(panel_size, resample)
 
@@ -346,8 +386,8 @@ def create_motion_comparison_composite(
     )
 
     separator_width = 3
-    composite_width = panel_size[0] * 2 + separator_width
-    composite_height = panel_size[1]
+    composite_width = target_width * 2 + separator_width
+    composite_height = target_height
     composite = Image.new(
         "RGB",
         (composite_width, composite_height),
@@ -355,7 +395,7 @@ def create_motion_comparison_composite(
     )
 
     composite.paste(left_panel, (0, 0))
-    composite.paste(right_panel, (panel_size[0] + separator_width, 0))
+    composite.paste(right_panel, (target_width + separator_width, 0))
 
     if output_path is not None:
         composite.save(output_path)
@@ -382,3 +422,108 @@ def select_best_candidate(candidates: List[Dict]) -> Optional[Dict]:
         return _CONFIDENCE_RANK.get(conf, len(_CONFIDENCE_RANK))
 
     return min(candidates, key=_rank)
+
+
+def compute_roi_motion_score(
+    frame: Union[np.ndarray, bytes, Image.Image],
+    adjacent_frame: Union[np.ndarray, bytes, Image.Image],
+    bbox_norm: List[float],
+    scale: float = 3.0,
+    gaussian_kernel: Optional[Tuple[int, int]] = (3, 3),
+    pixel_threshold: float = 8.0,
+) -> Dict[str, float]:
+    """Compute a motion score for a ROI by comparing two adjacent frames.
+
+    The comparison is performed inside an enlarged region around ``bbox_norm``
+    so that small spatial shifts of distant targets are still captured.  No
+    intermediate images are written to disk.
+
+    Args:
+        frame: Current-frame image as OpenCV BGR ``np.ndarray``, ``bytes``,
+            or PIL image.
+        adjacent_frame: Adjacent-frame image in the same accepted formats.
+        bbox_norm: Normalized bbox ``[x1, y1, x2, y2]`` of the target object.
+        scale: Factor by which the ROI is enlarged before differencing
+            (default 3.0).
+        gaussian_kernel: Optional Gaussian blur kernel applied to both crops
+            to suppress compression noise.  Use ``None`` to skip blurring.
+        pixel_threshold: Grayscale absolute-difference threshold above which a
+            pixel is considered to have changed (default 8.0).
+
+    Returns:
+        Dict with scalar motion metrics:
+            - ``mean_diff``: mean absolute grayscale difference in the ROI.
+            - ``fraction_above_threshold``: fraction of ROI pixels whose
+              absolute difference exceeds ``pixel_threshold``.
+            - ``motion_score``: combined heuristic ``mean_diff`` +
+              ``fraction_above_threshold * 100``.
+    """
+    current = load_image(frame)
+    adjacent = load_image(adjacent_frame)
+
+    # Normalize to the same dimensions in case decoding produced mismatched
+    # sizes (e.g. one frame was resized upstream).
+    if current.size != adjacent.size:
+        adjacent = adjacent.resize(current.size, Image.LANCZOS)
+
+    current_np = np.array(current)
+    adjacent_np = np.array(adjacent)
+
+    current_gray = cv2.cvtColor(current_np, cv2.COLOR_RGB2GRAY)
+    adjacent_gray = cv2.cvtColor(adjacent_np, cv2.COLOR_RGB2GRAY)
+
+    width, height = current.size
+    enlarged_norm = compute_enlarged_bbox(bbox_norm, scale=scale)
+    enlarged_px = _norm_to_px(enlarged_norm, width, height)
+    x1, y1, x2, y2 = enlarged_px
+    x1 = max(0, min(x1, width))
+    y1 = max(0, min(y1, height))
+    x2 = max(0, min(x2, width))
+    y2 = max(0, min(y2, height))
+
+    if x2 <= x1 or y2 <= y1:
+        return {
+            "mean_diff": 0.0,
+            "fraction_above_threshold": 0.0,
+            "motion_score": 0.0,
+        }
+
+    current_crop = current_gray[y1:y2, x1:x2]
+    adjacent_crop = adjacent_gray[y1:y2, x1:x2]
+
+    if (
+        gaussian_kernel is not None
+        and len(gaussian_kernel) == 2
+        and gaussian_kernel[0] > 0
+        and gaussian_kernel[1] > 0
+    ):
+        try:
+            current_crop = cv2.GaussianBlur(current_crop, gaussian_kernel, 0)
+            adjacent_crop = cv2.GaussianBlur(adjacent_crop, gaussian_kernel, 0)
+        except cv2.error:
+            # If the crop is too small for the kernel, skip denoising.
+            pass
+
+    diff = cv2.absdiff(current_crop, adjacent_crop)
+    mean_diff = float(cv2.mean(diff)[0])
+
+    total_pixels = int(diff.size)
+    if total_pixels == 0:
+        return {
+            "mean_diff": 0.0,
+            "fraction_above_threshold": 0.0,
+            "motion_score": 0.0,
+        }
+
+    _, binary_diff = cv2.threshold(
+        diff, pixel_threshold, 255, cv2.THRESH_BINARY
+    )
+    above = int(cv2.countNonZero(binary_diff))
+    fraction = above / total_pixels
+    motion_score = mean_diff + fraction * 100.0
+
+    return {
+        "mean_diff": mean_diff,
+        "fraction_above_threshold": fraction,
+        "motion_score": motion_score,
+    }

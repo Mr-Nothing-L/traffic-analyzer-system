@@ -832,7 +832,8 @@ class ReportGenerator:
                     None,
                 )
                 if candidate:
-                    composite_path = candidate.get("raw_vlm_response", {}).get("composite_image_path")
+                    raw_vlm_response = candidate.get("raw_vlm_response", {})
+                    composite_path = raw_vlm_response.get("composite_image_path")
                     if composite_path:
                         lines.append("#### 远距离非机动车增强证据")
                         lines.append(f"**远距离增强合成图**: `{composite_path}`")
@@ -840,7 +841,7 @@ class ReportGenerator:
                         lines.append(f"![远距离非机动车增强]({composite_path})")
                         lines.append("")
 
-                    motion_composite_path = candidate.get("raw_vlm_response", {}).get("motion_composite_image_path")
+                    motion_composite_path = raw_vlm_response.get("motion_composite_image_path")
                     if motion_composite_path:
                         if not composite_path:
                             lines.append("#### 远距离非机动车增强证据")
@@ -848,6 +849,32 @@ class ReportGenerator:
                         lines.append(f"**运动反射验证合成图**: `{motion_composite_path}`")
                         lines.append("")
                         lines.append(f"![运动反射验证]({motion_composite_path})")
+                        lines.append("")
+
+                    # 展示逐帧 ROI 分析（远距离非机动车增强流程产生）
+                    frame_analysis_log = raw_vlm_response.get("far_enhancement", {}).get("frame_analysis_log")
+                    if frame_analysis_log:
+                        lines.append("#### 逐帧 ROI 分析")
+                        lines.append("")
+                        lines.append("| 帧号 | 是否有候选 | bbox | 面积(px) | 宽高比 | 置信度 | 运动分数 | 原因 |")
+                        lines.append("|------|------------|------|----------|--------|--------|----------|------|")
+                        for entry in frame_analysis_log:
+                            has_candidate = bool(entry.get("has_candidate", False))
+                            has_candidate_str = "是" if has_candidate else "否"
+                            if has_candidate:
+                                bbox_str = str(entry.get("bbox_norm", "—"))
+                                area_str = str(entry.get("area_px", "—"))
+                                aspect_val = entry.get("aspect_ratio")
+                                aspect_str = f"{aspect_val:.2f}" if aspect_val is not None else "—"
+                                confidence_str = str(entry.get("confidence", "—"))
+                                motion_val = entry.get("motion_score")
+                                motion_str = f"{motion_val:.3f}" if motion_val is not None else "—"
+                            else:
+                                bbox_str = area_str = aspect_str = confidence_str = motion_str = "—"
+                            reason_str = str(entry.get("reason", ""))
+                            lines.append(
+                                f"| {entry.get('frame', '—')} | {has_candidate_str} | {bbox_str} | {area_str} | {aspect_str} | {confidence_str} | {motion_str} | {reason_str} |"
+                            )
                         lines.append("")
 
             return lines

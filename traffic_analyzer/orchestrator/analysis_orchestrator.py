@@ -122,12 +122,17 @@ class AnalysisOrchestrator:
         self,
         video_path: str,
         scene_understanding: Optional[SceneInfo] = None,
+        output_dir: Optional[str] = None,
     ) -> Report:
         """Run the full analysis pipeline on a video.
 
         Args:
             video_path: Path to the video file.
             scene_understanding: Optional pre-computed scene understanding.
+            output_dir: Optional directory where the report will be written.
+                When provided, far-enhancement composite images are saved
+                under ``<output_dir>/tmp_img`` and referenced with relative
+                paths in the markdown report.
 
         Returns:
             Complete analysis report.
@@ -138,7 +143,10 @@ class AnalysisOrchestrator:
 
         analysis_start = time.perf_counter()
         step_times: Dict[str, float] = {}
-        context = AnalysisContext(config=self.config_manager.load_all())
+        context = AnalysisContext(
+            config=self.config_manager.load_all(),
+            output_dir=output_dir,
+        )
         if scene_understanding is not None:
             context.scene_understanding = scene_understanding
 

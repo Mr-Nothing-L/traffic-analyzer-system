@@ -10,11 +10,15 @@ import numpy as np
 import pytest
 from PIL import Image
 
+from traffic_analyzer.core.expert_agent import _FAR_MOTION_SCORE_THRESHOLD
 from traffic_analyzer.utils.far_non_motor_enhancer import (
     compute_bbox_area_px,
+    compute_bbox_aspect_ratio,
     compute_enlarged_bbox,
+    compute_roi_motion_score,
     create_composite,
     create_motion_comparison_composite,
+    is_bbox_aspect_valid_for_non_motor,
     is_bbox_large_enough,
     load_image,
     select_best_candidate,
@@ -213,7 +217,7 @@ def test_is_bbox_large_enough_default_threshold():
 
 
 def test_create_motion_comparison_composite_dimensions():
-    """Dimensions equal two panels plus a separator, with equal panel sizes."""
+    """Dimensions equal two upscaled panels plus a separator, with equal panel sizes."""
     width, height = 200, 150
     frame = np.zeros((height, width, 3), dtype=np.uint8)
     adjacent_frame = np.zeros((height, width, 3), dtype=np.uint8)
@@ -231,13 +235,53 @@ def test_create_motion_comparison_composite_dimensions():
     ey1 = int(round(enlarged[1] * height))
     ex2 = int(round(enlarged[2] * width))
     ey2 = int(round(enlarged[3] * height))
-    panel_width = ex2 - ex1
-    panel_height = ey2 - ey1
+    crop_w = ex2 - ex1
+    crop_h = ey2 - ey1
+
+    target_height = min(height, max(height // 2, crop_h * 4))
+    target_width = int(round(crop_w * target_height / crop_h))
 
     assert isinstance(composite, Image.Image)
     assert composite.mode == "RGB"
-    assert composite.width == 2 * panel_width + 3
-    assert composite.height == panel_height
+    assert composite.width == 2 * target_width + 3
+    assert composite.height == target_height
+
+
+def test_compute_bbox_aspect_ratio():
+    """Aspect ratio is width / height."""
+    bbox = [0.1, 0.1, 0.3, 0.4]
+    assert compute_bbox_aspect_ratio(bbox) == pytest.approx(0.2 / 0.3)
+
+
+def test_compute_bbox_aspect_ratio_zero_height():
+    """Zero-height bbox returns infinity."""
+    bbox = [0.1, 0.2, 0.3, 0.2]
+    assert compute_bbox_aspect_ratio(bbox) == float("inf")
+
+
+def test_compute_bbox_aspect_ratio_flat_bbox():
+    """Flat bbox (width > height) returns ratio > 1."""
+    bbox = [0.1, 0.1, 0.4, 0.2]
+    assert compute_bbox_aspect_ratio(bbox) == pytest.approx(0.3 / 0.1)
+
+
+def test_is_bbox_aspect_valid_for_non_motor_default():
+    """Tall bbox passes default max_ratio=1.0."""
+    bbox = [0.4, 0.3, 0.5, 0.6]  # width=0.1, height=0.3, ratio=1/3
+    assert is_bbox_aspect_valid_for_non_motor(bbox) is True
+
+
+def test_is_bbox_aspect_valid_for_non_motor_wide_fails():
+    """Wide bbox fails default max_ratio=1.0."""
+    bbox = [0.3, 0.4, 0.6, 0.5]  # width=0.3, height=0.1, ratio=3
+    assert is_bbox_aspect_valid_for_non_motor(bbox) is False
+
+
+def test_is_bbox_aspect_valid_for_non_motor_custom_max():
+    """Custom max_ratio allows tuning the threshold."""
+    bbox = [0.3, 0.4, 0.6, 0.5]  # ratio=3
+    assert is_bbox_aspect_valid_for_non_motor(bbox, max_ratio=4.0) is True
+    assert is_bbox_aspect_valid_for_non_motor(bbox, max_ratio=2.0) is False
 
 
 def test_create_motion_comparison_composite_saves_to_file():
@@ -283,3 +327,44 @@ def test_create_motion_comparison_composite_draws_red_box_on_both_panels():
 
     assert np.any(np.all(left_arr == red, axis=2))
     assert np.any(np.all(right_arr == red, axis=2))
+
+
+def test_compute_roi_motion_score_zero_for_identical_frames():
+    """Identical frames produce zero motion metrics inside the ROI."""
+    frame = np.zeros((100, 100, 3), dtype=np.uint8)
+    bbox = [0.45, 0.45, 0.55, 0.55]
+    score = compute_roi_motion_score(frame, frame, bbox)
+
+    assert score["mean_diff"] == pytest.approx(0.0, abs=1e-6)
+    assert score["fraction_above_threshold"] == pytest.approx(0.0, abs=1e-6)
+    assert score["motion_score"] == pytest.approx(0.0, abs=1e-6)
+
+
+def test_compute_roi_motion_score_detects_moving_object():
+    """A shifted bright spot inside the ROI yields a positive motion score."""
+    height, width = 100, 100
+    frame = np.zeros((height, width, 3), dtype=np.uint8)
+    adjacent = np.zeros((height, width, 3), dtype=np.uint8)
+
+    # Bright spot in the ROI center for the current frame.
+    frame[48:53, 48:53] = 200
+    # Same spot shifted right in the adjacent frame.
+    adjacent[48:53, 55:60] = 200
+
+    bbox = [0.45, 0.45, 0.55, 0.55]
+    score = compute_roi_motion_score(frame, adjacent, bbox)
+
+    assert score["mean_diff"] > 0.0
+    assert score["fraction_above_threshold"] > 0.0
+    assert score["motion_score"] > _FAR_MOTION_SCORE_THRESHOLD
+
+
+def test_compute_roi_motion_score_respects_empty_bbox():
+    """A degenerate bbox returns zero motion metrics without raising."""
+    frame = np.zeros((50, 50, 3), dtype=np.uint8)
+    bbox = [0.5, 0.5, 0.5, 0.5]
+    score = compute_roi_motion_score(frame, frame, bbox)
+
+    assert score["mean_diff"] == 0.0
+    assert score["fraction_above_threshold"] == 0.0
+    assert score["motion_score"] == 0.0

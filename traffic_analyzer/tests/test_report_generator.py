@@ -653,3 +653,119 @@ class TestFarEnhancementEvidence:
 
         assert "远距离非机动车增强证据" not in md
         assert "composite" not in md.lower()
+
+    def test_frame_analysis_log_rendered_for_event_id_4(
+        self,
+        generator: ReportGenerator,
+        scene_info: SceneInfo,
+        video_meta: VideoMetadata,
+        usage_stats: Dict[str, Any],
+    ) -> None:
+        """Markdown should render a per-frame ROI analysis table when the log exists."""
+        results = [
+            EventResult(
+                event_id=4,
+                event_name="摩托车出现",
+                detected=True,
+                instances=[
+                    EventInstance(
+                        event_id=4,
+                        event_name="摩托车出现",
+                        description="distant motorcycle",
+                    )
+                ],
+            ),
+        ]
+        expert_candidates = [
+            {
+                "event_id": 4,
+                "event_name": "摩托车出现",
+                "detected": True,
+                "summary": "detected",
+                "raw_vlm_response": {
+                    "composite_image_path": "/tmp/composite.jpg",
+                    "far_enhancement": {
+                        "frame_analysis_log": [
+                            {
+                                "frame": 0,
+                                "has_candidate": True,
+                                "bbox_norm": [0.50, 0.50, 0.65, 0.70],
+                                "area_px": 120,
+                                "aspect_ratio": 0.83,
+                                "confidence": "high",
+                                "motion_score": 5.234,
+                                "reason": "frame 0 distant target",
+                            },
+                            {
+                                "frame": 1,
+                                "has_candidate": False,
+                                "bbox_norm": None,
+                                "area_px": None,
+                                "aspect_ratio": None,
+                                "confidence": None,
+                                "motion_score": None,
+                                "reason": "no candidate frame 1",
+                            },
+                        ]
+                    },
+                },
+            }
+        ]
+        report = generator.generate(
+            event_results=results,
+            scene_info=scene_info,
+            video_meta=video_meta,
+            usage_stats=usage_stats,
+            expert_candidates=expert_candidates,
+        )
+        md = generator.to_markdown(report)
+
+        assert "#### 逐帧 ROI 分析" in md
+        assert "| 帧号 | 是否有候选 | bbox | 面积(px) | 宽高比 | 置信度 | 运动分数 | 原因 |" in md
+        assert "| 0 | 是 | [0.5, 0.5, 0.65, 0.7] | 120 | 0.83 | high | 5.234 | frame 0 distant target |" in md
+        assert "| 1 | 否 | — | — | — | — | — | no candidate frame 1 |" in md
+
+    def test_no_frame_analysis_log_section_when_missing(
+        self,
+        generator: ReportGenerator,
+        scene_info: SceneInfo,
+        video_meta: VideoMetadata,
+        usage_stats: Dict[str, Any],
+    ) -> None:
+        """No per-frame ROI section should appear and rendering should not error when the log is absent."""
+        results = [
+            EventResult(
+                event_id=4,
+                event_name="摩托车出现",
+                detected=True,
+                instances=[
+                    EventInstance(
+                        event_id=4,
+                        event_name="摩托车出现",
+                        description="distant motorcycle",
+                    )
+                ],
+            ),
+        ]
+        expert_candidates = [
+            {
+                "event_id": 4,
+                "event_name": "摩托车出现",
+                "detected": True,
+                "summary": "detected",
+                "raw_vlm_response": {
+                    "composite_image_path": "/tmp/composite.jpg",
+                },
+            }
+        ]
+        report = generator.generate(
+            event_results=results,
+            scene_info=scene_info,
+            video_meta=video_meta,
+            usage_stats=usage_stats,
+            expert_candidates=expert_candidates,
+        )
+        md = generator.to_markdown(report)
+
+        assert "#### 逐帧 ROI 分析" not in md
+        assert "摩托车出现" in md
