@@ -759,7 +759,14 @@ class ReportGenerator:
                     area_str = str(entry.get("area_px", "—"))
                     aspect_val = entry.get("aspect_ratio")
                     aspect_str = f"{aspect_val:.2f}" if aspect_val is not None else "—"
-                    confidence_str = str(entry.get("confidence", "—"))
+                    confidence_val = entry.get("confidence")
+                    if confidence_val is None:
+                        confidence_str = "—"
+                    elif isinstance(confidence_val, (int, float)):
+                        confidence_str = f"{float(confidence_val):.2f}"
+                    else:
+                        # Preserve legacy string values for backward compatibility.
+                        confidence_str = str(confidence_val)
                     motion_val = entry.get("motion_score")
                     motion_str = f"{motion_val:.3f}" if motion_val is not None else "—"
                 else:

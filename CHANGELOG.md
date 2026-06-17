@@ -1,5 +1,43 @@
 # 更新日志
 
+## [v4.0.0] 2026-06-16 — 专家 Agent 重构与 event_id=4 远距离 ROI 量化增强
+
+### 核心变更
+
+#### 1. event_id=4（非机动车/摩托车出现）远距离 ROI 增强量化
+- **ROI confidence 从离散等级改为连续数值**: `high` / `medium` / `low` 三档改为 `0.0-1.0` 连续置信度
+- **增强逻辑重构**: 专家 Agent 根据连续 confidence 阈值决定是否进行 ROI 裁剪放大与二次 VLM 判别
+- **Prompt 与配置同步更新**: `prompt_templates.yaml` 和 `report_generator.py` 中相关描述统一改为 0-1 量化指标
+
+#### 2. 专家 Agent（Expert Agent）重构
+- 远距离非机动车增强流程与主裁决流程解耦，逻辑更清晰
+- ROI 增强结果与 adjudication 层数据对齐方式优化
+- 支持事件激活状态（`is_active`）动态控制，当前仅 event_id 3/4/5/6 处于激活状态
+
+#### 3. 工具系统持续完善
+- 工具调用链路稳定性提升
+- YOLO Track Tool 与专家 Agent 集成细节调优
+- 工具配置（`event_categories.yaml`、`prompt_templates.yaml`）随事件逻辑同步更新
+
+#### 4. 测试覆盖
+- `traffic_analyzer/tests/test_expert_agent_far_enhancement.py`: event_id=4 远距离增强量化指标测试
+- `traffic_analyzer/tests/test_report_generator.py`: 报告生成与量化 confidence 一致性测试
+
+### 关键文件变更
+
+| 文件 | 变更 |
+|---|---|
+| `traffic_analyzer/core/expert_agent.py` | event_id=4 远距离 ROI 增强逻辑重构，confidence 量化 |
+| `traffic_analyzer/core/report_generator.py` | 报告生成适配 0-1 连续 confidence |
+| `traffic_analyzer/config/prompt_templates.yaml` | 非机动车/摩托车 ROI 增强 prompt 改为 0-1 量化描述 |
+| `traffic_analyzer/tests/test_expert_agent_far_enhancement.py` | 新增/更新量化指标测试 |
+| `traffic_analyzer/tests/test_report_generator.py` | 更新报告生成测试 |
+
+### 版本说明
+- 版本号跳跃原因：内部已沉淀 v3.x 系列迭代（专家 Agent 重构、工具系统集成），本次对外发布统一为 **v4.0.0**，与 `README` 标注版本对齐。
+
+---
+
 ## [v2.1.0] 2026-05-29 — Anthropic Native API 工具调用 + Docker 容器化
 
 ### 核心功能

@@ -322,7 +322,7 @@ prompt_templates:
       {
         "bbox_norm": [<x1, y1, x2, y2>] 或 null,
         "occluded": <true|false>,
-        "confidence": "<high|medium|low>",
+        "confidence": <0.0-1.0>,
         "reason": "<选择理由>"
       }
 
@@ -330,7 +330,7 @@ prompt_templates:
       {
         "bbox_norm": null,
         "occluded": false,
-        "confidence": "low",
+        "confidence": 0.0,
         "reason": "<未发现理由>"
       }
 
@@ -340,17 +340,17 @@ prompt_templates:
       - 不要把护栏、阴影、反光点、普通四轮车、前景固定遮挡物（金属杆、支架、摄像头外壳、立柱、雨刷、电线、标识牌杆）当作目标；不要仅因远处小目标轮廓与这些物体外形近似就泛化排除。
 
       遮挡与置信度：
-      - 如果目标被电线杆、护栏、其他车辆遮挡导致只露出部分车身，或看起来是四轮车残部，必须设置 occluded=true 且 confidence=low。
-      - 如果能清晰看到完整两轮/三轮轮廓和骑乘姿态，设置 occluded=false 且 confidence=high。
-      - 如果目标较远、细节模糊但疑似非机动车，设置 occluded=false 且 confidence=medium。
+      - 如果目标被电线杆、护栏、其他车辆遮挡导致只露出部分车身，或看起来是四轮车残部，必须设置 occluded=true 且 confidence≈0.1-0.3。
+      - 如果能清晰看到完整两轮/三轮轮廓和骑乘姿态，设置 occluded=false 且 confidence≈0.85-1.0。
+      - 如果目标较远、细节模糊但疑似非机动车，设置 occluded=false 且 confidence≈0.45-0.70。
 
       示例（发现候选）：
-      {"bbox_norm": [0.75, 0.10, 0.78, 0.15], "occluded": false, "confidence": "high", "reason": "画面右上角远处应急车道边缘有黑色狭长轮廓，疑似骑乘姿态，位于道路区域"}
-      {"bbox_norm": [0.48, 0.05, 0.52, 0.09], "occluded": false, "confidence": "medium", "reason": "画面远处道路尽头有一个深色小轮廓，位于车道内，尺寸和形状均不同于四轮车，可能是远距离非机动车"}
+      {"bbox_norm": [0.75, 0.10, 0.78, 0.15], "occluded": false, "confidence": 0.92, "reason": "画面右上角远处应急车道边缘有黑色狭长轮廓，疑似骑乘姿态，位于道路区域"}
+      {"bbox_norm": [0.48, 0.05, 0.52, 0.09], "occluded": false, "confidence": 0.55, "reason": "画面远处道路尽头有一个深色小轮廓，位于车道内，尺寸和形状均不同于四轮车，可能是远距离非机动车"}
 
       示例（无候选）：
-      {"bbox_norm": null, "occluded": false, "confidence": "low", "reason": "画面远处均为护栏与路面反光，未见位于道路区域的可疑小目标"}
-      {"bbox_norm": null, "occluded": false, "confidence": "low", "reason": "画面中的车辆均为普通四轮机动车，没有明显小于四轮车的可疑目标"}
+      {"bbox_norm": null, "occluded": false, "confidence": 0.0, "reason": "画面远处均为护栏与路面反光，未见位于道路区域的可疑小目标"}
+      {"bbox_norm": null, "occluded": false, "confidence": 0.0, "reason": "画面中的车辆均为普通四轮机动车，没有明显小于四轮车的可疑目标"}
 
       重要：仅输出一个最可疑的远距离非机动车 bbox。
     output_format_hint: "JSON"

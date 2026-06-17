@@ -2,13 +2,13 @@
 
 # 交通事件分析系统
 
-基于多模态大视觉模型（VLM）的高速公路监控视频交通事件检测框架，支持 **10 类事件识别**，输出 10 位二进制编码 + 详细 Markdown 分析报告。所有事件定义、Prompt 模板、裁决规则均通过 YAML 配置驱动，新增事件无需修改代码。
+基于多模态大视觉模型（VLM）的高速公路监控视频交通事件检测框架，支持 **10 类事件识别**（当前 **4 类激活**），输出 10 位二进制编码 + 详细 Markdown 分析报告。所有事件定义、Prompt 模板、裁决规则均通过 YAML 配置驱动，新增事件无需修改代码。
 
-> **当前版本：v2.0.0** — 多智能体专家 + 裁决层架构（详见 [版本标签说明](#版本标签说明)）。
+> **当前版本：v4.0.0** —— VLM 多智能体专家 + 裁决层架构，支持远距离非机动车 ROI 增强，并保留可选的工具层扩展（详见 [版本标签说明](#版本标签说明)）。
 
 ---
 
-## 架构概览 (v2.0.0)
+## 架构概览 (v4.0.0)
 
 ```
 视频输入
@@ -19,45 +19,44 @@
    - 两段式采样（前段密集 + 后段均匀）
     |
     v
-2. ExpertAgentLayer（10 个并行 ExpertAgent）
+2. ExpertAgentLayer（针对激活事件并行运行 ExpertAgent）
    每个 ExpertAgent：单事件 VLM 调用 -> EventCandidate
    - 仅做事实识别（看到就报）
-   - 不做过滤或排除判断
+   - event_id=4（摩托车出现）可选启用远距离 ROI 增强流程：
+     ROI 检测 -> 合成图生成 -> 最终分类器，ROI 置信度使用 0-1 连续量化
     |
     v
-3. AdjudicationStep（单次 VLM 调用）
-   输入：所有 EventCandidate + 关键帧 + 业务规则
+3. AdjudicationStep（单次 VLM 调用，带重试循环）
+   输入：所有 EventCandidate + 关键帧 + 业务规则 + 标注规范
    输出：最终 EventResults + AuditLog
    - 解决冲突（如事故抑制违停）
    - 应用 YAML 中定义的业务规则
+   - event_results 不完整时最多重试 5 次
     |
     v
 4. 报告生成
    - Markdown 报告（人工可读，含每步耗时）
+   - JSON 报告
    - 二进制编码 {bit_0_bit_1_..._bit_9}
    - 每条包含/排除决策的审计日志
 ```
 
-**相比 v1.5 的核心改进**：不再依赖单次约 30 秒的场景理解瓶颈 + 混合检测模式，而是让 10 个事件由专用专家代理并行检测，再由单次裁决调用根据显式业务规则解决冲突。准确率更高、可审计性更强、调试更方便。
+默认推理流程由 **VLM 驱动**。系统同时提供可选的 **工具层**（工具定义层 + 工具路由层），可用于接入 YOLO 跟踪等工具；默认流水线不会自动调用工具，但工具层可供后续扩展或独立脚本使用。
 
 ---
 
 ## 支持的事件
 
+当前仅以下事件 `is_active=true`。其余事件位（0-2、7-9）保留在二进制编码中，但推理时跳过。
+
 | ID | 编码 | 事件名称 | is_active |
 |---|---|---|---|
-| 0 | A | 违法停车 | true |
-| 1 | B | 应急车道占用 | true |
-| 2 | C | 交通事故 | true |
 | 3 | D | 高速公路行人出现 | true |
 | 4 | E | 摩托车出现 | true |
 | 5 | F | 严重拥堵 | true |
 | 6 | G | 道路施工 | true |
-| 7 | H | 车辆逆行/倒车 | true |
-| 8 | J | 抛洒物 | true |
-| 9 | K | 实线变道 | false |
 
-v2.0.0 中所有事件均使用 `detection_mode: "expert_agent"`。
+事件 0（违法停车）、1（应急车道占用）、2（交通事故）、7（车辆逆行/倒车）、8（抛洒物）、9（实线变道）当前未激活。
 
 ---
 
@@ -67,7 +66,17 @@ v2.0.0 中所有事件均使用 `detection_mode: "expert_agent"`。
 
 每个激活的事件拥有独立的 **ExpertAgent** —— 一次专用的 VLM 调用，携带针对该事件的专用 Prompt。所有 Agent 通过 `ThreadPoolExecutor` 并行执行。每个 Agent 只负责 **事实识别**（看到什么报什么），不做任何过滤。这种关注点分离使系统模块化且易于调试。
 
-### 2. 裁决步骤 (Adjudication Step)
+### 2. 远距离非机动车增强（event_id=4）
+
+针对摩托车/非机动车检测，当事件 Prompt 模板设置 `enable_far_object_enhancement: true` 时，会启用专用增强流程：
+
+1. **ROI 检测**：逐帧 VLM 调用返回归一化 bbox、遮挡标志和 `[0.0, 1.0]` 连续置信度。
+2. **候选评分**：综合置信度、面积、宽高比、遮挡程度和相邻帧运动分数对 ROI 排序。
+3. **合成图生成**：对 top-K 候选生成双图合成（单帧放大 + 相邻帧运动对比）。
+4. **最终分类**：第二次 VLM 调用判断裁剪区域内是否为非机动车。
+5. **安全回退**：当分类器为负但 ROI 证据充分（高置信度、未遮挡）时，可将最优候选提升为阳性结果。
+
+### 3. 裁决步骤 (Adjudication Step)
 
 **单次 VLM 调用**接收所有专家候选结果、关键帧和业务规则，输出：
 - 每个事件的最终 `EventResult`（检出 / 未检出）
@@ -79,7 +88,7 @@ v2.0.0 中所有事件均使用 `detection_mode: "expert_agent"`。
 - **施工区域排除应急车道占用** —— 明确位于施工区域内的车辆不判定为应急车道占用
 - **摩托车排除应急车道占用** —— 应急车道上的摩托车优先判定为"摩托车出现"，避免重复标记
 
-### 3. 审计日志 (Audit Log)
+### 4. 审计日志 (Audit Log)
 
 裁决过程中被排除的每个事件都会记录原因和触发规则的 ID。这使系统透明化，有助于调试漏报。
 
@@ -93,13 +102,28 @@ v2.0.0 中所有事件均使用 `detection_mode: "expert_agent"`。
 }
 ```
 
-### 4. 配置驱动设计
+### 5. 配置驱动设计
 
 以下内容全部在 YAML 中定义 —— 无需修改代码：
 - 事件定义（`event_categories.yaml`）
 - Prompt 模板（`prompt_templates.yaml`）
 - 裁决规则（`event_categories.yaml`）
-- 遗留逻辑链（`logic_chains.yaml`，保留作参考）
+- 标注规范（`annotation_spec.yaml`）
+
+### 6. 裁决重试循环
+
+裁决步骤最多运行 **5 次**尝试。若 `event_results` 不完整：
+- 检查对应专家输出是否异常，异常则仅重跑这些专家；
+- 否则在提示中列出上次遗漏的事件并重新裁决；
+- 5 次尝试后仍缺失的事件将从原始专家候选回填。
+
+这使流水线对偶发的 VLM 遗漏具有鲁棒性，同时不丢失有效的专家信号。
+
+### 7. JSON 修复与候选清洗
+
+VLM 输出在解析前会自动加固：
+- `vlm_engine.py` 中的 `_repair_json` 修复常见语法错误（缺逗号、尾随逗号等）。
+- `event_detection.py` 中的 `_sanitize_candidate` 协调不一致的专家输出（例如 `detected=true` 但内容否认事件）。
 
 ---
 
@@ -108,25 +132,29 @@ v2.0.0 中所有事件均使用 `detection_mode: "expert_agent"`。
 ```
 traffic_analyzer/
 ├── config/
+│   ├── annotation_spec.yaml       # 注入裁决 Prompt 的标注规范
 │   ├── event_categories.yaml      # 事件定义 + 裁决规则
-│   ├── logic_chains.yaml          # 遗留逻辑链（保留作参考）
-│   └── prompt_templates.yaml      # VLM Prompt 模板 + 裁决模板
+│   ├── prompt_templates.yaml      # VLM Prompt 模板 + 裁决模板
+│   └── .env.example               # LLM 提供商配置示例
 ├── core/
 │   ├── config_manager.py          # 配置加载、校验
-│   ├── expert_agent.py            # 单事件检测代理
-│   ├── logic_engine.py            # 逻辑链执行引擎
-│   ├── pipeline_steps.py          # ExpertAgentLayer + AdjudicationStep
-│   ├── report_generator.py        # 报告生成
+│   ├── expert_agent.py            # 单事件检测代理 + 远距离增强
+│   ├── pipeline_steps.py          # ExpertAgentLayer + AdjudicationStep（含重试）
+│   ├── report_generator.py        # 报告生成（Markdown / JSON / 二进制）
 │   ├── video_preprocessor.py      # 视频帧提取
-│   └── vlm_engine.py              # VLM 封装（多提供商 + 缓存）
+│   └── vlm_engine.py              # VLM 封装（多提供商 + 缓存 + JSON 修复）
 ├── models/
 │   └── schemas.py                 # Pydantic 模型（EventCandidate, AdjudicationResult, AuditEntry）
 ├── orchestrator/
 │   └── analysis_orchestrator.py   # 4 步流水线编排器
+├── tools/
+│   ├── tool_schema.py             # 工具定义层
+│   ├── tool_router.py             # 工具路由层
+│   └── tool_registry.py           # 默认 Router 注册
 ├── utils/
-│   └── event_detection.py         # 图像选择 + 响应解析辅助函数
-└── config/
-    └── .env                       # LLM 提供商配置（API Key 等）
+│   └── event_detection.py         # 图像选择 + 响应解析 + 候选清洗
+├── cli.py                         # CLI 入口
+└── __main__.py                    # `python -m traffic_analyzer`
 ```
 
 ---
@@ -153,6 +181,8 @@ cp traffic_analyzer/config/.env.example traffic_analyzer/config/.env
 | `LLM_MAX_RETRIES` | 最大重试次数 | `3` |
 | `LLM_ENABLE_CACHE` | 启用 VLM 结果缓存 | `true` |
 | `LLM_CACHE_MAX_SIZE` | 缓存最大条目数 | `128` |
+| `TRAFFIC_ANALYZER_DISK_CACHE` | SQLite 磁盘缓存路径（跨进程） | - |
+| `TRAFFIC_ANALYZER_DISK_CACHE_MAX_ENTRIES` | 磁盘缓存最大条目数 | `2000` |
 | `VLM_MAX_FRAMES` | VLM 调用最大帧数 | `10` |
 | `PROMPT_VERSION_{TEMPLATE_ID}` | 强制使用指定 Prompt 版本 | - |
 
@@ -175,25 +205,18 @@ python3 -m traffic_analyzer validate-config \
 ### 4. 运行分析
 
 ```bash
-# 基本用法（默认 30 帧）
+# 基本用法（默认 10 帧）
 python3 -m traffic_analyzer analyze \
   --video ./path/to/video.mp4 \
   --format markdown \
   --output ./report.md
 
-# 快速模式（10 帧，适合短视频/测试）
+# 更多帧（精度更高、速度更慢）
 python3 -m traffic_analyzer analyze \
   --video ./path/to/video.mp4 \
   --format markdown \
   --output ./report.md \
-  --min-frames 10
-
-# 带 CV 轨迹验证
-python3 -m traffic_analyzer analyze \
-  --video ./path/to/video.mp4 \
-  --cv-tracks ./tracks.json \
-  --format markdown \
-  --output ./report.md
+  --min-frames 30
 ```
 
 ### 5. Python API
@@ -230,7 +253,6 @@ python3 scripts/batch_infer.py \
 | `--config-dir` / `-c` | 配置目录 | `./traffic_analyzer/config` |
 | `--format` / `-f` | 输出格式 (`markdown` / `json`) | `markdown` |
 | `--min-frames` / `-m` | VLM 最大输入帧数 | `30` |
-| `--cv-tracks-dir` | CV 轨迹 JSON 目录（可选） | - |
 | `--workers` / `-w` | 并行 worker 数（ProcessPoolExecutor） | CPU 核心数 |
 | `--log-dir` / `-l` | 逐视频日志文件存放目录 | - |
 | `--skip-existing` | 跳过已有报告的视频（默认启用） | `true` |
@@ -324,15 +346,15 @@ python3 scripts/batch_evaluate.py \
 
 ## Tool-Call 风格日志输出
 
-运行时输出类似现代 AI Agent (Cursor / Cline / Claude Code) 的工具调用轨迹日志：
+运行时输出类似现代 AI Agent 的工具调用轨迹日志：
 
 ```
 [INFO] 14:30:00 🔧 tool_call: video_preprocessor.process(video='clip.mp4')
 [INFO] 14:30:03   ↳ result: coarse=20, precision=41 | elapsed=3.0s
-[INFO] 14:30:03 🔧 tool_call: expert_agent.detect(event='违法停车')
-[INFO] 14:30:15   ↳ result: detected=true, confidence=0.92 | elapsed=12.0s
-[INFO] 14:30:15 🔧 tool_call: adjudication.resolve(candidates=10)
-[INFO] 14:30:28   ↳ result: events=3, audit_entries=2 | elapsed=13.0s
+[INFO] 14:30:03 🔧 tool_call: expert_agent.detect(event='高速公路行人出现')
+[INFO] 14:30:15   ↳ result: detected=true | elapsed=12.0s
+[INFO] 14:30:15 🔧 tool_call: adjudication.resolve(candidates=4)
+[INFO] 14:30:28   ↳ result: events=2, audit_entries=1 | elapsed=13.0s
 ```
 
 通过环境变量 `TRAFFIC_ANALYZER_TOOL_LOG_LEVEL` 切换粒度：
@@ -357,16 +379,17 @@ TRAFFIC_ANALYZER_TOOL_LOG_LEVEL=macro python -m traffic_analyzer ...  # 仅顶�
 
 | 标签 | 分支 | 说明 |
 |---|---|---|
-| `v2.0.0-multi-agent` | `main` | **当前版本**。多智能体专家 + 裁决架构。全部 10 个事件使用 `expert_agent` 模式。并行检测 + 单次 VLM 裁决，带业务规则。 |
+| `v4.0.0-far-enhancement` | `main` | **当前版本**。VLM 多智能体专家 + 裁决层架构。当前仅事件 3、4、5、6 激活。新增 event_id=4 远距离非机动车 ROI 增强，ROI 置信度使用 0-1 连续量化。保留可选的工具层（工具定义层 + 工具路由层），可扩展 YOLO 跟踪等能力。 |
+| `v2.0.0-multi-agent` | `legacy/v2.0` | 上一版稳定的多智能体架构，10 个事件中 8 个激活，纯 VLM 流水线。 |
 | `v1.5.0-legacy` | `legacy/v1.5` | 单体架构。SceneUnderstandingStep（约 30 秒瓶颈）+ 混合检测模式（direct_vlm 并行、logic_chain 串行、scene_tag 零 VLM）+ PostProcessStep 跨事件推断。 |
 
-`legacy/v1.5` 分支保留旧架构供参考和对比。所有新开发在 `main`（v2.0.0）上进行。
+所有新开发在 `main`（v4.0.0）上进行。
 
 ---
 
-## 自定义工具开发指南
+## 可选工具系统
 
-系统支持通过 **工具定义层 (Tool Schema)** + **工具路由层 (Tool Router)** 架构扩展自定义工具，供专家 Agent 调用。
+框架提供**工具定义层（Tool Schema）** + **工具路由层（Tool Router）**用于可选扩展。默认推理流水线不会自动调用工具，但工具层可用于独立脚本和后续能力扩展，例如基于 YOLO 的目标跟踪。
 
 ### 架构概述
 
@@ -424,9 +447,6 @@ def my_new_tool(
 ```python
 def create_router() -> ToolRouter:
     router = ToolRouter()
-    
-    # 已有工具
-    _register_yolo_track_tool(router)
     
     # 新工具
     _register_my_new_tool(router)
@@ -532,7 +552,7 @@ def test_my_new_tool_validation_error():
     # 缺少必填参数
     resp = router.route('{"tool_name": "my_new_tool", "arguments": {}}')
     assert resp.success is False
-    assert "缺少必填参数" in resp.error
+    assert "Missing required parameter" in resp.error
 ```
 
 运行测试：
@@ -557,14 +577,6 @@ docker-compose exec traffic-agent python3 -m pytest tests/tools/test_my_new_tool
 
 也支持 Markdown 代码块和 XML 标签格式，Router 会自动解析。
 
-### 完整示例：视频抽帧工具
-
-参考实现见 `traffic_analyzer/tools/yolo_track_tool.py`（YOLOv8 + ByteTrack 跟踪工具），包含：
-- 6 个参数定义（video_path, conf_threshold, stationary_threshold 等）
-- 像素级方向描述（`dx=+150px, dy=-80px (向右下)`）
-- 详细的错误 fallback 日志
-- 12 项单元测试全部通过
-
 ### 工具层文件清单
 
 | 文件 | 说明 |
@@ -572,6 +584,4 @@ docker-compose exec traffic-agent python3 -m pytest tests/tools/test_my_new_tool
 | `traffic_analyzer/tools/tool_schema.py` | 工具定义层：ToolDefinition, ToolParameter, ToolConstraint, ToolRegistry |
 | `traffic_analyzer/tools/tool_router.py` | 工具路由层：ToolRequest, ToolResponse, ToolRouter（同步/异步/批量） |
 | `traffic_analyzer/tools/tool_registry.py` | 注册集成：默认 Router 单例，注册所有内置工具 |
-| `traffic_analyzer/tools/yolo_track_tool.py` | 示例工具：YOLOv8 + ByteTrack 目标跟踪 |
 | `tests/tools/test_tool_router.py` | 路由层测试：30 项测试覆盖解析/校验/执行/错误处理 |
-| `tests/tools/test_yolo_track_tool.py` | YOLO 工具测试：12 项测试覆盖跟踪/位移/方向/集成 |

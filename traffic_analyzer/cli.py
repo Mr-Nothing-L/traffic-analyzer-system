@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional, Sequence
 
+from traffic_analyzer import __version__
 from traffic_analyzer.core.config_manager import ConfigManager
 from traffic_analyzer.models.schemas import SceneInfo
 from traffic_analyzer.orchestrator.analysis_orchestrator import AnalysisOrchestrator
@@ -153,7 +154,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--version",
         action="version",
-        version="%(prog)s 1.0.0",
+        version=f"%(prog)s {__version__}",
     )
     parser.add_argument(
         "--log-level",

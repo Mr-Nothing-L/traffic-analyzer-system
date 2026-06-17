@@ -665,7 +665,7 @@ class TestFarEnhancementEvidence:
                                 "bbox_norm": [0.50, 0.50, 0.65, 0.70],
                                 "area_px": 120,
                                 "aspect_ratio": 0.83,
-                                "confidence": "high",
+                                "confidence": 0.92,
                                 "motion_score": 5.234,
                                 "reason": "frame 0 distant target",
                             },
@@ -695,7 +695,7 @@ class TestFarEnhancementEvidence:
 
         assert "#### 逐帧 ROI 分析" in md
         assert "| 帧号 | 是否有候选 | bbox | 面积(px) | 宽高比 | 置信度 | 运动分数 | 原因 |" in md
-        assert "| 0 | 是 | [0.5, 0.5, 0.65, 0.7] | 120 | 0.83 | high | 5.234 | frame 0 distant target |" in md
+        assert "| 0 | 是 | [0.5, 0.5, 0.65, 0.7] | 120 | 0.83 | 0.92 | 5.234 | frame 0 distant target |" in md
         assert "| 1 | 否 | — | — | — | — | — | no candidate frame 1 |" in md
 
     def test_no_frame_analysis_log_section_when_missing(

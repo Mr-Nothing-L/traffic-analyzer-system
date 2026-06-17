@@ -151,7 +151,7 @@ def _roi_response(
     bbox_norm: Any,
     reason: str,
     occluded: bool = False,
-    confidence: str = "high",
+    confidence: Union[str, float] = 0.85,
 ) -> Dict[str, Any]:
     return {
         "bbox_norm": bbox_norm,
@@ -247,7 +247,7 @@ def test_far_enhancement_records_frame_analysis_log(make_agent, analysis_context
     assert log[0]["bbox_norm"] == [0.50, 0.50, 0.65, 0.70]
     assert isinstance(log[0]["area_px"], int) and log[0]["area_px"] > 0
     assert isinstance(log[0]["aspect_ratio"], float) and log[0]["aspect_ratio"] > 0
-    assert log[0]["confidence"] == "high"
+    assert log[0]["confidence"] == 0.85
     assert isinstance(log[0]["motion_score"], float)
     assert log[0]["reason"] == "frame 0 distant target"
 

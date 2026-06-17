@@ -94,7 +94,7 @@ _ROI_DETECTION_SCHEMA: Dict[str, Any] = {
             ]
         },
         "occluded": {"type": "boolean"},
-        "confidence": {"type": "string"},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
         "reason": {"type": "string"},
     },
 }
@@ -467,8 +467,8 @@ class ExpertAgent:
                 frame_info["global_index"],
             )
             return None
-        confidence = str(frame_info.get("confidence", "low")).lower()
-        if confidence not in {"high", "medium"}:
+        confidence = self._parse_roi_confidence(frame_info.get("confidence", 0.0))
+        if confidence < 0.5:
             logger.info(
                 "[expert_agent:_detect_with_far_enhancement] FALLBACK_REJECT_CONFIDENCE | event_id=%d frame=%d confidence=%s",
                 self.category.event_id,
@@ -510,6 +510,16 @@ class ExpertAgent:
             fallback=True,
         )
 
+    @staticmethod
+    def _parse_roi_confidence(value: Any) -> float:
+        """Normalize ROI confidence to a 0-1 float, handling string legacy values."""
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            legacy_map = {"high": 0.85, "medium": 0.55, "low": 0.15}
+            return legacy_map.get(value.lower(), 0.0)
+        return 0.0
+
     def _score_far_candidates(
         self,
         candidates: List[Dict[str, Any]],
@@ -518,12 +528,9 @@ class ExpertAgent:
         if not candidates:
             return []
         max_area = max(c["area_px"] for c in candidates)
-        confidence_scores = {"high": 3, "medium": 2, "low": 1}
         scored: List[Tuple[float, Dict[str, Any]]] = []
         for candidate in candidates:
-            conf = confidence_scores.get(
-                str(candidate.get("confidence", "low")).lower(), 1
-            )
+            conf = 3.0 * self._parse_roi_confidence(candidate.get("confidence", 0.0))
             area_score = (
                 candidate["area_px"] / max_area if max_area > 0 else 0.0
             )
@@ -698,7 +705,7 @@ class ExpertAgent:
             bbox_norm = parsed.get("bbox_norm")
             reason = parsed.get("reason", "")
             occluded = bool(parsed.get("occluded", False))
-            confidence = str(parsed.get("confidence", "low"))
+            confidence = self._parse_roi_confidence(parsed.get("confidence", 0.0))
 
             if bbox_norm is None:
                 self._log_frame(

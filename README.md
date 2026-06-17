@@ -2,13 +2,13 @@
 
 # Traffic Analyzer
 
-A multi-modal large vision model (VLM) based traffic event detection framework for highway surveillance video. Supports **10 event categories** (8 active), outputs a 10-bit binary encoding plus a detailed Markdown analysis report. All event definitions, prompt templates, and adjudication rules are driven by YAML configuration — adding a new event requires zero code changes.
+A multi-modal large vision model (VLM) based traffic event detection framework for highway surveillance video. Supports **10 event categories** (currently **4 active**), outputs a 10-bit binary encoding plus a detailed Markdown analysis report. All event definitions, prompt templates, and adjudication rules are driven by YAML configuration — adding a new event requires zero code changes.
 
-> **Current version: v2.0.0** — Pure VLM multi-agent expert + adjudication architecture (see [Version Tags](#version-tags)).
+> **Current version: v4.0.0** — VLM multi-agent expert + adjudication architecture, with far-distance non-motor vehicle ROI enhancement and an optional tool layer (see [Version Tags](#version-tags)).
 
 ---
 
-## Architecture Overview (v2.0.0)
+## Architecture Overview (v4.0.0)
 
 ```
 Video Input
@@ -19,10 +19,12 @@ Video Input
    - Two-stage sampling (dense early + uniform late)
     |
     v
-2. ExpertAgentLayer (10 parallel ExpertAgents)
+2. ExpertAgentLayer (parallel ExpertAgents for active events)
    Each ExpertAgent: single-event VLM call -> EventCandidate
    - Only fact identification (see it, report it)
-   - No filtering or exclusion logic
+   - event_id=4 (Motorcycle Presence) uses an optional far-distance
+     ROI enhancement path: ROI detection -> composite generation ->
+     final classifier, with ROI confidence expressed as a 0-1 score
     |
     v
 3. AdjudicationStep (single VLM call, with retry loop)
@@ -35,30 +37,27 @@ Video Input
     v
 4. Report Generation
    - Markdown report (human-readable, per-step timing)
+   - JSON report
    - Binary encoding {bit_0_bit_1_..._bit_9}
    - Audit log of every inclusion / exclusion decision
 ```
 
-**Key improvement over v1.5**: Instead of a single ~30s scene-understanding bottleneck followed by mixed detection modes, all events are detected in parallel by dedicated expert agents, then a single adjudication call resolves conflicts using explicit business rules. This is more accurate, more auditable, and easier to tune. The v2.0.0 architecture is **pure VLM** — no CV/YOLO components are used.
+The default inference pipeline is **VLM-driven**. An optional **tool layer** (Tool Schema + Tool Router) is also provided and can host tools such as a YOLO track tool; tools are not automatically invoked by the default pipeline but can be wired in for future extensions or utility scripts.
 
 ---
 
 ## Supported Events
 
+Currently only the following events are `is_active=true`. The remaining event slots (0-2, 7-9) are preserved in the binary encoding but are skipped during inference.
+
 | ID | Code | Name | is_active |
 |---|---|---|---|
-| 0 | A | Illegal Parking | true |
-| 1 | B | Emergency Lane Occupancy | true |
-| 2 | C | Traffic Accident | true |
 | 3 | D | Person Presence in Highway | true |
 | 4 | E | Motorcycle Presence | true |
 | 5 | F | Heavy Congestion | true |
 | 6 | G | Road Construction | true |
-| 7 | H | Vehicle Reversing | true |
-| 8 | J | Thrown Objects | false |
-| 9 | K | Lane Change over Solid Line | false |
 
-All active events use `detection_mode: "expert_agent"` in v2.0.0. Inactive events (`is_active: false`) are preserved in the binary encoding but skipped during inference.
+Events 0 (Illegal Parking), 1 (Emergency Lane Occupancy), 2 (Traffic Accident), 7 (Vehicle Reversing), 8 (Thrown Objects), and 9 (Lane Change over Solid Line) are currently inactive.
 
 ---
 
@@ -68,7 +67,17 @@ All active events use `detection_mode: "expert_agent"` in v2.0.0. Inactive event
 
 Each active event gets its own **ExpertAgent** — a dedicated VLM call with a specialized prompt. Agents run in parallel via `ThreadPoolExecutor`. Each agent only performs **fact identification** (what it sees) without any filtering. This separation of concerns makes the system modular and debuggable.
 
-### 2. Adjudication Step
+### 2. Far-Distance Non-Motor Vehicle Enhancement (event_id=4)
+
+For motorcycle/non-motor vehicle detection, a dedicated enhancement flow is enabled when `enable_far_object_enhancement: true` is set on the event prompt template:
+
+1. **ROI detection** — per-frame VLM call returns a normalized bbox, occlusion flag, and a continuous `confidence` in `[0.0, 1.0]`.
+2. **Candidate scoring** — ROIs are ranked by confidence, area, aspect ratio, occlusion, and adjacent-frame motion.
+3. **Composite generation** — dual composites (single-frame + motion-comparison) are generated for the top-K candidates.
+4. **Final classification** — a second VLM call decides whether the cropped ROI is a non-motor vehicle.
+5. **Safe fallback** — a high-confidence, non-occluded candidate can be promoted when the classifier is negative but the ROI evidence is strong.
+
+### 3. Adjudication Step
 
 A **single VLM call** receives all expert candidates, keyframes, and business rules, then outputs:
 - Final `EventResult` for each event (detected / not detected)
@@ -80,7 +89,7 @@ Business rules are defined in `event_categories.yaml` under `adjudication_rules:
 - **Construction excludes emergency lane** — vehicles inside a construction zone are not emergency lane violations
 - **Motorcycle excludes emergency lane** — a motorcycle on the shoulder is tagged as "motorcycle presence", not "emergency lane occupancy"
 
-### 3. Audit Log
+### 4. Audit Log
 
 Every event that is excluded during adjudication is recorded with a reason and the triggering rule ID. This makes the system transparent and helps debug false negatives.
 
@@ -94,16 +103,15 @@ Every event that is excluded during adjudication is recorded with a reason and t
 }
 ```
 
-### 4. Config-Driven Design
+### 5. Config-Driven Design
 
 All of the following are defined in YAML — no code changes needed:
 - Event definitions (`event_categories.yaml`)
 - Prompt templates (`prompt_templates.yaml`)
 - Adjudication rules (`event_categories.yaml`)
 - Annotation spec (`annotation_spec.yaml`)
-- Legacy logic chains (`logic_chains.yaml`, kept for reference)
 
-### 5. Adjudication Retry Loop
+### 6. Adjudication Retry Loop
 
 The adjudication step runs in a loop of up to **5 attempts**. If the adjudicator's `event_results` are incomplete, the system:
 - Checks whether the corresponding expert outputs are abnormal; if so, re-runs only those experts.
@@ -112,7 +120,7 @@ The adjudication step runs in a loop of up to **5 attempts**. If the adjudicator
 
 This makes the pipeline robust against sporadic VLM omissions without discarding good expert signals.
 
-### 6. JSON Repair & Sanitization
+### 7. JSON Repair & Sanitization
 
 VLM outputs are automatically hardened before parsing:
 - `_repair_json` in `vlm_engine.py` fixes common syntax errors such as missing commas and trailing commas.
@@ -127,24 +135,27 @@ traffic_analyzer/
 ├── config/
 │   ├── annotation_spec.yaml       # Annotation spec injected into adjudication prompt
 │   ├── event_categories.yaml      # Event definitions + adjudication_rules
-│   ├── logic_chains.yaml          # Legacy logic chains (kept for reference)
-│   └── prompt_templates.yaml      # VLM Prompt templates + adjudication template
+│   ├── prompt_templates.yaml      # VLM Prompt templates + adjudication template
+│   └── .env.example               # Example LLM provider config
 ├── core/
 │   ├── config_manager.py          # Config loading, validation
-│   ├── expert_agent.py            # Single-event detection agent
-│   ├── logic_engine.py            # Logic chain execution engine
+│   ├── expert_agent.py            # Single-event detection agent + far-distance enhancement
 │   ├── pipeline_steps.py          # ExpertAgentLayer + AdjudicationStep (with retry loop)
-│   ├── report_generator.py        # Report generation
+│   ├── report_generator.py        # Report generation (Markdown / JSON / binary)
 │   ├── video_preprocessor.py      # Video frame extraction
 │   └── vlm_engine.py              # VLM wrapper (multi-provider + cache + JSON repair)
 ├── models/
 │   └── schemas.py                 # Pydantic models (EventCandidate, AdjudicationResult, AuditEntry)
 ├── orchestrator/
 │   └── analysis_orchestrator.py   # 4-step pipeline orchestrator
+├── tools/
+│   ├── tool_schema.py             # Tool Definition Layer
+│   ├── tool_router.py             # Tool Router Layer
+│   └── tool_registry.py           # Default router registration
 ├── utils/
 │   └── event_detection.py         # Image selection + response parsing + candidate sanitization
-└── config/
-    └── .env                       # LLM provider config (API Key, etc.)
+├── cli.py                         # CLI entry point
+└── __main__.py                    # `python -m traffic_analyzer`
 ```
 
 ---
@@ -195,18 +206,18 @@ python3 -m traffic_analyzer validate-config \
 ### 4. Run Analysis
 
 ```bash
-# Basic usage (default 30 frames)
+# Basic usage (default 10 frames)
 python3 -m traffic_analyzer analyze \
   --video ./path/to/video.mp4 \
   --format markdown \
   --output ./report.md
 
-# Fast mode (10 frames, for short videos / testing)
+# More frames (better accuracy, slower)
 python3 -m traffic_analyzer analyze \
   --video ./path/to/video.mp4 \
   --format markdown \
   --output ./report.md \
-  --min-frames 10
+  --min-frames 30
 ```
 
 ### 5. Python API
@@ -341,10 +352,10 @@ Runtime output follows modern AI Agent tool-call trace style:
 ```
 [INFO] 14:30:00 🔧 tool_call: video_preprocessor.process(video='clip.mp4')
 [INFO] 14:30:03   ↳ result: coarse=20, precision=41 | elapsed=3.0s
-[INFO] 14:30:03 🔧 tool_call: expert_agent.detect(event='Illegal Parking')
+[INFO] 14:30:03 🔧 tool_call: expert_agent.detect(event='Person Presence in Highway')
 [INFO] 14:30:15   ↳ result: detected=true | elapsed=12.0s
-[INFO] 14:30:15 🔧 tool_call: adjudication.resolve(candidates=10)
-[INFO] 14:30:28   ↳ result: events=3, audit_entries=2 | elapsed=13.0s
+[INFO] 14:30:15 🔧 tool_call: adjudication.resolve(candidates=4)
+[INFO] 14:30:28   ↳ result: events=2, audit_entries=1 | elapsed=13.0s
 ```
 
 Control granularity via `TRAFFIC_ANALYZER_TOOL_LOG_LEVEL`:
@@ -369,26 +380,17 @@ This logging is a **pure display layer** — it does not affect parallelism, per
 
 | Tag | Branch | Description |
 |---|---|---|
-| `v2.0.0-multi-agent` | `main` | **Current**. Pure VLM multi-agent expert + adjudication architecture. 8 of 10 events are active; inactive events are preserved in the binary encoding but skipped during inference. Parallel detection + single VLM adjudication with business rules, retry loop, JSON repair, and annotation-spec integration. |
+| `v4.0.0-far-enhancement` | `main` | **Current**. VLM multi-agent expert + adjudication architecture. Only events 3, 4, 5, 6 are active. Adds far-distance non-motor vehicle ROI enhancement for event_id=4 with continuous 0-1 ROI confidence. Includes an optional tool layer (Tool Schema + Tool Router) for extensions such as YOLO tracking. |
+| `v2.0.0-multi-agent` | `legacy/v2.0` | Previous stable multi-agent architecture with 8 of 10 events active and a pure-VLM pipeline. |
 | `v1.5.0-legacy` | `legacy/v1.5` | Monolithic architecture. SceneUnderstandingStep (~30s bottleneck) + mixed detection modes (direct_vlm parallel, logic_chain sequential, scene_tag zero-VLM) + PostProcessStep with cross-event inference. |
 
-The `legacy/v1.5` branch preserves the old architecture for reference and comparison. All new development happens on `main` (v2.0.0).
-
-### Recent Changes on main
-
-- **YOLO fully removed**: the pipeline is now pure VLM; no CV tracking or cross-validation.
-- **Adjudication retry loop**: up to 5 attempts, with targeted expert re-runs and fallback candidate backfill.
-- **Event active flags**: `Thrown Objects` (id=8) and `Lane Change over Solid Line` (id=9) are now inactive.
-- **Confidence field removed**: all schemas and prompts no longer emit or expect `confidence`.
-- **JSON repair & candidate sanitization**: automatic fixing of common VLM JSON errors and inconsistent `detected` flags.
-- **Annotation spec integration**: `annotation_spec.yaml` is injected into the adjudication prompt alongside `event_categories.yaml`.
-- **Evaluation fix**: macro-average denominator uses the actual number of evaluated events; `--single-class` no longer penalizes overall metrics with inactive classes.
+All new development happens on `main` (v4.0.0).
 
 ---
 
-## Custom Tool Development Guide
+## Optional Tool System
 
-The system provides a small **Tool Definition Layer (Tool Schema)** + **Tool Router Layer (Tool Router)** framework. In v2.0.0 the pipeline is pure VLM and does not invoke tools during inference, but the tool layer is kept for future extensions and utility scripts.
+The framework provides a **Tool Definition Layer (Tool Schema)** + **Tool Router Layer (Tool Router)** for optional extensions. The default inference pipeline does not invoke tools automatically, but the layers are kept for utility scripts and future capabilities such as YOLO-based tracking.
 
 ### Architecture Overview
 
