@@ -103,8 +103,6 @@ def _make_analysis_context(num_frames: int = 3, vlm_max_frames: int = 6) -> Anal
     rng = np.random.RandomState(42)
     frames = []
     for i in range(num_frames):
-        # Random noise guarantees adjacent frames differ enough to avoid the
-        # motion-score penalty in the far-enhancement scoring stage.
         arr = rng.randint(0, 256, size=(120, 160, 3), dtype=np.uint8)
         frames.append(
             Keyframe(
@@ -133,6 +131,22 @@ def analysis_context() -> AnalysisContext:
     return _make_analysis_context(num_frames=3, vlm_max_frames=6)
 
 
+@pytest.fixture
+def make_agent(config_manager: ConfigManager, non_motor_category: Any):
+    """Return a factory that builds an ExpertAgent + mock engine pair."""
+
+    def _make(responses_by_template: Mapping[str, List[Dict[str, Any]]]) -> tuple[ExpertAgent, _MockVLMEngine]:
+        engine = _MockVLMEngine(responses_by_template=responses_by_template)
+        agent = ExpertAgent(
+            category=non_motor_category,
+            vlm_engine=engine,
+            config_manager=config_manager,
+        )
+        return agent, engine
+
+    return _make
+
+
 def _roi_response(
     bbox_norm: Any,
     reason: str,
@@ -151,14 +165,20 @@ def _final_response(detected: bool, reason: str) -> Dict[str, Any]:
     return {"detected": detected, "reason": reason}
 
 
-def test_far_enhancement_success(
-    config_manager: ConfigManager,
-    non_motor_category: Any,
-    analysis_context: AnalysisContext,
-) -> None:
+def _detect_with_patched_dir(agent: ExpertAgent, context: AnalysisContext) -> Any:
+    """Run detection with the output directory patched to a temp folder."""
+    tmpdir = Path(tempfile.mkdtemp())
+    with patch(
+        "traffic_analyzer.core.expert_agent._FAR_ENHANCEMENT_OUTPUT_DIR",
+        tmpdir,
+    ):
+        return agent.detect(context)
+
+
+def test_far_enhancement_success(make_agent, analysis_context) -> None:
     """Happy path: collect ROIs from all frames, rank, then classify the top candidate."""
-    engine = _MockVLMEngine(
-        responses_by_template={
+    agent, engine = make_agent(
+        {
             "far_non_motor_roi_detection": [
                 _roi_response([0.50, 0.50, 0.65, 0.70], "frame 0 distant target"),
                 _roi_response(None, "no candidate frame 1"),
@@ -169,33 +189,22 @@ def test_far_enhancement_success(
             ],
         }
     )
-    agent = ExpertAgent(
-        category=non_motor_category,
-        vlm_engine=engine,
-        config_manager=config_manager,
-    )
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmpdir_path = Path(tmpdir)
-        with patch(
-            "traffic_analyzer.core.expert_agent._FAR_ENHANCEMENT_OUTPUT_DIR",
-            tmpdir_path,
-        ):
-            candidate = agent.detect(analysis_context)
+    candidate = _detect_with_patched_dir(agent, analysis_context)
 
-        assert candidate.detected is True
-        raw = candidate.raw_vlm_response
-        composite_path = Path(raw["composite_image_path"])
-        motion_path = Path(raw["motion_composite_image_path"])
-        assert composite_path.name == "test_video_frame_0_composite.jpg"
-        assert "frame_0_motion_1.jpg" in str(motion_path)
-        assert composite_path.exists()
-        assert motion_path.exists()
+    assert candidate.detected is True
+    raw = candidate.raw_vlm_response
+    composite_path = Path(raw["composite_image_path"])
+    motion_path = Path(raw["motion_composite_image_path"])
+    assert composite_path.name == "test_video_frame_0_composite.jpg"
+    assert "frame_0_motion_1.jpg" in str(motion_path)
+    assert composite_path.exists()
+    assert motion_path.exists()
 
-        enhancement_meta = raw.get("far_enhancement", {})
-        assert enhancement_meta.get("selected_frame_index") == 0
-        assert enhancement_meta.get("bbox_norm") == [0.50, 0.50, 0.65, 0.70]
-        assert candidate.instances[0].evidence_frames == [0, 1]
+    enhancement_meta = raw.get("far_enhancement", {})
+    assert enhancement_meta.get("selected_frame_index") == 0
+    assert enhancement_meta.get("bbox_norm") == [0.50, 0.50, 0.65, 0.70]
+    assert candidate.instances[0].evidence_frames == [0, 1]
 
     roi_calls = [c for c in engine.calls if c["template_id"] == "far_non_motor_roi_detection"]
     final_calls = [c for c in engine.calls if c["template_id"] == "non_motor_vehicle_detection"]
@@ -207,14 +216,10 @@ def test_far_enhancement_success(
     assert final_calls[0]["images"][1] == str(motion_path)
 
 
-def test_far_enhancement_records_frame_analysis_log(
-    config_manager: ConfigManager,
-    non_motor_category: Any,
-    analysis_context: AnalysisContext,
-) -> None:
+def test_far_enhancement_records_frame_analysis_log(make_agent, analysis_context) -> None:
     """A positive detection result carries the per-frame ROI analysis log."""
-    engine = _MockVLMEngine(
-        responses_by_template={
+    agent, _ = make_agent(
+        {
             "far_non_motor_roi_detection": [
                 _roi_response(
                     [0.50, 0.50, 0.65, 0.70],
@@ -229,24 +234,11 @@ def test_far_enhancement_records_frame_analysis_log(
             ],
         }
     )
-    agent = ExpertAgent(
-        category=non_motor_category,
-        vlm_engine=engine,
-        config_manager=config_manager,
-    )
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmpdir_path = Path(tmpdir)
-        with patch(
-            "traffic_analyzer.core.expert_agent._FAR_ENHANCEMENT_OUTPUT_DIR",
-            tmpdir_path,
-        ):
-            candidate = agent.detect(analysis_context)
+    candidate = _detect_with_patched_dir(agent, analysis_context)
 
     assert candidate.detected is True
-    log = (
-        candidate.raw_vlm_response.get("far_enhancement", {}).get("frame_analysis_log")
-    )
+    log = candidate.raw_vlm_response.get("far_enhancement", {}).get("frame_analysis_log")
     assert log is not None
     assert len(log) == 3
 
@@ -270,14 +262,10 @@ def test_far_enhancement_records_frame_analysis_log(
         assert log[idx]["reason"] == f"no distant target in frame {idx}"
 
 
-def test_no_valid_candidates_frame_analysis_log(
-    config_manager: ConfigManager,
-    non_motor_category: Any,
-    analysis_context: AnalysisContext,
-) -> None:
+def test_no_valid_candidates_frame_analysis_log(make_agent, analysis_context) -> None:
     """A negative result still carries the per-frame ROI analysis log."""
-    engine = _MockVLMEngine(
-        responses_by_template={
+    agent, _ = make_agent(
+        {
             "far_non_motor_roi_detection": [
                 _roi_response(None, "no distant target in frame 0"),
                 _roi_response(None, "no distant target in frame 1"),
@@ -285,31 +273,21 @@ def test_no_valid_candidates_frame_analysis_log(
             ],
         }
     )
-    agent = ExpertAgent(
-        category=non_motor_category,
-        vlm_engine=engine,
-        config_manager=config_manager,
-    )
 
     candidate = agent.detect(analysis_context)
 
     assert candidate.detected is False
-    log = (
-        candidate.raw_vlm_response.get("far_enhancement", {}).get("frame_analysis_log")
-    )
+    log = candidate.raw_vlm_response.get("far_enhancement", {}).get("frame_analysis_log")
     assert log is not None
     assert len(log) == 3
     assert all(entry["has_candidate"] is False for entry in log)
 
 
-def test_frame_analysis_log_records_filter_reasons(
-    config_manager: ConfigManager,
-    non_motor_category: Any,
-) -> None:
+def test_frame_analysis_log_records_filter_reasons(make_agent) -> None:
     """Frames that fail the area/aspect filters are logged with the filter reason."""
     context = _make_analysis_context(num_frames=3, vlm_max_frames=6)
-    engine = _MockVLMEngine(
-        responses_by_template={
+    agent, _ = make_agent(
+        {
             "far_non_motor_roi_detection": [
                 _roi_response(
                     [0.50, 0.50, 0.505, 0.515],
@@ -323,18 +301,11 @@ def test_frame_analysis_log_records_filter_reasons(
             ],
         }
     )
-    agent = ExpertAgent(
-        category=non_motor_category,
-        vlm_engine=engine,
-        config_manager=config_manager,
-    )
 
     candidate = agent.detect(context)
 
     assert candidate.detected is False
-    log = (
-        candidate.raw_vlm_response.get("far_enhancement", {}).get("frame_analysis_log")
-    )
+    log = candidate.raw_vlm_response.get("far_enhancement", {}).get("frame_analysis_log")
     assert log is not None
     assert len(log) == 3
     assert log[0]["has_candidate"] is False
@@ -344,14 +315,10 @@ def test_frame_analysis_log_records_filter_reasons(
     assert log[2]["has_candidate"] is False
 
 
-def test_far_enhancement_saves_assets_next_to_report(
-    config_manager: ConfigManager,
-    non_motor_category: Any,
-    analysis_context: AnalysisContext,
-) -> None:
+def test_far_enhancement_saves_assets_next_to_report(make_agent, analysis_context) -> None:
     """When context.output_dir is set, composites are saved there and referenced relatively."""
-    engine = _MockVLMEngine(
-        responses_by_template={
+    agent, engine = make_agent(
+        {
             "far_non_motor_roi_detection": [
                 _roi_response([0.50, 0.50, 0.65, 0.70], "frame 0 distant target"),
                 _roi_response(None, "no candidate frame 1"),
@@ -361,11 +328,6 @@ def test_far_enhancement_saves_assets_next_to_report(
                 _final_response(True, "narrow silhouette, 摩托车"),
             ],
         }
-    )
-    agent = ExpertAgent(
-        category=non_motor_category,
-        vlm_engine=engine,
-        config_manager=config_manager,
     )
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -389,25 +351,16 @@ def test_far_enhancement_saves_assets_next_to_report(
         assert final_calls[0]["images"][1] == str(motion_file)
 
 
-def test_no_valid_candidates_returns_false(
-    config_manager: ConfigManager,
-    non_motor_category: Any,
-    analysis_context: AnalysisContext,
-) -> None:
+def test_no_valid_candidates_returns_false(make_agent, analysis_context) -> None:
     """When every frame returns no valid ROI candidate the flow reports detected=False."""
-    engine = _MockVLMEngine(
-        responses_by_template={
+    agent, engine = make_agent(
+        {
             "far_non_motor_roi_detection": [
                 _roi_response(None, "no distant target in frame 0"),
                 _roi_response(None, "no distant target in frame 1"),
                 _roi_response(None, "no distant target in frame 2"),
             ],
         }
-    )
-    agent = ExpertAgent(
-        category=non_motor_category,
-        vlm_engine=engine,
-        config_manager=config_manager,
     )
 
     candidate = agent.detect(analysis_context)
@@ -421,22 +374,16 @@ def test_no_valid_candidates_returns_false(
     assert len(final_calls) == 0
 
 
-def test_later_better_frame_chosen_over_earlier_worse(
-    config_manager: ConfigManager,
-    non_motor_category: Any,
-    analysis_context: AnalysisContext,
-) -> None:
+def test_later_better_frame_chosen_over_earlier_worse(make_agent, analysis_context) -> None:
     """A later frame with higher score is selected even though an earlier frame is valid."""
-    engine = _MockVLMEngine(
-        responses_by_template={
+    agent, engine = make_agent(
+        {
             "far_non_motor_roi_detection": [
-                # Low-confidence small candidate.
                 _roi_response(
                     [0.50, 0.50, 0.55, 0.60],
                     "frame 0 possible target",
                     confidence="low",
                 ),
-                # High-confidence large candidate.
                 _roi_response(
                     [0.50, 0.50, 0.70, 0.80],
                     "frame 1 clear distant target",
@@ -449,24 +396,13 @@ def test_later_better_frame_chosen_over_earlier_worse(
             ],
         }
     )
-    agent = ExpertAgent(
-        category=non_motor_category,
-        vlm_engine=engine,
-        config_manager=config_manager,
-    )
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmpdir_path = Path(tmpdir)
-        with patch(
-            "traffic_analyzer.core.expert_agent._FAR_ENHANCEMENT_OUTPUT_DIR",
-            tmpdir_path,
-        ):
-            candidate = agent.detect(analysis_context)
+    candidate = _detect_with_patched_dir(agent, analysis_context)
 
-        assert candidate.detected is True
-        composite_path = Path(candidate.raw_vlm_response["composite_image_path"])
-        assert composite_path.name == "test_video_frame_1_composite.jpg"
-        assert candidate.instances[0].evidence_frames == [1, 2]
+    assert candidate.detected is True
+    composite_path = Path(candidate.raw_vlm_response["composite_image_path"])
+    assert composite_path.name == "test_video_frame_1_composite.jpg"
+    assert candidate.instances[0].evidence_frames == [1, 2]
 
     roi_calls = [c for c in engine.calls if c["template_id"] == "far_non_motor_roi_detection"]
     final_calls = [c for c in engine.calls if c["template_id"] == "non_motor_vehicle_detection"]
@@ -474,14 +410,11 @@ def test_later_better_frame_chosen_over_earlier_worse(
     assert len(final_calls) == 1
 
 
-def test_high_scoring_false_does_not_block_lower_true(
-    config_manager: ConfigManager,
-    non_motor_category: Any,
-) -> None:
+def test_high_scoring_false_does_not_block_lower_true(make_agent) -> None:
     """A negative top-ranked candidate does not prevent a positive lower-ranked candidate from winning."""
     context = _make_analysis_context(num_frames=2, vlm_max_frames=6)
-    engine = _MockVLMEngine(
-        responses_by_template={
+    agent, engine = make_agent(
+        {
             "far_non_motor_roi_detection": [
                 _roi_response(
                     [0.50, 0.50, 0.70, 0.80],
@@ -495,48 +428,40 @@ def test_high_scoring_false_does_not_block_lower_true(
                 ),
             ],
             "non_motor_vehicle_detection": [
-                # Rank order: frame 0 first (higher score), then frame 1.
                 _final_response(False, "frame 0 is a car"),
                 _final_response(True, "frame 1 confirmed non-motor vehicle"),
             ],
         }
     )
-    agent = ExpertAgent(
-        category=non_motor_category,
-        vlm_engine=engine,
-        config_manager=config_manager,
-    )
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmpdir_path = Path(tmpdir)
-        with patch(
-            "traffic_analyzer.core.expert_agent._FAR_ENHANCEMENT_OUTPUT_DIR",
-            tmpdir_path,
-        ):
-            candidate = agent.detect(context)
+    candidate = _detect_with_patched_dir(agent, context)
 
-        assert candidate.detected is True
-        composite_path = Path(candidate.raw_vlm_response["composite_image_path"])
-        assert composite_path.name == "test_video_frame_1_composite.jpg"
-        assert candidate.instances[0].evidence_frames == [1, 0]
-        assert "frame 1 confirmed" in candidate.instances[0].reasoning
+    assert candidate.detected is True
+    composite_path = Path(candidate.raw_vlm_response["composite_image_path"])
+    assert composite_path.name == "test_video_frame_1_composite.jpg"
+    assert candidate.instances[0].evidence_frames == [1, 0]
+    assert "frame 1 confirmed" in candidate.instances[0].reasoning
 
     final_calls = [c for c in engine.calls if c["template_id"] == "non_motor_vehicle_detection"]
     assert len(final_calls) == 2
 
 
-def test_area_filter_skips_small_bbox(
-    config_manager: ConfigManager,
-    non_motor_category: Any,
-) -> None:
-    """A frame whose ROI bbox is too small (<80 px) is skipped during collection."""
+@pytest.mark.parametrize(
+    "bbox,expected_frame",
+    [
+        ([0.50, 0.50, 0.505, 0.515], 1),  # too small, skip frame 0
+        ([0.40, 0.40, 0.70, 0.60], 1),  # too flat, skip frame 0
+    ],
+    ids=["area_filter", "aspect_filter"],
+)
+def test_filter_skips_invalid_bbox(make_agent, bbox, expected_frame) -> None:
+    """A frame whose ROI fails a filter is skipped and the next valid frame is used."""
     context = _make_analysis_context(num_frames=3, vlm_max_frames=6)
-    engine = _MockVLMEngine(
-        responses_by_template={
+    agent, _ = make_agent(
+        {
             "far_non_motor_roi_detection": [
-                # ~10 px, below threshold.
-                _roi_response([0.50, 0.50, 0.505, 0.515], "small candidate in frame 0"),
-                _roi_response([0.50, 0.50, 0.65, 0.70], "large candidate in frame 1"),
+                _roi_response(bbox, "invalid candidate in frame 0"),
+                _roi_response([0.50, 0.50, 0.65, 0.70], "valid candidate in frame 1"),
                 _roi_response(None, "frame 2 no candidate"),
             ],
             "non_motor_vehicle_detection": [
@@ -544,81 +469,23 @@ def test_area_filter_skips_small_bbox(
             ],
         }
     )
-    agent = ExpertAgent(
-        category=non_motor_category,
-        vlm_engine=engine,
-        config_manager=config_manager,
-    )
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmpdir_path = Path(tmpdir)
-        with patch(
-            "traffic_analyzer.core.expert_agent._FAR_ENHANCEMENT_OUTPUT_DIR",
-            tmpdir_path,
-        ):
-            candidate = agent.detect(context)
+    candidate = _detect_with_patched_dir(agent, context)
 
-        assert candidate.detected is True
-        composite_path = Path(candidate.raw_vlm_response["composite_image_path"])
-        assert composite_path.name == "test_video_frame_1_composite.jpg"
+    assert candidate.detected is True
+    composite_path = Path(candidate.raw_vlm_response["composite_image_path"])
+    assert composite_path.name == f"test_video_frame_{expected_frame}_composite.jpg"
 
-    roi_calls = [c for c in engine.calls if c["template_id"] == "far_non_motor_roi_detection"]
-    final_calls = [c for c in engine.calls if c["template_id"] == "non_motor_vehicle_detection"]
-    assert len(roi_calls) == 3
+    final_calls = [c for c in agent.vlm_engine.calls if c["template_id"] == "non_motor_vehicle_detection"]
     assert len(final_calls) == 1
     assert final_calls[0]["images"][0] == str(composite_path)
 
 
-def test_aspect_ratio_filter_skips_flat_bbox(
-    config_manager: ConfigManager,
-    non_motor_category: Any,
-) -> None:
-    """A frame whose ROI bbox is too flat (width/height >= 1.2) is skipped."""
-    context = _make_analysis_context(num_frames=2, vlm_max_frames=6)
-    engine = _MockVLMEngine(
-        responses_by_template={
-            "far_non_motor_roi_detection": [
-                # width=0.30, height=0.20 -> ratio=1.5, rejected.
-                _roi_response([0.40, 0.40, 0.70, 0.60], "flat candidate in frame 0"),
-                # width=0.05, height=0.25 -> ratio=0.2, valid.
-                _roi_response([0.50, 0.50, 0.55, 0.75], "tall candidate in frame 1"),
-            ],
-            "non_motor_vehicle_detection": [
-                _final_response(True, "frame 1 confirmed non-motor vehicle"),
-            ],
-        }
-    )
-    agent = ExpertAgent(
-        category=non_motor_category,
-        vlm_engine=engine,
-        config_manager=config_manager,
-    )
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmpdir_path = Path(tmpdir)
-        with patch(
-            "traffic_analyzer.core.expert_agent._FAR_ENHANCEMENT_OUTPUT_DIR",
-            tmpdir_path,
-        ):
-            candidate = agent.detect(context)
-
-        assert candidate.detected is True
-        composite_path = Path(candidate.raw_vlm_response["composite_image_path"])
-        assert composite_path.name == "test_video_frame_1_composite.jpg"
-
-    final_calls = [c for c in engine.calls if c["template_id"] == "non_motor_vehicle_detection"]
-    assert len(final_calls) == 1
-    assert final_calls[0]["images"][0] == str(composite_path)
-
-
-def test_car_override_forces_false(
-    config_manager: ConfigManager,
-    non_motor_category: Any,
-) -> None:
+def test_car_override_forces_false(make_agent) -> None:
     """A positive classifier result that explicitly describes a car is overridden to False."""
     context = _make_analysis_context(num_frames=2, vlm_max_frames=6)
-    engine = _MockVLMEngine(
-        responses_by_template={
+    agent, _ = make_agent(
+        {
             "far_non_motor_roi_detection": [
                 _roi_response([0.50, 0.50, 0.55, 0.75], "valid candidate in frame 0"),
                 _roi_response(None, "frame 1 no candidate"),
@@ -628,32 +495,22 @@ def test_car_override_forces_false(
             ],
         }
     )
-    agent = ExpertAgent(
-        category=non_motor_category,
-        vlm_engine=engine,
-        config_manager=config_manager,
-    )
 
-    candidate = agent.detect(context)
+    candidate = _detect_with_patched_dir(agent, context)
 
     assert candidate.detected is False
-    # Composite images are preserved even when the result is negative so that
-    # the report can show what was analyzed and rejected.
     assert "composite_image_path" in candidate.raw_vlm_response
     assert "motion_composite_image_path" in candidate.raw_vlm_response
 
-    final_calls = [c for c in engine.calls if c["template_id"] == "non_motor_vehicle_detection"]
+    final_calls = [c for c in agent.vlm_engine.calls if c["template_id"] == "non_motor_vehicle_detection"]
     assert len(final_calls) == 1
 
 
-def test_all_top_k_negative_returns_false(
-    config_manager: ConfigManager,
-    non_motor_category: Any,
-) -> None:
+def test_all_top_k_negative_returns_false(make_agent) -> None:
     """If every top-K candidate is classified negative and fallback is blocked, return False."""
     context = _make_analysis_context(num_frames=2, vlm_max_frames=6)
-    engine = _MockVLMEngine(
-        responses_by_template={
+    agent, _ = make_agent(
+        {
             "far_non_motor_roi_detection": [
                 _roi_response(
                     [0.50, 0.50, 0.65, 0.70],
@@ -672,33 +529,31 @@ def test_all_top_k_negative_returns_false(
             ],
         }
     )
-    agent = ExpertAgent(
-        category=non_motor_category,
-        vlm_engine=engine,
-        config_manager=config_manager,
-    )
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        with patch(
-            "traffic_analyzer.core.expert_agent._FAR_ENHANCEMENT_OUTPUT_DIR",
-            Path(tmpdir),
-        ):
-            candidate = agent.detect(context)
+    candidate = _detect_with_patched_dir(agent, context)
 
     assert candidate.detected is False
 
-    final_calls = [c for c in engine.calls if c["template_id"] == "non_motor_vehicle_detection"]
+    final_calls = [c for c in agent.vlm_engine.calls if c["template_id"] == "non_motor_vehicle_detection"]
     assert len(final_calls) == 2
 
 
-def test_fallback_accepted_for_top_candidate(
-    config_manager: ConfigManager,
-    non_motor_category: Any,
-) -> None:
-    """When the highest-scored candidate is negative but safe, optional fallback promotes it."""
+@pytest.mark.parametrize(
+    "negative_reason,expected_fallback",
+    [
+        (
+            "目标被右侧车辆部分遮挡，但能看到骑乘者头盔和上半身轮廓",
+            True,
+        ),
+        ("框内仅是一团无结构的暗斑，无法确认车身结构", False),
+    ],
+    ids=["accepted", "rejected_no_structure"],
+)
+def test_fallback_behavior(make_agent, negative_reason, expected_fallback) -> None:
+    """Fallback accepts safe negatives and rejects 'no structure' negatives."""
     context = _make_analysis_context(num_frames=2, vlm_max_frames=6)
-    engine = _MockVLMEngine(
-        responses_by_template={
+    agent, _ = make_agent(
+        {
             "far_non_motor_roi_detection": [
                 _roi_response(
                     [0.50, 0.50, 0.65, 0.70],
@@ -708,76 +563,25 @@ def test_fallback_accepted_for_top_candidate(
                 _roi_response(None, "frame 1 no candidate"),
             ],
             "non_motor_vehicle_detection": [
-                _final_response(False, "目标被右侧车辆部分遮挡，但能看到骑乘者头盔和上半身轮廓"),
+                _final_response(False, negative_reason),
             ],
         }
     )
-    agent = ExpertAgent(
-        category=non_motor_category,
-        vlm_engine=engine,
-        config_manager=config_manager,
-    )
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmpdir_path = Path(tmpdir)
-        with patch(
-            "traffic_analyzer.core.expert_agent._FAR_ENHANCEMENT_OUTPUT_DIR",
-            tmpdir_path,
-        ):
-            candidate = agent.detect(context)
+    candidate = _detect_with_patched_dir(agent, context)
 
-    assert candidate.detected is True
-    assert candidate.raw_vlm_response["far_enhancement"].get("fallback") is True
-    assert "未确认" not in candidate.summary
-    assert "回退" not in candidate.summary
+    assert candidate.detected is expected_fallback
+    if expected_fallback:
+        assert candidate.raw_vlm_response["far_enhancement"].get("fallback") is True
+        assert "未确认" not in candidate.summary
+        assert "回退" not in candidate.summary
 
 
-def test_fallback_rejected_when_no_structure(
-    config_manager: ConfigManager,
-    non_motor_category: Any,
-) -> None:
-    """A top candidate rejected for 'no structure evidence' must not be promoted via fallback."""
-    context = _make_analysis_context(num_frames=2, vlm_max_frames=6)
-    engine = _MockVLMEngine(
-        responses_by_template={
-            "far_non_motor_roi_detection": [
-                _roi_response(
-                    [0.50, 0.50, 0.65, 0.70],
-                    "frame 0 high-confidence candidate",
-                    confidence="high",
-                ),
-                _roi_response(None, "frame 1 no candidate"),
-            ],
-            "non_motor_vehicle_detection": [
-                _final_response(False, "框内仅是一团无结构的暗斑，无法确认车身结构"),
-            ],
-        }
-    )
-    agent = ExpertAgent(
-        category=non_motor_category,
-        vlm_engine=engine,
-        config_manager=config_manager,
-    )
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmpdir_path = Path(tmpdir)
-        with patch(
-            "traffic_analyzer.core.expert_agent._FAR_ENHANCEMENT_OUTPUT_DIR",
-            tmpdir_path,
-        ):
-            candidate = agent.detect(context)
-
-    assert candidate.detected is False
-
-
-def test_fallback_rejected_when_occluded(
-    config_manager: ConfigManager,
-    non_motor_category: Any,
-) -> None:
+def test_fallback_rejected_when_occluded(make_agent) -> None:
     """An occluded top candidate must not be promoted via fallback."""
     context = _make_analysis_context(num_frames=2, vlm_max_frames=6)
-    engine = _MockVLMEngine(
-        responses_by_template={
+    agent, _ = make_agent(
+        {
             "far_non_motor_roi_detection": [
                 _roi_response(
                     [0.50, 0.50, 0.65, 0.70],
@@ -792,30 +596,17 @@ def test_fallback_rejected_when_occluded(
             ],
         }
     )
-    agent = ExpertAgent(
-        category=non_motor_category,
-        vlm_engine=engine,
-        config_manager=config_manager,
-    )
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        with patch(
-            "traffic_analyzer.core.expert_agent._FAR_ENHANCEMENT_OUTPUT_DIR",
-            Path(tmpdir),
-        ):
-            candidate = agent.detect(context)
+    candidate = _detect_with_patched_dir(agent, context)
 
     assert candidate.detected is False
 
 
-def test_dual_composite_paths(
-    config_manager: ConfigManager,
-    non_motor_category: Any,
-) -> None:
+def test_dual_composite_paths(make_agent) -> None:
     """A valid ROI produces both a single-frame composite and a motion-comparison composite."""
     context = _make_analysis_context(num_frames=2, vlm_max_frames=6)
-    engine = _MockVLMEngine(
-        responses_by_template={
+    agent, engine = make_agent(
+        {
             "far_non_motor_roi_detection": [
                 _roi_response([0.50, 0.50, 0.65, 0.70], "frame 0 distant target"),
                 _roi_response(None, "frame 1 no candidate"),
@@ -825,27 +616,16 @@ def test_dual_composite_paths(
             ],
         }
     )
-    agent = ExpertAgent(
-        category=non_motor_category,
-        vlm_engine=engine,
-        config_manager=config_manager,
-    )
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmpdir_path = Path(tmpdir)
-        with patch(
-            "traffic_analyzer.core.expert_agent._FAR_ENHANCEMENT_OUTPUT_DIR",
-            tmpdir_path,
-        ):
-            candidate = agent.detect(context)
+    candidate = _detect_with_patched_dir(agent, context)
 
-        assert candidate.detected is True
-        raw = candidate.raw_vlm_response
-        assert "composite_image_path" in raw
-        assert "motion_composite_image_path" in raw
-        motion_path = Path(raw["motion_composite_image_path"])
-        assert "frame_0_motion_1.jpg" in str(motion_path)
-        assert motion_path.exists()
+    assert candidate.detected is True
+    raw = candidate.raw_vlm_response
+    assert "composite_image_path" in raw
+    assert "motion_composite_image_path" in raw
+    motion_path = Path(raw["motion_composite_image_path"])
+    assert "frame_0_motion_1.jpg" in str(motion_path)
+    assert motion_path.exists()
 
     final_calls = [c for c in engine.calls if c["template_id"] == "non_motor_vehicle_detection"]
     assert len(final_calls) == 1
@@ -861,22 +641,25 @@ def _motion_score(value: float) -> Dict[str, float]:
     }
 
 
-def test_low_motion_candidate_drops_out_of_top_k(
-    config_manager: ConfigManager,
-    non_motor_category: Any,
-) -> None:
-    """A higher-scoring but static candidate is deprioritised by the motion penalty."""
+@pytest.mark.parametrize(
+    "side_effect,expected_frame",
+    [
+        ([_motion_score(0.0), _motion_score(10.0)], 1),
+        ([_motion_score(10.0)], 0),
+    ],
+    ids=["low_motion_drops_out", "high_motion_retained"],
+)
+def test_motion_score_ranking(make_agent, side_effect, expected_frame) -> None:
+    """Motion score penalty/retention affects which frame is selected."""
     context = _make_analysis_context(num_frames=2, vlm_max_frames=6)
-    engine = _MockVLMEngine(
-        responses_by_template={
+    agent, _ = make_agent(
+        {
             "far_non_motor_roi_detection": [
-                # Frame 0 would normally rank first (high confidence, larger).
                 _roi_response(
                     [0.50, 0.50, 0.70, 0.80],
                     "frame 0 clear but static target",
                     confidence="high",
                 ),
-                # Frame 1 is the moving target.
                 _roi_response(
                     [0.50, 0.50, 0.65, 0.70],
                     "frame 1 moving target",
@@ -888,79 +671,23 @@ def test_low_motion_candidate_drops_out_of_top_k(
             ],
         }
     )
-    agent = ExpertAgent(
-        category=non_motor_category,
-        vlm_engine=engine,
-        config_manager=config_manager,
-    )
 
     with patch(
         "traffic_analyzer.core.expert_agent.compute_roi_motion_score",
-        side_effect=[_motion_score(0.0), _motion_score(10.0)],
+        side_effect=side_effect,
     ):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            with patch(
-                "traffic_analyzer.core.expert_agent._FAR_ENHANCEMENT_OUTPUT_DIR",
-                Path(tmpdir),
-            ):
-                candidate = agent.detect(context)
+        candidate = _detect_with_patched_dir(agent, context)
 
     assert candidate.detected is True
     enhancement_meta = candidate.raw_vlm_response.get("far_enhancement", {})
-    assert enhancement_meta.get("selected_frame_index") == 1
+    assert enhancement_meta.get("selected_frame_index") == expected_frame
 
 
-def test_high_motion_candidate_is_retained(
-    config_manager: ConfigManager,
-    non_motor_category: Any,
-) -> None:
-    """A moving candidate keeps a high rank and is classified normally."""
-    context = _make_analysis_context(num_frames=2, vlm_max_frames=6)
-    engine = _MockVLMEngine(
-        responses_by_template={
-            "far_non_motor_roi_detection": [
-                _roi_response(
-                    [0.50, 0.50, 0.65, 0.70],
-                    "frame 0 moving target",
-                    confidence="high",
-                ),
-                _roi_response(None, "frame 1 no candidate"),
-            ],
-            "non_motor_vehicle_detection": [
-                _final_response(True, "confirmed non-motor vehicle"),
-            ],
-        }
-    )
-    agent = ExpertAgent(
-        category=non_motor_category,
-        vlm_engine=engine,
-        config_manager=config_manager,
-    )
-
-    with patch(
-        "traffic_analyzer.core.expert_agent.compute_roi_motion_score",
-        return_value=_motion_score(10.0),
-    ):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            with patch(
-                "traffic_analyzer.core.expert_agent._FAR_ENHANCEMENT_OUTPUT_DIR",
-                Path(tmpdir),
-            ):
-                candidate = agent.detect(context)
-
-    assert candidate.detected is True
-    enhancement_meta = candidate.raw_vlm_response.get("far_enhancement", {})
-    assert enhancement_meta.get("selected_frame_index") == 0
-
-
-def test_motion_score_computed_without_caching_diff_image(
-    config_manager: ConfigManager,
-    non_motor_category: Any,
-) -> None:
+def test_motion_score_computed_without_caching_diff_image(make_agent) -> None:
     """The motion-score helper runs on the input frames and writes no diff files."""
     context = _make_analysis_context(num_frames=2, vlm_max_frames=6)
-    engine = _MockVLMEngine(
-        responses_by_template={
+    agent, _ = make_agent(
+        {
             "far_non_motor_roi_detection": [
                 _roi_response(
                     [0.50, 0.50, 0.65, 0.70],
@@ -974,22 +701,15 @@ def test_motion_score_computed_without_caching_diff_image(
             ],
         }
     )
-    agent = ExpertAgent(
-        category=non_motor_category,
-        vlm_engine=engine,
-        config_manager=config_manager,
-    )
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        tmpdir_path = Path(tmpdir)
         with patch(
             "traffic_analyzer.core.expert_agent._FAR_ENHANCEMENT_OUTPUT_DIR",
-            tmpdir_path,
+            Path(tmpdir),
         ):
             candidate = agent.detect(context)
 
         assert candidate.detected is True
-        # Only the composite and motion-composite should be written; no diff image.
-        written = list(tmpdir_path.glob("*"))
+        written = list(Path(tmpdir).glob("*"))
         assert len(written) == 2
         assert all("diff" not in p.name.lower() for p in written)

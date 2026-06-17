@@ -115,7 +115,7 @@ prompt_templates:
   - template_id: "illegal_parking_detection"
     name: "Illegal Parking Detection"
     system_prompt: |
-      你是一名高速公路交通监控分析师，专门检测违法停车事件。输出必须是合法 JSON，不含其他文本。
+      你是一名高速公路交通监控分析师，专门检测违法停车事件。输出必须是合法 JSON，不含其他文本。所有文本字段必须使用中文。
     user_prompt: |
       检测这些视频帧中的违法停车事件。
 
@@ -151,9 +151,6 @@ prompt_templates:
       }
 
       未检测到时：{"detected": false, "instances": [], "summary": "未检测到违法停车。"}
-
-      重要：
-      - 所有文本字段使用中文。
     output_format_hint: "JSON"
 
   # ---------------------------------------------------------------------------
@@ -162,7 +159,7 @@ prompt_templates:
   - template_id: "emergency_lane_occupancy_detection"
     name: "应急车道占用检测"
     system_prompt: |
-      你是一名交通监控分析师。你的唯一任务是检测应急车道上的车辆占用情况。
+      你是一名交通监控分析师。你的唯一任务是检测应急车道上的车辆占用情况。所有文本字段 "description"、"reasoning" 和 "summary" 必须使用中文书写。
     user_prompt: |
       检测视频帧中的应急车道占用情况。
 
@@ -178,7 +175,6 @@ prompt_templates:
 
 
       重要：
-      - 所有文本字段 "description"、"reasoning" 和 "summary" 必须使用中文书写。
       - 应急车道占用判断要先确认区域归属，再判断车辆行为。
       - 车辆明确进入应急车道/路肩，或进入导流区、鱼骨线区域、网状实线区域、分流鼻端区域，需要报告detected=true。
       - 即使只有一辆车部分进入应急车道/路肩或导流区/分流鼻端，也必须报告 detected=true。
@@ -209,7 +205,7 @@ prompt_templates:
   - template_id: "traffic_accident_detection"
     name: "交通事故检测"
     system_prompt: |
-      你是一名专业的高速公路交通监控分析师。你的任务是检测视频中的交通事故事件。
+      你是一名专业的高速公路交通监控分析师。你的任务是检测视频中的交通事故事件。所有文本字段 "description"、"reasoning" 和 "summary" 必须使用中文书写。
     user_prompt: |
       检测这些视频帧中的交通事故事件。
 
@@ -248,9 +244,7 @@ prompt_templates:
         "summary": "未检测到交通事故。"
       }
 
-      重要：
-      - 所有文本字段 "description"、"reasoning" 和 "summary" 必须使用中文书写。
-      - 救援车辆到场本身不是事故证据，需结合其他视觉线索判断。
+      重要：救援车辆到场本身不是事故证据，需结合其他视觉线索判断。
     output_format_hint: "JSON"
 
   # ---------------------------------------------------------------------------
@@ -259,7 +253,7 @@ prompt_templates:
   - template_id: "pedestrian_detection"
     name: "Pedestrian Detection"
     system_prompt: |
-      你是一名专业的高速公路交通监控分析师。你的任务是检测视频中高速公路上的行人。
+      你是一名专业的高速公路交通监控分析师。你的任务是检测视频中高速公路上的行人。所有文本字段 "description"、"reasoning" 和 "summary" 必须使用中文书写。
     user_prompt: |
       检测这些视频帧中高速公路上的行人。
 
@@ -309,9 +303,6 @@ prompt_templates:
         "summary": "未检测到高速公路行人。"
       }
 
-      重要：
-      - 所有文本字段 "description"、"reasoning" 和 "summary" 必须使用中文书写。
-
     output_format_hint: "JSON"
 
   # ---------------------------------------------------------------------------
@@ -321,6 +312,7 @@ prompt_templates:
     name: "远距离非机动车批量 ROI 检测"
     system_prompt: |
       你是一名高速公路交通监控分析师。你的任务是检测单帧图像中远距离可疑的非机动车（摩托车、电动车、自行车、三轮车等），并输出归一化 bbox。
+      所有文本字段必须使用中文。
     user_prompt: |
       输入为单帧高速公路监控图像。
 
@@ -345,8 +337,7 @@ prompt_templates:
       提示：
       - `bbox_norm` 取值范围 [0.0, 1.0]，x1 < x2，y1 < y2。
       - 目标应在道路区域（车道、应急车道、路肩等）。
-      - 不要把护栏、阴影、反光点、普通四轮车当作目标。
-      - 仅排除前景中**固定的**金属杆、支架、摄像头外壳、立柱、雨刷、电线、标识牌杆等固定遮挡物；不要仅因远处小目标轮廓与这些物体外形近似就泛化排除。
+      - 不要把护栏、阴影、反光点、普通四轮车、前景固定遮挡物（金属杆、支架、摄像头外壳、立柱、雨刷、电线、标识牌杆）当作目标；不要仅因远处小目标轮廓与这些物体外形近似就泛化排除。
 
       遮挡与置信度：
       - 如果目标被电线杆、护栏、其他车辆遮挡导致只露出部分车身，或看起来是四轮车残部，必须设置 occluded=true 且 confidence=low。
@@ -361,45 +352,8 @@ prompt_templates:
       {"bbox_norm": null, "occluded": false, "confidence": "low", "reason": "画面远处均为护栏与路面反光，未见位于道路区域的可疑小目标"}
       {"bbox_norm": null, "occluded": false, "confidence": "low", "reason": "画面中的车辆均为普通四轮机动车，没有明显小于四轮车的可疑目标"}
 
-      重要：
-      - 仅输出一个最可疑的远距离非机动车 bbox。
-      - 所有文本字段使用中文。
+      重要：仅输出一个最可疑的远距离非机动车 bbox。
     output_format_hint: "JSON"
-
-  # ---------------------------------------------------------------------------
-  # 5b. Far Non-motor Motion Verification (helper for event_id=4)
-  # ---------------------------------------------------------------------------
-  - template_id: "far_non_motor_motion_verification"
-    name: "远距离非机动车运动反射验证"
-    system_prompt: |
-      你是一名高速公路交通监控分析师，擅长通过对比相邻帧判断目标是否移动。
-    user_prompt: |
-      输入为两张放大的相邻帧 ROI 图像的横向拼接：
-      - 左侧：当前帧红色方框内的区域放大图
-      - 右侧：相邻帧（前一帧或后一帧）同一位置红色方框内的区域放大图
-
-      任务：判断红色方框内的目标在两帧之间是否发生明显变化或移动。
-
-      输出 JSON：
-      {
-        "is_moving": <true|false>,
-        "reason": "<判断理由>"
-      }
-
-      判断标准：
-      - 如果方框内的物体位置、形状、姿态、阴影在两帧间有明显变化，说明它在移动，is_moving=true
-      - 如果方框内的物体几乎不变（只是背景/路面/护栏/井盖/标志牌阴影），is_moving=false
-      - 高速公路上的移动小型物体更可能是非机动车（摩托车、电动车等）
-
-      示例：
-      {"is_moving": true, "reason": "右侧相邻帧中框内目标位置明显向左移动，轮廓姿态发生变化，说明是移动目标"}
-      {"is_moving": false, "reason": "两帧中框内均为同一位置的路面反光点，形状和位置几乎无变化，为静态物体"}
-
-      重要：
-      - 仅判断框内目标是否移动，不要输出 bbox。
-      - 所有文本字段使用中文。
-    output_format_hint: "JSON"
-    enable_far_object_enhancement: false
 
   # ---------------------------------------------------------------------------
   # 6. Non-motor / Two-wheel Vehicle Detection (event_id=4)
@@ -408,6 +362,7 @@ prompt_templates:
     name: "Non-motor Vehicle Detection"
     system_prompt: |
       你是一名专业的高速公路交通监控分析师。你的任务是判断合成图像红色方框内是否为非机动车（摩托车、电动车、自行车、三轮车）。
+      所有文本字段必须使用中文。
     user_prompt: |
       输入为 1-2 张合成图像：
       - 第一张（如果有）：左侧为原视频帧，右侧红色方框区域为远距离可疑目标的放大图。
@@ -432,8 +387,7 @@ prompt_templates:
       - 工程车辆、压路机、沥青摊铺机、挖掘机、起重机、清扫车、水泥搅拌车等异形车辆
       - 施工区域内的车辆或人员（周围有交通锥、隔离栏、施工标志牌、工程车辆、反光背心人员）
       - 护栏边缘穿反光背心的施工人员或养护人员
-      - 路面反光点、阴影、污渍、交通标志牌、井盖等静态物体
-      - 前景中的监控摄像头、支架、立柱、雨刷、电线、标识牌杆等固定遮挡物
+      - 静态物体与前景固定遮挡物：路面反光点、阴影、污渍、交通标志牌、井盖、监控摄像头、支架、立柱、雨刷、电线、标识牌杆
       - 红框内只是一团无结构的暗斑、黑块、阴影、模糊色块，无法确认车身结构的
       - 夜间远处仅有一个亮点、光斑或反光点，看不到车身轮廓的
       - 只是一个小黑点或无法确认车身结构的模糊目标
@@ -445,8 +399,6 @@ prompt_templates:
         "detected": false,
         "reason": "<未发现理由>"
       }
-
-      所有文本字段使用中文。
     output_format_hint: "JSON"
     enable_far_object_enhancement: true
 
@@ -456,7 +408,7 @@ prompt_templates:
   - template_id: "heavy_congestion_detection"
     name: "严重拥堵检测"
     system_prompt: |
-      你是一名交通监控分析师。你的任务是检测高速公路上的严重交通拥堵事件。
+      你是一名交通监控分析师。你的任务是检测高速公路上的严重交通拥堵事件。所有文本字段 "description"、"reasoning" 和 "summary" 必须使用中文书写。
     user_prompt: |
       检测这些视频帧中是否存在交通拥堵。
 
@@ -509,9 +461,6 @@ prompt_templates:
         "summary": "未检测到严重交通拥堵。"
       }
 
-      重要：
-      - 所有文本字段 "description"、"reasoning" 和 "summary" 必须使用中文书写。
-  
     output_format_hint: "JSON"
 
   # ---------------------------------------------------------------------------
@@ -520,7 +469,7 @@ prompt_templates:
   - template_id: "road_construction_detection"
     name: "道路施工检测"
     system_prompt: |
-      你是一名交通监控分析师。检测活跃的道路施工或维护作业区。
+      你是一名交通监控分析师。检测活跃的道路施工或维护作业区。所有文本字段 "description"、"reasoning" 和 "summary" 必须使用中文书写。
     user_prompt: |
       检测这些视频帧中的道路施工/维护作业区。
 
@@ -554,9 +503,7 @@ prompt_templates:
         "summary": "未检测到道路施工。"
       }
 
-      重要：
-      - 所有文本字段 "description"、"reasoning" 和 "summary" 必须使用中文书写。
-      - 务必保守。如果不确定是施工还是日常清洁，报告 detected=false 并说明原因。
+      重要：务必保守。如果不确定是施工还是日常清洁，报告 detected=false 并说明原因。
 
   # ---------------------------------------------------------------------------
   # 9. Direct Reversing Detection (event_id=7, expert_agent)
@@ -564,7 +511,7 @@ prompt_templates:
   - template_id: "direct_reversing_detection"
     name: "直接逆行/倒车检测"
     system_prompt: |
-      你是一名交通监控分析师，检测逆行/倒车车辆。输出必须是合法 JSON，不含其他文本。
+      你是一名交通监控分析师，检测逆行/倒车车辆。输出必须是合法 JSON，不含其他文本。所有文本字段必须使用中文。
     user_prompt: |
       检测视频帧中的逆行/倒车车辆。
 
@@ -601,7 +548,6 @@ prompt_templates:
       未检测到时：{"detected": false, "instances": [], "summary": "未检测到逆行车辆。"}
 
       重要：
-      - 所有文本字段使用中文。
       - 务必保守。仅在确认车辆实际运动方向与道路正常流向相反时才报告 detected=true。
       - 如果所有车辆运动方向均正常，必须返回 detected=false。
       - **不要仅通过车头朝向判断逆行**，要以车辆相对于固定参照物的实际位移方向为准。
@@ -614,7 +560,7 @@ prompt_templates:
   - template_id: "thrown_object_detection"
     name: "抛洒物检测"
     system_prompt: |
-      你是一名交通监控分析师。你的任务是检测车道内可能影响车辆正常通行的抛洒物。
+      你是一名交通监控分析师。你的任务是检测车道内可能影响车辆正常通行的抛洒物。所有文本字段 "description"、"reasoning" 和 "summary" 必须使用中文书写。
     user_prompt: |
       检测这些视频帧中的抛洒物（遗落至车道内的异物）。
 
@@ -669,7 +615,6 @@ prompt_templates:
       }
 
       重要：
-      - 所有文本字段 "description"、"reasoning" 和 "summary" 必须使用中文书写。
       - 即使只有很小的可疑物体，也要报告 detected=true。
       - 抛洒物通常很小，在720p缩放下可能只有10x10像素，需要特别注意。
     output_format_hint: "JSON"
@@ -680,7 +625,7 @@ prompt_templates:
   - template_id: "lane_change_solid_detection"
     name: "实线变道检测"
     system_prompt: |
-      你是一名交通监控分析师。你的任务是检测车辆跨越实线变道的违规行为。
+      你是一名交通监控分析师。你的任务是检测车辆跨越实线变道的违规行为。所有文本字段 "description"、"reasoning" 和 "summary" 必须使用中文书写。
     user_prompt: |
       检测这些视频帧中是否存在车辆跨越实线（白色或黄色实线）变道的违规行为。
 
@@ -747,7 +692,6 @@ prompt_templates:
       }
 
       重要：
-      - 所有文本字段 "description"、"reasoning" 和 "summary" 必须使用中文书写。
       - 严格区分"正常行驶压线"和"主动变道跨越实线"，前者不判定为违规。
       - 注意导流线、虚实线等特殊标线情况。
       - 保持保守。仅在多帧确认车辆完整跨越实线变道后才报告。
@@ -759,7 +703,7 @@ prompt_templates:
   - template_id: "adjudication"
     name: "事件汇总裁决"
     system_prompt: |
-      你是一名专业的高速公路交通事件汇总专家。你的任务是基于以下专家Agent的初步检测结果、关键帧图像以及业务规则，对交通事件进行最终裁决。
+      你是一名专业的高速公路交通事件汇总专家。你的任务是基于以下专家Agent的初步检测结果、关键帧图像以及业务规则，对交通事件进行最终裁决。所有文本字段必须使用中文书写。
 
       核心原则：
       1. 每位专家只负责事实识别（看到什么就报什么），不做排除判断。
@@ -861,7 +805,6 @@ prompt_templates:
       }
 
       重要：
-      - 所有文本字段必须使用中文书写。
       - 保持客观，依据视觉证据和提供的业务规则进行判断。
       - audit_log 必须覆盖所有被排除的事件，不能遗漏。
 

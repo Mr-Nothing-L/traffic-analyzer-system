@@ -68,6 +68,19 @@ class ReportGenerator:
         Report
             Fully populated Pydantic model ready for serialization.
         """
+        from traffic_analyzer.models.schemas import SceneInfo
+
+        common_kwargs = {
+            "video_info": video_meta,
+            "scene_summary": scene_info or SceneInfo(),
+            "llm_usage_stats": usage_stats,
+            "analysis_duration_sec": analysis_duration_sec,
+            "generated_at": datetime.now(),
+            "adjudication_reasoning": adjudication_reasoning,
+            "reasoning_chain": reasoning_chain or [],
+            "audit_log": audit_log or [],
+        }
+
         try:
             # Sort results by event_id for deterministic output
             sorted_results = sorted(event_results, key=lambda r: r.event_id)
@@ -82,22 +95,14 @@ class ReportGenerator:
                 scene_info, sorted_results
             )
 
-            from traffic_analyzer.models.schemas import SceneInfo
             return Report(
-                video_info=video_meta,
-                scene_summary=scene_info or SceneInfo(),
+                **common_kwargs,
                 overall_traffic_description=overall_desc,
                 event_results=sorted_results,
                 expert_candidates=expert_candidates or [],
                 binary_encoding=binary_encoding,
                 final_classification=final_classification,
                 disposal_recommendations=disposal_recommendations,
-                llm_usage_stats=usage_stats,
-                analysis_duration_sec=analysis_duration_sec,
-                generated_at=datetime.now(),
-                adjudication_reasoning=adjudication_reasoning,
-                reasoning_chain=reasoning_chain or [],
-                audit_log=audit_log or [],
             )
         except Exception as exc:
             logger.error(
@@ -106,10 +111,8 @@ class ReportGenerator:
                 exc,
                 exc_info=True,
             )
-            from traffic_analyzer.models.schemas import SceneInfo
             return Report(
-                video_info=video_meta,
-                scene_summary=scene_info or SceneInfo(),
+                **common_kwargs,
                 overall_traffic_description=f"报告生成过程中发生错误: {exc}",
                 event_results=[],
                 binary_encoding=BinaryEncoding(
@@ -119,12 +122,6 @@ class ReportGenerator:
                 ),
                 final_classification="报告生成失败，请检查日志。",
                 disposal_recommendations=[],
-                llm_usage_stats=usage_stats,
-                analysis_duration_sec=analysis_duration_sec,
-                generated_at=datetime.now(),
-                adjudication_reasoning=adjudication_reasoning,
-                reasoning_chain=reasoning_chain or [],
-                audit_log=audit_log or [],
             )
 
     def to_json(self, report: Report) -> str:
@@ -718,6 +715,63 @@ class ReportGenerator:
 
         return "\n".join(result)
 
+    def _render_far_enhancement(
+        self, candidate: Optional[Dict[str, Any]]
+    ) -> List[str]:
+        """Render far-distance non-motor vehicle enhancement evidence."""
+        if not candidate:
+            return []
+
+        lines: List[str] = []
+        raw_vlm_response = candidate.get("raw_vlm_response", {})
+        composite_path = raw_vlm_response.get("composite_image_path")
+        motion_composite_path = raw_vlm_response.get("motion_composite_image_path")
+        has_header = False
+
+        if composite_path:
+            lines.append("#### 远距离非机动车增强证据")
+            lines.append(f"**远距离增强合成图**: `{composite_path}`")
+            lines.append("")
+            lines.append(f"![远距离非机动车增强]({composite_path})")
+            lines.append("")
+            has_header = True
+
+        if motion_composite_path:
+            if not has_header:
+                lines.append("#### 远距离非机动车增强证据")
+                lines.append("")
+            lines.append(f"**运动反射验证合成图**: `{motion_composite_path}`")
+            lines.append("")
+            lines.append(f"![运动反射验证]({motion_composite_path})")
+            lines.append("")
+
+        frame_analysis_log = raw_vlm_response.get("far_enhancement", {}).get("frame_analysis_log")
+        if frame_analysis_log:
+            lines.append("#### 逐帧 ROI 分析")
+            lines.append("")
+            lines.append("| 帧号 | 是否有候选 | bbox | 面积(px) | 宽高比 | 置信度 | 运动分数 | 原因 |")
+            lines.append("|------|------------|------|----------|--------|--------|----------|------|")
+            for entry in frame_analysis_log:
+                has_candidate = bool(entry.get("has_candidate", False))
+                has_candidate_str = "是" if has_candidate else "否"
+                if has_candidate:
+                    bbox_str = str(entry.get("bbox_norm", "—"))
+                    area_str = str(entry.get("area_px", "—"))
+                    aspect_val = entry.get("aspect_ratio")
+                    aspect_str = f"{aspect_val:.2f}" if aspect_val is not None else "—"
+                    confidence_str = str(entry.get("confidence", "—"))
+                    motion_val = entry.get("motion_score")
+                    motion_str = f"{motion_val:.3f}" if motion_val is not None else "—"
+                else:
+                    bbox_str = area_str = aspect_str = confidence_str = motion_str = "—"
+                reason_str = str(entry.get("reason", ""))
+                lines.append(
+                    f"| {entry.get('frame', '—')} | {has_candidate_str} | {bbox_str} | {area_str} | {aspect_str} | {confidence_str} | {motion_str} | {reason_str} |"
+                )
+            lines.append("")
+
+        return lines
+
     def _render_event_result(self, result: EventResult, expert_candidates: Optional[List[Dict[str, Any]]] = None) -> List[str]:
         """Render a single :class:`EventResult` as Markdown lines."""
         try:
@@ -730,6 +784,7 @@ class ReportGenerator:
             lines.append("")
 
             # 展示专家原始输出（裁决前）
+            candidate = None
             if expert_candidates:
                 candidate = next((c for c in expert_candidates if c.get("event_id") == result.event_id), None)
                 if candidate:
@@ -826,56 +881,8 @@ class ReportGenerator:
                 lines.append("")
 
             # 展示远距离非机动车增强合成图（如有）
-            if result.event_id == 4 and expert_candidates:
-                candidate = next(
-                    (c for c in expert_candidates if c.get("event_id") == result.event_id),
-                    None,
-                )
-                if candidate:
-                    raw_vlm_response = candidate.get("raw_vlm_response", {})
-                    composite_path = raw_vlm_response.get("composite_image_path")
-                    if composite_path:
-                        lines.append("#### 远距离非机动车增强证据")
-                        lines.append(f"**远距离增强合成图**: `{composite_path}`")
-                        lines.append("")
-                        lines.append(f"![远距离非机动车增强]({composite_path})")
-                        lines.append("")
-
-                    motion_composite_path = raw_vlm_response.get("motion_composite_image_path")
-                    if motion_composite_path:
-                        if not composite_path:
-                            lines.append("#### 远距离非机动车增强证据")
-                            lines.append("")
-                        lines.append(f"**运动反射验证合成图**: `{motion_composite_path}`")
-                        lines.append("")
-                        lines.append(f"![运动反射验证]({motion_composite_path})")
-                        lines.append("")
-
-                    # 展示逐帧 ROI 分析（远距离非机动车增强流程产生）
-                    frame_analysis_log = raw_vlm_response.get("far_enhancement", {}).get("frame_analysis_log")
-                    if frame_analysis_log:
-                        lines.append("#### 逐帧 ROI 分析")
-                        lines.append("")
-                        lines.append("| 帧号 | 是否有候选 | bbox | 面积(px) | 宽高比 | 置信度 | 运动分数 | 原因 |")
-                        lines.append("|------|------------|------|----------|--------|--------|----------|------|")
-                        for entry in frame_analysis_log:
-                            has_candidate = bool(entry.get("has_candidate", False))
-                            has_candidate_str = "是" if has_candidate else "否"
-                            if has_candidate:
-                                bbox_str = str(entry.get("bbox_norm", "—"))
-                                area_str = str(entry.get("area_px", "—"))
-                                aspect_val = entry.get("aspect_ratio")
-                                aspect_str = f"{aspect_val:.2f}" if aspect_val is not None else "—"
-                                confidence_str = str(entry.get("confidence", "—"))
-                                motion_val = entry.get("motion_score")
-                                motion_str = f"{motion_val:.3f}" if motion_val is not None else "—"
-                            else:
-                                bbox_str = area_str = aspect_str = confidence_str = motion_str = "—"
-                            reason_str = str(entry.get("reason", ""))
-                            lines.append(
-                                f"| {entry.get('frame', '—')} | {has_candidate_str} | {bbox_str} | {area_str} | {aspect_str} | {confidence_str} | {motion_str} | {reason_str} |"
-                            )
-                        lines.append("")
+            if result.event_id == 4:
+                lines.extend(self._render_far_enhancement(candidate))
 
             return lines
         except Exception as exc:

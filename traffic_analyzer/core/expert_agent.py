@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import json
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -325,72 +326,239 @@ class ExpertAgent:
         ]
         return any(keyword in lower for keyword in car_keywords)
 
-    def _is_no_structure_reasoning(self, reason: str) -> bool:
-        """判断 reason 文本是否说明框内没有可辨识的车辆结构证据。
+    # Pattern matching phrases that indicate the ROI lacks identifiable
+    # vehicle-structure evidence (no wheels, handlebars, rider, lights, etc.).
+    _NO_STRUCTURE_RE = re.compile(
+        r"(无|没有)(结构|明确|可辨识|清晰|具体|车轮|车把|车灯|车牌|骑乘|骑手|头盔|车身|车辆|非机动车|摩托车|两轮|三轮|轮廓|明显)|"
+        r"轮廓不清|无明显|"
+        r"无法(确认|辨认|识别|判断|确定|提供)|"
+        r"不能(确认|辨认|识别|判断|确定)|"
+        r"看不清|看不见|看不到|看不出|"
+        r"(仅|只|仅为)(是|为|能看到|是一个|一个|一团|一块)|"
+        r"暗斑|黑块|阴影|模糊色块",
+        re.IGNORECASE,
+    )
 
-        当最终分类器因为“看不到车轮、车把、骑手、车灯、车牌等具体结构”
-        而拒绝时，fallback 不应再把这个候选提升为 true。否则会把暗斑、阴影、
-        路面污渍等无结构目标误报为非机动车。
-        """
-        if not reason:
-            return False
-        lower = reason.lower()
-        no_structure_keywords = [
-            "无结构",
-            "没有结构",
-            "没有明确",
-            "没有可辨识",
-            "没有清晰",
-            "没有具体",
-            "没有车轮",
-            "没有车把",
-            "没有车灯",
-            "没有车牌",
-            "没有骑乘",
-            "没有骑手",
-            "没有头盔",
-            "没有车身",
-            "没有车辆",
-            "没有非机动车",
-            "没有摩托车",
-            "没有两轮",
-            "没有三轮",
-            "无法确认",
-            "无法辨认",
-            "无法识别",
-            "无法判断",
-            "无法确定",
-            "不能确认",
-            "不能辨认",
-            "不能识别",
-            "不能判断",
-            "不能确定",
-            "看不清",
-            "看不见",
-            "看不到",
-            "看不出",
-            "仅是一团",
-            "只是一团",
-            "仅为一团",
-            "仅是一块",
-            "只是一块",
-            "仅为一块",
-            "暗斑",
-            "黑块",
-            "阴影",
-            "模糊色块",
-            "无明确轮廓",
-            "没有轮廓",
-            "轮廓不清",
-            "没有明显",
-            "无明显",
-            "仅能看到",
-            "只能看到",
-            "仅是一个",
-            "只是一个",
-            "无法提供",
-        ]
-        return any(keyword in lower for keyword in no_structure_keywords)
+    def _is_no_structure_reasoning(self, reason: str) -> bool:
+        """判断 reason 文本是否说明框内没有可辨识的车辆结构证据。"""
+        return bool(reason) and bool(self._NO_STRUCTURE_RE.search(reason))
+
+    def _build_far_candidate(
+        self,
+        frame_info: Dict[str, Any],
+        reason: str,
+        frame_analysis_log: List[Dict[str, Any]],
+        raw_text: Optional[str] = None,
+        fallback: bool = False,
+    ) -> EventCandidate:
+        """Build a positive EventCandidate from a far-enhancement frame_info dict."""
+        global_index = frame_info["global_index"]
+        adjacent_index = frame_info["adjacent_index"]
+        bbox_norm = frame_info["bbox_norm"]
+        composite_ref = frame_info["composite_ref"]
+        motion_composite_ref = frame_info["motion_composite_ref"]
+
+        far_enhancement: Dict[str, Any] = {
+            "selected_frame_index": global_index,
+            "bbox_norm": bbox_norm,
+            "reason": reason,
+            "frame_analysis_log": frame_analysis_log,
+        }
+        if fallback:
+            far_enhancement["fallback"] = True
+
+        raw_text = raw_text if raw_text is not None else reason
+        return EventCandidate(
+            event_id=self.category.event_id,
+            event_name=self.category.name_zh,
+            detected=True,
+            summary=f"检测到摩托车/非机动车：{reason}",
+            instances=[
+                EventInstance(
+                    event_id=self.category.event_id,
+                    event_name=self.category.name_zh,
+                    start_time_sec=0.0,
+                    end_time_sec=0.0,
+                    evidence_frames=[global_index, adjacent_index],
+                    description=reason,
+                    reasoning=reason,
+                )
+            ],
+            raw_vlm_response={
+                "composite_image_path": composite_ref,
+                "motion_composite_image_path": motion_composite_ref,
+                "far_enhancement": far_enhancement,
+            },
+            raw_vlm_text=raw_text,
+        )
+
+    def _run_final_classifier(
+        self,
+        frame_info: Dict[str, Any],
+        template: PromptTemplate,
+        context_vars: Dict[str, Any],
+    ) -> Optional[EventCandidate]:
+        """Run the final non-motor classifier on a candidate's composites."""
+        try:
+            response = self.vlm_engine.call(
+                template=template,
+                images=[
+                    frame_info["composite_path"],
+                    frame_info["motion_composite_path"],
+                ],
+                context_vars=context_vars,
+                response_schema=_NON_MOTOR_RESPONSE_SCHEMA,
+            )
+        except FatalAPIError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "[expert_agent:_detect_with_far_enhancement] FINAL_CALL_ERROR | event_id=%d frame=%d | %s",
+                self.category.event_id,
+                frame_info["global_index"],
+                exc,
+                exc_info=True,
+            )
+            return None
+
+        if not response.success or not isinstance(response.parsed_data, dict):
+            logger.warning(
+                "[expert_agent:_detect_with_far_enhancement] FINAL_PARSE_ERROR | event_id=%d frame=%d success=%s",
+                self.category.event_id,
+                frame_info["global_index"],
+                response.success,
+            )
+            return None
+
+        detected = bool(response.parsed_data.get("detected", False))
+        final_reason = str(response.parsed_data.get("reason", ""))
+
+        if detected and self._is_explicitly_car_reasoning(final_reason):
+            logger.info(
+                "[expert_agent:_detect_with_far_enhancement] CAR_OVERRIDDEN | event_id=%d frame=%d reason=%s",
+                self.category.event_id,
+                frame_info["global_index"],
+                final_reason,
+            )
+            detected = False
+
+        if detected:
+            return self._build_far_candidate(
+                frame_info,
+                final_reason,
+                frame_info.get("frame_analysis_log", []),
+                raw_text=response.raw_text,
+            )
+        # Preserve the negative classifier reason so fallback logic can still
+        # apply the car-semantic veto.
+        frame_info["negative_final_reason"] = final_reason
+        return None
+
+    def _accept_fallback(
+        self,
+        frame_info: Dict[str, Any],
+        frame_analysis_log: List[Dict[str, Any]],
+    ) -> Optional[EventCandidate]:
+        """Promote a previously negative candidate to detected=True if safe."""
+        if frame_info.get("occluded"):
+            logger.info(
+                "[expert_agent:_detect_with_far_enhancement] FALLBACK_REJECT_OCCLUDED | event_id=%d frame=%d",
+                self.category.event_id,
+                frame_info["global_index"],
+            )
+            return None
+        confidence = str(frame_info.get("confidence", "low")).lower()
+        if confidence not in {"high", "medium"}:
+            logger.info(
+                "[expert_agent:_detect_with_far_enhancement] FALLBACK_REJECT_CONFIDENCE | event_id=%d frame=%d confidence=%s",
+                self.category.event_id,
+                frame_info["global_index"],
+                confidence,
+            )
+            return None
+        # Apply car-semantic veto to the classifier's negative reasoning. The
+        # ROI reason may legitimately mention surrounding cars for comparison,
+        # so only the final classifier's explicit car description is used here.
+        negative_reason = str(frame_info.get("negative_final_reason", ""))
+        if self._is_explicitly_car_reasoning(negative_reason):
+            logger.info(
+                "[expert_agent:_detect_with_far_enhancement] FALLBACK_REJECT_CAR | event_id=%d frame=%d negative_reason=%s",
+                self.category.event_id,
+                frame_info["global_index"],
+                negative_reason,
+            )
+            return None
+        if self._is_no_structure_reasoning(negative_reason):
+            logger.info(
+                "[expert_agent:_detect_with_far_enhancement] FALLBACK_REJECT_NO_STRUCTURE | event_id=%d frame=%d negative_reason=%s",
+                self.category.event_id,
+                frame_info["global_index"],
+                negative_reason,
+            )
+            return None
+        # Use a confident, self-consistent summary so the adjudication layer's
+        # self-consistency check does not downgrade a fallback positive.
+        fallback_reason = (
+            f"检测到远距离非机动车。第{frame_info['global_index']}帧红色方框内目标位于道路区域，"
+            f"尺寸与宽高比符合摩托车、电动车、自行车或三轮车特征。"
+        )
+        return self._build_far_candidate(
+            frame_info,
+            fallback_reason,
+            frame_analysis_log,
+            raw_text=fallback_reason,
+            fallback=True,
+        )
+
+    def _score_far_candidates(
+        self,
+        candidates: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Rank ROI candidates by confidence, area, aspect, occlusion and motion."""
+        if not candidates:
+            return []
+        max_area = max(c["area_px"] for c in candidates)
+        confidence_scores = {"high": 3, "medium": 2, "low": 1}
+        scored: List[Tuple[float, Dict[str, Any]]] = []
+        for candidate in candidates:
+            conf = confidence_scores.get(
+                str(candidate.get("confidence", "low")).lower(), 1
+            )
+            area_score = (
+                candidate["area_px"] / max_area if max_area > 0 else 0.0
+            )
+            aspect_penalty = max(0.0, candidate["aspect_ratio"] - 1.0)
+            occlusion_penalty = 2.0 if candidate.get("occluded") else 0.0
+            motion_score = float(
+                candidate.get("motion_score", {}).get("motion_score", 0.0)
+            )
+            motion_penalty = (
+                _FAR_MOTION_PENALTY
+                if motion_score < _FAR_MOTION_SCORE_THRESHOLD
+                else 0.0
+            )
+            score = (
+                conf
+                + area_score
+                - aspect_penalty
+                - occlusion_penalty
+                - motion_penalty
+            )
+            candidate["score"] = score
+            scored.append((score, candidate))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [candidate for _, candidate in scored]
+
+    def _log_frame(
+        self,
+        frame_analysis_log: List[Dict[str, Any]],
+        frame_log: Dict[str, Any],
+        reason: Optional[str] = None,
+    ) -> None:
+        """Append a frame log, optionally setting its reason first."""
+        if reason is not None:
+            frame_log["reason"] = reason
+        frame_analysis_log.append(frame_log)
 
     def _detect_with_far_enhancement(
         self,
@@ -471,210 +639,6 @@ class ExpertAgent:
         # this flow so the report can render a frame-by-frame ROI summary.
         frame_analysis_log: List[Dict[str, Any]] = []
 
-        def _build_candidate(
-            frame_info: Dict[str, Any], classifier_response: Any, reason: str
-        ) -> EventCandidate:
-            global_index = frame_info["global_index"]
-            adjacent_index = frame_info["adjacent_index"]
-            bbox_norm = frame_info["bbox_norm"]
-            composite_ref = frame_info["composite_ref"]
-            motion_composite_ref = frame_info["motion_composite_ref"]
-            return EventCandidate(
-                event_id=self.category.event_id,
-                event_name=self.category.name_zh,
-                detected=True,
-                summary=f"检测到摩托车/非机动车：{reason}",
-                instances=[
-                    EventInstance(
-                        event_id=self.category.event_id,
-                        event_name=self.category.name_zh,
-                        start_time_sec=0.0,
-                        end_time_sec=0.0,
-                        evidence_frames=[global_index, adjacent_index],
-                        description=reason,
-                        reasoning=reason,
-                    )
-                ],
-                raw_vlm_response={
-                    "composite_image_path": composite_ref,
-                    "motion_composite_image_path": motion_composite_ref,
-                    "far_enhancement": {
-                        "selected_frame_index": global_index,
-                        "bbox_norm": bbox_norm,
-                        "reason": reason,
-                        "frame_analysis_log": frame_analysis_log,
-                    },
-                },
-                raw_vlm_text=classifier_response.raw_text,
-            )
-
-        def _run_final_classifier(
-            frame_info: Dict[str, Any]
-        ) -> Optional[EventCandidate]:
-            try:
-                response = self.vlm_engine.call(
-                    template=template,
-                    images=[
-                        frame_info["composite_path"],
-                        frame_info["motion_composite_path"],
-                    ],
-                    context_vars=context_vars,
-                    response_schema=_NON_MOTOR_RESPONSE_SCHEMA,
-                )
-            except FatalAPIError:
-                raise
-            except Exception as exc:
-                logger.error(
-                    "[expert_agent:_detect_with_far_enhancement] FINAL_CALL_ERROR | event_id=%d frame=%d | %s",
-                    self.category.event_id,
-                    frame_info["global_index"],
-                    exc,
-                    exc_info=True,
-                )
-                return None
-
-            if not response.success or not isinstance(response.parsed_data, dict):
-                logger.warning(
-                    "[expert_agent:_detect_with_far_enhancement] FINAL_PARSE_ERROR | event_id=%d frame=%d success=%s",
-                    self.category.event_id,
-                    frame_info["global_index"],
-                    response.success,
-                )
-                return None
-
-            detected = bool(response.parsed_data.get("detected", False))
-            final_reason = str(response.parsed_data.get("reason", ""))
-
-            if detected and self._is_explicitly_car_reasoning(final_reason):
-                logger.info(
-                    "[expert_agent:_detect_with_far_enhancement] CAR_OVERRIDDEN | event_id=%d frame=%d reason=%s",
-                    self.category.event_id,
-                    frame_info["global_index"],
-                    final_reason,
-                )
-                detected = False
-
-            if detected:
-                return _build_candidate(frame_info, response, final_reason)
-            # Preserve the negative classifier reason so fallback logic can still
-            # apply the car-semantic veto.
-            frame_info["negative_final_reason"] = final_reason
-            return None
-
-        def _accept_fallback(frame_info: Dict[str, Any]) -> Optional[EventCandidate]:
-            """Promote a previously negative candidate to detected=True if safe."""
-            if frame_info.get("occluded"):
-                logger.info(
-                    "[expert_agent:_detect_with_far_enhancement] FALLBACK_REJECT_OCCLUDED | event_id=%d frame=%d",
-                    self.category.event_id,
-                    frame_info["global_index"],
-                )
-                return None
-            confidence = str(frame_info.get("confidence", "low")).lower()
-            if confidence not in {"high", "medium"}:
-                logger.info(
-                    "[expert_agent:_detect_with_far_enhancement] FALLBACK_REJECT_CONFIDENCE | event_id=%d frame=%d confidence=%s",
-                    self.category.event_id,
-                    frame_info["global_index"],
-                    confidence,
-                )
-                return None
-            # Apply car-semantic veto to the classifier's negative reasoning. The
-            # ROI reason may legitimately mention surrounding cars for comparison,
-            # so only the final classifier's explicit car description is used here.
-            negative_reason = str(frame_info.get("negative_final_reason", ""))
-            if self._is_explicitly_car_reasoning(negative_reason):
-                logger.info(
-                    "[expert_agent:_detect_with_far_enhancement] FALLBACK_REJECT_CAR | event_id=%d frame=%d negative_reason=%s",
-                    self.category.event_id,
-                    frame_info["global_index"],
-                    negative_reason,
-                )
-                return None
-            if self._is_no_structure_reasoning(negative_reason):
-                logger.info(
-                    "[expert_agent:_detect_with_far_enhancement] FALLBACK_REJECT_NO_STRUCTURE | event_id=%d frame=%d negative_reason=%s",
-                    self.category.event_id,
-                    frame_info["global_index"],
-                    negative_reason,
-                )
-                return None
-            # Use a confident, self-consistent summary so the adjudication layer's
-            # self-consistency check does not downgrade a fallback positive.
-            fallback_reason = (
-                f"检测到远距离非机动车。第{frame_info['global_index']}帧红色方框内目标位于道路区域，"
-                f"尺寸与宽高比符合摩托车、电动车、自行车或三轮车特征。"
-            )
-            global_index = frame_info["global_index"]
-            adjacent_index = frame_info["adjacent_index"]
-            return EventCandidate(
-                event_id=self.category.event_id,
-                event_name=self.category.name_zh,
-                detected=True,
-                summary=f"检测到摩托车/非机动车：{fallback_reason}",
-                instances=[
-                    EventInstance(
-                        event_id=self.category.event_id,
-                        event_name=self.category.name_zh,
-                        start_time_sec=0.0,
-                        end_time_sec=0.0,
-                        evidence_frames=[global_index, adjacent_index],
-                        description=fallback_reason,
-                        reasoning=fallback_reason,
-                    )
-                ],
-                raw_vlm_response={
-                    "composite_image_path": frame_info["composite_ref"],
-                    "motion_composite_image_path": frame_info["motion_composite_ref"],
-                    "far_enhancement": {
-                        "selected_frame_index": global_index,
-                        "bbox_norm": frame_info["bbox_norm"],
-                        "reason": fallback_reason,
-                        "fallback": True,
-                        "frame_analysis_log": frame_analysis_log,
-                    },
-                },
-                raw_vlm_text=fallback_reason,
-            )
-
-        def _score_candidates(
-            candidates: List[Dict[str, Any]]
-        ) -> List[Dict[str, Any]]:
-            """Rank ROI candidates by confidence, area, aspect, occlusion and motion."""
-            if not candidates:
-                return []
-            max_area = max(c["area_px"] for c in candidates)
-            confidence_scores = {"high": 3, "medium": 2, "low": 1}
-            scored: List[Tuple[float, Dict[str, Any]]] = []
-            for candidate in candidates:
-                conf = confidence_scores.get(
-                    str(candidate.get("confidence", "low")).lower(), 1
-                )
-                area_score = (
-                    candidate["area_px"] / max_area if max_area > 0 else 0.0
-                )
-                aspect_penalty = max(0.0, candidate["aspect_ratio"] - 1.0)
-                occlusion_penalty = 2.0 if candidate.get("occluded") else 0.0
-                motion_score = float(
-                    candidate.get("motion_score", {}).get("motion_score", 0.0)
-                )
-                motion_penalty = (
-                    _FAR_MOTION_PENALTY
-                    if motion_score < _FAR_MOTION_SCORE_THRESHOLD
-                    else 0.0
-                )
-                score = (
-                    conf
-                    + area_score
-                    - aspect_penalty
-                    - occlusion_penalty
-                    - motion_penalty
-                )
-                candidate["score"] = score
-                scored.append((score, candidate))
-            scored.sort(key=lambda item: item[0], reverse=True)
-            return [candidate for _, candidate in scored]
-
         # ------------------------------------------------------------------
         # First pass: collect all valid ROI candidates and a per-frame log.
         # ------------------------------------------------------------------
@@ -701,8 +665,11 @@ class ExpertAgent:
             except FatalAPIError:
                 raise
             except Exception as exc:
-                frame_log["reason"] = f"ROI detection failed: {exc}"
-                frame_analysis_log.append(frame_log)
+                self._log_frame(
+                    frame_analysis_log,
+                    frame_log,
+                    reason=f"ROI detection failed: {exc}",
+                )
                 logger.warning(
                     "[expert_agent:_detect_with_far_enhancement] ROI_CALL_ERROR | event_id=%d frame=%d | %s",
                     self.category.event_id,
@@ -714,8 +681,11 @@ class ExpertAgent:
             if not roi_response.success or not isinstance(
                 roi_response.parsed_data, dict
             ):
-                frame_log["reason"] = "ROI response parsing failed"
-                frame_analysis_log.append(frame_log)
+                self._log_frame(
+                    frame_analysis_log,
+                    frame_log,
+                    reason="ROI response parsing failed",
+                )
                 logger.warning(
                     "[expert_agent:_detect_with_far_enhancement] ROI_PARSE_ERROR | event_id=%d frame=%d success=%s",
                     self.category.event_id,
@@ -731,8 +701,11 @@ class ExpertAgent:
             confidence = str(parsed.get("confidence", "low"))
 
             if bbox_norm is None:
-                frame_log["reason"] = reason or "ROI returned no candidate"
-                frame_analysis_log.append(frame_log)
+                self._log_frame(
+                    frame_analysis_log,
+                    frame_log,
+                    reason=reason or "ROI returned no candidate",
+                )
                 logger.info(
                     "[expert_agent:_detect_with_far_enhancement] NO_CANDIDATE | event_id=%d frame=%d reason=%s",
                     self.category.event_id,
@@ -742,8 +715,11 @@ class ExpertAgent:
                 continue
 
             if not isinstance(bbox_norm, list) or len(bbox_norm) != 4:
-                frame_log["reason"] = f"invalid bbox from ROI: {bbox_norm}"
-                frame_analysis_log.append(frame_log)
+                self._log_frame(
+                    frame_analysis_log,
+                    frame_log,
+                    reason=f"invalid bbox from ROI: {bbox_norm}",
+                )
                 logger.warning(
                     "[expert_agent:_detect_with_far_enhancement] INVALID_BBOX | event_id=%d frame=%d bbox=%s",
                     self.category.event_id,
@@ -760,10 +736,11 @@ class ExpertAgent:
                 if not is_bbox_large_enough(
                     bbox_norm, img_width, img_height, min_area_px=80
                 ):
-                    frame_log["reason"] = (
-                        f"ROI candidate too small: area_px={bbox_area} < 80"
+                    self._log_frame(
+                        frame_analysis_log,
+                        frame_log,
+                        reason=f"ROI candidate too small: area_px={bbox_area} < 80",
                     )
-                    frame_analysis_log.append(frame_log)
                     logger.info(
                         "[expert_agent:_detect_with_far_enhancement] ROI_TOO_SMALL | event_id=%d frame=%d area_px=%d < 80",
                         self.category.event_id,
@@ -774,10 +751,11 @@ class ExpertAgent:
                 if not is_bbox_aspect_valid_for_non_motor(
                     bbox_norm, max_ratio=1.2
                 ):
-                    frame_log["reason"] = (
-                        f"ROI candidate aspect ratio rejected: {aspect_ratio:.2f}"
+                    self._log_frame(
+                        frame_analysis_log,
+                        frame_log,
+                        reason=f"ROI candidate aspect ratio rejected: {aspect_ratio:.2f}",
                     )
-                    frame_analysis_log.append(frame_log)
                     logger.info(
                         "[expert_agent:_detect_with_far_enhancement] ASPECT_REJECT | event_id=%d frame=%d bbox=%s ratio=%.2f",
                         self.category.event_id,
@@ -787,8 +765,11 @@ class ExpertAgent:
                     )
                     continue
             except Exception as exc:
-                frame_log["reason"] = f"ROI candidate size check failed: {exc}"
-                frame_analysis_log.append(frame_log)
+                self._log_frame(
+                    frame_analysis_log,
+                    frame_log,
+                    reason=f"ROI candidate size check failed: {exc}",
+                )
                 logger.warning(
                     "[expert_agent:_detect_with_far_enhancement] SIZE_CHECK_ERROR | event_id=%d frame=%d | %s",
                     self.category.event_id,
@@ -863,6 +844,7 @@ class ExpertAgent:
                     "reason": reason,
                     "motion_score": motion_score,
                     "adjacent_index": adjacent_index,
+                    "frame_analysis_log": frame_analysis_log,
                 }
             )
 
@@ -886,7 +868,7 @@ class ExpertAgent:
         # ------------------------------------------------------------------
         # Rank candidates and keep the top K.
         # ------------------------------------------------------------------
-        ranked_candidates = _score_candidates(candidates)
+        ranked_candidates = self._score_far_candidates(candidates)
         top_candidates = ranked_candidates[:_FAR_ENHANCEMENT_TOP_K]
         logger.info(
             "[expert_agent:_detect_with_far_enhancement] TOP_CANDIDATES | event_id=%d total=%d selected=%d",
@@ -903,10 +885,7 @@ class ExpertAgent:
             composite_filename = f"{video_stem}_frame_{global_index}_composite.jpg"
             composite_path = str(output_dir / composite_filename)
             composite_ref = f"{image_ref_prefix}/{composite_filename}"
-            if global_index == len(images) - 1:
-                adjacent_index = global_index - 1
-            else:
-                adjacent_index = global_index + 1
+            adjacent_index = candidate["adjacent_index"]
             motion_composite_filename = (
                 f"{video_stem}_frame_{global_index}_motion_{adjacent_index}.jpg"
             )
@@ -951,11 +930,12 @@ class ExpertAgent:
                     "motion_composite_path": motion_composite_path,
                     "composite_ref": composite_ref,
                     "motion_composite_ref": motion_composite_ref,
-                    "adjacent_index": adjacent_index,
                 }
             )
 
-            final_candidate = _run_final_classifier(candidate)
+            final_candidate = self._run_final_classifier(
+                candidate, template=template, context_vars=context_vars
+            )
             if final_candidate is not None:
                 logger.info(
                     "[expert_agent:_detect_with_far_enhancement] COMPLETE | event_id=%d detected=True frame=%d composite=%s motion=%s",
@@ -979,7 +959,9 @@ class ExpertAgent:
         # ------------------------------------------------------------------
         best_candidate = top_candidates[0]
         if "composite_path" in best_candidate:
-            fallback_candidate = _accept_fallback(best_candidate)
+            fallback_candidate = self._accept_fallback(
+                best_candidate, frame_analysis_log
+            )
             if fallback_candidate is not None:
                 logger.info(
                     "[expert_agent:_detect_with_far_enhancement] FALLBACK_ACCEPT | event_id=%d frame=%d",

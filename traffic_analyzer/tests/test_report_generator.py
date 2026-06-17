@@ -148,6 +148,38 @@ def generator() -> ReportGenerator:
     return ReportGenerator()
 
 
+@pytest.fixture
+def far_enhancement_result() -> EventResult:
+    """A detected event_id=4 result for far-enhancement rendering tests."""
+    return EventResult(
+        event_id=4,
+        event_name="摩托车出现",
+        detected=True,
+        instances=[
+            EventInstance(
+                event_id=4,
+                event_name="摩托车出现",
+                description="distant motorcycle",
+            )
+        ],
+    )
+
+
+@pytest.fixture
+def far_enhancement_candidate() -> Dict[str, Any]:
+    """Base expert candidate for event_id=4 with composite and motion paths."""
+    return {
+        "event_id": 4,
+        "event_name": "摩托车出现",
+        "detected": True,
+        "summary": "detected",
+        "raw_vlm_response": {
+            "composite_image_path": "/tmp/test_video_frame_2_composite.jpg",
+            "motion_composite_image_path": "/tmp/test_video_frame_2_motion_3.jpg",
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -531,101 +563,55 @@ class TestDisposalRecommendations:
 
 
 class TestFarEnhancementEvidence:
-    def test_composite_image_embedded_for_event_id_4(
+    @pytest.mark.parametrize(
+        "composite_path,motion_path",
+        [
+            ("/tmp/test_video_frame_2_composite.jpg", None),
+            (
+                "/tmp/test_video_frame_2_composite.jpg",
+                "/tmp/test_video_frame_2_motion_3.jpg",
+            ),
+        ],
+        ids=["composite_only", "composite_and_motion"],
+    )
+    def test_composite_images_embedded_for_event_id_4(
         self,
         generator: ReportGenerator,
         scene_info: SceneInfo,
         video_meta: VideoMetadata,
         usage_stats: Dict[str, Any],
+        far_enhancement_result: EventResult,
+        far_enhancement_candidate: Dict[str, Any],
+        composite_path: str,
+        motion_path: Optional[str],
     ) -> None:
-        """Markdown should embed the far-distance non-motor composite image."""
-        composite_path = "/tmp/test_video_frame_2_composite.jpg"
-        results = [
-            EventResult(
-                event_id=4,
-                event_name="摩托车出现",
-                detected=True,
-                instances=[
-                    EventInstance(
-                        event_id=4,
-                        event_name="摩托车出现",
-                        description="distant motorcycle",
-                    )
-                ],
-            ),
-        ]
-        expert_candidates = [
-            {
-                "event_id": 4,
-                "event_name": "摩托车出现",
-                "detected": True,
-                "summary": "detected",
-                "raw_vlm_response": {"composite_image_path": composite_path},
-            }
-        ]
+        """Markdown should embed the far-distance non-motor composite image(s)."""
+        candidate = {
+            **far_enhancement_candidate,
+            "raw_vlm_response": {
+                "composite_image_path": composite_path,
+                **(
+                    {"motion_composite_image_path": motion_path}
+                    if motion_path
+                    else {}
+                ),
+            },
+        }
         report = generator.generate(
-            event_results=results,
+            event_results=[far_enhancement_result],
             scene_info=scene_info,
             video_meta=video_meta,
             usage_stats=usage_stats,
-            expert_candidates=expert_candidates,
+            expert_candidates=[candidate],
         )
         md = generator.to_markdown(report)
 
         assert "#### 远距离非机动车增强证据" in md
         assert f"**远距离增强合成图**: `{composite_path}`" in md
         assert f"![远距离非机动车增强]({composite_path})" in md
-
-    def test_motion_composite_image_embedded_for_event_id_4(
-        self,
-        generator: ReportGenerator,
-        scene_info: SceneInfo,
-        video_meta: VideoMetadata,
-        usage_stats: Dict[str, Any],
-    ) -> None:
-        """Markdown should embed both the far-distance composite and motion reflection composite."""
-        composite_path = "/tmp/test_video_frame_2_composite.jpg"
-        motion_path = "/tmp/test_video_frame_2_motion_3.jpg"
-        results = [
-            EventResult(
-                event_id=4,
-                event_name="摩托车出现",
-                detected=True,
-                instances=[
-                    EventInstance(
-                        event_id=4,
-                        event_name="摩托车出现",
-                        description="distant motorcycle",
-                    )
-                ],
-            ),
-        ]
-        expert_candidates = [
-            {
-                "event_id": 4,
-                "event_name": "摩托车出现",
-                "detected": True,
-                "summary": "detected",
-                "raw_vlm_response": {
-                    "composite_image_path": composite_path,
-                    "motion_composite_image_path": motion_path,
-                },
-            }
-        ]
-        report = generator.generate(
-            event_results=results,
-            scene_info=scene_info,
-            video_meta=video_meta,
-            usage_stats=usage_stats,
-            expert_candidates=expert_candidates,
-        )
-        md = generator.to_markdown(report)
-
-        assert "#### 远距离非机动车增强证据" in md
-        assert f"**远距离增强合成图**: `{composite_path}`" in md
-        assert f"![远距离非机动车增强]({composite_path})" in md
-        assert f"**运动反射验证合成图**: `{motion_path}`" in md
-        assert f"![运动反射验证]({motion_path})" in md
+        if motion_path:
+            assert f"**运动反射验证合成图**: `{motion_path}`" in md
+            assert f"![运动反射验证]({motion_path})" in md
 
     def test_no_composite_section_without_composite_path(
         self,
@@ -660,22 +646,9 @@ class TestFarEnhancementEvidence:
         scene_info: SceneInfo,
         video_meta: VideoMetadata,
         usage_stats: Dict[str, Any],
+        far_enhancement_result: EventResult,
     ) -> None:
         """Markdown should render a per-frame ROI analysis table when the log exists."""
-        results = [
-            EventResult(
-                event_id=4,
-                event_name="摩托车出现",
-                detected=True,
-                instances=[
-                    EventInstance(
-                        event_id=4,
-                        event_name="摩托车出现",
-                        description="distant motorcycle",
-                    )
-                ],
-            ),
-        ]
         expert_candidates = [
             {
                 "event_id": 4,
@@ -712,7 +685,7 @@ class TestFarEnhancementEvidence:
             }
         ]
         report = generator.generate(
-            event_results=results,
+            event_results=[far_enhancement_result],
             scene_info=scene_info,
             video_meta=video_meta,
             usage_stats=usage_stats,
@@ -731,22 +704,9 @@ class TestFarEnhancementEvidence:
         scene_info: SceneInfo,
         video_meta: VideoMetadata,
         usage_stats: Dict[str, Any],
+        far_enhancement_result: EventResult,
     ) -> None:
         """No per-frame ROI section should appear and rendering should not error when the log is absent."""
-        results = [
-            EventResult(
-                event_id=4,
-                event_name="摩托车出现",
-                detected=True,
-                instances=[
-                    EventInstance(
-                        event_id=4,
-                        event_name="摩托车出现",
-                        description="distant motorcycle",
-                    )
-                ],
-            ),
-        ]
         expert_candidates = [
             {
                 "event_id": 4,
@@ -759,7 +719,7 @@ class TestFarEnhancementEvidence:
             }
         ]
         report = generator.generate(
-            event_results=results,
+            event_results=[far_enhancement_result],
             scene_info=scene_info,
             video_meta=video_meta,
             usage_stats=usage_stats,
