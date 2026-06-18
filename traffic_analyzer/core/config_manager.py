@@ -51,6 +51,7 @@ class ConfigManager:
         "event_categories": "event_categories.yaml",
         "prompt_templates": "prompt_templates.yaml",
     }
+    _PROMPT_DIR = "prompts"
 
     def __init__(self, config_dir: str) -> None:
         """Initialise the manager with a configuration directory.
@@ -104,19 +105,20 @@ class ConfigManager:
             )
             raw_event_categories = {}
 
-        # --- prompt_templates YAML ---
+        # --- prompt_templates YAML (split directory with fallback) ---
         try:
-            raw_prompt_templates = self._load_yaml("prompt_templates")
+            raw_prompt_templates, prompt_files_loaded = self._load_prompt_templates()
         except (FileNotFoundError, ValueError):
             raise  # critical config missing or malformed — must fail fast
         except Exception as exc:
             logger.error(
-                "[config_manager:load_all] PROMPT_TEMPLATES_LOAD_ERROR | file=%s | %s",
-                self._YAML_FILES["prompt_templates"],
+                "[config_manager:load_all] PROMPT_TEMPLATES_LOAD_ERROR | dir=%s | %s",
+                self._PROMPT_DIR,
                 exc,
                 exc_info=True,
             )
             raw_prompt_templates = {}
+            prompt_files_loaded = []
 
         # --- LLM config ---
         try:
@@ -191,12 +193,16 @@ class ConfigManager:
             )
             raise
 
+        total_template_versions = sum(len(v) for v in self._prompt_templates.values())
         logger.info(
-            "Config loaded: %d categories, %d inference rules, %d adjudication rules, %d prompt templates",
+            "Config loaded: %d categories, %d inference rules, %d adjudication rules, "
+            "%d prompt templates (%d versions) from %d file(s)",
             len(self._event_categories),
             len(self._inference_rules),
             len(self._adjudication_rules),
             len(self._prompt_templates),
+            total_template_versions,
+            len(prompt_files_loaded),
         )
 
         return self._system_config
@@ -516,6 +522,100 @@ class ConfigManager:
                 exc_info=True,
             )
             raise
+
+    def _load_prompt_templates(self) -> tuple[Dict[str, Any], List[Path]]:
+        """Load prompt templates from the split ``prompts/`` directory or fall back.
+
+        If ``<config_dir>/prompts/`` exists and contains at least one ``.yaml``
+        file, those files are loaded in lexicographic order and their
+        ``prompt_templates`` lists are merged. If the directory does not exist
+        or is empty, the legacy ``prompt_templates.yaml`` at the config root is
+        loaded instead.
+
+        Duplicate ``template_id`` + ``version`` combinations are resolved with
+        the later file winning; a warning is logged for each duplicate.
+
+        Returns:
+            A tuple of (merged raw dict, list of loaded file paths).
+        """
+        prompt_dir = self.config_dir / self._PROMPT_DIR
+        files_to_load: List[Path] = []
+
+        if prompt_dir.is_dir():
+            yaml_files = sorted([p for p in prompt_dir.glob("*.yaml") if p.is_file()])
+            if yaml_files:
+                files_to_load = yaml_files
+            else:
+                logger.debug(
+                    "Prompt directory %s exists but contains no .yaml files; falling back to %s",
+                    prompt_dir,
+                    self._YAML_FILES["prompt_templates"],
+                )
+
+        if not files_to_load:
+            legacy_path = self.config_dir / self._YAML_FILES["prompt_templates"]
+            if not legacy_path.exists():
+                raise FileNotFoundError(
+                    f"Required config file not found: {legacy_path}"
+                )
+            files_to_load = [legacy_path]
+
+        merged: Dict[str, Any] = {"prompt_templates": []}
+        seen: Dict[str, Dict[str, Path]] = {}
+        loaded_paths: List[Path] = []
+
+        for path in files_to_load:
+            try:
+                with path.open("r", encoding="utf-8") as fh:
+                    data = yaml.safe_load(fh)
+            except Exception as exc:
+                logger.error(
+                    "[config_manager:_load_prompt_templates] YAML_LOAD_ERROR | file=%s | %s",
+                    path,
+                    exc,
+                    exc_info=True,
+                )
+                raise
+
+            if data is None:
+                data = {}
+            if not isinstance(data, dict):
+                raise ValueError(
+                    f"Top-level of {path} must be a mapping, got {type(data).__name__}"
+                )
+
+            templates = data.get("prompt_templates", [])
+            if not isinstance(templates, list):
+                raise ValueError(
+                    f"'prompt_templates' in {path} must be a list, got {type(templates).__name__}"
+                )
+
+            for tmpl in templates:
+                if not isinstance(tmpl, dict):
+                    raise ValueError(
+                        f"Each prompt template in {path} must be a mapping"
+                    )
+                tid = tmpl.get("template_id")
+                version = tmpl.get("version")
+                if tid is None:
+                    raise ValueError(
+                        f"Prompt template in {path} is missing required 'template_id'"
+                    )
+
+                if tid in seen and version in seen[tid]:
+                    logger.warning(
+                        "Duplicate prompt template '%s' version '%s' in %s; overwriting version from %s",
+                        tid,
+                        version,
+                        path,
+                        seen[tid][version],
+                    )
+                seen.setdefault(tid, {})[version] = path
+                merged["prompt_templates"].append(tmpl)
+
+            loaded_paths.append(path)
+
+        return merged, loaded_paths
 
     def _load_env_llm_config(self) -> LLMProviderConfig:
         """Parse ``.env`` (if present) and return an ``LLMProviderConfig``.

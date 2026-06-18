@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from traffic_analyzer.core.expert_agent import _FAR_MOTION_SCORE_THRESHOLD
+from traffic_analyzer.models.schemas import FarObjectEnhancementConfig
 from traffic_analyzer.utils.far_non_motor_enhancer import (
     compute_bbox_area_px,
     compute_bbox_aspect_ratio,
@@ -18,6 +18,7 @@ from traffic_analyzer.utils.far_non_motor_enhancer import (
     compute_roi_motion_score,
     create_composite,
     create_motion_comparison_composite,
+    create_multi_roi_gallery,
     is_bbox_aspect_valid_for_non_motor,
     is_bbox_large_enough,
     load_image,
@@ -324,4 +325,47 @@ def test_compute_roi_motion_score_detects_moving_object():
 
     assert score["mean_diff"] > 0.0
     assert score["fraction_above_threshold"] > 0.0
-    assert score["motion_score"] > _FAR_MOTION_SCORE_THRESHOLD
+    assert score["motion_score"] > FarObjectEnhancementConfig().motion_score_threshold
+
+
+def test_create_multi_roi_gallery_fills_bottom_panel():
+    """Bottom grid cells cover the full panel width and use the full cell height."""
+    width, height = 400, 300
+    frame = np.zeros((height, width, 3), dtype=np.uint8)
+    # Fill a few ROIs with distinct colours so the crops are non-empty.
+    frame[80:120, 60:100] = [255, 0, 0]
+    frame[80:120, 180:220] = [0, 255, 0]
+    frame[180:220, 60:100] = [0, 0, 255]
+    frame[180:220, 180:220] = [255, 255, 0]
+
+    regions = [
+        {"bbox_norm": [0.15, 0.27, 0.25, 0.40], "tag": "cone", "confidence": 0.9},
+        {"bbox_norm": [0.45, 0.27, 0.55, 0.40], "tag": "worker", "confidence": 0.8},
+        {"bbox_norm": [0.15, 0.60, 0.25, 0.73], "tag": "barrier", "confidence": 0.7},
+        {"bbox_norm": [0.45, 0.60, 0.55, 0.73], "tag": "sign", "confidence": 0.6},
+    ]
+
+    gallery = create_multi_roi_gallery(frame, regions)
+    assert gallery.size == (width, height * 2)
+
+    # With 4 ROIs the bottom panel is split into a 2x2 grid.
+    bottom = gallery.crop((0, height, width, height * 2))
+    # Very little grey background should remain: each cell is filled by cover-resize.
+    grey = np.array([240, 240, 240], dtype=np.uint8)
+    arr = np.array(bottom)
+    grey_mask = np.all(arr == grey, axis=2)
+    # Allow only a narrow separator and rounding margins (~2% of pixels).
+    assert grey_mask.sum() / grey_mask.size < 0.02
+
+
+def test_create_multi_roi_gallery_single_roi_uses_full_bottom():
+    """A single ROI occupies the entire bottom panel."""
+    width, height = 200, 150
+    frame = np.full((height, width, 3), 128, dtype=np.uint8)
+    frame[60:90, 80:120] = [255, 0, 0]
+
+    gallery = create_multi_roi_gallery(
+        frame,
+        [{"bbox_norm": [0.40, 0.40, 0.60, 0.60], "tag": "cone", "confidence": 0.95}],
+    )
+    assert gallery.size == (width, height * 2)

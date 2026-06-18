@@ -29,32 +29,24 @@ from traffic_analyzer.utils.far_non_motor_enhancer import (
     compute_roi_motion_score,
     create_composite,
     create_motion_comparison_composite,
-    is_bbox_aspect_valid_for_non_motor,
+    create_multi_roi_gallery,
+    is_bbox_aspect_valid,
     is_bbox_large_enough,
     load_image,
 )
 
 logger = logging.getLogger(__name__)
 
-# Directory where far-distance non-motor vehicle composite images are saved.
+# Directory where far-distance object composite images are saved.
 # Kept relative to the project root so it works across local dev, CI and Docker.
 _FAR_ENHANCEMENT_OUTPUT_DIR = Path("./output/tmp_img")
 
-# Number of top-ranked ROI candidates to classify in the second pass.
-_FAR_ENHANCEMENT_TOP_K = 2
-
-# Motion-filtering parameters for the far-distance non-motor vehicle ROI
-# collection stage.  A candidate whose adjacent-frame difference is too low
-# receives a large scoring penalty so that static foreground objects (cameras,
-# poles, brackets) are unlikely to survive into the top-K set.  No diff images
-# are written to disk; only the scalar motion metrics are retained.
+# Default far-enhancement parameters.  Most are overridden per-template via
+# ``PromptTemplate.far_object_enhancement``; these constants act as fallback
+# defaults and as fixed values that are not exposed in the config object.
 _FAR_MOTION_ENLARGE_SCALE = 3.0
 _FAR_MOTION_GAUSSIAN_KERNEL = (3, 3)
 _FAR_MOTION_PIXEL_THRESHOLD = 8.0
-# A pixel is considered "changed" when its grayscale abs-diff exceeds the
-# pixel threshold.  The combined motion_score = mean_diff + fraction * 100.
-_FAR_MOTION_SCORE_THRESHOLD = 1.0
-_FAR_MOTION_PENALTY = 5.0
 
 # JSON schema expected from the VLM for expert-agent responses.
 _EXPERT_RESPONSE_SCHEMA: Dict[str, Any] = {
@@ -62,6 +54,8 @@ _EXPERT_RESPONSE_SCHEMA: Dict[str, Any] = {
     "required": ["detected"],
     "properties": {
         "detected": {"type": "boolean"},
+        "is_target_explicitly_four_wheel_vehicle": {"type": "boolean"},
+        "target_type": {"type": "string"},
         "summary": {"type": "string"},
         "instances": {
             "type": "array",
@@ -82,7 +76,7 @@ _EXPERT_RESPONSE_SCHEMA: Dict[str, Any] = {
     },
 }
 
-# JSON schema for the far-distance non-motor vehicle per-frame ROI detection.
+# JSON schema for the far-distance per-frame ROI detection.
 _ROI_DETECTION_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "required": ["bbox_norm"],
@@ -99,14 +93,40 @@ _ROI_DETECTION_SCHEMA: Dict[str, Any] = {
     },
 }
 
-# JSON schema for the far-distance non-motor vehicle final classifier.
+# JSON schema for the multi-evidence ROI detection used by event_id=6.
+_MULTI_ROI_DETECTION_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "required": ["evidence_regions"],
+    "properties": {
+        "evidence_regions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["bbox_norm", "tag", "confidence"],
+                "properties": {
+                    "bbox_norm": {
+                        "type": "array",
+                        "items": {"type": "number"},
+                    },
+                    "tag": {"type": "string"},
+                    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                },
+            },
+        },
+        "summary": {"type": "string"},
+    },
+}
+
+# JSON schema for the far-distance object final classifier.
 # This is intentionally separate from the shared _EXPERT_RESPONSE_SCHEMA because
-# the final non-motor classifier returns a minimal {detected, reason} object.
-_NON_MOTOR_RESPONSE_SCHEMA: Dict[str, Any] = {
+# the final classifier returns a minimal {detected, reason} object.
+_FAR_ENHANCEMENT_RESPONSE_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "required": ["detected"],
     "properties": {
         "detected": {"type": "boolean"},
+        "is_target_explicitly_four_wheel_vehicle": {"type": "boolean"},
+        "target_type": {"type": "string"},
         "reason": {"type": "string"},
     },
     "additionalProperties": False,
@@ -191,12 +211,9 @@ class ExpertAgent:
                 summary=f"Failed to load prompt template: {exc}",
             )
 
-        # Decide whether to use the far-distance non-motor vehicle enhancement
-        # path before the template is possibly mutated by prior-knowledge injection.
-        enable_far_enhancement = (
-            self.category.event_id == 4
-            and getattr(template, "enable_far_object_enhancement", False)
-        )
+        # Decide whether to use the far-distance object enhancement path before
+        # the template is possibly mutated by prior-knowledge injection.
+        enable_far_enhancement = template.far_object_enhancement.enabled
 
         # -- 3. Inject prior knowledge (scene_understanding rules) -----------
         # scene_understanding prompt contains universal rules (direction,
@@ -244,7 +261,7 @@ class ExpertAgent:
                 example_output=template.example_output,
                 traffic_percentage=template.traffic_percentage,
                 available_tools=template.available_tools,
-                enable_far_object_enhancement=template.enable_far_object_enhancement,
+                far_object_enhancement=template.far_object_enhancement,
             )
 
         # -- 4. Context variables ----------------------------------------------
@@ -256,7 +273,7 @@ class ExpertAgent:
         if context.video_meta is not None:
             context_vars["video_meta"] = context.video_meta.model_dump()
 
-        # -- 5. Far-distance non-motor vehicle enhancement (event_id=4 only) -----
+        # -- 5. Far-distance object enhancement (template-driven) ---------------
         if enable_far_enhancement:
             enhanced_candidate = self._detect_with_far_enhancement(
                 context=context,
@@ -326,6 +343,211 @@ class ExpertAgent:
         ]
         return any(keyword in lower for keyword in car_keywords)
 
+    # Stricter vehicle-semantic check for pedestrians. A pedestrian standing
+    # near a vehicle is still a pedestrian; we only veto if the text explicitly
+    # says the boxed target itself is a vehicle or an occupant inside a vehicle.
+    _PEDESTRIAN_CAR_RE = re.compile(
+        r"(是|为|疑似|像是|类似|看作|判定为|判断为|确认为)(?:一辆|一个|一尊)?(?:白色|黑色|红色|银色|灰色|蓝色|黄色|深色|浅色)?(?:小|大)?(?:轿车|suv|越野车|货车|卡车|厢式货车|面包车|客车|大巴|中巴|公交车|四轮车|四轮机动车|机动车|汽车)",
+        re.IGNORECASE,
+    )
+    _PEDESTRIAN_CAR_OCCUPANT_RE = re.compile(
+        r"(车内人员|车里的人|坐在车内|在车内|驾驶座|副驾驶|车内)",
+        re.IGNORECASE,
+    )
+    _PEDESTRIAN_NOT_PEDESTRIAN_BUT_CAR_RE = re.compile(
+        r"(不是行人|非行人|不是人|不是高速公路行人|不是滞留人员).*?(轿车|suv|货车|卡车|面包车|客车|四轮车|四轮机动车|汽车|机动车)",
+        re.IGNORECASE,
+    )
+
+    def _is_explicitly_car_reasoning_for_pedestrian(self, reason: str) -> bool:
+        """判断 reason 文本是否明确说明红框内目标是汽车/四轮车或车内人员。"""
+        if not reason:
+            return False
+        return bool(
+            self._PEDESTRIAN_CAR_RE.search(reason)
+            or self._PEDESTRIAN_CAR_OCCUPANT_RE.search(reason)
+            or self._PEDESTRIAN_NOT_PEDESTRIAN_BUT_CAR_RE.search(reason)
+        )
+
+    # Strong positive anchors for non-motor vehicles. If a reason contains these,
+    # the model is describing a motorcycle / e-bike / non-motor vehicle, so we must
+    # not veto it merely because surrounding context mentions a car.
+    _NON_MOTOR_POSITIVE_ANCHORS = [
+        "摩托车",
+        "电动车",
+        "非机动车",
+        "两轮车",
+        "三轮车",
+        "两轮",
+        "三轮",
+        "骑乘者",
+        "骑乘姿态",
+        "骑手",
+        "头盔",
+        "车把",
+        "脚踏车",
+        "自行车",
+        "骑乘",
+    ]
+
+    # Negation / comparison / replacement patterns involving cars. These indicate
+    # the text mentions a car only to contrast with, replace, or describe the
+    # surroundings of the real target, not to assert the target is a car.
+    _NON_MOTOR_CAR_NEGATION_RE = re.compile(
+        r"(?:"
+        r"被.*?轿车.*?取代|被.*?汽车.*?取代|"
+        r"被.*?轿车.*?遮挡|被.*?汽车.*?遮挡|"
+        r"而非轿车|而非汽车|而非机动车|"
+        r"而不是轿车|而不是汽车|而不是机动车|"
+        r"不是轿车|不是汽车|不是机动车|不是suv|不是面包车|不是货车|不是卡车|"
+        r"不是一辆.*?轿车|不是一辆.*?汽车|不是一辆.*?机动车|"
+        r"并未被.*?汽车|并未被.*?轿车|"
+        r"没有被.*?汽车|没有被.*?轿车|"
+        r"并非汽车|并非轿车|并非机动车|"
+        r"没有.*?汽车|没有.*?轿车|没有.*?机动车"
+        r")",
+        re.IGNORECASE,
+    )
+
+    # Explicit statement that the boxed target itself is a car / four-wheel vehicle.
+    _NON_MOTOR_EXPLICIT_CAR_RE = re.compile(
+        r"(?:"
+        r"(?:红框内|框内|目标|该目标|主体|对象|这个物体|ROI内)"
+        r".*?"
+        r"(?:是|为|疑似|像是|类似|看作|判定为|判断为|确认为|属于|归类于)"
+        r"(?:一辆|一台|一个|几辆)?"
+        r"(?:白色|黑色|红色|银色|灰色|蓝色|黄色|深色|浅色|亮色|暗色)?"
+        r"(?:小|大|小型|大型|中型|微型)?"
+        r"(?:轿车|suv|越野车|货车|卡车|厢式货车|面包车|客车|大巴|中巴|公交车|四轮车|四轮机动车|机动车|汽车)"
+        r")",
+        re.IGNORECASE,
+    )
+
+    def _is_explicitly_car_reasoning_for_non_motor(self, reason: str) -> bool:
+        """判断 reason 是否明确说红框内目标是汽车/四轮车（非机动车事件专用）。
+
+        对 event_id=4 做更精细的语义判断：
+        - 若出现否定/对比/替代语境（“而非汽车”“被轿车取代”），返回 False；
+        - 若明确断言“红框内是汽车/轿车/...”，返回 True；
+        - 若出现非机动车/摩托车强锚定词且无明确汽车断言，返回 False。
+        """
+        if not reason:
+            return False
+        lower = reason.lower()
+
+        # 1. Negation / comparison / replacement contexts mentioning cars.
+        if self._NON_MOTOR_CAR_NEGATION_RE.search(reason):
+            return False
+
+        # 2. Explicit assertion that the target is a car.
+        explicit_car_match = self._NON_MOTOR_EXPLICIT_CAR_RE.search(reason)
+        if explicit_car_match:
+            return True
+
+        # 3. Strong positive anchors for non-motor vehicles: never veto.
+        if any(anchor in lower for anchor in self._NON_MOTOR_POSITIVE_ANCHORS):
+            return False
+
+        return False
+
+    def _select_car_veto_check(self, event_id: int):
+        """Return the appropriate car-semantic veto function for an event."""
+        if event_id == 3:
+            return self._is_explicitly_car_reasoning_for_pedestrian
+        if event_id == 4:
+            return self._is_explicitly_car_reasoning_for_non_motor
+        return self._is_explicitly_car_reasoning
+
+    def _build_minimal_final_classifier_template(
+        self,
+        template: PromptTemplate,
+    ) -> PromptTemplate:
+        """Build a concise retry prompt when the first classifier response is unparseable."""
+        if self.category.event_id == 4:
+            example_json = (
+                '{\n'
+                '  "detected": <true|false>,\n'
+                '  "is_target_explicitly_four_wheel_vehicle": <true|false>,\n'
+                '  "target_type": "<汽车|摩托车|电动车|非机动车|施工元素|行人|无法确定>",\n'
+                '  "reason": "<一句话判断理由>"\n'
+                '}'
+            )
+        else:
+            # Pedestrian and construction use the full expert response shape.
+            example_json = (
+                '{\n'
+                '  "detected": <true|false>,\n'
+                '  "is_target_explicitly_four_wheel_vehicle": <true|false>,\n'
+                '  "target_type": "<汽车|摩托车|电动车|非机动车|施工元素|行人|无法确定>",\n'
+                '  "instances": [...],\n'
+                '  "summary": "<总体评估>"\n'
+                '}'
+            )
+        minimal_user = (
+            "你刚才的输出格式不正确，无法按 JSON schema 解析。请仅根据图像重新输出合法 JSON，"
+            "不要包含 markdown 代码块、解释或其他任何文字。\n\n"
+            "必须包含以下字段：\n"
+            f"{example_json}\n\n"
+            "重要提示：\n"
+            "- is_target_explicitly_four_wheel_vehicle 只回答红色方框内的目标本身是否是四轮机动车（汽车/SUV/货车/面包车）。\n"
+            "- 如果目标是行人、摩托车、电动车、非机动车、施工元素，必须填 false。\n"
+            "- 如果只是背景中提到汽车、被汽车取代、与汽车对比，必须填 false。"
+        )
+        return PromptTemplate(
+            template_id=template.template_id,
+            name=template.name,
+            version=template.version,
+            system_prompt=template.system_prompt,
+            user_prompt=minimal_user,
+            output_format_hint="JSON",
+            example_input=None,
+            example_output=None,
+            traffic_percentage=template.traffic_percentage,
+            available_tools=[],
+            far_object_enhancement=template.far_object_enhancement,
+        )
+
+    def _should_veto_as_car(
+        self,
+        parsed: Dict[str, Any],
+        text: str,
+        event_id: int,
+    ) -> bool:
+        """Decide whether to veto the detection because the target is a car.
+
+        Primary path: structured ``is_target_explicitly_four_wheel_vehicle``.
+        Fallback path: regex on the free-text reason when the field is missing.
+        """
+        structured = parsed.get("is_target_explicitly_four_wheel_vehicle")
+        if structured is True:
+            return True
+        if structured is False:
+            return False
+        # Structured field absent/null: fall back to regex reasoning checks.
+        car_check = self._select_car_veto_check(event_id)
+        return bool(car_check(text))
+
+    def _apply_structured_veto_to_candidate(
+        self,
+        candidate: EventCandidate,
+    ) -> EventCandidate:
+        """Force candidate.detected=False when the classifier says it is a car."""
+        parsed = candidate.raw_vlm_response
+        if not isinstance(parsed, dict):
+            return candidate
+        is_car = parsed.get("is_target_explicitly_four_wheel_vehicle")
+        if is_car is True and candidate.detected:
+            logger.info(
+                "[expert_agent:_apply_structured_veto_to_candidate] CAR_OVERRIDDEN | "
+                "event_id=%d target_type=%s",
+                candidate.event_id,
+                parsed.get("target_type", ""),
+            )
+            candidate.detected = False
+        candidate.is_target_explicitly_four_wheel_vehicle = is_car
+        candidate.target_type = str(parsed.get("target_type", ""))
+        return candidate
+
     # Pattern matching phrases that indicate the ROI lacks identifiable
     # vehicle-structure evidence (no wheels, handlebars, rider, lights, etc.).
     _NO_STRUCTURE_RE = re.compile(
@@ -372,7 +594,7 @@ class ExpertAgent:
             event_id=self.category.event_id,
             event_name=self.category.name_zh,
             detected=True,
-            summary=f"检测到摩托车/非机动车：{reason}",
+            summary=f"检测到{self.category.name_zh}：{reason}",
             instances=[
                 EventInstance(
                     event_id=self.category.event_id,
@@ -398,57 +620,229 @@ class ExpertAgent:
         template: PromptTemplate,
         context_vars: Dict[str, Any],
     ) -> Optional[EventCandidate]:
-        """Run the final non-motor classifier on a candidate's composites."""
-        try:
-            response = self.vlm_engine.call(
-                template=template,
-                images=[
-                    frame_info["composite_path"],
-                    frame_info["motion_composite_path"],
-                ],
+        """Run the final far-distance classifier on a candidate's composites.
+
+        The expected response format depends on the event category:
+        - event_id=3 (pedestrian) uses the full expert response schema with
+          ``detected`` / ``instances`` / ``summary``.
+        - event_id=4 (non-motor vehicle) and other categories use the minimal
+          ``{detected, reason}`` classifier schema.
+
+        The classifier is now expected to emit a structured veto field
+        ``is_target_explicitly_four_wheel_vehicle``. When the field is missing
+        or the response cannot be parsed, we fall back to the legacy regex
+        checks and, as a last resort, retry once with a shorter prompt.
+        """
+        global_index = frame_info["global_index"]
+
+        # Pedestrian final classifier returns a full expert response so that
+        # the adjudication layer receives the same structured instances as
+        # other expert agents.
+        if self.category.event_id == 3:
+            response_schema = _EXPERT_RESPONSE_SCHEMA
+        else:
+            response_schema = _FAR_ENHANCEMENT_RESPONSE_SCHEMA
+
+        images = [
+            frame_info["composite_path"],
+            frame_info["motion_composite_path"],
+        ]
+
+        def _call_classifier(
+            prompt_template: PromptTemplate,
+        ) -> Any:
+            return self.vlm_engine.call(
+                template=prompt_template,
+                images=images,
                 context_vars=context_vars,
-                response_schema=_NON_MOTOR_RESPONSE_SCHEMA,
+                response_schema=response_schema,
             )
+
+        try:
+            response = _call_classifier(template)
         except FatalAPIError:
             raise
         except Exception as exc:
             logger.error(
-                "[expert_agent:_detect_with_far_enhancement] FINAL_CALL_ERROR | event_id=%d frame=%d | %s",
+                "[expert_agent:_run_final_classifier] FINAL_CALL_ERROR | event_id=%d frame=%d | %s",
                 self.category.event_id,
-                frame_info["global_index"],
+                global_index,
                 exc,
                 exc_info=True,
             )
             return None
 
+        # Retry once with a minimal prompt if the first response is unparseable.
         if not response.success or not isinstance(response.parsed_data, dict):
             logger.warning(
-                "[expert_agent:_detect_with_far_enhancement] FINAL_PARSE_ERROR | event_id=%d frame=%d success=%s",
+                "[expert_agent:_run_final_classifier] PARSE_RETRY | event_id=%d frame=%d success=%s error=%s",
                 self.category.event_id,
-                frame_info["global_index"],
+                global_index,
                 response.success,
+                getattr(response, "raw_text", "")[:200],
             )
+            retry_template = self._build_minimal_final_classifier_template(template)
+            try:
+                retry_response = _call_classifier(retry_template)
+            except Exception as exc:
+                logger.error(
+                    "[expert_agent:_run_final_classifier] RETRY_CALL_ERROR | event_id=%d frame=%d | %s",
+                    self.category.event_id,
+                    global_index,
+                    exc,
+                    exc_info=True,
+                )
+                retry_response = None
+
+            if (
+                retry_response is not None
+                and retry_response.success
+                and isinstance(retry_response.parsed_data, dict)
+            ):
+                logger.info(
+                    "[expert_agent:_run_final_classifier] RETRY_SUCCESS | event_id=%d frame=%d",
+                    self.category.event_id,
+                    global_index,
+                )
+                response = retry_response
+            else:
+                logger.warning(
+                    "[expert_agent:_run_final_classifier] RETRY_FAILED | event_id=%d frame=%d",
+                    self.category.event_id,
+                    global_index,
+                )
+                # Preserve the raw text so fallback can still apply regex.
+                frame_info["negative_final_reason"] = str(
+                    getattr(response, "raw_text", "")
+                )[:2000]
+                return None
+
+        parsed = response.parsed_data
+        detected = bool(parsed.get("detected", False))
+
+        # Preserve the classifier's raw output before any car-semantic override.
+        # This lets fallback distinguish "classifier was negative" from
+        # "classifier was positive but vetoed because of a car keyword".
+        frame_info["raw_final_detected"] = detected
+        frame_info["is_target_explicitly_four_wheel_vehicle"] = parsed.get(
+            "is_target_explicitly_four_wheel_vehicle"
+        )
+        frame_info["target_type"] = parsed.get("target_type", "")
+
+        # ------------------------------------------------------------------
+        # Pedestrian branch: keep instances/summary from the classifier.
+        # ------------------------------------------------------------------
+        if self.category.event_id == 3:
+            final_summary = str(parsed.get("summary", ""))
+            frame_info["raw_final_reason"] = final_summary
+            final_instances = parsed.get("instances") or []
+
+            # Structured car veto: if the classifier explicitly says the boxed
+            # target is a four-wheel vehicle, override detected=false. Fallback
+            # to regex checks only when the structured field is missing.
+            text_for_veto = " ".join(
+                [
+                    final_summary,
+                    *(
+                        str(inst.get("description", ""))
+                        + " "
+                        + str(inst.get("reasoning", ""))
+                        for inst in final_instances
+                    ),
+                ]
+            )
+            if detected and self._should_veto_as_car(
+                parsed, text_for_veto, self.category.event_id
+            ):
+                logger.info(
+                    "[expert_agent:_run_final_classifier] CAR_OVERRIDDEN | event_id=%d frame=%d summary=%s",
+                    self.category.event_id,
+                    global_index,
+                    final_summary,
+                )
+                detected = False
+
+            if detected:
+                normalized_instances: List[EventInstance] = []
+                for inst in final_instances:
+                    normalized_instances.append(
+                        EventInstance(
+                            event_id=self.category.event_id,
+                            event_name=self.category.name_zh,
+                            start_time_sec=float(inst.get("start_time_sec", 0.0)),
+                            end_time_sec=float(inst.get("end_time_sec", 0.0)),
+                            evidence_frames=inst.get("evidence_frames")
+                            or [global_index, frame_info["adjacent_index"]],
+                            description=str(inst.get("description", ""))
+                            or final_summary,
+                            reasoning=str(inst.get("reasoning", "")) or final_summary,
+                        )
+                    )
+                if not normalized_instances:
+                    normalized_instances = [
+                        EventInstance(
+                            event_id=self.category.event_id,
+                            event_name=self.category.name_zh,
+                            evidence_frames=[global_index, frame_info["adjacent_index"]],
+                            description=final_summary,
+                            reasoning=final_summary,
+                        )
+                    ]
+
+                far_enhancement: Dict[str, Any] = {
+                    "selected_frame_index": global_index,
+                    "bbox_norm": frame_info["bbox_norm"],
+                    "reason": final_summary,
+                    "frame_analysis_log": frame_info.get("frame_analysis_log", []),
+                }
+                return EventCandidate(
+                    event_id=self.category.event_id,
+                    event_name=self.category.name_zh,
+                    detected=True,
+                    summary=final_summary
+                    or f"检测到{self.category.name_zh}",
+                    instances=normalized_instances,
+                    raw_vlm_response={
+                        "composite_image_path": frame_info["composite_ref"],
+                        "motion_composite_image_path": frame_info["motion_composite_ref"],
+                        "far_enhancement": far_enhancement,
+                    },
+                    raw_vlm_text=response.raw_text,
+                    is_target_explicitly_four_wheel_vehicle=False,
+                    target_type=parsed.get("target_type", "行人"),
+                )
+
+            negative_reason = final_summary or "未检测到高速公路行人。"
+            frame_info["negative_final_reason"] = negative_reason
             return None
 
-        detected = bool(response.parsed_data.get("detected", False))
-        final_reason = str(response.parsed_data.get("reason", ""))
+        # ------------------------------------------------------------------
+        # Non-motor / minimal branch: {detected, reason}.
+        # ------------------------------------------------------------------
+        final_reason = str(parsed.get("reason", ""))
+        frame_info["raw_final_reason"] = final_reason
 
-        if detected and self._is_explicitly_car_reasoning(final_reason):
+        if detected and self._should_veto_as_car(
+            parsed, final_reason, self.category.event_id
+        ):
             logger.info(
-                "[expert_agent:_detect_with_far_enhancement] CAR_OVERRIDDEN | event_id=%d frame=%d reason=%s",
+                "[expert_agent:_run_final_classifier] CAR_OVERRIDDEN | event_id=%d frame=%d reason=%s",
                 self.category.event_id,
-                frame_info["global_index"],
+                global_index,
                 final_reason,
             )
             detected = False
 
         if detected:
-            return self._build_far_candidate(
+            candidate = self._build_far_candidate(
                 frame_info,
                 final_reason,
                 frame_info.get("frame_analysis_log", []),
                 raw_text=response.raw_text,
             )
+            candidate.is_target_explicitly_four_wheel_vehicle = False
+            candidate.target_type = parsed.get("target_type", "非机动车")
+            return candidate
         # Preserve the negative classifier reason so fallback logic can still
         # apply the car-semantic veto.
         frame_info["negative_final_reason"] = final_reason
@@ -467,28 +861,73 @@ class ExpertAgent:
                 frame_info["global_index"],
             )
             return None
+
+        # Pedestrians require a higher confidence bar before we override the
+        # final classifier, because the ROI detector is intentionally permissive.
+        confidence_threshold = 0.7 if self.category.event_id == 3 else 0.5
         confidence = self._parse_roi_confidence(frame_info.get("confidence", 0.0))
-        if confidence < 0.5:
+        if confidence < confidence_threshold:
             logger.info(
-                "[expert_agent:_detect_with_far_enhancement] FALLBACK_REJECT_CONFIDENCE | event_id=%d frame=%d confidence=%s",
+                "[expert_agent:_detect_with_far_enhancement] FALLBACK_REJECT_CONFIDENCE | event_id=%d frame=%d confidence=%s threshold=%s",
                 self.category.event_id,
                 frame_info["global_index"],
                 confidence,
+                confidence_threshold,
             )
             return None
+
+        # For pedestrians, re-validate that the ROI itself passed the configured
+        # size/aspect filters. These checks already happened during candidate
+        # collection, but repeating them here makes the fallback self-contained.
+        if self.category.event_id == 3:
+            if not frame_info.get("area_px"):
+                logger.info(
+                    "[expert_agent:_detect_with_far_enhancement] FALLBACK_REJECT_NO_AREA | event_id=%d frame=%d",
+                    self.category.event_id,
+                    frame_info["global_index"],
+                )
+                return None
+            aspect_ratio = float(frame_info.get("aspect_ratio", 0.0))
+            if aspect_ratio <= 0.0:
+                logger.info(
+                    "[expert_agent:_detect_with_far_enhancement] FALLBACK_REJECT_ASPECT | event_id=%d frame=%d aspect=%s",
+                    self.category.event_id,
+                    frame_info["global_index"],
+                    aspect_ratio,
+                )
+                return None
+
         # Apply car-semantic veto to the classifier's negative reasoning. The
         # ROI reason may legitimately mention surrounding cars for comparison,
         # so only the final classifier's explicit car description is used here.
+        # Pedestrians use a stricter veto because a pedestrian near a vehicle is
+        # still a pedestrian.
         negative_reason = str(frame_info.get("negative_final_reason", ""))
-        if self._is_explicitly_car_reasoning(negative_reason):
+        structured_is_car = frame_info.get("is_target_explicitly_four_wheel_vehicle")
+        if structured_is_car is True:
             logger.info(
-                "[expert_agent:_detect_with_far_enhancement] FALLBACK_REJECT_CAR | event_id=%d frame=%d negative_reason=%s",
+                "[expert_agent:_accept_fallback] FALLBACK_REJECT_CAR_STRUCTURED | event_id=%d frame=%d",
                 self.category.event_id,
                 frame_info["global_index"],
-                negative_reason,
             )
             return None
-        if self._is_no_structure_reasoning(negative_reason):
+        if structured_is_car is None:
+            # Structured field missing: fall back to regex reasoning checks.
+            car_veto_check = self._select_car_veto_check(self.category.event_id)
+            if car_veto_check(negative_reason):
+                logger.info(
+                    "[expert_agent:_accept_fallback] FALLBACK_REJECT_CAR_REGEX | event_id=%d frame=%d negative_reason=%s",
+                    self.category.event_id,
+                    frame_info["global_index"],
+                    negative_reason,
+                )
+                return None
+        # The "no structure" veto is specific to non-motor vehicles (event_id=4):
+        # it blocks fallback when the classifier says the box lacks identifiable
+        # vehicle-structure evidence (wheels, handlebars, etc.). For pedestrians
+        # the ROI detector already verified an upright human silhouette, so a
+        # vague "cannot confirm" classifier reason should not block fallback.
+        if self.category.event_id == 4 and self._is_no_structure_reasoning(negative_reason):
             logger.info(
                 "[expert_agent:_detect_with_far_enhancement] FALLBACK_REJECT_NO_STRUCTURE | event_id=%d frame=%d negative_reason=%s",
                 self.category.event_id,
@@ -496,19 +935,120 @@ class ExpertAgent:
                 negative_reason,
             )
             return None
-        # Use a confident, self-consistent summary so the adjudication layer's
-        # self-consistency check does not downgrade a fallback positive.
-        fallback_reason = (
-            f"检测到远距离非机动车。第{frame_info['global_index']}帧红色方框内目标位于道路区域，"
-            f"尺寸与宽高比符合摩托车、电动车、自行车或三轮车特征。"
-        )
-        return self._build_far_candidate(
+
+        # Build a self-consistent summary. For pedestrians, anchor the summary
+        # in the ROI detector's own reason so the report's "expert raw output"
+        # matches the per-frame ROI evidence table.
+        if self.category.event_id == 3:
+            roi_reason = str(frame_info.get("reason", ""))
+            fallback_reason = (
+                f"检测到高速公路行人。第{frame_info['global_index']}帧红色方框内"
+                f"{'，' + roi_reason if roi_reason else '目标位于道路区域，直立人形轮廓'}"
+            )
+        else:
+            fallback_reason = (
+                f"检测到远距离{self.category.name_zh}。第{frame_info['global_index']}帧红色方框内目标位于道路区域，"
+                f"尺寸与宽高比符合{self.category.name_zh}特征。"
+            )
+        candidate = self._build_far_candidate(
             frame_info,
             fallback_reason,
             frame_analysis_log,
             raw_text=fallback_reason,
             fallback=True,
         )
+        candidate.is_target_explicitly_four_wheel_vehicle = False
+        candidate.target_type = "行人" if self.category.event_id == 3 else "非机动车"
+        return candidate
+
+    def _has_construction_evidence(self, regions: List[Dict[str, Any]]) -> bool:
+        """Check if ROI evidence regions satisfy the construction work-zone definition.
+
+        A valid construction scene requires at least one of the following:
+        - at least one cone plus at least one worker or vehicle;
+        - at least three cones (continuous or grouped arrangement);
+        - at least one worker and one vehicle present together;
+        - at least two barriers forming a clear lane closure.
+
+        Only regions with confidence >= 0.5 are counted.
+        """
+        tags = [
+            str(r.get("tag", "")).lower()
+            for r in regions
+            if self._parse_roi_confidence(r.get("confidence", 0.0)) >= 0.5
+        ]
+        cone_count = tags.count("cone")
+        worker_count = tags.count("worker")
+        vehicle_count = tags.count("vehicle")
+        barrier_count = tags.count("barrier")
+
+        if cone_count >= 1 and (worker_count + vehicle_count) >= 1:
+            return True
+        if cone_count >= 3:
+            return True
+        if worker_count >= 1 and vehicle_count >= 1:
+            return True
+        if barrier_count >= 2:
+            return True
+        return False
+
+    def _build_construction_fallback_candidate(
+        self,
+        candidate: EventCandidate,
+        display_regions: List[Dict[str, Any]],
+        valid_regions: List[Dict[str, Any]],
+        selected_index: int,
+        gallery_ref: str,
+        roi_summary: str,
+    ) -> EventCandidate:
+        """Promote a negative construction candidate when evidence clearly supports it."""
+        tag_counts: Dict[str, int] = {}
+        for region in valid_regions:
+            tag = str(region.get("tag", "unknown")).lower()
+            if self._parse_roi_confidence(region.get("confidence", 0.0)) >= 0.5:
+                tag_counts[tag] = tag_counts.get(tag, 0) + 1
+
+        present_tags: List[str] = []
+        if tag_counts.get("cone", 0) > 0:
+            present_tags.append(f"锥桶×{tag_counts['cone']}")
+        if tag_counts.get("worker", 0) > 0:
+            present_tags.append(f"施工人员×{tag_counts['worker']}")
+        if tag_counts.get("vehicle", 0) > 0:
+            present_tags.append(f"施工车辆×{tag_counts['vehicle']}")
+        if tag_counts.get("barrier", 0) > 0:
+            present_tags.append(f"隔离栏/围挡×{tag_counts['barrier']}")
+        if tag_counts.get("sign", 0) > 0:
+            present_tags.append(f"施工标志牌×{tag_counts['sign']}")
+
+        tags_str = "、".join(present_tags) if present_tags else "施工元素"
+        summary = (
+            f"检测到道路施工。证据合成图中出现 {tags_str} 等施工元素，"
+            f"满足施工作业区定义。"
+        )
+
+        candidate.detected = True
+        candidate.summary = summary
+        candidate.instances = [
+            EventInstance(
+                event_id=self.category.event_id,
+                event_name=self.category.name_zh,
+                evidence_frames=[selected_index],
+                description=summary,
+                reasoning=summary,
+            )
+        ]
+
+        candidate.raw_vlm_response["gallery_image_path"] = gallery_ref
+        candidate.raw_vlm_response.setdefault("far_enhancement", {})
+        candidate.raw_vlm_response["far_enhancement"].update(
+            {
+                "selected_frame_index": selected_index,
+                "evidence_regions": display_regions,
+                "summary": roi_summary,
+                "fallback": True,
+            }
+        )
+        return candidate
 
     @staticmethod
     def _parse_roi_confidence(value: Any) -> float:
@@ -523,6 +1063,8 @@ class ExpertAgent:
     def _score_far_candidates(
         self,
         candidates: List[Dict[str, Any]],
+        motion_score_threshold: float = 1.0,
+        motion_penalty: float = 5.0,
     ) -> List[Dict[str, Any]]:
         """Rank ROI candidates by confidence, area, aspect, occlusion and motion."""
         if not candidates:
@@ -539,9 +1081,9 @@ class ExpertAgent:
             motion_score = float(
                 candidate.get("motion_score", {}).get("motion_score", 0.0)
             )
-            motion_penalty = (
-                _FAR_MOTION_PENALTY
-                if motion_score < _FAR_MOTION_SCORE_THRESHOLD
+            applied_motion_penalty = (
+                motion_penalty
+                if motion_score < motion_score_threshold
                 else 0.0
             )
             score = (
@@ -549,7 +1091,7 @@ class ExpertAgent:
                 + area_score
                 - aspect_penalty
                 - occlusion_penalty
-                - motion_penalty
+                - applied_motion_penalty
             )
             candidate["score"] = score
             scored.append((score, candidate))
@@ -567,6 +1109,277 @@ class ExpertAgent:
             frame_log["reason"] = reason
         frame_analysis_log.append(frame_log)
 
+    def _detect_with_far_enhancement_gallery(
+        self,
+        context: AnalysisContext,
+        images: List[Any],
+        template: PromptTemplate,
+        context_vars: Dict[str, Any],
+        roi_template: PromptTemplate,
+        output_dir: Path,
+        image_ref_prefix: str,
+        video_stem: str,
+        far_cfg: Any,
+    ) -> Optional[EventCandidate]:
+        """Multi-ROI gallery branch for static, evidence-rich events (e.g. construction).
+
+        1. Select the middle frame.
+        2. Run the multi-ROI template to get evidence_regions.
+        3. Filter ROIs by area/aspect and keep the top ``max_regions`` by confidence.
+        4. Build a gallery composite (annotated original + zoom grid).
+        5. Run the final classifier on the gallery.
+        6. Return an EventCandidate that always includes the gallery path, even
+           when the classifier is negative.
+        """
+        if not images:
+            return None
+
+        selected_index = len(images) // 2
+        frame = images[selected_index]
+
+        logger.info(
+            "[expert_agent:_detect_with_far_enhancement_gallery] START | event_id=%d event_name=%s frame=%d",
+            self.category.event_id,
+            self.category.name_zh,
+            selected_index,
+        )
+
+        # --- ROI detection on the middle frame ------------------------------
+        try:
+            roi_response = self.vlm_engine.call(
+                template=roi_template,
+                images=[frame],
+                context_vars=context_vars,
+                response_schema=_MULTI_ROI_DETECTION_SCHEMA,
+            )
+        except FatalAPIError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "[expert_agent:_detect_with_far_enhancement_gallery] ROI_CALL_ERROR | event_id=%d frame=%d | %s",
+                self.category.event_id,
+                selected_index,
+                exc,
+                exc_info=True,
+            )
+            return None
+
+        if not roi_response.success or not isinstance(roi_response.parsed_data, dict):
+            logger.warning(
+                "[expert_agent:_detect_with_far_enhancement_gallery] ROI_PARSE_ERROR | event_id=%d frame=%d",
+                self.category.event_id,
+                selected_index,
+            )
+            return None
+
+        parsed = roi_response.parsed_data
+        evidence_regions = parsed.get("evidence_regions", []) or []
+        roi_summary = str(parsed.get("summary", ""))
+
+        # --- Validate/filter regions ----------------------------------------
+        min_area_px = far_cfg.min_area_px
+        max_aspect_ratio = far_cfg.max_aspect_ratio
+        valid_regions: List[Dict[str, Any]] = []
+        try:
+            frame_pil = load_image(frame)
+            img_width, img_height = frame_pil.size
+        except Exception as exc:
+            logger.warning(
+                "[expert_agent:_detect_with_far_enhancement_gallery] LOAD_FRAME_ERROR | event_id=%d | %s",
+                self.category.event_id,
+                exc,
+            )
+            return None
+
+        for region in evidence_regions:
+            bbox_norm = region.get("bbox_norm")
+            tag = str(region.get("tag", "unknown"))
+            confidence = self._parse_roi_confidence(region.get("confidence", 0.0))
+            if not bbox_norm or len(bbox_norm) != 4:
+                logger.info(
+                    "[expert_agent:_detect_with_far_enhancement_gallery] INVALID_BBOX | event_id=%d bbox=%s",
+                    self.category.event_id,
+                    bbox_norm,
+                )
+                continue
+            try:
+                area_px = compute_bbox_area_px(bbox_norm, img_width, img_height)
+                aspect_ratio = compute_bbox_aspect_ratio(bbox_norm)
+                if not is_bbox_large_enough(
+                    bbox_norm, img_width, img_height, min_area_px=min_area_px
+                ):
+                    logger.info(
+                        "[expert_agent:_detect_with_far_enhancement_gallery] ROI_TOO_SMALL | event_id=%d area_px=%d < %d",
+                        self.category.event_id,
+                        area_px,
+                        min_area_px,
+                    )
+                    continue
+                if not is_bbox_aspect_valid(bbox_norm, max_ratio=max_aspect_ratio):
+                    logger.info(
+                        "[expert_agent:_detect_with_far_enhancement_gallery] ASPECT_REJECT | event_id=%d ratio=%.2f",
+                        self.category.event_id,
+                        aspect_ratio,
+                    )
+                    continue
+            except Exception as exc:
+                logger.warning(
+                    "[expert_agent:_detect_with_far_enhancement_gallery] SIZE_CHECK_ERROR | event_id=%d | %s",
+                    self.category.event_id,
+                    exc,
+                )
+                continue
+
+            valid_regions.append(
+                {
+                    "bbox_norm": bbox_norm,
+                    "tag": tag,
+                    "confidence": confidence,
+                    "area_px": area_px,
+                    "aspect_ratio": aspect_ratio,
+                }
+            )
+
+        if not valid_regions:
+            logger.info(
+                "[expert_agent:_detect_with_far_enhancement_gallery] NO_VALID_REGIONS | event_id=%d",
+                self.category.event_id,
+            )
+            return EventCandidate(
+                detected=False,
+                event_id=self.category.event_id,
+                event_name=self.category.name_zh,
+                summary=f"未检测到{self.category.name_zh}。",
+                raw_vlm_response={
+                    "far_enhancement": {
+                        "selected_frame_index": selected_index,
+                        "evidence_regions": [],
+                        "summary": roi_summary,
+                    }
+                },
+            )
+
+        # Keep highest-confidence regions for the gallery.
+        valid_regions.sort(key=lambda r: r["confidence"], reverse=True)
+        display_regions = valid_regions[:4]
+
+        # --- Build gallery composite ----------------------------------------
+        gallery_filename = f"{video_stem}_frame_{selected_index}_gallery.jpg"
+        gallery_path = str(output_dir / gallery_filename)
+        gallery_ref = f"{image_ref_prefix}/{gallery_filename}"
+
+        try:
+            create_multi_roi_gallery(
+                frame, display_regions, output_path=gallery_path, max_regions=4
+            )
+        except Exception as exc:
+            logger.error(
+                "[expert_agent:_detect_with_far_enhancement_gallery] GALLERY_ERROR | event_id=%d | %s",
+                self.category.event_id,
+                exc,
+                exc_info=True,
+            )
+            return None
+
+        logger.info(
+            "[expert_agent:_detect_with_far_enhancement_gallery] GALLERY_CREATED | event_id=%d path=%s regions=%d",
+            self.category.event_id,
+            gallery_path,
+            len(display_regions),
+        )
+
+        # --- Final classifier on the gallery --------------------------------
+        try:
+            response = self.vlm_engine.call(
+                template=template,
+                images=[gallery_path],
+                context_vars=context_vars,
+                response_schema=_EXPERT_RESPONSE_SCHEMA,
+            )
+        except FatalAPIError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "[expert_agent:_detect_with_far_enhancement_gallery] FINAL_CALL_ERROR | event_id=%d | %s",
+                self.category.event_id,
+                exc,
+                exc_info=True,
+            )
+            return EventCandidate(
+                detected=False,
+                event_id=self.category.event_id,
+                event_name=self.category.name_zh,
+                summary=f"{self.category.name_zh}增强分类失败。",
+                raw_vlm_response={
+                    "gallery_image_path": gallery_ref,
+                    "far_enhancement": {
+                        "selected_frame_index": selected_index,
+                        "evidence_regions": display_regions,
+                        "summary": roi_summary,
+                    },
+                },
+            )
+
+        candidate = parse_expert_response(response, self.category)
+        # Ensure the selected frame is recorded as evidence.
+        if candidate.instances:
+            for inst in candidate.instances:
+                if not inst.evidence_frames:
+                    inst.evidence_frames = [selected_index]
+        else:
+            candidate.instances = [
+                EventInstance(
+                    event_id=self.category.event_id,
+                    event_name=self.category.name_zh,
+                    evidence_frames=[selected_index],
+                    description=candidate.summary,
+                    reasoning=candidate.summary,
+                )
+            ]
+
+        # Apply structured car veto (and capture target_type) for the gallery
+        # classifier, just like the per-frame far-enhancement path.
+        candidate = self._apply_structured_veto_to_candidate(candidate)
+
+        # ------------------------------------------------------------------
+        # Construction fallback: if the final classifier rejected the scene
+        # but the ROI evidence clearly satisfies the work-zone definition,
+        # promote the candidate to detected=True. This keeps the expert
+        # output consistent with the evidence table and gallery image.
+        # ------------------------------------------------------------------
+        if (
+            self.category.event_id == 6
+            and not candidate.detected
+            and self._has_construction_evidence(valid_regions)
+        ):
+            logger.info(
+                "[expert_agent:_detect_with_far_enhancement_gallery] CONSTRUCTION_FALLBACK | "
+                "event_id=%d frame=%d regions=%d",
+                self.category.event_id,
+                selected_index,
+                len(valid_regions),
+            )
+            candidate = self._build_construction_fallback_candidate(
+                candidate=candidate,
+                display_regions=display_regions,
+                valid_regions=valid_regions,
+                selected_index=selected_index,
+                gallery_ref=gallery_ref,
+                roi_summary=roi_summary,
+            )
+
+        # Merge the gallery metadata into the candidate's raw response.
+        candidate.raw_vlm_response["gallery_image_path"] = gallery_ref
+        candidate.raw_vlm_response.setdefault("far_enhancement", {})
+        candidate.raw_vlm_response["far_enhancement"].update(
+            {
+                "selected_frame_index": selected_index,
+                "evidence_regions": display_regions,
+                "summary": roi_summary,
+            }
+        )
+        return candidate
+
     def _detect_with_far_enhancement(
         self,
         context: AnalysisContext,
@@ -574,13 +1387,12 @@ class ExpertAgent:
         template: PromptTemplate,
         context_vars: Dict[str, Any],
     ) -> Optional[EventCandidate]:
-        """Run the far-distance non-motor vehicle enhancement flow.
+        """Run the far-distance object enhancement flow.
 
         Two-pass design:
         1. Collect ROI candidates from every input frame. Valid ROIs must pass
-           the existing minimum-area check (>=80 px) and aspect-ratio filter
-           (width/height < 1.2).
-        2. Score all candidates and keep the top ``_FAR_ENHANCEMENT_TOP_K``.
+           the configured minimum-area check and aspect-ratio filter.
+        2. Score all candidates and keep the top ``far_object_enhancement.top_k``.
         3. For each top candidate generate the dual composites
            (single-frame + motion-comparison) and run the final classifier.
         4. Return the highest-scoring positive result. If none of the top-K
@@ -605,10 +1417,17 @@ class ExpertAgent:
             len(images),
         )
 
+        far_cfg = template.far_object_enhancement
+        roi_template_id = far_cfg.roi_template_id
+        min_area_px = far_cfg.min_area_px
+        max_aspect_ratio = far_cfg.max_aspect_ratio
+        enable_motion_filter = far_cfg.enable_motion_filter
+        motion_score_threshold = far_cfg.motion_score_threshold
+        motion_penalty = far_cfg.motion_penalty
+        top_k = far_cfg.top_k
+
         try:
-            roi_template = self.config_manager.get_prompt_template(
-                "far_non_motor_roi_detection"
-            )
+            roi_template = self.config_manager.get_prompt_template(roi_template_id)
         except (KeyError, RuntimeError) as exc:
             logger.warning(
                 "[expert_agent:_detect_with_far_enhancement] ROI_TEMPLATE_ERROR | event_id=%d | %s",
@@ -645,6 +1464,23 @@ class ExpertAgent:
         # Per-frame ROI analysis log, attached to every EventCandidate produced by
         # this flow so the report can render a frame-by-frame ROI summary.
         frame_analysis_log: List[Dict[str, Any]] = []
+
+        # ------------------------------------------------------------------
+        # Multi-ROI gallery branch (e.g. event_id=6 road construction).
+        # Uses a single middle frame and a gallery of evidence ROIs.
+        # ------------------------------------------------------------------
+        if far_cfg.frame_selection == "middle":
+            return self._detect_with_far_enhancement_gallery(
+                context=context,
+                images=images,
+                template=template,
+                context_vars=context_vars,
+                roi_template=roi_template,
+                output_dir=output_dir,
+                image_ref_prefix=image_ref_prefix,
+                video_stem=video_stem,
+                far_cfg=far_cfg,
+            )
 
         # ------------------------------------------------------------------
         # First pass: collect all valid ROI candidates and a per-frame log.
@@ -741,22 +1577,23 @@ class ExpertAgent:
                 bbox_area = compute_bbox_area_px(bbox_norm, img_width, img_height)
                 aspect_ratio = compute_bbox_aspect_ratio(bbox_norm)
                 if not is_bbox_large_enough(
-                    bbox_norm, img_width, img_height, min_area_px=80
+                    bbox_norm, img_width, img_height, min_area_px=min_area_px
                 ):
                     self._log_frame(
                         frame_analysis_log,
                         frame_log,
-                        reason=f"ROI candidate too small: area_px={bbox_area} < 80",
+                        reason=f"ROI candidate too small: area_px={bbox_area} < {min_area_px}",
                     )
                     logger.info(
-                        "[expert_agent:_detect_with_far_enhancement] ROI_TOO_SMALL | event_id=%d frame=%d area_px=%d < 80",
+                        "[expert_agent:_detect_with_far_enhancement] ROI_TOO_SMALL | event_id=%d frame=%d area_px=%d < %d",
                         self.category.event_id,
                         global_index,
                         bbox_area,
+                        min_area_px,
                     )
                     continue
-                if not is_bbox_aspect_valid_for_non_motor(
-                    bbox_norm, max_ratio=1.2
+                if not is_bbox_aspect_valid(
+                    bbox_norm, max_ratio=max_aspect_ratio
                 ):
                     self._log_frame(
                         frame_analysis_log,
@@ -785,30 +1622,38 @@ class ExpertAgent:
                 )
                 continue
 
-            # Compute adjacent-frame motion inside the enlarged ROI.  This is
-            # used to penalise static foreground objects (camera brackets,
-            # poles, wires) that the VLM occasionally returns as false ROIs.
+            # Compute adjacent-frame motion inside the enlarged ROI when
+            # configured.  This is used to penalise static foreground objects
+            # (camera brackets, poles, wires) that the VLM occasionally returns
+            # as false ROIs.
             adjacent_index = (
                 global_index - 1
                 if global_index == len(images) - 1
                 else global_index + 1
             )
-            try:
-                motion_score = compute_roi_motion_score(
-                    frame,
-                    images[adjacent_index],
-                    bbox_norm,
-                    scale=_FAR_MOTION_ENLARGE_SCALE,
-                    gaussian_kernel=_FAR_MOTION_GAUSSIAN_KERNEL,
-                    pixel_threshold=_FAR_MOTION_PIXEL_THRESHOLD,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "[expert_agent:_detect_with_far_enhancement] MOTION_SCORE_ERROR | event_id=%d frame=%d | %s",
-                    self.category.event_id,
-                    global_index,
-                    exc,
-                )
+            if enable_motion_filter:
+                try:
+                    motion_score = compute_roi_motion_score(
+                        frame,
+                        images[adjacent_index],
+                        bbox_norm,
+                        scale=_FAR_MOTION_ENLARGE_SCALE,
+                        gaussian_kernel=_FAR_MOTION_GAUSSIAN_KERNEL,
+                        pixel_threshold=_FAR_MOTION_PIXEL_THRESHOLD,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[expert_agent:_detect_with_far_enhancement] MOTION_SCORE_ERROR | event_id=%d frame=%d | %s",
+                        self.category.event_id,
+                        global_index,
+                        exc,
+                    )
+                    motion_score = {
+                        "mean_diff": 0.0,
+                        "fraction_above_threshold": 0.0,
+                        "motion_score": 0.0,
+                    }
+            else:
                 motion_score = {
                     "mean_diff": 0.0,
                     "fraction_above_threshold": 0.0,
@@ -864,7 +1709,7 @@ class ExpertAgent:
                 detected=False,
                 event_id=self.category.event_id,
                 event_name=self.category.name_zh,
-                summary="未检测到非机动车及两轮/三轮异常车辆。",
+                summary=f"未检测到{self.category.name_zh}。",
                 raw_vlm_response={
                     "far_enhancement": {
                         "frame_analysis_log": frame_analysis_log,
@@ -875,8 +1720,12 @@ class ExpertAgent:
         # ------------------------------------------------------------------
         # Rank candidates and keep the top K.
         # ------------------------------------------------------------------
-        ranked_candidates = self._score_far_candidates(candidates)
-        top_candidates = ranked_candidates[:_FAR_ENHANCEMENT_TOP_K]
+        ranked_candidates = self._score_far_candidates(
+            candidates,
+            motion_score_threshold=motion_score_threshold,
+            motion_penalty=motion_penalty,
+        )
+        top_candidates = ranked_candidates[:top_k]
         logger.info(
             "[expert_agent:_detect_with_far_enhancement] TOP_CANDIDATES | event_id=%d total=%d selected=%d",
             self.category.event_id,
@@ -963,9 +1812,15 @@ class ExpertAgent:
 
         # ------------------------------------------------------------------
         # Optional fallback on the highest-scored candidate.
+        # Fallback is used for far-distance object categories (event_id=3
+        # pedestrians and event_id=4 non-motor vehicles). When the final
+        # classifier is over-conservative but the ROI detector produced a
+        # high-confidence, unoccluded, well-shaped candidate, promote it to
+        # detected=True so the expert raw output stays consistent with the
+        # per-frame ROI evidence table.
         # ------------------------------------------------------------------
         best_candidate = top_candidates[0]
-        if "composite_path" in best_candidate:
+        if "composite_path" in best_candidate and self.category.event_id in (3, 4):
             fallback_candidate = self._accept_fallback(
                 best_candidate, frame_analysis_log
             )
@@ -996,8 +1851,12 @@ class ExpertAgent:
             detected=False,
             event_id=self.category.event_id,
             event_name=self.category.name_zh,
-            summary="未检测到非机动车及两轮/三轮异常车辆。",
+            summary=f"未检测到{self.category.name_zh}。",
             raw_vlm_response=negative_raw_response,
+            is_target_explicitly_four_wheel_vehicle=best_candidate.get(
+                "is_target_explicitly_four_wheel_vehicle"
+            ),
+            target_type=str(best_candidate.get("target_type", "")),
         )
 
     def _execute_tool_calls(

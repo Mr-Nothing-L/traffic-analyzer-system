@@ -180,6 +180,38 @@ def far_enhancement_candidate() -> Dict[str, Any]:
     }
 
 
+@pytest.fixture
+def pedestrian_enhancement_result() -> EventResult:
+    """A detected event_id=3 result for far-enhancement rendering tests."""
+    return EventResult(
+        event_id=3,
+        event_name="高速公路行人出现",
+        detected=True,
+        instances=[
+            EventInstance(
+                event_id=3,
+                event_name="高速公路行人出现",
+                description="distant pedestrian",
+            )
+        ],
+    )
+
+
+@pytest.fixture
+def pedestrian_enhancement_candidate() -> Dict[str, Any]:
+    """Base expert candidate for event_id=3 with composite and motion paths."""
+    return {
+        "event_id": 3,
+        "event_name": "高速公路行人出现",
+        "detected": True,
+        "summary": "detected",
+        "raw_vlm_response": {
+            "composite_image_path": "/tmp/test_video_frame_2_composite.jpg",
+            "motion_composite_image_path": "/tmp/test_video_frame_2_motion_3.jpg",
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -729,3 +761,153 @@ class TestFarEnhancementEvidence:
 
         assert "#### 逐帧 ROI 分析" not in md
         assert "摩托车出现" in md
+
+    def test_composite_images_embedded_for_event_id_3(
+        self,
+        generator: ReportGenerator,
+        scene_info: SceneInfo,
+        video_meta: VideoMetadata,
+        usage_stats: Dict[str, Any],
+        pedestrian_enhancement_result: EventResult,
+        pedestrian_enhancement_candidate: Dict[str, Any],
+    ) -> None:
+        """Markdown should embed the far-distance pedestrian composite image(s)."""
+        report = generator.generate(
+            event_results=[pedestrian_enhancement_result],
+            scene_info=scene_info,
+            video_meta=video_meta,
+            usage_stats=usage_stats,
+            expert_candidates=[pedestrian_enhancement_candidate],
+        )
+        md = generator.to_markdown(report)
+
+        assert "#### 远距离行人增强证据" in md
+        assert "**远距离增强合成图**: `/tmp/test_video_frame_2_composite.jpg`" in md
+        assert "![远距离行人增强](/tmp/test_video_frame_2_composite.jpg)" in md
+        assert "**运动反射验证合成图**: `/tmp/test_video_frame_2_motion_3.jpg`" in md
+
+    def test_frame_analysis_log_rendered_for_event_id_3(
+        self,
+        generator: ReportGenerator,
+        scene_info: SceneInfo,
+        video_meta: VideoMetadata,
+        usage_stats: Dict[str, Any],
+        pedestrian_enhancement_result: EventResult,
+    ) -> None:
+        """Markdown should render a per-frame ROI analysis table for pedestrians."""
+        expert_candidates = [
+            {
+                "event_id": 3,
+                "event_name": "高速公路行人出现",
+                "detected": True,
+                "summary": "detected",
+                "raw_vlm_response": {
+                    "composite_image_path": "/tmp/composite.jpg",
+                    "far_enhancement": {
+                        "frame_analysis_log": [
+                            {
+                                "frame": 0,
+                                "has_candidate": True,
+                                "bbox_norm": [0.50, 0.50, 0.55, 0.75],
+                                "area_px": 96,
+                                "aspect_ratio": 0.50,
+                                "confidence": 0.88,
+                                "motion_score": 4.5,
+                                "reason": "frame 0 distant pedestrian",
+                            },
+                            {
+                                "frame": 1,
+                                "has_candidate": False,
+                                "bbox_norm": None,
+                                "area_px": None,
+                                "aspect_ratio": None,
+                                "confidence": None,
+                                "motion_score": None,
+                                "reason": "no candidate frame 1",
+                            },
+                        ]
+                    },
+                },
+            }
+        ]
+        report = generator.generate(
+            event_results=[pedestrian_enhancement_result],
+            scene_info=scene_info,
+            video_meta=video_meta,
+            usage_stats=usage_stats,
+            expert_candidates=expert_candidates,
+        )
+        md = generator.to_markdown(report)
+
+        assert "#### 逐帧 ROI 分析" in md
+        assert "| 帧号 | 是否有候选 | bbox | 面积(px) | 宽高比 | 置信度 | 运动分数 | 原因 |" in md
+        assert "| 0 | 是 | [0.5, 0.5, 0.55, 0.75] | 96 | 0.50 | 0.88 | 4.500 | frame 0 distant pedestrian |" in md
+
+    def test_construction_gallery_and_evidence_table_rendered(
+        self,
+        generator: ReportGenerator,
+        scene_info: SceneInfo,
+        video_meta: VideoMetadata,
+        usage_stats: Dict[str, Any],
+    ) -> None:
+        """Markdown should render the construction gallery image and evidence table."""
+        construction_result = EventResult(
+            event_id=6,
+            event_name="道路施工",
+            detected=True,
+            instances=[
+                EventInstance(
+                    event_id=6,
+                    event_name="道路施工",
+                    description="construction zone",
+                )
+            ],
+        )
+        expert_candidates = [
+            {
+                "event_id": 6,
+                "event_name": "道路施工",
+                "detected": True,
+                "summary": "detected",
+                "raw_vlm_response": {
+                    "gallery_image_path": "/tmp/test_video_frame_1_gallery.jpg",
+                    "far_enhancement": {
+                        "selected_frame_index": 1,
+                        "evidence_regions": [
+                            {
+                                "bbox_norm": [0.30, 0.40, 0.35, 0.55],
+                                "tag": "cone",
+                                "confidence": 0.92,
+                                "area_px": 120,
+                                "aspect_ratio": 0.83,
+                            },
+                            {
+                                "bbox_norm": [0.50, 0.45, 0.55, 0.60],
+                                "tag": "worker",
+                                "confidence": 0.85,
+                                "area_px": 96,
+                                "aspect_ratio": 0.50,
+                            },
+                        ],
+                        "summary": "画面中央有锥桶和施工人员",
+                    },
+                },
+            }
+        ]
+        report = generator.generate(
+            event_results=[construction_result],
+            scene_info=scene_info,
+            video_meta=video_meta,
+            usage_stats=usage_stats,
+            expert_candidates=expert_candidates,
+        )
+        md = generator.to_markdown(report)
+
+        assert "#### 施工证据合成图" in md
+        assert "**施工证据合成图**: `/tmp/test_video_frame_1_gallery.jpg`" in md
+        assert "![施工证据合成图](/tmp/test_video_frame_1_gallery.jpg)" in md
+        assert "#### 证据区域表" in md
+        assert "| tag | bbox | confidence | 面积(px) | 宽高比 | 说明 |" in md
+        assert "cone" in md
+        assert "worker" in md
+        assert "画面中央有锥桶和施工人员" in md

@@ -461,3 +461,133 @@ class TestEdgeCases:
         mgr = ConfigManager(str(config_dir))
         with pytest.raises(ValueError, match="must be a mapping"):
             mgr.load_all()
+
+
+# ---------------------------------------------------------------------------
+# Split prompt_templates directory
+# ---------------------------------------------------------------------------
+
+
+class TestSplitPromptTemplates:
+    def _write_minimal_categories(self, config_dir: Path) -> None:
+        cats = {
+            "event_categories": [
+                {
+                    "event_id": 0,
+                    "event_code": "A",
+                    "name": "Illegal Parking",
+                    "name_zh": "违法停车",
+                    "description": "Vehicle stopped illegally.",
+                    "detection_mode": "expert_agent",
+                    "prompt_template_id": "illegal_parking",
+                    "confidence_threshold": 0.7,
+                    "is_active": True,
+                }
+            ]
+        }
+        (config_dir / "event_categories.yaml").write_text(
+            yaml.safe_dump(cats), encoding="utf-8"
+        )
+
+    def test_prompts_directory_takes_precedence(self, tmp_path: Path) -> None:
+        """If prompts/ exists and contains YAML files, use them instead of root file."""
+        config_dir = tmp_path / "config"
+        config_dir.mkdir()
+        self._write_minimal_categories(config_dir)
+
+        # Legacy root file with the wrong template text
+        root_templates = {
+            "prompt_templates": [
+                {
+                    "template_id": "illegal_parking",
+                    "name": "Root Template",
+                    "system_prompt": "from root",
+                    "user_prompt": "from root",
+                }
+            ]
+        }
+        (config_dir / "prompt_templates.yaml").write_text(
+            yaml.safe_dump(root_templates), encoding="utf-8"
+        )
+
+        # Split directory with the correct template text
+        prompts_dir = config_dir / "prompts"
+        prompts_dir.mkdir()
+        split_templates = {
+            "prompt_templates": [
+                {
+                    "template_id": "illegal_parking",
+                    "name": "Split Template",
+                    "system_prompt": "from split",
+                    "user_prompt": "from split",
+                }
+            ]
+        }
+        (prompts_dir / "event_0.yaml").write_text(
+            yaml.safe_dump(split_templates), encoding="utf-8"
+        )
+
+        mgr = ConfigManager(str(config_dir))
+        mgr.load_all()
+        tmpl = mgr.get_prompt_template("illegal_parking")
+        assert "from split" in tmpl.system_prompt
+
+    def test_empty_prompts_directory_falls_back_to_root(self, tmp_path: Path) -> None:
+        """An empty prompts/ directory should fall back to the legacy root file."""
+        config_dir = tmp_path / "config"
+        config_dir.mkdir()
+        self._write_minimal_categories(config_dir)
+
+        root_templates = {
+            "prompt_templates": [
+                {
+                    "template_id": "illegal_parking",
+                    "name": "Root Template",
+                    "system_prompt": "from root",
+                    "user_prompt": "from root",
+                }
+            ]
+        }
+        (config_dir / "prompt_templates.yaml").write_text(
+            yaml.safe_dump(root_templates), encoding="utf-8"
+        )
+        (config_dir / "prompts").mkdir()
+
+        mgr = ConfigManager(str(config_dir))
+        mgr.load_all()
+        tmpl = mgr.get_prompt_template("illegal_parking")
+        assert "from root" in tmpl.system_prompt
+
+    def test_duplicate_template_later_file_wins(self, tmp_path: Path, caplog) -> None:
+        """Duplicate template_id + version combinations are overwritten in load order."""
+        config_dir = tmp_path / "config"
+        config_dir.mkdir()
+        self._write_minimal_categories(config_dir)
+
+        prompts_dir = config_dir / "prompts"
+        prompts_dir.mkdir()
+        for fname, text in (
+            ("common.yaml", "first"),
+            ("event_0.yaml", "second"),
+        ):
+            data = {
+                "prompt_templates": [
+                    {
+                        "template_id": "illegal_parking",
+                        "version": "1.0.0",
+                        "name": f"{text} Template",
+                        "system_prompt": f"from {text}",
+                        "user_prompt": f"from {text}",
+                    }
+                ]
+            }
+            (prompts_dir / fname).write_text(
+                yaml.safe_dump(data), encoding="utf-8"
+            )
+
+        mgr = ConfigManager(str(config_dir))
+        with caplog.at_level("WARNING"):
+            mgr.load_all()
+        tmpl = mgr.get_prompt_template("illegal_parking")
+        assert "from second" in tmpl.system_prompt
+        assert "Duplicate prompt template" in caplog.text

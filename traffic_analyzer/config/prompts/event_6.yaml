@@ -1,0 +1,129 @@
+# =============================================================================
+# event_id 6 — 道路施工检测（含多证据 ROI 辅助模板）
+# =============================================================================
+
+prompt_templates:
+
+  # ---------------------------------------------------------------------------
+  # 5c. Road Construction Multi-evidence ROI Detection (helper for event_id=6)
+  # ---------------------------------------------------------------------------
+  - template_id: "road_construction_roi_detection"
+    name: "道路施工多证据 ROI 检测"
+    system_prompt: |
+      你是一名高速公路交通监控分析师。你的任务是在单帧图像中定位多个道路施工证据区域，并输出归一化 bbox。
+      所有文本字段必须使用中文。
+    user_prompt: |
+      输入为单帧高速公路监控图像。
+
+      任务：找出画面中所有与道路施工相关的证据区域。
+
+      证据类型（tag）：
+      - cone：交通锥/锥桶
+      - worker：穿着高可视性服装的施工人员
+      - vehicle：工程车辆/施工设备（沥青摊铺机、压路机、水泥搅拌车、挖掘机、自卸卡车、起重机等）
+      - barrier：隔离栏/水马/施工围挡
+      - sign：施工标志牌/警示牌
+
+      输出 JSON：
+      {
+        "evidence_regions": [
+          {"bbox_norm": [<x1, y1, x2, y2>], "tag": "<cone|worker|vehicle|barrier|sign>", "confidence": <0.0-1.0>}
+        ],
+        "summary": "<简短说明>"
+      }
+
+      如果没有证据，返回 {"evidence_regions": [], "summary": "..."}。
+
+      提示：
+      - `bbox_norm` 取值范围 [0.0, 1.0]，x1 < x2，y1 < y2。
+      - 仅返回位于道路区域（车道、应急车道、路肩、施工区）内的证据。
+      - 不要返回正常行驶车辆、路面标线、护栏、阴影等无关区域。
+      - confidence 仅在有明确视觉特征时给高值。
+    output_format_hint: "JSON"
+
+  # ---------------------------------------------------------------------------
+  # 6. Non-motor / Two-wheel Vehicle Detection (event_id=4)
+  # ---------------------------------------------------------------------------
+
+  # ---------------------------------------------------------------------------
+  # 8. Road Construction Detection (event_id=6)
+  # ---------------------------------------------------------------------------
+  - template_id: "road_construction_detection"
+    name: "道路施工检测"
+    system_prompt: |
+      你是一名交通监控分析师。你的任务是根据“施工证据合成图”判定原视频帧中是否存在活跃的道路施工或维护作业区。所有文本字段 "description"、"reasoning" 和 "summary" 必须使用中文书写。
+    user_prompt: |-
+      输入为 1 张施工证据合成图，由上半部分和下半部分组成，请结合两部分综合判断：
+      - 上半部分：原视频帧，叠加绘制了多个彩色方框（bbox），每个方框旁标注了证据类型 tag 和置信度 confidence。
+      - 下半部分：上半部分每个方框内区域的放大图，按网格排列。每个放大图下方同样标注了证据类型 tag 和置信度 confidence。
+
+      证据类型 tag 含义：
+      - cone：交通锥/锥桶
+      - worker：穿着高可视性服装的施工人员（橙色、黄色或荧光绿色背心/帽子）
+      - vehicle：工程车辆/施工设备（沥青摊铺机、压路机、水泥搅拌车、挖掘机、自卸卡车、起重机等）
+      - barrier：隔离栏/水马/施工围挡
+      - sign：施工标志牌/警示牌
+
+      判定标准 — 只要满足以下任意一条，即判定为检测到道路施工（detected=true）：
+      1. 存在多个连续或成组布置的锥桶（cone），形成作业区、车道封闭或交通引导区域；
+      2. 存在至少 1 个锥桶，并且同时存在施工人员（worker）或施工车辆（vehicle）中的至少一类；
+      3. 存在施工人员（worker）和施工车辆（vehicle）同时出现（即使没有锥桶）；
+      4. 存在明显的隔离栏/水马/施工围挡（barrier）布置，指示车道封闭。
+
+      注意：
+      - 孤立的单个锥桶不算施工作业区；
+      - 多个连续锥桶、或锥桶+车辆、或锥桶+人员、或隔离栏布置明确的车道封闭，均算作施工作业区；
+      - 不要因画面中同时有正常行驶车辆而忽略施工证据；
+      - 只要合成图中明确出现上述施工元素，就必须判定为 detected=true，不要过度保守。
+
+      返回结构化 JSON：
+      {
+        "detected": <true|false>,
+        "is_target_explicitly_four_wheel_vehicle": <true|false>,
+        "target_type": "<汽车|摩托车|电动车|非机动车|施工元素|行人|无法确定>",
+        "instances": [
+          {
+            "start_time_sec": <大致开始时间>,
+            "end_time_sec": <大致结束时间>,
+            "evidence_frames": [<帧索引>],
+            "description": "<观察到的内容：工人、设备、锥桶布置等>",
+            "reasoning": "<判定理由：依据合成图中的哪些施工元素（如锥桶、工人、车辆、隔离栏）做出的判断>"
+          }
+        ],
+        "summary": "<总体评估：必须说明依据哪些证据元素做出判断>"
+      }
+
+      `is_target_explicitly_four_wheel_vehicle` 填写规则（极其重要）：
+      - 只回答“画面中的目标本身是否是四轮机动车（汽车/SUV/货车/面包车），而不是施工作业区”。
+      - 如果合成图中是施工元素（锥桶、施工人员、施工车辆、隔离栏、施工标志牌），必须填 false。
+      - 如果只是背景中正常行驶的汽车、或仅因对比提到汽车，必须填 false。
+      - 只有当画面主体明确只是一辆普通四轮机动车且没有任何施工元素时，才填 true。
+
+      如果事件中**不存在**施工，返回：
+      {
+        "detected": false,
+        "is_target_explicitly_four_wheel_vehicle": false,
+        "target_type": "无法确定",
+        "instances": [],
+        "summary": "未检测到道路施工。"
+      }
+
+      示例（检测到施工）：
+      {"detected": true, "is_target_explicitly_four_wheel_vehicle": false, "target_type": "施工元素", "instances": [{"start_time_sec": 0, "end_time_sec": 0, "evidence_frames": [1], "description": "多个锥桶和一名穿反光背心工人", "reasoning": "合成图显示锥桶连续布置并有一名施工人员，符合施工作业区定义"}], "summary": "检测到道路施工，证据包括连续锥桶和施工人员"}
+
+      示例（只是普通车辆，无施工）：
+      {"detected": false, "is_target_explicitly_four_wheel_vehicle": true, "target_type": "汽车", "instances": [], "summary": "画面中只有一辆正常行驶的白色轿车，没有施工元素。"}
+
+      提示：你的判断必须完全基于合成图中标注的 bbox 和放大图证据。如果合成图清晰显示了施工元素，请输出 detected=true。
+    output_format_hint: "JSON"
+    far_object_enhancement:
+      enabled: true
+      roi_template_id: "road_construction_roi_detection"
+      min_area_px: 100
+      max_aspect_ratio: 4.0
+      enable_motion_filter: false
+      frame_selection: "middle"
+
+  # ---------------------------------------------------------------------------
+  # 9. Direct Reversing Detection (event_id=7, expert_agent)
+  # ---------------------------------------------------------------------------

@@ -16,6 +16,7 @@ from traffic_analyzer.core.config_manager import ConfigManager
 from traffic_analyzer.core.expert_agent import ExpertAgent, _FAR_ENHANCEMENT_OUTPUT_DIR
 from traffic_analyzer.models.schemas import (
     AnalysisContext,
+    EventInstance,
     Keyframe,
     KeyframeSequence,
     SystemConfig,
@@ -26,10 +27,15 @@ from traffic_analyzer.models.schemas import (
 class _MockResponse:
     """Minimal stand-in for :class:`traffic_analyzer.models.schemas.LLMResponse`."""
 
-    def __init__(self, parsed_data: Dict[str, Any]) -> None:
-        self.success = True
+    def __init__(
+        self,
+        parsed_data: Dict[str, Any],
+        success: bool = True,
+        raw_text: Optional[str] = None,
+    ) -> None:
+        self.success = success
         self.parsed_data = parsed_data
-        self.raw_text = str(parsed_data)
+        self.raw_text = raw_text if raw_text is not None else str(parsed_data)
         self.model = "mock"
         self.prompt_tokens = 0
         self.completion_tokens = 0
@@ -88,6 +94,22 @@ def non_motor_category(config_manager: ConfigManager) -> Any:
     return category
 
 
+@pytest.fixture
+def pedestrian_category(config_manager: ConfigManager) -> Any:
+    categories = config_manager.get_event_categories()
+    category = next(c for c in categories if c.event_id == 3)
+    assert category.prompt_template_id == "pedestrian_detection"
+    return category
+
+
+@pytest.fixture
+def construction_category(config_manager: ConfigManager) -> Any:
+    categories = config_manager.get_event_categories()
+    category = next(c for c in categories if c.event_id == 6)
+    assert category.prompt_template_id == "road_construction_detection"
+    return category
+
+
 def _make_analysis_context(num_frames: int = 3, vlm_max_frames: int = 6) -> AnalysisContext:
     """Build an AnalysisContext with the requested number of frames.
 
@@ -135,10 +157,15 @@ def analysis_context() -> AnalysisContext:
 def make_agent(config_manager: ConfigManager, non_motor_category: Any):
     """Return a factory that builds an ExpertAgent + mock engine pair."""
 
-    def _make(responses_by_template: Mapping[str, List[Dict[str, Any]]]) -> tuple[ExpertAgent, _MockVLMEngine]:
+    def _make(
+        responses_by_template: Mapping[str, List[Dict[str, Any]]],
+        category: Any = None,
+    ) -> tuple[ExpertAgent, _MockVLMEngine]:
+        if category is None:
+            category = non_motor_category
         engine = _MockVLMEngine(responses_by_template=responses_by_template)
         agent = ExpertAgent(
-            category=non_motor_category,
+            category=category,
             vlm_engine=engine,
             config_manager=config_manager,
         )
@@ -163,6 +190,51 @@ def _roi_response(
 
 def _final_response(detected: bool, reason: str) -> Dict[str, Any]:
     return {"detected": detected, "reason": reason}
+
+
+def _final_response_with_veto(
+    detected: bool,
+    reason: str,
+    is_target_explicitly_four_wheel_vehicle: Optional[bool] = None,
+    target_type: str = "",
+) -> Dict[str, Any]:
+    result: Dict[str, Any] = {"detected": detected, "reason": reason}
+    if is_target_explicitly_four_wheel_vehicle is not None:
+        result["is_target_explicitly_four_wheel_vehicle"] = is_target_explicitly_four_wheel_vehicle
+    if target_type:
+        result["target_type"] = target_type
+    return result
+
+
+def _pedestrian_final_response(
+    detected: bool,
+    summary: str,
+    instances: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    return {
+        "detected": detected,
+        "instances": instances or [],
+        "summary": summary,
+    }
+
+
+def _pedestrian_final_response_with_veto(
+    detected: bool,
+    summary: str,
+    instances: Optional[List[Dict[str, Any]]] = None,
+    is_target_explicitly_four_wheel_vehicle: Optional[bool] = None,
+    target_type: str = "",
+) -> Dict[str, Any]:
+    result: Dict[str, Any] = {
+        "detected": detected,
+        "instances": instances or [],
+        "summary": summary,
+    }
+    if is_target_explicitly_four_wheel_vehicle is not None:
+        result["is_target_explicitly_four_wheel_vehicle"] = is_target_explicitly_four_wheel_vehicle
+    if target_type:
+        result["target_type"] = target_type
+    return result
 
 
 def _detect_with_patched_dir(agent: ExpertAgent, context: AnalysisContext) -> Any:
@@ -713,3 +785,1047 @@ def test_motion_score_computed_without_caching_diff_image(make_agent) -> None:
         written = list(Path(tmpdir).glob("*"))
         assert len(written) == 2
         assert all("diff" not in p.name.lower() for p in written)
+
+
+# ---------------------------------------------------------------------------
+# Pedestrian far ROI enhancement
+# ---------------------------------------------------------------------------
+
+
+def test_pedestrian_far_enhancement_success(make_agent, pedestrian_category, analysis_context) -> None:
+    """Happy path: ROI detector finds a person, final classifier returns instances."""
+    agent, engine = make_agent(
+        {
+            "far_pedestrian_roi_detection": [
+                _roi_response([0.50, 0.50, 0.55, 0.75], "frame 0 distant pedestrian"),
+                _roi_response(None, "no candidate frame 1"),
+                _roi_response(None, "no candidate frame 2"),
+            ],
+            "pedestrian_detection": [
+                _pedestrian_final_response(
+                    True,
+                    "第0帧红框内为一名站立行人",
+                    instances=[
+                        {
+                            "start_time_sec": 0.0,
+                            "end_time_sec": 0.0,
+                            "evidence_frames": [0],
+                            "description": "应急车道边缘站立行人，穿深色衣物",
+                            "reasoning": "红框内可见直立人形轮廓，位于道路区域",
+                        }
+                    ],
+                ),
+            ],
+        },
+        category=pedestrian_category,
+    )
+
+    candidate = _detect_with_patched_dir(agent, analysis_context)
+
+    assert candidate.detected is True
+    assert candidate.event_id == 3
+    assert "第0帧红框内为一名站立行人" in candidate.summary
+    assert len(candidate.instances) == 1
+    assert candidate.instances[0].description == "应急车道边缘站立行人，穿深色衣物"
+
+    raw = candidate.raw_vlm_response
+    assert "composite_image_path" in raw
+    assert "motion_composite_image_path" in raw
+    assert raw["far_enhancement"]["selected_frame_index"] == 0
+
+    roi_calls = [c for c in engine.calls if c["template_id"] == "far_pedestrian_roi_detection"]
+    final_calls = [c for c in engine.calls if c["template_id"] == "pedestrian_detection"]
+    assert len(roi_calls) == 3
+    assert len(final_calls) == 1
+    # Pedestrian final classifier should receive the full expert response schema.
+    assert "instances" in final_calls[0]["response_schema"].get("properties", {})
+
+
+def test_pedestrian_far_enhancement_negative(make_agent, pedestrian_category, analysis_context) -> None:
+    """If the final classifier rejects a low-confidence ROI, the result stays detected=False."""
+    agent, _ = make_agent(
+        {
+            "far_pedestrian_roi_detection": [
+                _roi_response(
+                    [0.50, 0.50, 0.55, 0.75],
+                    "frame 0 distant target",
+                    confidence=0.40,
+                ),
+                _roi_response(None, "no candidate frame 1"),
+                _roi_response(None, "no candidate frame 2"),
+            ],
+            "pedestrian_detection": [
+                _pedestrian_final_response(
+                    False,
+                    "红框内为路侧标志牌，不是行人",
+                ),
+            ],
+        },
+        category=pedestrian_category,
+    )
+
+    candidate = _detect_with_patched_dir(agent, analysis_context)
+
+    assert candidate.detected is False
+    assert candidate.event_id == 3
+    assert "未检测到" in candidate.summary
+
+
+def test_pedestrian_far_enhancement_car_override(make_agent, pedestrian_category, analysis_context) -> None:
+    """A pedestrian classifier that actually describes a car is overridden to False."""
+    agent, _ = make_agent(
+        {
+            "far_pedestrian_roi_detection": [
+                _roi_response([0.50, 0.50, 0.55, 0.75], "frame 0 distant target"),
+                _roi_response(None, "no candidate frame 1"),
+                _roi_response(None, "no candidate frame 2"),
+            ],
+            "pedestrian_detection": [
+                _pedestrian_final_response(
+                    True,
+                    "红框内为一辆白色轿车",
+                    instances=[
+                        {
+                            "description": "白色轿车停在应急车道",
+                            "reasoning": "红框内是轿车，不是行人",
+                        }
+                    ],
+                ),
+            ],
+        },
+        category=pedestrian_category,
+    )
+
+    candidate = _detect_with_patched_dir(agent, analysis_context)
+
+    assert candidate.detected is False
+
+
+def test_pedestrian_far_enhancement_fallback_high_confidence(
+    make_agent, pedestrian_category, analysis_context
+) -> None:
+    """When the final classifier rejects a high-confidence pedestrian ROI, fallback promotes it."""
+    roi_reason = "画面右侧应急车道边缘有直立人形轮廓，位于道路区域，疑似行人"
+    agent, engine = make_agent(
+        {
+            "far_pedestrian_roi_detection": [
+                _roi_response(
+                    [0.50, 0.50, 0.55, 0.75],
+                    roi_reason,
+                    confidence=0.88,
+                    occluded=False,
+                ),
+                _roi_response(None, "no candidate frame 1"),
+                _roi_response(None, "no candidate frame 2"),
+            ],
+            "pedestrian_detection": [
+                _pedestrian_final_response(
+                    False,
+                    "红框内目标较小，无法确认是否为行人",
+                ),
+            ],
+        },
+        category=pedestrian_category,
+    )
+
+    candidate = _detect_with_patched_dir(agent, analysis_context)
+
+    assert candidate.detected is True
+    assert candidate.event_id == 3
+    assert candidate.raw_vlm_response["far_enhancement"].get("fallback") is True
+    assert "第0帧红色方框内" in candidate.summary
+    assert "直立人形轮廓" in candidate.summary
+    assert "位于道路区域" in candidate.summary
+
+    # The final classifier was still called, but its negative result was overridden.
+    final_calls = [c for c in engine.calls if c["template_id"] == "pedestrian_detection"]
+    assert len(final_calls) == 1
+
+
+def test_pedestrian_far_enhancement_fallback_rejects_low_confidence(
+    make_agent, pedestrian_category, analysis_context
+) -> None:
+    """A low-confidence pedestrian ROI must not be promoted via fallback."""
+    agent, _ = make_agent(
+        {
+            "far_pedestrian_roi_detection": [
+                _roi_response(
+                    [0.50, 0.50, 0.55, 0.75],
+                    "frame 0 possible target",
+                    confidence=0.40,
+                    occluded=False,
+                ),
+                _roi_response(None, "no candidate frame 1"),
+                _roi_response(None, "no candidate frame 2"),
+            ],
+            "pedestrian_detection": [
+                _pedestrian_final_response(
+                    False,
+                    "红框内无法确认",
+                ),
+            ],
+        },
+        category=pedestrian_category,
+    )
+
+    candidate = _detect_with_patched_dir(agent, analysis_context)
+
+    assert candidate.detected is False
+
+
+def test_pedestrian_far_enhancement_fallback_rejects_occluded(
+    make_agent, pedestrian_category, analysis_context
+) -> None:
+    """An occluded pedestrian ROI must not be promoted via fallback."""
+    agent, _ = make_agent(
+        {
+            "far_pedestrian_roi_detection": [
+                _roi_response(
+                    [0.50, 0.50, 0.55, 0.75],
+                    "frame 0 occluded candidate",
+                    confidence=0.88,
+                    occluded=True,
+                ),
+                _roi_response(None, "no candidate frame 1"),
+                _roi_response(None, "no candidate frame 2"),
+            ],
+            "pedestrian_detection": [
+                _pedestrian_final_response(
+                    False,
+                    "红框内被遮挡，无法确认",
+                ),
+            ],
+        },
+        category=pedestrian_category,
+    )
+
+    candidate = _detect_with_patched_dir(agent, analysis_context)
+
+    assert candidate.detected is False
+
+
+def test_pedestrian_far_enhancement_fallback_rejects_car_reason(
+    make_agent, pedestrian_category, analysis_context
+) -> None:
+    """If the classifier's negative reason explicitly describes a car, fallback is blocked."""
+    agent, _ = make_agent(
+        {
+            "far_pedestrian_roi_detection": [
+                _roi_response(
+                    [0.50, 0.50, 0.55, 0.75],
+                    "frame 0 distant target",
+                    confidence=0.88,
+                    occluded=False,
+                ),
+                _roi_response(None, "no candidate frame 1"),
+                _roi_response(None, "no candidate frame 2"),
+            ],
+            "pedestrian_detection": [
+                _pedestrian_final_response(
+                    False,
+                    "红框内是一辆白色轿车，不是行人",
+                ),
+            ],
+        },
+        category=pedestrian_category,
+    )
+
+    candidate = _detect_with_patched_dir(agent, analysis_context)
+
+    assert candidate.detected is False
+
+
+def test_pedestrian_far_enhancement_not_overridden_near_vehicle(
+    make_agent, pedestrian_category, analysis_context
+) -> None:
+    """A pedestrian standing next to a vehicle must not be overridden as a car."""
+    agent, _ = make_agent(
+        {
+            "far_pedestrian_roi_detection": [
+                _roi_response(
+                    [0.50, 0.50, 0.55, 0.75],
+                    "frame 0 distant pedestrian",
+                    confidence=0.88,
+                    occluded=False,
+                ),
+                _roi_response(None, "no candidate frame 1"),
+                _roi_response(None, "no candidate frame 2"),
+            ],
+            "pedestrian_detection": [
+                _pedestrian_final_response(
+                    True,
+                    "红色方框内确认为1名高速公路行人，位于白色厢式货车后方，呈直立站立姿态",
+                    instances=[
+                        {
+                            "description": "应急车道边缘站立行人，位于白色厢式货车后方",
+                            "reasoning": "红框内可见直立人形轮廓，靠近一辆白色面包车，位于道路区域",
+                        }
+                    ],
+                ),
+            ],
+        },
+        category=pedestrian_category,
+    )
+
+    candidate = _detect_with_patched_dir(agent, analysis_context)
+
+    assert candidate.detected is True
+    assert "白色厢式货车后方" in candidate.summary
+
+
+def _construction_roi_response(
+    evidence_regions: List[Dict[str, Any]],
+    summary: str = "construction evidence found",
+) -> Dict[str, Any]:
+    return {"evidence_regions": evidence_regions, "summary": summary}
+
+
+def _construction_final_response(
+    detected: bool,
+    summary: str,
+    instances: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    return {
+        "detected": detected,
+        "instances": instances or [],
+        "summary": summary,
+    }
+
+
+def test_construction_gallery_success(
+    make_agent, construction_category, analysis_context
+) -> None:
+    """Construction multi-ROI gallery produces a detected candidate."""
+    agent, engine = make_agent(
+        {
+            "road_construction_roi_detection": [
+                _construction_roi_response(
+                    [
+                        {"bbox_norm": [0.30, 0.40, 0.35, 0.55], "tag": "cone", "confidence": 0.92},
+                        {"bbox_norm": [0.50, 0.45, 0.55, 0.60], "tag": "worker", "confidence": 0.85},
+                    ]
+                ),
+            ],
+            "road_construction_detection": [
+                _construction_final_response(
+                    True,
+                    "检测到道路施工",
+                    instances=[
+                        {
+                            "description": "施工区域有锥桶和工人",
+                            "reasoning": "合成图显示锥桶和穿反光背心工人，判定为道路施工。",
+                        }
+                    ],
+                ),
+            ],
+        },
+        category=construction_category,
+    )
+
+    candidate = _detect_with_patched_dir(agent, analysis_context)
+
+    assert candidate.detected is True
+    assert candidate.event_id == 6
+    raw = candidate.raw_vlm_response
+    assert "gallery_image_path" in raw
+    assert raw["gallery_image_path"].endswith("_frame_1_gallery.jpg")
+
+    gallery_path = Path(str(raw["gallery_image_path"]).replace("tmp_img/", ""))
+    # Resolve against the patched temp dir prefix if needed.
+    if not gallery_path.is_absolute():
+        gallery_path = Path(_FAR_ENHANCEMENT_OUTPUT_DIR) / gallery_path
+    assert gallery_path.exists()
+
+    far_enhancement = raw.get("far_enhancement", {})
+    assert far_enhancement.get("selected_frame_index") == 1
+    assert len(far_enhancement.get("evidence_regions", [])) == 2
+
+    roi_calls = [c for c in engine.calls if c["template_id"] == "road_construction_roi_detection"]
+    final_calls = [c for c in engine.calls if c["template_id"] == "road_construction_detection"]
+    assert len(roi_calls) == 1
+    assert len(final_calls) == 1
+    assert len(final_calls[0]["images"]) == 1
+
+
+def test_construction_gallery_negative_keeps_image(
+    make_agent, construction_category, analysis_context
+) -> None:
+    """A negative classifier still preserves the gallery image path."""
+    agent, _ = make_agent(
+        {
+            "road_construction_roi_detection": [
+                _construction_roi_response(
+                    [
+                        {"bbox_norm": [0.30, 0.40, 0.35, 0.55], "tag": "cone", "confidence": 0.60},
+                    ]
+                ),
+            ],
+            "road_construction_detection": [
+                _construction_final_response(False, "未检测到道路施工。"),
+            ],
+        },
+        category=construction_category,
+    )
+
+    candidate = _detect_with_patched_dir(agent, analysis_context)
+
+    assert candidate.detected is False
+    assert "gallery_image_path" in candidate.raw_vlm_response
+
+
+def test_construction_gallery_filters_invalid_regions(
+    make_agent, construction_category, analysis_context
+) -> None:
+    """Regions that fail area/aspect filters result in a negative with no gallery."""
+    agent, _ = make_agent(
+        {
+            "road_construction_roi_detection": [
+                _construction_roi_response(
+                    [
+                        # Too small.
+                        {"bbox_norm": [0.50, 0.50, 0.505, 0.515], "tag": "cone", "confidence": 0.9},
+                        # Too flat (w/h = 5.0 > 4.0).
+                        {"bbox_norm": [0.40, 0.40, 0.90, 0.50], "tag": "barrier", "confidence": 0.9},
+                    ]
+                ),
+            ],
+        },
+        category=construction_category,
+    )
+
+    candidate = _detect_with_patched_dir(agent, analysis_context)
+
+    assert candidate.detected is False
+    assert "gallery_image_path" not in candidate.raw_vlm_response
+
+
+def test_construction_gallery_caps_regions(
+    make_agent, construction_category, analysis_context
+) -> None:
+    """Only the top 4 regions by confidence are shown in the gallery."""
+    agent, engine = make_agent(
+        {
+            "road_construction_roi_detection": [
+                _construction_roi_response(
+                    [
+                        {"bbox_norm": [0.05 * i, 0.40, 0.05 * i + 0.04, 0.55], "tag": "cone", "confidence": 0.5 + i * 0.1}
+                        for i in range(6)
+                    ]
+                ),
+            ],
+            "road_construction_detection": [
+                _construction_final_response(True, "检测到道路施工"),
+            ],
+        },
+        category=construction_category,
+    )
+
+    candidate = _detect_with_patched_dir(agent, analysis_context)
+
+    assert candidate.detected is True
+    far_enhancement = candidate.raw_vlm_response.get("far_enhancement", {})
+    assert len(far_enhancement.get("evidence_regions", [])) == 4
+
+
+def test_construction_gallery_saves_assets_next_to_report(
+    make_agent, construction_category, analysis_context
+) -> None:
+    """When context.output_dir is set, the gallery is saved next to the report."""
+    agent, engine = make_agent(
+        {
+            "road_construction_roi_detection": [
+                _construction_roi_response(
+                    [
+                        {"bbox_norm": [0.30, 0.40, 0.35, 0.55], "tag": "cone", "confidence": 0.92},
+                    ]
+                ),
+            ],
+            "road_construction_detection": [
+                _construction_final_response(True, "检测到道路施工"),
+            ],
+        },
+        category=construction_category,
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        report_dir = Path(tmpdir) / "reports"
+        report_dir.mkdir()
+        analysis_context.output_dir = str(report_dir)
+        candidate = agent.detect(analysis_context)
+
+        assert candidate.detected is True
+        assert candidate.raw_vlm_response["gallery_image_path"] == "tmp_img/test_video_frame_1_gallery.jpg"
+        gallery_file = report_dir / "tmp_img" / "test_video_frame_1_gallery.jpg"
+        assert gallery_file.exists()
+
+        final_calls = [c for c in engine.calls if c["template_id"] == "road_construction_detection"]
+        assert final_calls[0]["images"][0] == str(gallery_file)
+
+
+
+def test_construction_gallery_fallback_classifier_false_but_evidence_strong(
+    make_agent, construction_category, analysis_context
+) -> None:
+    """If classifier returns false but ROI evidence has cone+worker, fallback promotes to true."""
+    agent, engine = make_agent(
+        {
+            "road_construction_roi_detection": [
+                _construction_roi_response(
+                    [
+                        {"bbox_norm": [0.30, 0.40, 0.35, 0.55], "tag": "cone", "confidence": 0.92},
+                        {"bbox_norm": [0.50, 0.45, 0.55, 0.60], "tag": "worker", "confidence": 0.85},
+                    ]
+                ),
+            ],
+            "road_construction_detection": [
+                _construction_final_response(False, "未检测到道路施工，只有孤立锥桶。"),
+            ],
+        },
+        category=construction_category,
+    )
+
+    candidate = _detect_with_patched_dir(agent, analysis_context)
+
+    assert candidate.detected is True
+    assert "检测到道路施工" in candidate.summary
+    assert "锥桶" in candidate.summary
+    assert "施工人员" in candidate.summary
+    assert candidate.raw_vlm_response["far_enhancement"].get("fallback") is True
+
+    # Classifier was still called, but its negative result was overridden.
+    final_calls = [c for c in engine.calls if c["template_id"] == "road_construction_detection"]
+    assert len(final_calls) == 1
+
+
+def test_construction_gallery_fallback_three_cones(
+    make_agent, construction_category, analysis_context
+) -> None:
+    """Three cones without worker/vehicle still trigger the construction fallback."""
+    agent, _ = make_agent(
+        {
+            "road_construction_roi_detection": [
+                _construction_roi_response(
+                    [
+                        {"bbox_norm": [0.20, 0.40, 0.25, 0.55], "tag": "cone", "confidence": 0.88},
+                        {"bbox_norm": [0.30, 0.42, 0.35, 0.57], "tag": "cone", "confidence": 0.85},
+                        {"bbox_norm": [0.40, 0.44, 0.45, 0.59], "tag": "cone", "confidence": 0.82},
+                    ]
+                ),
+            ],
+            "road_construction_detection": [
+                _construction_final_response(False, "未检测到道路施工。"),
+            ],
+        },
+        category=construction_category,
+    )
+
+    candidate = _detect_with_patched_dir(agent, analysis_context)
+
+    assert candidate.detected is True
+    assert "锥桶×3" in candidate.summary
+    assert candidate.raw_vlm_response["far_enhancement"].get("fallback") is True
+
+
+def test_construction_gallery_fallback_not_triggered_for_isolated_cone(
+    make_agent, construction_category, analysis_context
+) -> None:
+    """A single isolated cone with negative classifier should remain detected=false."""
+    agent, _ = make_agent(
+        {
+            "road_construction_roi_detection": [
+                _construction_roi_response(
+                    [
+                        {"bbox_norm": [0.30, 0.40, 0.35, 0.55], "tag": "cone", "confidence": 0.70},
+                    ]
+                ),
+            ],
+            "road_construction_detection": [
+                _construction_final_response(False, "未检测到道路施工，只有孤立锥桶。"),
+            ],
+        },
+        category=construction_category,
+    )
+
+    candidate = _detect_with_patched_dir(agent, analysis_context)
+
+    assert candidate.detected is False
+    assert "fallback" not in candidate.raw_vlm_response.get("far_enhancement", {})
+
+
+def test_construction_gallery_fallback_not_triggered_for_low_confidence(
+    make_agent, construction_category, analysis_context
+) -> None:
+    """Evidence with confidence below 0.5 must not count toward fallback."""
+    agent, _ = make_agent(
+        {
+            "road_construction_roi_detection": [
+                _construction_roi_response(
+                    [
+                        {"bbox_norm": [0.30, 0.40, 0.35, 0.55], "tag": "cone", "confidence": 0.40},
+                        {"bbox_norm": [0.50, 0.45, 0.55, 0.60], "tag": "worker", "confidence": 0.35},
+                    ]
+                ),
+            ],
+            "road_construction_detection": [
+                _construction_final_response(False, "未检测到道路施工。"),
+            ],
+        },
+        category=construction_category,
+    )
+
+    candidate = _detect_with_patched_dir(agent, analysis_context)
+
+    assert candidate.detected is False
+    assert "fallback" not in candidate.raw_vlm_response.get("far_enhancement", {})
+
+
+# ---------------------------------------------------------------------------
+# Non-motor car-semantic veto regression tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "reason,expected",
+    [
+        # Non-motor conclusion with car mentioned only for contrast/negation.
+        ("红框内是一辆摩托车，不是轿车", False),
+        ("红框内为两轮车，而非汽车", False),
+        ("目标为电动车，并非汽车", False),
+        ("该目标为非机动车，不是轿车", False),
+        # Replacement/comparison contexts still anchored to non-motor evidence.
+        ("目标被一辆白色轿车取代，但可见骑乘者头盔", False),
+        ("并未被汽车遮挡，可见骑乘姿态", False),
+        ("虽被轿车遮挡，仍能辨识车把与头盔", False),
+        # Explicit car assertion dominates over a trailing non-motor negation.
+        ("红色方框内是一辆红色轿车，不是摩托车", True),
+        ("框内目标判定为白色面包车", True),
+        ("红框内是一辆SUV，不是电动车", True),
+        # Plain non-motor description without car context.
+        ("目标为非机动车，位于应急车道", False),
+        ("红框内可见两轮车和骑手", False),
+    ],
+)
+def test_is_explicitly_car_reasoning_for_non_motor(make_agent, reason, expected) -> None:
+    """The event-aware car veto distinguishes car-context from car-conclusion."""
+    agent, _ = make_agent({})
+    assert agent._is_explicitly_car_reasoning_for_non_motor(reason) is expected
+
+
+def test_non_motor_car_context_does_not_override_positive(make_agent) -> None:
+    """A positive classifier mentioning cars in comparison context is not overridden."""
+    context = _make_analysis_context(num_frames=2, vlm_max_frames=6)
+    agent, _ = make_agent(
+        {
+            "far_non_motor_roi_detection": [
+                _roi_response(
+                    [0.50, 0.50, 0.65, 0.70],
+                    "frame 0 two-wheeler candidate",
+                    confidence="high",
+                ),
+                _roi_response(None, "frame 1 no candidate"),
+            ],
+            "non_motor_vehicle_detection": [
+                _final_response(True, "红框内为两轮车，而非汽车，骑乘姿态明显"),
+            ],
+        }
+    )
+
+    candidate = _detect_with_patched_dir(agent, context)
+
+    assert candidate.detected is True
+    assert "fallback" not in candidate.raw_vlm_response.get("far_enhancement", {})
+    assert "而非汽车" in candidate.summary or "两轮车" in candidate.summary
+
+
+def test_non_motor_fallback_accepts_car_context_negative(make_agent) -> None:
+    """Fallback accepts a negative classifier whose reason only mentions cars in comparison."""
+    context = _make_analysis_context(num_frames=2, vlm_max_frames=6)
+    agent, _ = make_agent(
+        {
+            "far_non_motor_roi_detection": [
+                _roi_response(
+                    [0.50, 0.50, 0.65, 0.70],
+                    "frame 0 two-wheeler candidate with rider posture",
+                    confidence="high",
+                ),
+                _roi_response(None, "frame 1 no candidate"),
+            ],
+            "non_motor_vehicle_detection": [
+                # Classifier mentions a car only as a contextual replacement;
+                # it does not claim the boxed target is a car, nor does it invoke
+                # the "no structure" veto, so fallback should promote the ROI.
+                _final_response(False, "目标被一辆白色轿车取代"),
+            ],
+        }
+    )
+
+    candidate = _detect_with_patched_dir(agent, context)
+
+    assert candidate.detected is True
+    assert candidate.raw_vlm_response["far_enhancement"].get("fallback") is True
+
+
+def test_non_motor_fallback_skips_double_car_veto_after_override(make_agent) -> None:
+    """If classifier was positive but car-vetoed, fallback does not re-apply the veto."""
+    context = _make_analysis_context(num_frames=2, vlm_max_frames=6)
+    agent, _ = make_agent(
+        {
+            "far_non_motor_roi_detection": [
+                _roi_response(
+                    [0.50, 0.50, 0.65, 0.70],
+                    "frame 0 two-wheeler candidate",
+                    confidence="high",
+                ),
+                _roi_response(None, "frame 1 no candidate"),
+            ],
+            "non_motor_vehicle_detection": [
+                # The old generic veto would override this to False because of "汽车".
+                # The new event-aware veto keeps it True, so fallback is not needed.
+                _final_response(True, "红框内为摩托车，而非汽车"),
+            ],
+        }
+    )
+
+    candidate = _detect_with_patched_dir(agent, context)
+
+    assert candidate.detected is True
+    assert "fallback" not in candidate.raw_vlm_response.get("far_enhancement", {})
+
+
+# ---------------------------------------------------------------------------
+# Structured veto field tests
+# ---------------------------------------------------------------------------
+
+
+def test_non_motor_structured_veto_true_overrides_detected(make_agent) -> None:
+    """A positive classifier with is_target_explicitly_four_wheel_vehicle=true is vetoed."""
+    context = _make_analysis_context(num_frames=2, vlm_max_frames=6)
+    agent, engine = make_agent(
+        {
+            "far_non_motor_roi_detection": [
+                _roi_response([0.50, 0.50, 0.65, 0.70], "frame 0 candidate", confidence="high"),
+                _roi_response(None, "frame 1 no candidate"),
+            ],
+            "non_motor_vehicle_detection": [
+                _final_response_with_veto(
+                    True,
+                    "红框内为摩托车，而非汽车",
+                    is_target_explicitly_four_wheel_vehicle=True,
+                    target_type="汽车",
+                ),
+            ],
+        }
+    )
+
+    candidate = _detect_with_patched_dir(agent, context)
+
+    assert candidate.detected is False
+    assert candidate.is_target_explicitly_four_wheel_vehicle is True
+    assert candidate.target_type == "汽车"
+
+
+def test_non_motor_structured_veto_false_keeps_detected(make_agent) -> None:
+    """A positive classifier with is_target_explicitly_four_wheel_vehicle=false stays true."""
+    context = _make_analysis_context(num_frames=2, vlm_max_frames=6)
+    agent, engine = make_agent(
+        {
+            "far_non_motor_roi_detection": [
+                _roi_response([0.50, 0.50, 0.65, 0.70], "frame 0 candidate", confidence="high"),
+                _roi_response(None, "frame 1 no candidate"),
+            ],
+            "non_motor_vehicle_detection": [
+                _final_response_with_veto(
+                    True,
+                    "红框内为摩托车",
+                    is_target_explicitly_four_wheel_vehicle=False,
+                    target_type="摩托车",
+                ),
+            ],
+        }
+    )
+
+    candidate = _detect_with_patched_dir(agent, context)
+
+    assert candidate.detected is True
+    assert candidate.is_target_explicitly_four_wheel_vehicle is False
+    assert candidate.target_type == "摩托车"
+
+
+def test_non_motor_structured_veto_missing_falls_back_to_regex(make_agent) -> None:
+    """When the structured veto field is missing, regex checks still veto explicit cars."""
+    context = _make_analysis_context(num_frames=2, vlm_max_frames=6)
+    agent, engine = make_agent(
+        {
+            "far_non_motor_roi_detection": [
+                _roi_response([0.50, 0.50, 0.65, 0.70], "frame 0 candidate", confidence="high"),
+                _roi_response(None, "frame 1 no candidate"),
+            ],
+            "non_motor_vehicle_detection": [
+                _final_response(True, "红色方框内是一辆红色轿车，不是摩托车"),
+            ],
+        }
+    )
+
+    candidate = _detect_with_patched_dir(agent, context)
+
+    assert candidate.detected is False
+    assert candidate.is_target_explicitly_four_wheel_vehicle is None
+
+
+def test_non_motor_structured_veto_false_in_fallback_negative_keeps_accepted(make_agent) -> None:
+    """Fallback accepts a negative classifier that explicitly sets is_target_explicitly_four_wheel_vehicle=false."""
+    context = _make_analysis_context(num_frames=2, vlm_max_frames=6)
+    agent, _ = make_agent(
+        {
+            "far_non_motor_roi_detection": [
+                _roi_response(
+                    [0.50, 0.50, 0.65, 0.70],
+                    "frame 0 two-wheeler candidate with rider posture",
+                    confidence="high",
+                ),
+                _roi_response(None, "frame 1 no candidate"),
+            ],
+            "non_motor_vehicle_detection": [
+                _final_response_with_veto(
+                    False,
+                    "目标被一辆白色轿车取代",
+                    is_target_explicitly_four_wheel_vehicle=False,
+                    target_type="无法确定",
+                ),
+            ],
+        }
+    )
+
+    candidate = _detect_with_patched_dir(agent, context)
+
+    assert candidate.detected is True
+    assert candidate.raw_vlm_response["far_enhancement"].get("fallback") is True
+
+
+def test_non_motor_structured_veto_true_in_fallback_blocks_fallback(make_agent) -> None:
+    """Fallback is blocked when the classifier explicitly says the target is a car."""
+    context = _make_analysis_context(num_frames=2, vlm_max_frames=6)
+    agent, _ = make_agent(
+        {
+            "far_non_motor_roi_detection": [
+                _roi_response(
+                    [0.50, 0.50, 0.65, 0.70],
+                    "frame 0 two-wheeler candidate",
+                    confidence="high",
+                ),
+                _roi_response(None, "frame 1 no candidate"),
+            ],
+            "non_motor_vehicle_detection": [
+                _final_response_with_veto(
+                    False,
+                    "红框内是一辆白色轿车",
+                    is_target_explicitly_four_wheel_vehicle=True,
+                    target_type="汽车",
+                ),
+            ],
+        }
+    )
+
+    candidate = _detect_with_patched_dir(agent, context)
+
+    assert candidate.detected is False
+
+
+def test_non_motor_final_classifier_parse_failure_retries_and_succeeds(make_agent) -> None:
+    """If the first final classifier response is unparseable, retry with a shorter prompt."""
+    context = _make_analysis_context(num_frames=2, vlm_max_frames=6)
+    agent, engine = make_agent(
+        {
+            "far_non_motor_roi_detection": [
+                _roi_response([0.50, 0.50, 0.65, 0.70], "frame 0 candidate", confidence="high"),
+                _roi_response(None, "frame 1 no candidate"),
+            ],
+            "non_motor_vehicle_detection": [
+                {"_unparseable": True},  # first call returns a dict but we simulate via _MockResponse
+                _final_response_with_veto(
+                    True,
+                    "红框内为摩托车",
+                    is_target_explicitly_four_wheel_vehicle=False,
+                    target_type="摩托车",
+                ),
+            ],
+        }
+    )
+
+    # Override the first response to be a parse failure.
+    original_call = engine.call
+
+    def _patched_call(template, images, context_vars=None, response_schema=None):
+        queue = engine._responses.get(template.template_id, [])
+        if queue and "_unparseable" in queue[0]:
+            queue.pop(0)
+            engine.calls.append(
+                {
+                    "template_id": template.template_id,
+                    "images": images,
+                    "context_vars": context_vars,
+                    "response_schema": response_schema,
+                }
+            )
+            return _MockResponse({}, success=False, raw_text="not valid json")
+        return original_call(template, images, context_vars, response_schema)
+
+    engine.call = _patched_call
+
+    candidate = _detect_with_patched_dir(agent, context)
+
+    assert candidate.detected is True
+    assert candidate.is_target_explicitly_four_wheel_vehicle is False
+    final_calls = [c for c in engine.calls if c["template_id"] == "non_motor_vehicle_detection"]
+    assert len(final_calls) == 2
+
+
+def test_non_motor_final_classifier_parse_failure_retry_falls_back_to_regex(make_agent) -> None:
+    """If both initial and retry final classifier responses fail, regex fallback can still veto."""
+    context = _make_analysis_context(num_frames=2, vlm_max_frames=6)
+    agent, engine = make_agent(
+        {
+            "far_non_motor_roi_detection": [
+                _roi_response([0.50, 0.50, 0.65, 0.70], "frame 0 candidate", confidence="high"),
+                _roi_response(None, "frame 1 no candidate"),
+            ],
+            "non_motor_vehicle_detection": [
+                {"_unparseable": True},
+                {"_unparseable": True},
+            ],
+        }
+    )
+
+    original_call = engine.call
+
+    def _patched_call(template, images, context_vars=None, response_schema=None):
+        queue = engine._responses.get(template.template_id, [])
+        if queue and "_unparseable" in queue[0]:
+            queue.pop(0)
+            engine.calls.append(
+                {
+                    "template_id": template.template_id,
+                    "images": images,
+                    "context_vars": context_vars,
+                    "response_schema": response_schema,
+                }
+            )
+            return _MockResponse({}, success=False, raw_text="红色方框内是一辆红色轿车")
+        return original_call(template, images, context_vars, response_schema)
+
+    engine.call = _patched_call
+
+    candidate = _detect_with_patched_dir(agent, context)
+
+    # Both calls failed to parse, so _run_final_classifier returns None.
+    # The negative_final_reason is set to the raw text, but fallback is blocked
+    # by the car regex on "红色方框内是一辆红色轿车".
+    assert candidate.detected is False
+
+
+def test_pedestrian_structured_veto_true_overrides_detected(
+    make_agent, pedestrian_category, analysis_context
+) -> None:
+    """A pedestrian classifier with is_target_explicitly_four_wheel_vehicle=true is vetoed."""
+    agent, _ = make_agent(
+        {
+            "far_pedestrian_roi_detection": [
+                _roi_response([0.50, 0.50, 0.55, 0.75], "frame 0 distant target"),
+                _roi_response(None, "no candidate frame 1"),
+                _roi_response(None, "no candidate frame 2"),
+            ],
+            "pedestrian_detection": [
+                _pedestrian_final_response_with_veto(
+                    True,
+                    "红框内为一名站立行人",
+                    instances=[
+                        {
+                            "description": "应急车道边缘站立行人",
+                            "reasoning": "红框内可见直立人形轮廓",
+                        }
+                    ],
+                    is_target_explicitly_four_wheel_vehicle=True,
+                    target_type="汽车",
+                ),
+            ],
+        },
+        category=pedestrian_category,
+    )
+
+    candidate = _detect_with_patched_dir(agent, analysis_context)
+
+    assert candidate.detected is False
+    assert candidate.is_target_explicitly_four_wheel_vehicle is True
+
+
+def test_pedestrian_structured_veto_false_keeps_detected(
+    make_agent, pedestrian_category, analysis_context
+) -> None:
+    """A pedestrian classifier with is_target_explicitly_four_wheel_vehicle=false stays true."""
+    agent, _ = make_agent(
+        {
+            "far_pedestrian_roi_detection": [
+                _roi_response([0.50, 0.50, 0.55, 0.75], "frame 0 distant pedestrian"),
+                _roi_response(None, "no candidate frame 1"),
+                _roi_response(None, "no candidate frame 2"),
+            ],
+            "pedestrian_detection": [
+                _pedestrian_final_response_with_veto(
+                    True,
+                    "红框内为一名站立行人",
+                    instances=[
+                        {
+                            "description": "应急车道边缘站立行人",
+                            "reasoning": "红框内可见直立人形轮廓",
+                        }
+                    ],
+                    is_target_explicitly_four_wheel_vehicle=False,
+                    target_type="行人",
+                ),
+            ],
+        },
+        category=pedestrian_category,
+    )
+
+    candidate = _detect_with_patched_dir(agent, analysis_context)
+
+    assert candidate.detected is True
+    assert candidate.is_target_explicitly_four_wheel_vehicle is False
+    assert candidate.target_type == "行人"
+
+
+def test_construction_structured_veto_true_overrides_detected(
+    make_agent, construction_category, analysis_context
+) -> None:
+    """A construction classifier with is_target_explicitly_four_wheel_vehicle=true is vetoed."""
+    agent, _ = make_agent(
+        {
+            "road_construction_roi_detection": [
+                _construction_roi_response(
+                    [
+                        {"bbox_norm": [0.30, 0.40, 0.35, 0.55], "tag": "cone", "confidence": 0.92},
+                    ]
+                ),
+            ],
+            "road_construction_detection": [
+                {
+                    "detected": True,
+                    "is_target_explicitly_four_wheel_vehicle": True,
+                    "target_type": "汽车",
+                    "instances": [
+                        {
+                            "description": "一辆白色轿车",
+                            "reasoning": "画面中只有一辆正常行驶车辆",
+                        }
+                    ],
+                    "summary": "画面中只有一辆白色轿车，没有施工",
+                },
+            ],
+        },
+        category=construction_category,
+    )
+
+    candidate = _detect_with_patched_dir(agent, analysis_context)
+
+    assert candidate.detected is False
+    assert candidate.is_target_explicitly_four_wheel_vehicle is True

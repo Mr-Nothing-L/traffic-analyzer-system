@@ -716,37 +716,82 @@ class ReportGenerator:
         return "\n".join(result)
 
     def _render_far_enhancement(
-        self, candidate: Optional[Dict[str, Any]]
+        self,
+        candidate: Optional[Dict[str, Any]],
+        event_id: int,
     ) -> List[str]:
-        """Render far-distance non-motor vehicle enhancement evidence."""
+        """Render far-distance object enhancement evidence for an event."""
         if not candidate:
             return []
+
+        if event_id == 4:
+            title = "远距离非机动车增强证据"
+            composite_alt = "远距离非机动车增强"
+        elif event_id == 3:
+            title = "远距离行人增强证据"
+            composite_alt = "远距离行人增强"
+        elif event_id == 6:
+            title = "施工证据合成图"
+            composite_alt = "施工证据合成图"
+        else:
+            title = "远距离目标增强证据"
+            composite_alt = "远距离目标增强"
 
         lines: List[str] = []
         raw_vlm_response = candidate.get("raw_vlm_response", {})
         composite_path = raw_vlm_response.get("composite_image_path")
         motion_composite_path = raw_vlm_response.get("motion_composite_image_path")
+        gallery_path = raw_vlm_response.get("gallery_image_path")
         has_header = False
 
+        if gallery_path and event_id == 6:
+            lines.append(f"#### {title}")
+            lines.append(f"**施工证据合成图**: `{gallery_path}`")
+            lines.append("")
+            lines.append(f"![{composite_alt}]({gallery_path})")
+            lines.append("")
+            has_header = True
+
         if composite_path:
-            lines.append("#### 远距离非机动车增强证据")
+            lines.append(f"#### {title}")
             lines.append(f"**远距离增强合成图**: `{composite_path}`")
             lines.append("")
-            lines.append(f"![远距离非机动车增强]({composite_path})")
+            lines.append(f"![{composite_alt}]({composite_path})")
             lines.append("")
             has_header = True
 
         if motion_composite_path:
             if not has_header:
-                lines.append("#### 远距离非机动车增强证据")
+                lines.append(f"#### {title}")
                 lines.append("")
             lines.append(f"**运动反射验证合成图**: `{motion_composite_path}`")
             lines.append("")
             lines.append(f"![运动反射验证]({motion_composite_path})")
             lines.append("")
 
-        frame_analysis_log = raw_vlm_response.get("far_enhancement", {}).get("frame_analysis_log")
-        if frame_analysis_log:
+        far_enhancement = raw_vlm_response.get("far_enhancement", {}) or {}
+
+        # Construction evidence region table.
+        if event_id == 6 and far_enhancement.get("evidence_regions"):
+            lines.append("#### 证据区域表")
+            lines.append("")
+            lines.append("| tag | bbox | confidence | 面积(px) | 宽高比 | 说明 |")
+            lines.append("|-----|------|------------|----------|--------|------|")
+            for region in far_enhancement["evidence_regions"]:
+                bbox_str = str(region.get("bbox_norm", "—"))
+                confidence_val = region.get("confidence")
+                confidence_str = f"{float(confidence_val):.2f}" if isinstance(confidence_val, (int, float)) else "—"
+                area_str = str(region.get("area_px", "—"))
+                aspect_val = region.get("aspect_ratio")
+                aspect_str = f"{aspect_val:.2f}" if aspect_val is not None else "—"
+                summary_str = str(far_enhancement.get("summary", ""))
+                lines.append(
+                    f"| {region.get('tag', '—')} | {bbox_str} | {confidence_str} | {area_str} | {aspect_str} | {summary_str} |"
+                )
+            lines.append("")
+
+        frame_analysis_log = far_enhancement.get("frame_analysis_log")
+        if frame_analysis_log and event_id != 6:
             lines.append("#### 逐帧 ROI 分析")
             lines.append("")
             lines.append("| 帧号 | 是否有候选 | bbox | 面积(px) | 宽高比 | 置信度 | 运动分数 | 原因 |")
@@ -887,9 +932,20 @@ class ReportGenerator:
                 lines.append(result.cv_evidence)
                 lines.append("")
 
-            # 展示远距离非机动车增强合成图（如有）
-            if result.event_id == 4:
-                lines.extend(self._render_far_enhancement(candidate))
+            # 展示远距离目标增强合成图（如有）
+            raw_vlm_response = (
+                candidate.get("raw_vlm_response", {}) if candidate else {}
+            )
+            has_far_evidence = bool(
+                raw_vlm_response.get("composite_image_path")
+                or raw_vlm_response.get("motion_composite_image_path")
+                or raw_vlm_response.get("gallery_image_path")
+                or raw_vlm_response.get("far_enhancement")
+            )
+            if has_far_evidence:
+                lines.extend(
+                    self._render_far_enhancement(candidate, result.event_id)
+                )
 
             return lines
         except Exception as exc:

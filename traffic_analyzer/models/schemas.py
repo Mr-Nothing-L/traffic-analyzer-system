@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -285,6 +285,11 @@ class EventCandidate(BaseModel):
     raw_vlm_text: str = Field(default="", description="VLM原始自然语言回复全文")
     cv_evidence: str = Field(default="", description="CV帧差检测证据")
     tool_results: List[Dict[str, Any]] = Field(default_factory=list, description="工具调用结果列表")
+    # Structured veto fields populated by the far-enhancement final classifier.
+    # is_target_explicitly_four_wheel_vehicle=true means the boxed target is a
+    # car/SUV/truck/van and the event should be vetoed.
+    is_target_explicitly_four_wheel_vehicle: Optional[bool] = None
+    target_type: str = Field(default="", description="结构化目标类型，如行人/非机动车/汽车/施工元素等")
 
 
 class AuditEntry(BaseModel):
@@ -314,8 +319,28 @@ class AdjudicationResult(BaseModel):
 # LLM/VLM Models
 # ---------------------------------------------------------------------------
 
+class FarObjectEnhancementConfig(BaseModel):
+    """Per-template configuration for far-distance object ROI enhancement.
+
+    Defaults preserve the historical event_id=4 (non-motor vehicle) behaviour
+    so that existing ``enable_far_object_enhancement: true`` YAML entries keep
+    working without additional fields.
+    """
+
+    enabled: bool = False
+    roi_template_id: str = "far_non_motor_roi_detection"
+    min_area_px: int = 80
+    max_aspect_ratio: float = 1.2
+    enable_motion_filter: bool = True
+    motion_score_threshold: float = 1.0
+    motion_penalty: float = 5.0
+    top_k: int = 2
+    frame_selection: str = "all"  # "all" = per-frame ROI scan; "middle" = single middle frame (e.g. construction)
+
+
 class PromptTemplate(BaseModel):
     """A reusable prompt template."""
+
     template_id: str
     name: str
     version: str = "1.0"
@@ -332,10 +357,24 @@ class PromptTemplate(BaseModel):
         default_factory=list,
         description="Tool names available in this prompt context (injected into prompt)"
     )
-    enable_far_object_enhancement: bool = Field(
-        default=False,
-        description="Whether this template supports far-distance object enhancement preprocessing"
+    far_object_enhancement: FarObjectEnhancementConfig = Field(
+        default_factory=FarObjectEnhancementConfig,
+        description="Far-distance object enhancement configuration"
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_enable_far_object_enhancement(cls, data: Any) -> Any:
+        """Backward compatibility: convert legacy bool field to config object."""
+        if isinstance(data, dict) and "enable_far_object_enhancement" in data:
+            legacy_enabled = bool(data.pop("enable_far_object_enhancement"))
+            if "far_object_enhancement" not in data:
+                data["far_object_enhancement"] = {"enabled": legacy_enabled}
+            else:
+                fe = data["far_object_enhancement"]
+                if isinstance(fe, dict) and "enabled" not in fe:
+                    fe["enabled"] = legacy_enabled
+        return data
 
 
 class LLMResponse(BaseModel):
