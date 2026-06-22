@@ -9,21 +9,15 @@ and usage tracking.
 
 from __future__ import annotations
 
-import base64
 import copy
-import hashlib
-import io
-import json
 import logging
-import re
 import threading
 import time
 import uuid
 from collections import OrderedDict
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from jinja2 import Template, UndefinedError, StrictUndefined, DebugUndefined
+from jinja2 import Template, UndefinedError, StrictUndefined
 
 # Import SDKs at top level so tests can patch them via the module namespace.
 import anthropic
@@ -37,813 +31,83 @@ from traffic_analyzer.models.schemas import (
     PromptTemplate,
 )
 
+from traffic_analyzer.core.vlm_exceptions import (
+    FatalAPIError,
+    PromptRenderError,
+    ProviderNotSupportedError,
+    ResponseParseError,
+    SchemaValidationError,
+    VLMEngineError,
+)
+
+from traffic_analyzer.core.vlm_cache import (
+    DiskCache,
+    _compute_cache_key,
+)
+
+from traffic_analyzer.core.vlm_response_parser import (
+    _extract_json_from_text,
+    _repair_json,
+    _validate_schema_basic,
+)
+
+from traffic_analyzer.core.vlm_error_classifier import (
+    _is_fatal_api_error,
+    _is_retryable_error,
+)
+
+from traffic_analyzer.core.vlm_provider_clients import (
+    _build_aliyun_payload,
+    _build_anthropic_payload,
+    _build_google_payload,
+    _build_openai_payload,
+    _call_aliyun,
+    _call_anthropic,
+    _call_anthropic_with_tools,
+    _call_google,
+    _call_openai,
+    _encode_image_to_base64,
+    _is_image_path,
+)
+
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Exceptions
+# Compatibility re-exports
 # ---------------------------------------------------------------------------
 
-class VLMEngineError(Exception):
-    """Base exception for VLM engine errors."""
-
-
-class ProviderNotSupportedError(VLMEngineError):
-    """Raised when the configured provider is not supported."""
-
-
-class PromptRenderError(VLMEngineError):
-    """Raised when prompt template rendering fails."""
-
-
-class ResponseParseError(VLMEngineError):
-    """Raised when the LLM response cannot be parsed."""
-
-
-class SchemaValidationError(VLMEngineError):
-    """Raised when parsed response fails schema validation."""
-
-
-class FatalAPIError(VLMEngineError):
-    """Raised when the API is unusable (quota exhausted, auth failed, etc.).
-
-    This error propagates through all fallback layers to signal batch_infer
-    that subsequent videos will also fail — processing should stop immediately.
-    """
-
-
-# ---------------------------------------------------------------------------
-# Disk Cache (cross-process persistent cache)
-# ---------------------------------------------------------------------------
-
-class DiskCache:
-    """SQLite-backed persistent cache for LLM responses.
-
-    Enables cache hits across subprocess boundaries (e.g. batch_infer)
-    where each video runs in a separate process.
-    """
-
-    def __init__(self, db_path: str, max_entries: int = 2000) -> None:
-        # Resolve relative paths to absolute (subprocess cwd may differ)
-        self.db_path = str(Path(db_path).expanduser().resolve())
-        self.max_entries = max_entries
-        self._local = threading.local()
-        self._init_db()
-
-    def _get_conn(self) -> "sqlite3.Connection":
-        """Return a thread-local SQLite connection."""
-        if not hasattr(self._local, "conn") or self._local.conn is None:
-            import sqlite3
-            self._local.conn = sqlite3.connect(
-                self.db_path,
-                timeout=10.0,
-                check_same_thread=False,
-            )
-            self._local.conn.execute("PRAGMA journal_mode=WAL")
-            self._local.conn.execute("PRAGMA synchronous=NORMAL")
-        return self._local.conn
-
-    def _init_db(self) -> None:
-        import sqlite3
-        import os
-        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
-        conn = sqlite3.connect(self.db_path, timeout=10.0)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS vlm_cache (
-                cache_key TEXT PRIMARY KEY,
-                provider TEXT NOT NULL,
-                model TEXT NOT NULL,
-                response_json TEXT NOT NULL,
-                created_at REAL,
-                access_count INTEGER DEFAULT 1,
-                last_accessed REAL
-            )
-        """)
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_vlm_cache_last_accessed
-            ON vlm_cache(last_accessed)
-        """)
-        conn.commit()
-        conn.close()
-
-    def get(self, cache_key: str, provider: str, model: str) -> Optional[LLMResponse]:
-        """Retrieve a cached response if it exists and matches provider/model."""
-        import sqlite3
-        try:
-            conn = self._get_conn()
-            cursor = conn.execute(
-                "SELECT response_json FROM vlm_cache WHERE cache_key = ? AND provider = ? AND model = ?",
-                (cache_key, provider, model),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                return None
-            # Update access stats
-            now = time.time()
-            conn.execute(
-                "UPDATE vlm_cache SET access_count = access_count + 1, last_accessed = ? WHERE cache_key = ?",
-                (now, cache_key),
-            )
-            conn.commit()
-            data = json.loads(row[0])
-            return LLMResponse(**data)
-        except sqlite3.Error as exc:
-            logger.debug("[DiskCache] GET error: %s", exc)
-            return None
-
-    def set(self, cache_key: str, provider: str, model: str, response: LLMResponse) -> None:
-        """Store a response in the disk cache."""
-        import sqlite3
-        try:
-            conn = self._get_conn()
-            now = time.time()
-            response_json = json.dumps(response.model_dump(), default=str)
-            conn.execute(
-                """INSERT OR REPLACE INTO vlm_cache
-                   (cache_key, provider, model, response_json, created_at, access_count, last_accessed)
-                   VALUES (?, ?, ?, ?, ?, 1, ?)""",
-                (cache_key, provider, model, response_json, now, now),
-            )
-            conn.commit()
-            # Prune if over max_entries
-            self._prune(conn)
-        except sqlite3.Error as exc:
-            logger.debug("[DiskCache] SET error: %s", exc)
-
-    def _prune(self, conn: "sqlite3.Connection") -> None:
-        """Remove oldest entries if over max_entries."""
-        import sqlite3
-        try:
-            cursor = conn.execute("SELECT COUNT(*) FROM vlm_cache")
-            count = cursor.fetchone()[0]
-            if count > self.max_entries:
-                to_delete = count - self.max_entries
-                conn.execute(
-                    "DELETE FROM vlm_cache WHERE cache_key IN ("
-                    "SELECT cache_key FROM vlm_cache ORDER BY last_accessed ASC LIMIT ?"
-                    ")",
-                    (to_delete,),
-                )
-                conn.commit()
-        except sqlite3.Error:
-            pass
-
-    def get_stats(self) -> Dict[str, Any]:
-        """Return disk cache statistics."""
-        import sqlite3
-        try:
-            conn = self._get_conn()
-            cursor = conn.execute("SELECT COUNT(*), SUM(access_count) FROM vlm_cache")
-            row = cursor.fetchone()
-            return {
-                "disk_cache_enabled": True,
-                "disk_cache_path": self.db_path,
-                "disk_cache_entries": row[0] or 0,
-                "disk_cache_total_hits": row[1] or 0,
-            }
-        except sqlite3.Error as exc:
-            return {
-                "disk_cache_enabled": True,
-                "disk_cache_path": self.db_path,
-                "disk_cache_error": str(exc),
-            }
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _compute_cache_key(system_prompt: str, user_prompt: str, images: List[Any]) -> str:
-    """Compute a deterministic cache key for a VLM call.
-
-    The key is a SHA-256 hex digest of the prompt text combined with
-    the raw image data.  This allows identical calls (same prompt +
-    same images) to hit the cache even if the caller passes different
-    Python object identities.
-
-    Args:
-        system_prompt: Rendered system prompt.
-        user_prompt: Rendered user prompt.
-        images: List of images (PIL Image, bytes, or file paths).
-
-    Returns:
-        Hex digest string suitable as a cache key.
-    """
-    hasher = hashlib.sha256()
-    hasher.update((system_prompt or "").encode("utf-8"))
-    hasher.update(b"\x00")
-    hasher.update((user_prompt or "").encode("utf-8"))
-
-    for img in images:
-        hasher.update(b"\x00")
-        if isinstance(img, bytes):
-            hasher.update(img)
-        elif isinstance(img, str):
-            try:
-                with open(img, "rb") as fh:
-                    hasher.update(fh.read())
-            except OSError:
-                hasher.update(img.encode("utf-8"))
-        else:
-            # PIL Image or other – convert to PNG bytes
-            try:
-                from PIL import Image as PILImage
-                if isinstance(img, PILImage.Image):
-                    buf = io.BytesIO()
-                    img.save(buf, format="PNG")
-                    hasher.update(buf.getvalue())
-                else:
-                    hasher.update(str(img).encode("utf-8"))
-            except Exception:
-                hasher.update(str(img).encode("utf-8"))
-
-    return hasher.hexdigest()
-
-
-def _encode_image_to_base64(image: Any) -> str:
-    """Convert an image to a base64-encoded PNG string.
-
-    Args:
-        image: PIL Image, bytes, or file path (str/Path).
-
-    Returns:
-        Base64-encoded PNG data URI.
-    """
-    try:
-        try:
-            from PIL import Image as PILImage
-        except ImportError:  # pragma: no cover
-            PILImage = None  # type: ignore[misc,assignment]
-
-        if PILImage is not None and isinstance(image, PILImage.Image):
-            buffer = io.BytesIO()
-            image.save(buffer, format="PNG")
-            data = buffer.getvalue()
-        elif isinstance(image, bytes):
-            data = image
-        elif isinstance(image, (str,)):
-            f = open(image, "rb")
-            try:
-                data = f.read()
-            finally:
-                f.close()
-        else:
-            raise TypeError(
-                f"Unsupported image type: {type(image)}. "
-                "Expected PIL Image, bytes, or file path."
-            )
-
-        b64 = base64.b64encode(data).decode("utf-8")
-        return f"data:image/png;base64,{b64}"
-    except Exception as exc:
-        image_type = type(image).__name__
-        logger.error(
-            "[vlm_engine:_encode_image_to_base64] ENCODE_FAILED | image_type=%s | %s",
-            image_type,
-            exc,
-            exc_info=True,
-        )
-        raise
-
-
-def _repair_json(text: str) -> str:
-    """Fix common VLM JSON syntax errors.
-
-    Handles missing commas between properties and trailing commas.
-    """
-    # Fix 1: missing comma after } or ] before the next property key
-    # e.g.  {"a": 1} "b": 2  ->  {"a": 1}, "b": 2
-    text = re.sub(r'([}\]])(\s*)(")', r'\1,\2\3', text)
-
-    # Fix 2: missing comma after a literal value before the next property key
-    # e.g.  "a": true "b": false  ->  "a": true, "b": false
-    # Matches: string "...", number, true, false, null
-    text = re.sub(r'("(?:[^"\\]|\\.)*"|\d+(?:\.\d+)?|true|false|null)(\s+)(")', r'\1,\2\3', text)
-
-    # Fix 3: trailing commas before } or ]
-    # e.g.  {"a": 1, }  ->  {"a": 1}
-    text = re.sub(r',(\s*[}\]])', r'\1', text)
-
-    return text
-
-
-def _extract_json_from_text(text: str) -> Dict[str, Any]:
-    """Extract JSON object from text, with fallback to regex.
-
-    Tries strict JSON parsing first, then searches for the first
-    JSON object block via regex.  Also attempts to auto-repair common
-    VLM JSON syntax errors (missing commas, trailing commas).
-
-    Args:
-        text: Raw text potentially containing JSON.
-
-    Returns:
-        Parsed JSON dictionary.
-
-    Raises:
-        ResponseParseError: If no valid JSON is found.
-    """
-    try:
-        text = text.strip()
-        # Try direct parse first
-        try:
-            result = json.loads(text)
-            if isinstance(result, dict):
-                return result
-            # VLM sometimes returns a JSON array (e.g. []) instead of an object.
-            # If the array contains a dict as its first element, use that.
-            if isinstance(result, list) and result and isinstance(result[0], dict):
-                return result[0]
-        except json.JSONDecodeError:
-            pass
-
-        # Try to find a JSON object or array block
-        # Look for ```json ... ``` fenced code blocks first
-        fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-        if fenced:
-            try:
-                return json.loads(fenced.group(1))
-            except json.JSONDecodeError:
-                pass
-
-        # Fallback: find all JSON objects and merge them if multiple found
-        # (VLM sometimes outputs partial JSONs that should be merged)
-        matches = re.findall(r"\{[\s\S]*?\}", text)
-        if len(matches) >= 2:
-            # Try to merge all valid JSON objects
-            merged = {}
-            for candidate in matches:
-                try:
-                    result = json.loads(candidate)
-                    if isinstance(result, dict):
-                        merged.update(result)
-                except json.JSONDecodeError:
-                    continue
-            if merged:
-                return merged
-        elif len(matches) == 1:
-            candidate = matches[0]
-            # Try strict parse first
-            try:
-                result = json.loads(candidate)
-                if isinstance(result, dict):
-                    return result
-                if isinstance(result, list) and result and isinstance(result[0], dict):
-                    return result[0]
-            except json.JSONDecodeError:
-                pass
-
-            # Try auto-repair common VLM JSON errors
-            repaired = _repair_json(candidate)
-            try:
-                result = json.loads(repaired)
-                if isinstance(result, dict):
-                    logger.debug(
-                        "[vlm_engine:_extract_json_from_text] JSON_REPAIRED | "
-                        "original_len=%d repaired_len=%d",
-                        len(candidate),
-                        len(repaired),
-                    )
-                    return result
-                if isinstance(result, list) and result and isinstance(result[0], dict):
-                    return result[0]
-            except json.JSONDecodeError:
-                pass
-
-            # Still failed — raise with the original error for clarity
-            try:
-                json.loads(candidate)
-            except json.JSONDecodeError as exc:
-                raise ResponseParseError(f"Found JSON-like block but failed to parse: {exc}")
-
-        raise ResponseParseError("No JSON object found in response text.")
-    except ResponseParseError:
-        raise
-    except Exception as exc:
-        logger.error(
-            "[vlm_engine:_extract_json_from_text] PARSE_FAILED | text_len=%d | %s",
-            len(text),
-            exc,
-            exc_info=True,
-        )
-        raise ResponseParseError(f"JSON extraction failed: {exc}") from exc
-
-
-def _is_retryable_error(exc: Exception) -> bool:
-    """Return True if *exc* is a transient error worth retrying.
-
-    Retryable: rate limits, connection issues, timeouts, server-side 5xx.
-    Non-retryable: auth errors, bad requests, parse/validation errors.
-    """
-    # Our own exceptions — never retry
-    if isinstance(exc, (PromptRenderError, ResponseParseError, SchemaValidationError)):
-        return False
-
-    # Unwrap wrapped exceptions (e.g. SDK wrappers, chained causes)
-    cause = getattr(exc, "__cause__", None) or getattr(exc, "__context__", None)
-    candidates = [exc]
-    if cause is not None:
-        candidates.append(cause)
-
-    for candidate in candidates:
-        # OpenAI SDK errors
-        if isinstance(candidate, openai.RateLimitError):
-            return True
-        if isinstance(candidate, openai.APIConnectionError):
-            return True
-        if isinstance(candidate, openai.APITimeoutError):
-            return True
-        if isinstance(candidate, openai.InternalServerError):
-            return True
-        if isinstance(candidate, openai.APIStatusError):
-            # 5xx server errors are retryable; 4xx client errors are not
-            status = getattr(candidate, "status_code", None) or 0
-            if status >= 500:
-                return True
-            # Explicit non-retryable OpenAI client errors
-            if isinstance(
-                candidate,
-                (openai.AuthenticationError, openai.BadRequestError, openai.NotFoundError),
-            ):
-                return False
-            # Other 4xx — don't retry by default
-            if 400 <= status < 500:
-                return False
-
-        # Anthropic SDK errors (use getattr for safety in case SDK version differs)
-        anthropic_rate_limit = getattr(anthropic, "RateLimitError", None)
-        anthropic_timeout = getattr(anthropic, "APITimeoutError", None)
-        anthropic_auth = getattr(anthropic, "AuthenticationError", None)
-        anthropic_bad_request = getattr(anthropic, "BadRequestError", None)
-        if anthropic_rate_limit and isinstance(candidate, anthropic_rate_limit):
-            return True
-        if anthropic_timeout and isinstance(candidate, anthropic_timeout):
-            return True
-        if anthropic_auth and isinstance(candidate, anthropic_auth):
-            return False
-        if anthropic_bad_request and isinstance(candidate, anthropic_bad_request):
-            return False
-
-        # httpx timeouts
-        if isinstance(candidate, httpx.TimeoutException):
-            return True
-
-        # Generic Python network / timeout errors
-        if isinstance(candidate, (ConnectionError, TimeoutError)):
-            return True
-
-    # Default: if we can't classify it, be conservative and don't retry
-    # (avoids burning API quota on unknown errors)
-    return False
-
-
-def _is_fatal_api_error(exc: Exception) -> bool:
-    """Return True if *exc* means the API is unusable and will not recover.
-
-    Fatal errors should stop batch processing immediately to avoid wasting
-    quota on retries and subsequent videos.
-    """
-    cause = getattr(exc, "__cause__", None) or getattr(exc, "__context__", None)
-    candidates = [exc]
-    if cause is not None:
-        candidates.append(cause)
-
-    for candidate in candidates:
-        if candidate is None:
-            continue
-        # OpenAI SDK — auth / permission / quota
-        if isinstance(
-            candidate,
-            (openai.AuthenticationError, openai.PermissionDeniedError),
-        ):
-            return True
-        # Anthropic SDK — auth
-        anthropic_auth = getattr(anthropic, "AuthenticationError", None)
-        if anthropic_auth and isinstance(candidate, anthropic_auth):
-            return True
-        # Check error message for quota / balance / billing keywords
-        msg = str(candidate).lower()
-        fatal_keywords = (
-            "quota", "insufficient", "balance", "billing", "exhausted",
-            "unauthorized", "invalid api key", "access denied",
-            "余额", "配额", "欠费", "未授权", "无效的",
-        )
-        if any(kw in msg for kw in fatal_keywords):
-            return True
-
-    return False
-
-
-def _validate_schema_basic(data: Dict[str, Any], schema: Dict[str, Any]) -> None:
-    """Perform basic key-check validation against a JSON schema.
-
-    Currently checks that all top-level 'required' keys are present.
-
-    Args:
-        data: Parsed response data.
-        schema: JSON schema dict (may contain 'required' list).
-
-    Raises:
-        SchemaValidationError: If required keys are missing.
-    """
-    required = schema.get("required", [])
-    missing = [k for k in required if k not in data]
-    if missing:
-        raise SchemaValidationError(
-            f"Schema validation failed: missing required keys {missing}"
-        )
-
-
-# ---------------------------------------------------------------------------
-# Provider-specific payload builders / callers
-# ---------------------------------------------------------------------------
-
-def _is_image_path(path: str) -> bool:
-    """Check if a string looks like an image file path or URL."""
-    if not isinstance(path, str):
-        return False
-    return path.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")) or path.startswith(("http://", "https://", "data:image/"))
-
-
-def _build_anthropic_payload(
-    system_prompt: str,
-    user_prompt: str,
-    images: List[Any],
-    model: str,
-    max_tokens: int,
-    temperature: float,
-) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    """Build Anthropic message list and kwargs.
-
-    Supports interleaving text labels with images: if an element in *images*
-    is a plain string that does not look like an image path, it is inserted
-    as a text content block before the subsequent image.
-    """
-    content: List[Dict[str, Any]] = []
-    if user_prompt:
-        content.append({"type": "text", "text": user_prompt})
-    for img in images:
-        if isinstance(img, str) and not _is_image_path(img):
-            content.append({"type": "text", "text": img})
-            continue
-        b64_uri = _encode_image_to_base64(img)
-        # Anthropic expects base64 data without the data URI prefix
-        b64_data = b64_uri.split(",", 1)[1]
-        content.append(
-            {
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": "image/png",
-                    "data": b64_data,
-                },
-            }
-        )
-
-    messages: List[Dict[str, Any]] = [{"role": "user", "content": content}]
-    kwargs: Dict[str, Any] = {
-        "model": model,
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-        "messages": messages,
-    }
-    if system_prompt:
-        kwargs["system"] = system_prompt
-    return messages, kwargs
-
-
-def _build_openai_payload(
-    system_prompt: str,
-    user_prompt: str,
-    images: List[Any],
-    model: str,
-    max_tokens: int,
-    temperature: float,
-) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    """Build OpenAI message list and kwargs.
-
-    Supports interleaving text labels with images (see _build_anthropic_payload).
-    """
-    content: List[Dict[str, Any]] = []
-    if user_prompt:
-        content.append({"type": "text", "text": user_prompt})
-    for img in images:
-        if isinstance(img, str) and not _is_image_path(img):
-            content.append({"type": "text", "text": img})
-            continue
-        b64_uri = _encode_image_to_base64(img)
-        content.append(
-            {
-                "type": "image_url",
-                "image_url": {"url": b64_uri, "detail": "auto"},
-            }
-        )
-
-    messages: List[Dict[str, Any]] = []
-    if system_prompt:
-        messages.append({"role": "system", "content": system_prompt})
-    messages.append({"role": "user", "content": content})
-
-    kwargs: Dict[str, Any] = {
-        "model": model,
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-        "messages": messages,
-    }
-    return messages, kwargs
-
-
-def _build_google_payload(
-    system_prompt: str,
-    user_prompt: str,
-    images: List[Any],
-    model: str,
-    max_tokens: int,
-    temperature: float,
-) -> Tuple[Any, Dict[str, Any]]:
-    """Build Google GenAI content list and kwargs."""
-    try:
-        from PIL import Image as PILImage
-    except ImportError:  # pragma: no cover
-        PILImage = None  # type: ignore[misc,assignment]
-
-    contents: List[Any] = []
-    if system_prompt:
-        contents.append(system_prompt)
-    if user_prompt:
-        contents.append(user_prompt)
-    for img in images:
-        if isinstance(img, str) and not _is_image_path(img):
-            contents.append(img)
-            continue
-        if PILImage is not None and isinstance(img, PILImage.Image):
-            contents.append(img)
-        elif isinstance(img, bytes):
-            contents.append(PILImage.open(io.BytesIO(img)) if PILImage else img)
-        elif isinstance(img, str):
-            contents.append(PILImage.open(img) if PILImage else img)
-        else:
-            contents.append(img)
-
-    kwargs: Dict[str, Any] = {
-        "model": model,
-    }
-    generation_config: Dict[str, Any] = {
-        "max_output_tokens": max_tokens,
-        "temperature": temperature,
-    }
-    kwargs["generation_config"] = generation_config
-    return contents, kwargs
-
-
-def _build_aliyun_payload(
-    system_prompt: str,
-    user_prompt: str,
-    images: List[Any],
-    model: str,
-    max_tokens: int,
-    temperature: float,
-) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    """Build Aliyun (OpenAI-compatible) message list and kwargs."""
-    # Aliyun Qwen-VL supports OpenAI-compatible vision format
-    content: List[Dict[str, Any]] = []
-    if user_prompt:
-        content.append({"type": "text", "text": user_prompt})
-    for img in images:
-        if isinstance(img, str) and not _is_image_path(img):
-            content.append({"type": "text", "text": img})
-            continue
-        b64_uri = _encode_image_to_base64(img)
-        content.append(
-            {
-                "type": "image_url",
-                "image_url": {"url": b64_uri},
-            }
-        )
-
-    messages: List[Dict[str, Any]] = []
-    if system_prompt:
-        messages.append({"role": "system", "content": system_prompt})
-    messages.append({"role": "user", "content": content})
-
-    kwargs: Dict[str, Any] = {
-        "model": model,
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-        "messages": messages,
-    }
-    return messages, kwargs
-
-
-# ---------------------------------------------------------------------------
-# Provider-specific callers
-# ---------------------------------------------------------------------------
-
-def _call_anthropic(
-    client: Any,
-    kwargs: Dict[str, Any],
-) -> Tuple[str, int, int, int]:
-    """Call Anthropic and return (text, prompt_tokens, completion_tokens, total_tokens)."""
-    response = client.messages.create(**kwargs)
-    text = ""
-    if response.content:
-        for block in response.content:
-            if getattr(block, "type", None) == "text":
-                text += block.text
-    usage = response.usage
-    prompt_tokens = getattr(usage, "input_tokens", 0)
-    completion_tokens = getattr(usage, "output_tokens", 0)
-    total_tokens = prompt_tokens + completion_tokens
-    return text, prompt_tokens, completion_tokens, total_tokens
-
-
-def _call_anthropic_with_tools(
-    client: Any,
-    kwargs: Dict[str, Any],
-) -> Tuple[str, List[Dict[str, Any]], int, int, int]:
-    """
-    Call Anthropic with tool support.
-    
-    Returns:
-        (text, tool_use_blocks, prompt_tokens, completion_tokens, total_tokens)
-        tool_use_blocks: list of {"name": str, "id": str, "input": dict}
-    """
-    response = client.messages.create(**kwargs)
-    text = ""
-    tool_uses: List[Dict[str, Any]] = []
-    
-    if response.content:
-        for block in response.content:
-            block_type = getattr(block, "type", None)
-            if block_type == "text":
-                text += block.text
-            elif block_type == "tool_use":
-                tool_uses.append({
-                    "name": getattr(block, "name", ""),
-                    "id": getattr(block, "id", ""),
-                    "input": getattr(block, "input", {}),
-                })
-    
-    usage = response.usage
-    prompt_tokens = getattr(usage, "input_tokens", 0)
-    completion_tokens = getattr(usage, "output_tokens", 0)
-    total_tokens = prompt_tokens + completion_tokens
-    return text, tool_uses, prompt_tokens, completion_tokens, total_tokens
-
-
-def _call_openai(
-    client: Any,
-    kwargs: Dict[str, Any],
-) -> Tuple[str, int, int, int]:
-    """Call OpenAI and return (text, prompt_tokens, completion_tokens, total_tokens)."""
-    response = client.chat.completions.create(**kwargs)
-    text = response.choices[0].message.content or ""
-    usage = response.usage
-    prompt_tokens = getattr(usage, "prompt_tokens", 0)
-    completion_tokens = getattr(usage, "completion_tokens", 0)
-    total_tokens = getattr(usage, "total_tokens", prompt_tokens + completion_tokens)
-    return text, prompt_tokens, completion_tokens, total_tokens
-
-
-def _call_google(
-    client_model: Any,
-    contents: Any,
-    generation_config: Dict[str, Any],
-) -> Tuple[str, int, int, int]:
-    """Call Google GenAI and return (text, prompt_tokens, completion_tokens, total_tokens)."""
-    response = client_model.generate_content(
-        contents,
-        generation_config=generation_config,
-    )
-    text = ""
-    if response.parts:
-        for part in response.parts:
-            if hasattr(part, "text"):
-                text += part.text
-    elif hasattr(response, "text"):
-        text = response.text
-
-    # Google does not always return token counts; attempt to extract
-    usage_metadata = getattr(response, "usage_metadata", None)
-    if usage_metadata:
-        prompt_tokens = getattr(usage_metadata, "prompt_token_count", 0)
-        completion_tokens = getattr(usage_metadata, "candidates_token_count", 0)
-        total_tokens = getattr(
-            usage_metadata, "total_token_count", prompt_tokens + completion_tokens
-        )
-    else:
-        prompt_tokens = completion_tokens = total_tokens = 0
-    return text, prompt_tokens, completion_tokens, total_tokens
-
-
-def _call_aliyun(
-    client: Any,
-    kwargs: Dict[str, Any],
-) -> Tuple[str, int, int, int]:
-    """Call Aliyun via OpenAI-compatible client."""
-    # Aliyun uses the same interface as OpenAI
-    return _call_openai(client, kwargs)
+# Internal helpers that were previously defined in this module are now
+# implemented in focused submodules.  Re-export them here so existing
+# imports (e.g. from tests and expert_agent) continue to work unchanged.
+
+__all__ = [
+    "VLMInferenceEngine",
+    "VLMEngineError",
+    "ProviderNotSupportedError",
+    "PromptRenderError",
+    "ResponseParseError",
+    "SchemaValidationError",
+    "FatalAPIError",
+    "DiskCache",
+    "_compute_cache_key",
+    "_encode_image_to_base64",
+    "_extract_json_from_text",
+    "_repair_json",
+    "_validate_schema_basic",
+    "_is_retryable_error",
+    "_is_fatal_api_error",
+    "_is_image_path",
+    "_build_anthropic_payload",
+    "_build_openai_payload",
+    "_build_google_payload",
+    "_build_aliyun_payload",
+    "_call_anthropic",
+    "_call_anthropic_with_tools",
+    "_call_openai",
+    "_call_google",
+    "_call_aliyun",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -1173,20 +437,20 @@ class VLMInferenceEngine:
     ) -> Tuple[LLMResponse, List[Dict[str, Any]]]:
         """
         Execute a VLM call with Anthropic Native API tool support.
-        
+
         This method performs a multi-turn conversation:
         1. User message (prompt + images) + tools definition
         2. Assistant message with tool_use blocks (or direct text response)
         3. If tool_use blocks present: User message with tool_result blocks
         4. Assistant message with final analysis
-        
+
         Args:
             template: Prompt template to render.
             images: List of images.
             tool_definitions: List of Anthropic-format tool definitions.
             context_vars: Variables for Jinja2 prompt rendering.
             response_schema: Optional JSON schema for basic validation.
-        
+
         Returns:
             (LLMResponse, tool_use_blocks)
             If tool_use_blocks is non-empty, caller must execute tools and call again.
@@ -1199,9 +463,9 @@ class VLMInferenceEngine:
             # Fallback to regular call
             response = self.call(template, images, context_vars, response_schema)
             return response, []
-        
+
         system_prompt, user_prompt = self.render_prompt(template, context_vars)
-        
+
         # Build initial message list
         _, kwargs = _build_anthropic_payload(
             system_prompt,
@@ -1213,7 +477,7 @@ class VLMInferenceEngine:
         )
         kwargs["tools"] = tool_definitions
         kwargs["tool_choice"] = tool_choice if tool_choice else {"type": "auto"}
-        
+
         call_id = str(uuid.uuid4())
         start_time = time.perf_counter()
         raw_text = ""
@@ -1222,7 +486,7 @@ class VLMInferenceEngine:
         error_message: Optional[str] = None
         prompt_tokens = completion_tokens = total_tokens = 0
         tool_uses: List[Dict[str, Any]] = []
-        
+
         template_id = getattr(template, "template_id", "unknown")
         try:
             raw_text, tool_uses, prompt_tokens, completion_tokens, total_tokens = (
@@ -1264,9 +528,9 @@ class VLMInferenceEngine:
                 exc,
                 exc_info=True,
             )
-        
+
         latency_ms = (time.perf_counter() - start_time) * 1000.0
-        
+
         # Update stats
         with self._cache_lock:
             self._total_calls += 1
@@ -1276,7 +540,7 @@ class VLMInferenceEngine:
             self._total_latency_ms += latency_ms
             if not success:
                 self._failed_calls += 1
-        
+
         response = LLMResponse(
             success=success,
             raw_text=raw_text,
@@ -1288,9 +552,9 @@ class VLMInferenceEngine:
             latency_ms=latency_ms,
             retry_count=0,
         )
-        
+
         return response, tool_uses
-    
+
     def call_with_tool_results(
         self,
         template: PromptTemplate,
@@ -1302,7 +566,7 @@ class VLMInferenceEngine:
     ) -> LLMResponse:
         """
         Continue conversation with tool results.
-        
+
         Args:
             template: Original prompt template (for system prompt).
             images: Original images (not used in second call, but kept for consistency).
@@ -1310,7 +574,7 @@ class VLMInferenceEngine:
             tool_results: List of {"tool_use_id": str, "content": str}.
             context_vars: Variables for Jinja2 prompt rendering.
             response_schema: Optional JSON schema for basic validation.
-        
+
         Returns:
             LLMResponse with final analysis.
         """
@@ -1330,12 +594,12 @@ class VLMInferenceEngine:
                 latency_ms=0,
                 retry_count=0,
             )
-        
+
         system_prompt, _ = self.render_prompt(template, context_vars)
-        
+
         # Build messages: previous + tool_result
         messages = list(previous_messages)
-        
+
         # Add tool_result message
         tool_content = []
         for result in tool_results:
@@ -1345,7 +609,7 @@ class VLMInferenceEngine:
                 "content": result["content"],
             })
         messages.append({"role": "user", "content": tool_content})
-        
+
         kwargs = {
             "model": self.config.model,
             "max_tokens": self.config.max_tokens,
@@ -1354,14 +618,14 @@ class VLMInferenceEngine:
         }
         if system_prompt:
             kwargs["system"] = system_prompt
-        
+
         call_id = str(uuid.uuid4())
         start_time = time.perf_counter()
         raw_text = ""
         parsed_data: Dict[str, Any] = {}
         success = False
         prompt_tokens = completion_tokens = total_tokens = 0
-        
+
         template_id = getattr(template, "template_id", "unknown")
         try:
             raw_text, _, prompt_tokens, completion_tokens, total_tokens = (
@@ -1384,9 +648,9 @@ class VLMInferenceEngine:
                 exc,
                 exc_info=True,
             )
-        
+
         latency_ms = (time.perf_counter() - start_time) * 1000.0
-        
+
         with self._cache_lock:
             self._total_calls += 1
             self._total_prompt_tokens += prompt_tokens
@@ -1395,7 +659,7 @@ class VLMInferenceEngine:
             self._total_latency_ms += latency_ms
             if not success:
                 self._failed_calls += 1
-        
+
         return LLMResponse(
             success=success,
             raw_text=raw_text,

@@ -15,7 +15,6 @@ from __future__ import annotations
 import logging
 import os
 import time
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from traffic_analyzer.core.config_manager import ConfigManager
@@ -37,11 +36,12 @@ from traffic_analyzer.models.schemas import (
 )
 from traffic_analyzer.utils.tool_call_logger import tool_call
 
+from .candidate_fallback import fallback_candidates_to_event_results
+from .orchestrator_exceptions import OrchestratorError
+from .reject_report_factory import generate_reject_report
+from .video_meta_extractor import extract_video_meta
+
 logger = logging.getLogger(__name__)
-
-
-class OrchestratorError(Exception):
-    """Base exception for orchestration errors."""
 
 
 class AnalysisOrchestrator:
@@ -151,7 +151,7 @@ class AnalysisOrchestrator:
             context.scene_understanding = scene_understanding
 
         # Extract video metadata early (needed for prefilter reject report)
-        video_meta = self._extract_video_meta(video_path)
+        video_meta = extract_video_meta(video_path)
         context.video_meta = video_meta
 
         # Step 1: Video preprocessing
@@ -174,8 +174,12 @@ class AnalysisOrchestrator:
                 video_path,
                 exc,
             )
-            return self._generate_reject_report(
-                video_meta, str(exc), getattr(exc, "checks", None)
+            return generate_reject_report(
+                report_generator=self.report_generator,
+                video_meta=video_meta,
+                reject_reason=str(exc),
+                checks=getattr(exc, "checks", None),
+                usage_stats=self.vlm_engine.get_usage_stats(),
             )
         except Exception as exc:
             logger.error(
@@ -241,7 +245,7 @@ class AnalysisOrchestrator:
                     exc_info=True,
                 )
                 # Fallback: convert raw candidates to EventResults
-                event_results = self._fallback(candidates)
+                event_results = fallback_candidates_to_event_results(candidates)
         else:
             logger.warning("No AdjudicationStep configured, skipping")
         step_times["adjudication"] = time.perf_counter() - t0
@@ -322,68 +326,14 @@ class AnalysisOrchestrator:
 
         return report
 
-    def _generate_reject_report(
-        self,
-        video_meta: VideoMetadata,
-        reject_reason: str,
-        checks: Optional[Dict[str, Any]] = None,
-    ) -> Report:
-        """Generate a report for a video rejected by prefilter."""
-        usage_stats = self.vlm_engine.get_usage_stats()
-        report = self.report_generator.generate(
-            event_results=[],
-            scene_info=None,
-            video_meta=video_meta,
-            usage_stats=usage_stats,
-            analysis_duration_sec=0.0,
-            overall_traffic_description=f"视频被预处理筛除: {reject_reason}",
-        )
-        report.rejected = True
-        report.reject_reason = reject_reason
-        # Store prefilter checks in context for debugging
-        if checks:
-            logger.info("[orchestrator:analyze] PREFILTER_CHECKS | %s", checks)
-        return report
-
     # ------------------------------------------------------------------
     # Pipeline steps
     # ------------------------------------------------------------------
 
     @staticmethod
     def _extract_video_meta(video_path: str) -> VideoMetadata:
-        """Extract video metadata using the preprocessor."""
-        import cv2
-        cap = cv2.VideoCapture(video_path)
-        try:
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            duration_sec = total_frames / fps if fps > 0 else 0.0
-            return VideoMetadata(
-                file_path=video_path,
-                file_name=Path(video_path).name,
-                duration_sec=duration_sec,
-                fps=fps,
-                total_frames=total_frames,
-                width=width,
-                height=height,
-            )
-        except Exception as exc:
-            logger.error(
-                "[orchestrator:_extract_video_meta] META_ERROR | video=%s | %s",
-                video_path,
-                exc,
-                exc_info=True,
-            )
-            return VideoMetadata(
-                file_path=video_path,
-                file_name=Path(video_path).name,
-                duration_sec=0.0,
-                fps=0.0,
-                total_frames=0,
-                width=0,
-                height=0,
-            )
-        finally:
-            cap.release()
+        """Extract video metadata using the preprocessor.
+
+        Delegates to :func:`video_meta_extractor.extract_video_meta`.
+        """
+        return extract_video_meta(video_path)

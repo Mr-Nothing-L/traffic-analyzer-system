@@ -78,6 +78,7 @@ def preprocessor() -> VideoPreprocessor:
             precision_quality_threshold=0.0,
             max_precision_segments=10,
             segment_padding_sec=0.5,
+            prefilter_enabled=False,
         ),
         save_debug_frames=False,
     )
@@ -143,6 +144,7 @@ class TestVideoPreprocessor:
                     precision_fps=4.0,
                     coarse_quality_threshold=0.0,
                     precision_quality_threshold=0.0,
+                    prefilter_enabled=False,
                 ),
                 output_dir=outdir,
                 save_debug_frames=True,
@@ -174,6 +176,7 @@ class TestVideoPreprocessor:
                 precision_fps=4.0,
                 coarse_quality_threshold=0.0,
                 precision_quality_threshold=0.0,
+                prefilter_enabled=False,
             ),
             save_debug_frames=False,
         )
@@ -254,7 +257,10 @@ class TestVideoPreprocessor:
         synthetic_video_path: str,
     ) -> None:
         """Using as context manager should not raise and should clean up."""
-        with VideoPreprocessor(save_debug_frames=False) as proc:
+        with VideoPreprocessor(
+            config=SamplingConfig(prefilter_enabled=False),
+            save_debug_frames=False,
+        ) as proc:
             result = proc.process(synthetic_video_path)
             assert len(result.coarse_frames) > 0
 
@@ -282,6 +288,7 @@ class TestVideoPreprocessor:
                 segment_padding_sec=0.5,
                 coarse_quality_threshold=0.0,
                 precision_quality_threshold=0.0,
+                prefilter_enabled=False,
             ),
             save_debug_frames=False,
         )

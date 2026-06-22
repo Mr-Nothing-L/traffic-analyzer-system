@@ -95,7 +95,9 @@ def temp_config_dir(tmp_path: Path) -> Path:
     (config_dir / "event_categories.yaml").write_text(
         yaml.safe_dump(event_categories), encoding="utf-8"
     )
-    (config_dir / "prompt_templates.yaml").write_text(
+    prompts_dir = config_dir / "prompts"
+    prompts_dir.mkdir()
+    (prompts_dir / "default.yaml").write_text(
         yaml.safe_dump(prompt_templates), encoding="utf-8"
     )
     (config_dir / "annotation_spec.yaml").write_text(
@@ -180,7 +182,9 @@ class TestLoadAll:
         (config_dir / "event_categories.yaml").write_text(
             yaml.safe_dump(event_categories), encoding="utf-8"
         )
-        (config_dir / "prompt_templates.yaml").write_text(
+        prompts_dir = config_dir / "prompts"
+        prompts_dir.mkdir()
+        (prompts_dir / "default.yaml").write_text(
             yaml.safe_dump(prompt_templates), encoding="utf-8"
         )
 
@@ -438,10 +442,14 @@ class TestEdgeCases:
     def test_empty_yaml_lists(self, tmp_path: Path) -> None:
         config_dir = tmp_path / "config"
         config_dir.mkdir()
-        for fname in ("event_categories.yaml", "prompt_templates.yaml"):
-            (config_dir / fname).write_text(
-                yaml.safe_dump({fname.replace(".yaml", ""): []}), encoding="utf-8"
-            )
+        (config_dir / "event_categories.yaml").write_text(
+            yaml.safe_dump({"event_categories": []}), encoding="utf-8"
+        )
+        prompts_dir = config_dir / "prompts"
+        prompts_dir.mkdir()
+        (prompts_dir / "empty.yaml").write_text(
+            yaml.safe_dump({"prompt_templates": []}), encoding="utf-8"
+        )
 
         mgr = ConfigManager(str(config_dir))
         config = mgr.load_all()
@@ -454,7 +462,9 @@ class TestEdgeCases:
         (config_dir / "event_categories.yaml").write_text(
             "- just\n- a\n- list\n", encoding="utf-8"
         )
-        (config_dir / "prompt_templates.yaml").write_text(
+        prompts_dir = config_dir / "prompts"
+        prompts_dir.mkdir()
+        (prompts_dir / "empty.yaml").write_text(
             yaml.safe_dump({"prompt_templates": []}), encoding="utf-8"
         )
 
@@ -490,27 +500,11 @@ class TestSplitPromptTemplates:
         )
 
     def test_prompts_directory_takes_precedence(self, tmp_path: Path) -> None:
-        """If prompts/ exists and contains YAML files, use them instead of root file."""
+        """If prompts/ exists and contains YAML files, use them."""
         config_dir = tmp_path / "config"
         config_dir.mkdir()
         self._write_minimal_categories(config_dir)
 
-        # Legacy root file with the wrong template text
-        root_templates = {
-            "prompt_templates": [
-                {
-                    "template_id": "illegal_parking",
-                    "name": "Root Template",
-                    "system_prompt": "from root",
-                    "user_prompt": "from root",
-                }
-            ]
-        }
-        (config_dir / "prompt_templates.yaml").write_text(
-            yaml.safe_dump(root_templates), encoding="utf-8"
-        )
-
-        # Split directory with the correct template text
         prompts_dir = config_dir / "prompts"
         prompts_dir.mkdir()
         split_templates = {
@@ -532,31 +526,16 @@ class TestSplitPromptTemplates:
         tmpl = mgr.get_prompt_template("illegal_parking")
         assert "from split" in tmpl.system_prompt
 
-    def test_empty_prompts_directory_falls_back_to_root(self, tmp_path: Path) -> None:
-        """An empty prompts/ directory should fall back to the legacy root file."""
+    def test_empty_prompts_directory_raises(self, tmp_path: Path) -> None:
+        """An empty prompts/ directory must raise FileNotFoundError."""
         config_dir = tmp_path / "config"
         config_dir.mkdir()
         self._write_minimal_categories(config_dir)
-
-        root_templates = {
-            "prompt_templates": [
-                {
-                    "template_id": "illegal_parking",
-                    "name": "Root Template",
-                    "system_prompt": "from root",
-                    "user_prompt": "from root",
-                }
-            ]
-        }
-        (config_dir / "prompt_templates.yaml").write_text(
-            yaml.safe_dump(root_templates), encoding="utf-8"
-        )
         (config_dir / "prompts").mkdir()
 
         mgr = ConfigManager(str(config_dir))
-        mgr.load_all()
-        tmpl = mgr.get_prompt_template("illegal_parking")
-        assert "from root" in tmpl.system_prompt
+        with pytest.raises(FileNotFoundError):
+            mgr.load_all()
 
     def test_duplicate_template_later_file_wins(self, tmp_path: Path, caplog) -> None:
         """Duplicate template_id + version combinations are overwritten in load order."""

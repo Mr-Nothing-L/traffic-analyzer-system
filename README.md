@@ -107,7 +107,7 @@ Every event that is excluded during adjudication is recorded with a reason and t
 
 All of the following are defined in YAML — no code changes needed:
 - Event definitions (`event_categories.yaml`)
-- Prompt templates (`prompt_templates.yaml`)
+- Prompt templates (`prompts/*.yaml`)
 - Adjudication rules (`event_categories.yaml`)
 - Annotation spec (`annotation_spec.yaml`)
 
@@ -135,7 +135,7 @@ traffic_analyzer/
 ├── config/
 │   ├── annotation_spec.yaml       # Annotation spec injected into adjudication prompt
 │   ├── event_categories.yaml      # Event definitions + adjudication_rules
-│   ├── prompt_templates.yaml      # VLM Prompt templates + adjudication template
+│   ├── prompts/                   # VLM Prompt templates + adjudication template
 │   └── .env.example               # Example LLM provider config
 ├── core/
 │   ├── config_manager.py          # Config loading, validation

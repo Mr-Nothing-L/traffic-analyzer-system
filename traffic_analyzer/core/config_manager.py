@@ -49,7 +49,6 @@ class ConfigManager:
 
     _YAML_FILES = {
         "event_categories": "event_categories.yaml",
-        "prompt_templates": "prompt_templates.yaml",
     }
     _PROMPT_DIR = "prompts"
 
@@ -524,47 +523,39 @@ class ConfigManager:
             raise
 
     def _load_prompt_templates(self) -> tuple[Dict[str, Any], List[Path]]:
-        """Load prompt templates from the split ``prompts/`` directory or fall back.
+        """Load prompt templates from the split ``prompts/`` directory.
 
-        If ``<config_dir>/prompts/`` exists and contains at least one ``.yaml``
-        file, those files are loaded in lexicographic order and their
-        ``prompt_templates`` lists are merged. If the directory does not exist
-        or is empty, the legacy ``prompt_templates.yaml`` at the config root is
-        loaded instead.
+        ``<config_dir>/prompts/`` must exist and contain at least one ``.yaml``
+        file. Those files are loaded in lexicographic order and their
+        ``prompt_templates`` lists are merged.
 
         Duplicate ``template_id`` + ``version`` combinations are resolved with
         the later file winning; a warning is logged for each duplicate.
 
         Returns:
             A tuple of (merged raw dict, list of loaded file paths).
+
+        Raises:
+            FileNotFoundError: If the ``prompts/`` directory does not exist or
+                contains no ``.yaml`` files.
         """
         prompt_dir = self.config_dir / self._PROMPT_DIR
-        files_to_load: List[Path] = []
+        if not prompt_dir.is_dir():
+            raise FileNotFoundError(
+                f"Required prompt directory not found: {prompt_dir}"
+            )
 
-        if prompt_dir.is_dir():
-            yaml_files = sorted([p for p in prompt_dir.glob("*.yaml") if p.is_file()])
-            if yaml_files:
-                files_to_load = yaml_files
-            else:
-                logger.debug(
-                    "Prompt directory %s exists but contains no .yaml files; falling back to %s",
-                    prompt_dir,
-                    self._YAML_FILES["prompt_templates"],
-                )
-
-        if not files_to_load:
-            legacy_path = self.config_dir / self._YAML_FILES["prompt_templates"]
-            if not legacy_path.exists():
-                raise FileNotFoundError(
-                    f"Required config file not found: {legacy_path}"
-                )
-            files_to_load = [legacy_path]
+        yaml_files = sorted([p for p in prompt_dir.glob("*.yaml") if p.is_file()])
+        if not yaml_files:
+            raise FileNotFoundError(
+                f"Prompt directory {prompt_dir} contains no .yaml files"
+            )
 
         merged: Dict[str, Any] = {"prompt_templates": []}
         seen: Dict[str, Dict[str, Path]] = {}
         loaded_paths: List[Path] = []
 
-        for path in files_to_load:
+        for path in yaml_files:
             try:
                 with path.open("r", encoding="utf-8") as fh:
                     data = yaml.safe_load(fh)

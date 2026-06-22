@@ -268,8 +268,8 @@ def test_far_enhancement_success(make_agent, analysis_context) -> None:
     raw = candidate.raw_vlm_response
     composite_path = Path(raw["composite_image_path"])
     motion_path = Path(raw["motion_composite_image_path"])
-    assert composite_path.name == "test_video_frame_0_composite.jpg"
-    assert "frame_0_motion_1.jpg" in str(motion_path)
+    assert composite_path.name == "test_video_event_4_frame_0_composite.jpg"
+    assert "event_4_frame_0_motion_1.jpg" in str(motion_path)
     assert composite_path.exists()
     assert motion_path.exists()
 
@@ -410,11 +410,11 @@ def test_far_enhancement_saves_assets_next_to_report(make_agent, analysis_contex
 
         assert candidate.detected is True
         raw = candidate.raw_vlm_response
-        assert raw["composite_image_path"] == "tmp_img/test_video_frame_0_composite.jpg"
-        assert raw["motion_composite_image_path"] == "tmp_img/test_video_frame_0_motion_1.jpg"
+        assert raw["composite_image_path"] == "tmp_img/test_video_event_4_frame_0_composite.jpg"
+        assert raw["motion_composite_image_path"] == "tmp_img/test_video_event_4_frame_0_motion_1.jpg"
 
-        composite_file = report_dir / "tmp_img" / "test_video_frame_0_composite.jpg"
-        motion_file = report_dir / "tmp_img" / "test_video_frame_0_motion_1.jpg"
+        composite_file = report_dir / "tmp_img" / "test_video_event_4_frame_0_composite.jpg"
+        motion_file = report_dir / "tmp_img" / "test_video_event_4_frame_0_motion_1.jpg"
         assert composite_file.exists()
         assert motion_file.exists()
 
@@ -473,7 +473,7 @@ def test_later_better_frame_chosen_over_earlier_worse(make_agent, analysis_conte
 
     assert candidate.detected is True
     composite_path = Path(candidate.raw_vlm_response["composite_image_path"])
-    assert composite_path.name == "test_video_frame_1_composite.jpg"
+    assert composite_path.name == "test_video_event_4_frame_1_composite.jpg"
     assert candidate.instances[0].evidence_frames == [1, 2]
 
     roi_calls = [c for c in engine.calls if c["template_id"] == "far_non_motor_roi_detection"]
@@ -491,12 +491,12 @@ def test_high_scoring_false_does_not_block_lower_true(make_agent) -> None:
                 _roi_response(
                     [0.50, 0.50, 0.70, 0.80],
                     "frame 0 clear candidate",
-                    confidence="high",
+                    confidence=0.90,
                 ),
                 _roi_response(
                     [0.50, 0.50, 0.65, 0.70],
                     "frame 1 candidate",
-                    confidence="medium",
+                    confidence=0.65,
                 ),
             ],
             "non_motor_vehicle_detection": [
@@ -510,7 +510,7 @@ def test_high_scoring_false_does_not_block_lower_true(make_agent) -> None:
 
     assert candidate.detected is True
     composite_path = Path(candidate.raw_vlm_response["composite_image_path"])
-    assert composite_path.name == "test_video_frame_1_composite.jpg"
+    assert composite_path.name == "test_video_event_4_frame_1_composite.jpg"
     assert candidate.instances[0].evidence_frames == [1, 0]
     assert "frame 1 confirmed" in candidate.instances[0].reasoning
 
@@ -546,7 +546,7 @@ def test_filter_skips_invalid_bbox(make_agent, bbox, expected_frame) -> None:
 
     assert candidate.detected is True
     composite_path = Path(candidate.raw_vlm_response["composite_image_path"])
-    assert composite_path.name == f"test_video_frame_{expected_frame}_composite.jpg"
+    assert composite_path.name == f"test_video_event_4_frame_{expected_frame}_composite.jpg"
 
     final_calls = [c for c in agent.vlm_engine.calls if c["template_id"] == "non_motor_vehicle_detection"]
     assert len(final_calls) == 1
@@ -587,17 +587,18 @@ def test_all_top_k_negative_returns_false(make_agent) -> None:
                 _roi_response(
                     [0.50, 0.50, 0.65, 0.70],
                     "frame 0 candidate",
-                    confidence="low",
+                    confidence=0.65,
                 ),
                 _roi_response(
                     [0.50, 0.50, 0.60, 0.65],
                     "frame 1 candidate",
-                    confidence="low",
+                    confidence=0.70,
                 ),
             ],
             "non_motor_vehicle_detection": [
-                _final_response(False, "frame 0 not a non-motor vehicle"),
-                _final_response(False, "frame 1 not a non-motor vehicle"),
+                # Negative reasons that lack identifiable vehicle structure block fallback.
+                _final_response(False, "框内仅是一团无结构的暗斑，无法确认车身结构"),
+                _final_response(False, "框内仅是一团无结构的暗斑，无法确认车身结构"),
             ],
         }
     )
@@ -674,6 +675,127 @@ def test_fallback_rejected_when_occluded(make_agent) -> None:
     assert candidate.detected is False
 
 
+@pytest.mark.parametrize(
+    "reason,expected_no_structure",
+    [
+        ("细节不足，无法确认", False),
+        ("画面模糊，无法判断", False),
+        ("看不清具体是什么", False),
+        ("无法确认目标类型", False),
+        ("无法提供明确证据", False),
+        ("目标被部分遮挡，但能看到骑乘者头盔", False),
+        ("框内仅是一团无结构的暗斑", True),
+        ("没有清晰轮廓，无法辨识车辆结构", True),
+        ("无明显车辆结构", True),
+        ("仅是一个黑点", True),
+        ("模糊色块，没有车轮车把", True),
+    ],
+)
+def test_is_no_structure_reasoning(make_agent, reason, expected_no_structure) -> None:
+    """Pure uncertainty expressions must not be treated as 'no structure'."""
+    agent, _ = make_agent({})
+    assert agent._is_no_structure_reasoning(reason) is expected_no_structure
+
+
+def test_fallback_accepts_uncertainty_reasoning(make_agent) -> None:
+    """A high-confidence unoccluded candidate with only uncertain reasoning is promoted."""
+    context = _make_analysis_context(num_frames=2, vlm_max_frames=6)
+    agent, _ = make_agent(
+        {
+            "far_non_motor_roi_detection": [
+                _roi_response(
+                    [0.50, 0.50, 0.65, 0.70],
+                    "frame 0 high-confidence candidate",
+                    confidence="high",
+                ),
+                _roi_response(None, "frame 1 no candidate"),
+            ],
+            "non_motor_vehicle_detection": [
+                _final_response(False, "细节不足，无法确认"),
+            ],
+        }
+    )
+
+    candidate = _detect_with_patched_dir(agent, context)
+
+    assert candidate.detected is True
+    assert candidate.raw_vlm_response["far_enhancement"].get("fallback") is True
+
+
+def test_non_motor_low_confidence_filter(make_agent) -> None:
+    """Only ROI candidates with confidence >= 0.6 enter the final classifier for event_id=4."""
+    context = _make_analysis_context(num_frames=3, vlm_max_frames=6)
+    agent, engine = make_agent(
+        {
+            "far_non_motor_roi_detection": [
+                _roi_response(
+                    [0.50, 0.50, 0.55, 0.60],
+                    "frame 0 low confidence target",
+                    confidence=0.50,
+                ),
+                _roi_response(
+                    [0.50, 0.50, 0.65, 0.70],
+                    "frame 1 medium confidence target",
+                    confidence=0.65,
+                ),
+                _roi_response(
+                    [0.50, 0.50, 0.70, 0.80],
+                    "frame 2 high confidence target",
+                    confidence=0.90,
+                ),
+            ],
+            "non_motor_vehicle_detection": [
+                _final_response(False, "frame 1 not confirmed"),
+                _final_response(True, "frame 2 confirmed non-motor vehicle"),
+            ],
+        }
+    )
+
+    candidate = _detect_with_patched_dir(agent, context)
+
+    assert candidate.detected is True
+    final_calls = [c for c in engine.calls if c["template_id"] == "non_motor_vehicle_detection"]
+    assert len(final_calls) == 2
+
+
+def test_non_motor_all_candidates_below_confidence_gate(make_agent) -> None:
+    """If every non-motor ROI candidate is below 0.6, no classifier call is made,
+    but evidence composites are still generated from the best candidate."""
+    context = _make_analysis_context(num_frames=3, vlm_max_frames=6)
+    agent, engine = make_agent(
+        {
+            "far_non_motor_roi_detection": [
+                _roi_response(
+                    [0.50, 0.50, 0.55, 0.60],
+                    "frame 0 low confidence target",
+                    confidence=0.50,
+                ),
+                _roi_response(
+                    [0.50, 0.50, 0.65, 0.70],
+                    "frame 1 low confidence target",
+                    confidence=0.55,
+                ),
+                _roi_response(
+                    [0.50, 0.50, 0.70, 0.80],
+                    "frame 2 low confidence target",
+                    confidence=0.20,
+                ),
+            ],
+        }
+    )
+
+    candidate = _detect_with_patched_dir(agent, context)
+
+    assert candidate.detected is False
+    final_calls = [c for c in engine.calls if c["template_id"] == "non_motor_vehicle_detection"]
+    assert len(final_calls) == 0
+    raw = candidate.raw_vlm_response
+    assert "composite_image_path" in raw
+    assert "motion_composite_image_path" in raw
+    assert Path(raw["composite_image_path"]).exists()
+    assert Path(raw["motion_composite_image_path"]).exists()
+
+
 def test_dual_composite_paths(make_agent) -> None:
     """A valid ROI produces both a single-frame composite and a motion-comparison composite."""
     context = _make_analysis_context(num_frames=2, vlm_max_frames=6)
@@ -696,7 +818,7 @@ def test_dual_composite_paths(make_agent) -> None:
     assert "composite_image_path" in raw
     assert "motion_composite_image_path" in raw
     motion_path = Path(raw["motion_composite_image_path"])
-    assert "frame_0_motion_1.jpg" in str(motion_path)
+    assert "event_4_frame_0_motion_1.jpg" in str(motion_path)
     assert motion_path.exists()
 
     final_calls = [c for c in engine.calls if c["template_id"] == "non_motor_vehicle_detection"]
@@ -730,12 +852,12 @@ def test_motion_score_ranking(make_agent, side_effect, expected_frame) -> None:
                 _roi_response(
                     [0.50, 0.50, 0.70, 0.80],
                     "frame 0 clear but static target",
-                    confidence="high",
+                    confidence=0.90,
                 ),
                 _roi_response(
                     [0.50, 0.50, 0.65, 0.70],
                     "frame 1 moving target",
-                    confidence="medium",
+                    confidence=0.65,
                 ),
             ],
             "non_motor_vehicle_detection": [
@@ -745,7 +867,7 @@ def test_motion_score_ranking(make_agent, side_effect, expected_frame) -> None:
     )
 
     with patch(
-        "traffic_analyzer.core.expert_agent.compute_roi_motion_score",
+        "traffic_analyzer.core.expert_agent_far_enhancement.compute_roi_motion_score",
         side_effect=side_effect,
     ):
         candidate = _detect_with_patched_dir(agent, context)
@@ -793,12 +915,20 @@ def test_motion_score_computed_without_caching_diff_image(make_agent) -> None:
 
 
 def test_pedestrian_far_enhancement_success(make_agent, pedestrian_category, analysis_context) -> None:
-    """Happy path: ROI detector finds a person, final classifier returns instances."""
+    """Happy path: a single high-confidence ROI classified positive is enough."""
     agent, engine = make_agent(
         {
             "far_pedestrian_roi_detection": [
-                _roi_response([0.50, 0.50, 0.55, 0.75], "frame 0 distant pedestrian"),
-                _roi_response(None, "no candidate frame 1"),
+                _roi_response(
+                    [0.50, 0.50, 0.55, 0.75],
+                    "frame 0 distant pedestrian",
+                    confidence=0.90,
+                ),
+                _roi_response(
+                    [0.50, 0.50, 0.55, 0.75],
+                    "frame 1 distant pedestrian",
+                    confidence=0.75,
+                ),
                 _roi_response(None, "no candidate frame 2"),
             ],
             "pedestrian_detection": [
@@ -820,10 +950,15 @@ def test_pedestrian_far_enhancement_success(make_agent, pedestrian_category, ana
         category=pedestrian_category,
     )
 
-    candidate = _detect_with_patched_dir(agent, analysis_context)
+    with patch(
+        "traffic_analyzer.core.expert_agent_far_enhancement.compute_roi_motion_score",
+        return_value=_motion_score(10.0),
+    ):
+        candidate = _detect_with_patched_dir(agent, analysis_context)
 
     assert candidate.detected is True
     assert candidate.event_id == 3
+    # The first positive frame is returned immediately.
     assert "第0帧红框内为一名站立行人" in candidate.summary
     assert len(candidate.instances) == 1
     assert candidate.instances[0].description == "应急车道边缘站立行人，穿深色衣物"
@@ -1039,16 +1174,21 @@ def test_pedestrian_far_enhancement_not_overridden_near_vehicle(
     make_agent, pedestrian_category, analysis_context
 ) -> None:
     """A pedestrian standing next to a vehicle must not be overridden as a car."""
-    agent, _ = make_agent(
+    agent, engine = make_agent(
         {
             "far_pedestrian_roi_detection": [
                 _roi_response(
                     [0.50, 0.50, 0.55, 0.75],
                     "frame 0 distant pedestrian",
-                    confidence=0.88,
+                    confidence=0.90,
                     occluded=False,
                 ),
-                _roi_response(None, "no candidate frame 1"),
+                _roi_response(
+                    [0.50, 0.50, 0.55, 0.75],
+                    "frame 1 distant pedestrian",
+                    confidence=0.75,
+                    occluded=False,
+                ),
                 _roi_response(None, "no candidate frame 2"),
             ],
             "pedestrian_detection": [
@@ -1067,10 +1207,17 @@ def test_pedestrian_far_enhancement_not_overridden_near_vehicle(
         category=pedestrian_category,
     )
 
-    candidate = _detect_with_patched_dir(agent, analysis_context)
+    with patch(
+        "traffic_analyzer.core.expert_agent_far_enhancement.compute_roi_motion_score",
+        return_value=_motion_score(10.0),
+    ):
+        candidate = _detect_with_patched_dir(agent, analysis_context)
 
     assert candidate.detected is True
     assert "白色厢式货车后方" in candidate.summary
+
+    final_calls = [c for c in engine.calls if c["template_id"] == "pedestrian_detection"]
+    assert len(final_calls) == 1
 
 
 def _construction_roi_response(
@@ -1128,7 +1275,7 @@ def test_construction_gallery_success(
     assert candidate.event_id == 6
     raw = candidate.raw_vlm_response
     assert "gallery_image_path" in raw
-    assert raw["gallery_image_path"].endswith("_frame_1_gallery.jpg")
+    assert raw["gallery_image_path"].endswith("_event_6_frame_1_gallery.jpg")
 
     gallery_path = Path(str(raw["gallery_image_path"]).replace("tmp_img/", ""))
     # Resolve against the patched temp dir prefix if needed.
@@ -1254,8 +1401,8 @@ def test_construction_gallery_saves_assets_next_to_report(
         candidate = agent.detect(analysis_context)
 
         assert candidate.detected is True
-        assert candidate.raw_vlm_response["gallery_image_path"] == "tmp_img/test_video_frame_1_gallery.jpg"
-        gallery_file = report_dir / "tmp_img" / "test_video_frame_1_gallery.jpg"
+        assert candidate.raw_vlm_response["gallery_image_path"] == "tmp_img/test_video_event_6_frame_1_gallery.jpg"
+        gallery_file = report_dir / "tmp_img" / "test_video_event_6_frame_1_gallery.jpg"
         assert gallery_file.exists()
 
         final_calls = [c for c in engine.calls if c["template_id"] == "road_construction_detection"]
@@ -1368,6 +1515,33 @@ def test_construction_gallery_fallback_not_triggered_for_low_confidence(
             ],
             "road_construction_detection": [
                 _construction_final_response(False, "未检测到道路施工。"),
+            ],
+        },
+        category=construction_category,
+    )
+
+    candidate = _detect_with_patched_dir(agent, analysis_context)
+
+    assert candidate.detected is False
+    assert "fallback" not in candidate.raw_vlm_response.get("far_enhancement", {})
+
+
+def test_construction_gallery_fallback_not_triggered_for_worker_vehicle_only(
+    make_agent, construction_category, analysis_context
+) -> None:
+    """Worker + vehicle alone is not sufficient ground-based construction evidence."""
+    agent, _ = make_agent(
+        {
+            "road_construction_roi_detection": [
+                _construction_roi_response(
+                    [
+                        {"bbox_norm": [0.30, 0.40, 0.35, 0.55], "tag": "worker", "confidence": 0.90},
+                        {"bbox_norm": [0.50, 0.45, 0.55, 0.60], "tag": "vehicle", "confidence": 0.95},
+                    ]
+                ),
+            ],
+            "road_construction_detection": [
+                _construction_final_response(False, "只有施工人员和车辆，没有落地锥桶或隔离栏。"),
             ],
         },
         category=construction_category,
@@ -1762,11 +1936,19 @@ def test_pedestrian_structured_veto_false_keeps_detected(
     make_agent, pedestrian_category, analysis_context
 ) -> None:
     """A pedestrian classifier with is_target_explicitly_four_wheel_vehicle=false stays true."""
-    agent, _ = make_agent(
+    agent, engine = make_agent(
         {
             "far_pedestrian_roi_detection": [
-                _roi_response([0.50, 0.50, 0.55, 0.75], "frame 0 distant pedestrian"),
-                _roi_response(None, "no candidate frame 1"),
+                _roi_response(
+                    [0.50, 0.50, 0.55, 0.75],
+                    "frame 0 distant pedestrian",
+                    confidence=0.85,
+                ),
+                _roi_response(
+                    [0.50, 0.50, 0.55, 0.75],
+                    "frame 1 distant pedestrian",
+                    confidence=0.75,
+                ),
                 _roi_response(None, "no candidate frame 2"),
             ],
             "pedestrian_detection": [
@@ -1787,11 +1969,131 @@ def test_pedestrian_structured_veto_false_keeps_detected(
         category=pedestrian_category,
     )
 
-    candidate = _detect_with_patched_dir(agent, analysis_context)
+    with patch(
+        "traffic_analyzer.core.expert_agent_far_enhancement.compute_roi_motion_score",
+        return_value=_motion_score(10.0),
+    ):
+        candidate = _detect_with_patched_dir(agent, analysis_context)
 
     assert candidate.detected is True
     assert candidate.is_target_explicitly_four_wheel_vehicle is False
     assert candidate.target_type == "行人"
+    assert candidate.raw_vlm_response["far_enhancement"]["selected_frame_index"] == 0
+
+    final_calls = [c for c in engine.calls if c["template_id"] == "pedestrian_detection"]
+    assert len(final_calls) == 1
+
+
+def test_pedestrian_low_confidence_filter_excludes_below_threshold(
+    make_agent, pedestrian_category, analysis_context
+) -> None:
+    """Only ROI candidates with confidence >= 0.6 enter the final classifier for event_id=3."""
+    agent, engine = make_agent(
+        {
+            "far_pedestrian_roi_detection": [
+                _roi_response(
+                    [0.50, 0.50, 0.55, 0.75],
+                    "frame 0 low-confidence target",
+                    confidence=0.50,
+                ),
+                _roi_response(
+                    [0.50, 0.50, 0.55, 0.75],
+                    "frame 1 medium-confidence target",
+                    confidence=0.65,
+                ),
+                _roi_response(
+                    [0.50, 0.50, 0.55, 0.75],
+                    "frame 2 high-confidence target",
+                    confidence=0.80,
+                ),
+            ],
+            "pedestrian_detection": [
+                _pedestrian_final_response(
+                    True,
+                    "第2帧红框内为一名站立行人",
+                    instances=[
+                        {
+                            "start_time_sec": 2.0,
+                            "end_time_sec": 2.0,
+                            "evidence_frames": [2],
+                            "description": "应急车道边缘站立行人",
+                            "reasoning": "红框内可见直立人形轮廓",
+                        }
+                    ],
+                ),
+                _pedestrian_final_response(
+                    True,
+                    "第1帧红框内为一名站立行人",
+                    instances=[
+                        {
+                            "start_time_sec": 1.0,
+                            "end_time_sec": 1.0,
+                            "evidence_frames": [1],
+                            "description": "应急车道边缘站立行人",
+                            "reasoning": "红框内可见直立人形轮廓",
+                        }
+                    ],
+                ),
+            ],
+        },
+        category=pedestrian_category,
+    )
+
+    with patch(
+        "traffic_analyzer.core.expert_agent_far_enhancement.compute_roi_motion_score",
+        return_value=_motion_score(10.0),
+    ):
+        candidate = _detect_with_patched_dir(agent, analysis_context)
+
+    assert candidate.detected is True
+    final_calls = [c for c in engine.calls if c["template_id"] == "pedestrian_detection"]
+    # The highest-confidence ROI (0.80) is classified first and returns immediately.
+    assert len(final_calls) == 1
+    assert candidate.raw_vlm_response["far_enhancement"]["selected_frame_index"] == 2
+
+
+def test_pedestrian_all_candidates_below_confidence_gate_generate_evidence(
+    make_agent, pedestrian_category, analysis_context
+) -> None:
+    """If every pedestrian ROI candidate is below 0.6, no classifier call is made,
+    but evidence composites are still generated from the best candidate."""
+    agent, engine = make_agent(
+        {
+            "far_pedestrian_roi_detection": [
+                _roi_response(
+                    [0.50, 0.50, 0.55, 0.75],
+                    "frame 0 low-confidence target",
+                    confidence=0.50,
+                ),
+                _roi_response(
+                    [0.50, 0.50, 0.55, 0.75],
+                    "frame 1 low-confidence target",
+                    confidence=0.55,
+                ),
+                _roi_response(
+                    [0.50, 0.50, 0.55, 0.75],
+                    "frame 2 low-confidence target",
+                    confidence=0.20,
+                ),
+            ],
+        },
+        category=pedestrian_category,
+    )
+
+    with patch(
+        "traffic_analyzer.core.expert_agent_far_enhancement.compute_roi_motion_score",
+        return_value=_motion_score(10.0),
+    ):
+        candidate = _detect_with_patched_dir(agent, analysis_context)
+
+    assert candidate.detected is False
+    final_calls = [c for c in engine.calls if c["template_id"] == "pedestrian_detection"]
+    assert len(final_calls) == 0
+    raw = candidate.raw_vlm_response
+    assert "composite_image_path" in raw
+    assert "motion_composite_image_path" in raw
+    assert Path(raw["composite_image_path"]).exists()
+    assert Path(raw["motion_composite_image_path"]).exists()
 
 
 def test_construction_structured_veto_true_overrides_detected(
@@ -1829,3 +2131,78 @@ def test_construction_structured_veto_true_overrides_detected(
 
     assert candidate.detected is False
     assert candidate.is_target_explicitly_four_wheel_vehicle is True
+
+
+
+def test_construction_gallery_filters_cone_not_on_ground(
+    make_agent, construction_category, analysis_context
+) -> None:
+    """Cone regions explicitly flagged as not on the ground are filtered out."""
+    agent, _ = make_agent(
+        {
+            "road_construction_roi_detection": [
+                _construction_roi_response(
+                    [
+                        {
+                            "bbox_norm": [0.30, 0.10, 0.35, 0.25],
+                            "tag": "cone",
+                            "confidence": 0.92,
+                            "on_ground": False,
+                        },
+                    ]
+                ),
+            ],
+            "road_construction_detection": [
+                _construction_final_response(False, "未检测到道路施工。"),
+            ],
+        },
+        category=construction_category,
+    )
+
+    candidate = _detect_with_patched_dir(agent, analysis_context)
+
+    assert candidate.detected is False
+    # No gallery should be created when the only region is an invalid cone.
+    assert "gallery_image_path" not in candidate.raw_vlm_response
+    far_enhancement = candidate.raw_vlm_response.get("far_enhancement", {})
+    assert len(far_enhancement.get("evidence_regions", [])) == 0
+
+
+def test_construction_gallery_keeps_cone_on_ground_for_fallback(
+    make_agent, construction_category, analysis_context
+) -> None:
+    """Grounded cones are kept and can contribute to the construction fallback."""
+    agent, engine = make_agent(
+        {
+            "road_construction_roi_detection": [
+                _construction_roi_response(
+                    [
+                        {
+                            "bbox_norm": [0.30, 0.40, 0.35, 0.55],
+                            "tag": "cone",
+                            "confidence": 0.92,
+                            "on_ground": True,
+                        },
+                        {"bbox_norm": [0.50, 0.45, 0.55, 0.60], "tag": "worker", "confidence": 0.85},
+                    ]
+                ),
+            ],
+            "road_construction_detection": [
+                _construction_final_response(False, "未检测到道路施工。"),
+            ],
+        },
+        category=construction_category,
+    )
+
+    candidate = _detect_with_patched_dir(agent, analysis_context)
+
+    assert candidate.detected is True
+    assert candidate.raw_vlm_response["far_enhancement"].get("fallback") is True
+    # The gallery should only contain the grounded cone + worker.
+    far_enhancement = candidate.raw_vlm_response.get("far_enhancement", {})
+    tags = {r["tag"] for r in far_enhancement.get("evidence_regions", [])}
+    assert "cone" in tags
+    assert "worker" in tags
+
+    final_calls = [c for c in engine.calls if c["template_id"] == "road_construction_detection"]
+    assert len(final_calls) == 1

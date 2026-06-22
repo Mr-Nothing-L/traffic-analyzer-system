@@ -106,7 +106,7 @@
 
 以下内容全部在 YAML 中定义 —— 无需修改代码：
 - 事件定义（`event_categories.yaml`）
-- Prompt 模板（`prompt_templates.yaml`）
+- Prompt 模板（`prompts/*.yaml`）
 - 裁决规则（`event_categories.yaml`）
 - 标注规范（`annotation_spec.yaml`）
 
@@ -134,7 +134,7 @@ traffic_analyzer/
 ├── config/
 │   ├── annotation_spec.yaml       # 注入裁决 Prompt 的标注规范
 │   ├── event_categories.yaml      # 事件定义 + 裁决规则
-│   ├── prompt_templates.yaml      # VLM Prompt 模板 + 裁决模板
+│   ├── prompts/                   # VLM Prompt 模板 + 裁决模板
 │   └── .env.example               # LLM 提供商配置示例
 ├── core/
 │   ├── config_manager.py          # 配置加载、校验

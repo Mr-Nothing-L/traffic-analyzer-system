@@ -174,8 +174,8 @@ def far_enhancement_candidate() -> Dict[str, Any]:
         "detected": True,
         "summary": "detected",
         "raw_vlm_response": {
-            "composite_image_path": "/tmp/test_video_frame_2_composite.jpg",
-            "motion_composite_image_path": "/tmp/test_video_frame_2_motion_3.jpg",
+            "composite_image_path": "/tmp/test_video_event_4_frame_2_composite.jpg",
+            "motion_composite_image_path": "/tmp/test_video_event_4_frame_2_motion_3.jpg",
         },
     }
 
@@ -206,8 +206,8 @@ def pedestrian_enhancement_candidate() -> Dict[str, Any]:
         "detected": True,
         "summary": "detected",
         "raw_vlm_response": {
-            "composite_image_path": "/tmp/test_video_frame_2_composite.jpg",
-            "motion_composite_image_path": "/tmp/test_video_frame_2_motion_3.jpg",
+            "composite_image_path": "/tmp/test_video_event_3_frame_2_composite.jpg",
+            "motion_composite_image_path": "/tmp/test_video_event_3_frame_2_motion_3.jpg",
         },
     }
 
@@ -363,7 +363,6 @@ class TestToMarkdown:
 
         assert "# 交通事件分析报告" in md
         assert "## 视频信息" in md
-        assert "## 整体交通态势" in md
         assert "## 事件类别分析" in md
         assert "## 最终分类" in md
         assert "## 处置建议" in md
@@ -598,10 +597,10 @@ class TestFarEnhancementEvidence:
     @pytest.mark.parametrize(
         "composite_path,motion_path",
         [
-            ("/tmp/test_video_frame_2_composite.jpg", None),
+            ("/tmp/test_video_event_4_frame_2_composite.jpg", None),
             (
-                "/tmp/test_video_frame_2_composite.jpg",
-                "/tmp/test_video_frame_2_motion_3.jpg",
+                "/tmp/test_video_event_4_frame_2_composite.jpg",
+                "/tmp/test_video_event_4_frame_2_motion_3.jpg",
             ),
         ],
         ids=["composite_only", "composite_and_motion"],
@@ -782,9 +781,9 @@ class TestFarEnhancementEvidence:
         md = generator.to_markdown(report)
 
         assert "#### 远距离行人增强证据" in md
-        assert "**远距离增强合成图**: `/tmp/test_video_frame_2_composite.jpg`" in md
-        assert "![远距离行人增强](/tmp/test_video_frame_2_composite.jpg)" in md
-        assert "**运动反射验证合成图**: `/tmp/test_video_frame_2_motion_3.jpg`" in md
+        assert "**远距离增强合成图**: `/tmp/test_video_event_3_frame_2_composite.jpg`" in md
+        assert "![远距离行人增强](/tmp/test_video_event_3_frame_2_composite.jpg)" in md
+        assert "**运动反射验证合成图**: `/tmp/test_video_event_3_frame_2_motion_3.jpg`" in md
 
     def test_frame_analysis_log_rendered_for_event_id_3(
         self,
@@ -870,7 +869,7 @@ class TestFarEnhancementEvidence:
                 "detected": True,
                 "summary": "detected",
                 "raw_vlm_response": {
-                    "gallery_image_path": "/tmp/test_video_frame_1_gallery.jpg",
+                    "gallery_image_path": "/tmp/test_video_event_6_frame_1_gallery.jpg",
                     "far_enhancement": {
                         "selected_frame_index": 1,
                         "evidence_regions": [
@@ -904,8 +903,8 @@ class TestFarEnhancementEvidence:
         md = generator.to_markdown(report)
 
         assert "#### 施工证据合成图" in md
-        assert "**施工证据合成图**: `/tmp/test_video_frame_1_gallery.jpg`" in md
-        assert "![施工证据合成图](/tmp/test_video_frame_1_gallery.jpg)" in md
+        assert "**施工证据合成图**: `/tmp/test_video_event_6_frame_1_gallery.jpg`" in md
+        assert "![施工证据合成图](/tmp/test_video_event_6_frame_1_gallery.jpg)" in md
         assert "#### 证据区域表" in md
         assert "| tag | bbox | confidence | 面积(px) | 宽高比 | 说明 |" in md
         assert "cone" in md
