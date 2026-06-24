@@ -473,6 +473,53 @@ def compute_metrics(
 
 
 # ---------------------------------------------------------------------------
+# Embed local images into markdown text as base64 data URIs.
+# ---------------------------------------------------------------------------
+IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
+
+
+def _mime_type_for_image(path: Path) -> str:
+    """Return MIME type based on image file extension."""
+    ext = path.suffix.lower()
+    return {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+        ".bmp": "image/bmp",
+    }.get(ext, "image/jpeg")
+
+
+def embed_images_in_markdown(text: str, report_dir: Path) -> str:
+    """Replace local image references in markdown with inline base64 data URIs.
+
+    Only existing local files are embedded. Missing images and remote URLs are
+    left untouched so reports without evidence images remain compatible.
+    """
+
+    def replacer(match: re.Match[str]) -> str:
+        alt = match.group(1)
+        src = match.group(2).strip()
+        # Skip remote URLs and anchor-only references
+        if src.startswith(("http://", "https://", "data:", "#")):
+            return match.group(0)
+        # Resolve relative to the markdown report directory
+        image_path = report_dir / src
+        if not image_path.exists():
+            return match.group(0)
+        try:
+            data = image_path.read_bytes()
+            b64 = base64.b64encode(data).decode("ascii")
+            mime = _mime_type_for_image(image_path)
+            return f"![{alt}](data:{mime};base64,{b64})"
+        except Exception:
+            return match.group(0)
+
+    return IMAGE_RE.sub(replacer, text)
+
+
+# ---------------------------------------------------------------------------
 # Markdown table output
 # ---------------------------------------------------------------------------
 def format_markdown_table(result: Dict[str, Any]) -> str:
@@ -866,6 +913,13 @@ def format_html_report(
       color: var(--text);
     }}
     #report-preview .md-content a {{ color: #60a5fa; }}
+    #report-preview .md-content img {{
+      max-width: 100%;
+      height: auto;
+      display: block;
+      margin: 0.5rem 0;
+      border-radius: 4px;
+    }}
     #report-preview .md-content code {{
       background: #243044;
       padding: 0.15em 0.4em;
@@ -1420,6 +1474,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             # Read report content for HTML embedding
             try:
                 report_text = report_path.read_text(encoding="utf-8")
+                report_text = embed_images_in_markdown(report_text, report_path.parent)
             except Exception:
                 report_text = ""
 
