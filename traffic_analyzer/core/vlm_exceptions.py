@@ -31,3 +31,7 @@ class FatalAPIError(VLMEngineError):
     This error propagates through all fallback layers to signal batch_infer
     that subsequent videos will also fail — processing should stop immediately.
     """
+
+
+class AllProvidersExhaustedError(VLMEngineError):
+    """Raised when all configured providers fail and failover is exhausted."""

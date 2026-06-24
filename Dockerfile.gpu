@@ -1,0 +1,54 @@
+# ============================================
+# Traffic Agent - Docker Environment (GPU)
+# CUDA 11.4 runtime + Miniconda + Python 3.11
+# Uses Tsinghua mirrors for conda/pip
+# ============================================
+
+FROM nvidia/cuda:11.4.3-runtime-ubuntu20.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONPATH=/data
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git curl wget vim ffmpeg \
+    libgl1-mesa-glx libglib2.0-0 libsm6 libxext6 libxrender-dev libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Miniconda (Tsinghua mirror)
+RUN wget -q https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O /tmp/miniconda.sh \
+    && bash /tmp/miniconda.sh -b -p /opt/conda \
+    && rm /tmp/miniconda.sh
+
+ENV PATH=/opt/conda/bin:$PATH
+
+# Configure conda to use Tsinghua mirrors
+COPY .condarc /root/.condarc
+
+# Create conda env with Python 3.11
+RUN conda create -n traffic python=3.11 -y \
+    && conda clean -afy
+
+# Activate env for subsequent RUNs
+SHELL ["/bin/bash", "-c"]
+ENV PATH=/opt/conda/envs/traffic/bin:$PATH
+
+# Configure pip to use Tsinghua mirror
+RUN mkdir -p ~/.pip && \
+    echo '[global]' > ~/.pip/pip.conf && \
+    echo 'index-url = https://pypi.tuna.tsinghua.edu.cn/simple' >> ~/.pip/pip.conf && \
+    echo 'trusted-host = pypi.tuna.tsinghua.edu.cn' >> ~/.pip/pip.conf
+
+# Install project dependencies
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
+
+WORKDIR /data
+
+# Ensure tools directory is available in PYTHONPATH
+ENV PYTHONPATH=/data:/data/traffic_analyzer/tools:${PYTHONPATH}
+
+# Default: keep container running
+CMD ["tail", "-f", "/dev/null"]

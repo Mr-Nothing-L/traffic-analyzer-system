@@ -19,7 +19,7 @@ import pytest
 import yaml
 
 from traffic_analyzer.core.config_manager import ConfigManager, ConfigValidationError
-from traffic_analyzer.models.schemas import DetectionMode, SystemConfig
+from traffic_analyzer.models.schemas import DetectionMode, LLMProviderConfig, SystemConfig
 
 
 @pytest.fixture
@@ -237,13 +237,34 @@ class TestEnvParsing:
             "LLM_TEMPERATURE",
             "LLM_TIMEOUT",
             "LLM_MAX_RETRIES",
+            "LLM_ENABLE_CACHE",
+            "LLM_CACHE_MAX_SIZE",
             "ANTHROPIC_API_KEY",
             "ANTHROPIC_BASE_URL",
+            "ANTHROPIC_MODEL",
             "OPENAI_API_KEY",
             "OPENAI_BASE_URL",
+            "OPENAI_MODEL",
             "GOOGLE_API_KEY",
             "ALIYUN_API_KEY",
             "ALIYUN_BASE_URL",
+            "ALIYUN_MODEL",
+            "LLM_PROVIDER_0_PROVIDER",
+            "LLM_PROVIDER_0_API_KEY",
+            "LLM_PROVIDER_0_BASE_URL",
+            "LLM_PROVIDER_0_MODEL",
+            "LLM_PROVIDER_0_MAX_TOKENS",
+            "LLM_PROVIDER_0_TEMPERATURE",
+            "LLM_PROVIDER_0_TIMEOUT",
+            "LLM_PROVIDER_0_MAX_RETRIES",
+            "LLM_PROVIDER_1_PROVIDER",
+            "LLM_PROVIDER_1_API_KEY",
+            "LLM_PROVIDER_1_BASE_URL",
+            "LLM_PROVIDER_1_MODEL",
+            "LLM_PROVIDER_1_MAX_TOKENS",
+            "LLM_PROVIDER_1_TEMPERATURE",
+            "LLM_PROVIDER_1_TIMEOUT",
+            "LLM_PROVIDER_1_MAX_RETRIES",
         ]
         preserved = {k: os.environ.pop(k, None) for k in keys}
         yield
@@ -288,6 +309,114 @@ class TestEnvParsing:
         config = mgr.load_all()
         # Should fall back to default
         assert config.llm_provider.max_tokens == 4096
+
+    def test_legacy_single_env_becomes_first_provider(self, temp_config_dir: Path) -> None:
+        """Legacy LLM_* variables must be available as llm_providers[0]."""
+        env_content = textwrap.dedent(
+            """\
+            LLM_PROVIDER=openai
+            LLM_API_KEY=sk-test-key
+            LLM_BASE_URL=https://api.openai.com/v1
+            LLM_MODEL=gpt-4o
+            LLM_MAX_TOKENS=2048
+            LLM_TEMPERATURE=0.5
+            LLM_TIMEOUT=60.0
+            LLM_MAX_RETRIES=5
+            """
+        )
+        (temp_config_dir / ".env").write_text(env_content, encoding="utf-8")
+
+        mgr = ConfigManager(str(temp_config_dir))
+        config = mgr.load_all()
+
+        assert len(config.llm_providers) == 1
+        assert config.llm_providers[0].provider == "openai"
+        assert config.llm_providers[0].api_key == "sk-test-key"
+        assert config.llm_providers[0].base_url == "https://api.openai.com/v1"
+        assert config.llm_providers[0].model == "gpt-4o"
+        assert config.llm_providers[0].max_tokens == 2048
+        assert config.llm_providers[0].temperature == 0.5
+        assert config.llm_providers[0].timeout == 60.0
+        assert config.llm_providers[0].max_retries == 5
+
+        # Backwards-compatible accessors
+        assert config.llm_provider.provider == "openai"
+        assert mgr.get_llm_provider().provider == "openai"
+        assert len(mgr.get_llm_providers()) == 1
+
+    def test_multi_provider_env_parsing(self, temp_config_dir: Path) -> None:
+        """Indexed LLM_PROVIDER_N_* variables must create multiple providers."""
+        env_content = textwrap.dedent(
+            """\
+            LLM_PROVIDER_0_PROVIDER=openai
+            LLM_PROVIDER_0_API_KEY=sk-openai
+            LLM_PROVIDER_0_BASE_URL=https://api.openai.com/v1
+            LLM_PROVIDER_0_MODEL=gpt-4o
+            LLM_PROVIDER_0_MAX_TOKENS=2048
+            LLM_PROVIDER_0_TEMPERATURE=0.1
+            LLM_PROVIDER_0_TIMEOUT=30.0
+            LLM_PROVIDER_0_MAX_RETRIES=2
+            LLM_PROVIDER_1_PROVIDER=anthropic
+            LLM_PROVIDER_1_API_KEY=sk-anthropic
+            LLM_PROVIDER_1_BASE_URL=https://api.anthropic.com/v1
+            LLM_PROVIDER_1_MODEL=claude-sonnet-4
+            LLM_PROVIDER_1_MAX_TOKENS=8192
+            LLM_PROVIDER_1_TEMPERATURE=0.3
+            LLM_PROVIDER_1_TIMEOUT=120.0
+            LLM_PROVIDER_1_MAX_RETRIES=4
+            """
+        )
+        (temp_config_dir / ".env").write_text(env_content, encoding="utf-8")
+
+        mgr = ConfigManager(str(temp_config_dir))
+        config = mgr.load_all()
+
+        assert len(config.llm_providers) == 2
+
+        p0 = config.llm_providers[0]
+        assert p0.provider == "openai"
+        assert p0.api_key == "sk-openai"
+        assert p0.base_url == "https://api.openai.com/v1"
+        assert p0.model == "gpt-4o"
+        assert p0.max_tokens == 2048
+        assert p0.temperature == 0.1
+        assert p0.timeout == 30.0
+        assert p0.max_retries == 2
+
+        p1 = config.llm_providers[1]
+        assert p1.provider == "anthropic"
+        assert p1.api_key == "sk-anthropic"
+        assert p1.base_url == "https://api.anthropic.com/v1"
+        assert p1.model == "claude-sonnet-4"
+        assert p1.max_tokens == 8192
+        assert p1.temperature == 0.3
+        assert p1.timeout == 120.0
+        assert p1.max_retries == 4
+
+        # Primary provider is the first one
+        assert config.llm_provider == p0
+        assert mgr.get_llm_provider() == p0
+
+
+# ---------------------------------------------------------------------------
+# SystemConfig model validator tests
+# ---------------------------------------------------------------------------
+
+
+class TestSystemConfigValidator:
+    def test_both_provider_fields_list_wins(self, caplog) -> None:
+        """When both llm_provider and llm_providers are provided, the list wins."""
+        single = LLMProviderConfig(provider="openai", api_key="old-key")
+        multi = [LLMProviderConfig(provider="anthropic", api_key="new-key")]
+
+        with caplog.at_level("WARNING"):
+            config = SystemConfig(llm_provider=single, llm_providers=multi)
+
+        assert len(config.llm_providers) == 1
+        assert config.llm_providers[0].provider == "anthropic"
+        assert config.llm_providers[0].api_key == "new-key"
+        assert config.llm_provider.provider == "anthropic"
+        assert "llm_providers takes precedence" in caplog.text
 
 
 # ---------------------------------------------------------------------------

@@ -4,10 +4,13 @@ Configuration models for the traffic analyzer framework.
 
 from __future__ import annotations
 
+import logging
 import os
-from typing import Optional
+from typing import List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+logger = logging.getLogger(__name__)
 
 
 class SamplingConfig(BaseModel):
@@ -44,6 +47,7 @@ class LLMProviderConfig(BaseModel):
 class SystemConfig(BaseModel):
     """Complete system configuration."""
     llm_provider: LLMProviderConfig = Field(default_factory=LLMProviderConfig)
+    llm_providers: List[LLMProviderConfig] = Field(default_factory=list)
     sampling: SamplingConfig = Field(default_factory=SamplingConfig)
     output_dir: str = "./output"
     save_debug_frames: bool = False
@@ -56,3 +60,14 @@ class SystemConfig(BaseModel):
     vlm_max_frames: int = Field(
         default_factory=lambda: int(os.getenv("VLM_MAX_FRAMES", "10"))
     )
+
+    @model_validator(mode="after")
+    def _sync_llm_providers(self) -> "SystemConfig":
+        if self.llm_providers and self.llm_provider:
+            logger.warning(
+                "Both llm_provider and llm_providers are set; llm_providers takes precedence."
+            )
+            self.llm_provider = self.llm_providers[0]
+        elif not self.llm_providers and self.llm_provider:
+            self.llm_providers = [self.llm_provider.model_copy()]
+        return self

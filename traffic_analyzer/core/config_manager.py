@@ -121,14 +121,14 @@ class ConfigManager:
 
         # --- LLM config ---
         try:
-            llm_config = self._load_env_llm_config()
+            llm_providers = self._load_env_llm_providers()
         except Exception as exc:
             logger.error(
                 "[config_manager:load_all] LLM_CONFIG_ERROR | %s",
                 exc,
                 exc_info=True,
             )
-            llm_config = LLMProviderConfig()
+            llm_providers = [LLMProviderConfig()]
 
         # Build lookup tables
         self._event_categories = {
@@ -180,7 +180,7 @@ class ConfigManager:
         # --- SystemConfig build ---
         try:
             self._system_config = SystemConfig(
-                llm_provider=llm_config,
+                llm_providers=llm_providers,
                 sampling=SamplingConfig(),  # reads SAMPLING_FPS from env
                 **system_kwargs,
             )
@@ -227,6 +227,23 @@ class ConfigManager:
         if self._system_config is None:
             raise RuntimeError("Configuration has not been loaded. Call load_all() first.")
         return len(self._event_categories)
+
+    def get_llm_providers(self) -> List[LLMProviderConfig]:
+        """Return all configured LLM providers in priority order."""
+        if self._system_config is None:
+            raise RuntimeError("Configuration has not been loaded. Call load_all() first.")
+        return self._system_config.llm_providers
+
+    def get_llm_provider(self) -> LLMProviderConfig:
+        """Return the primary (first) LLM provider.
+
+        Kept for backwards compatibility with code that expects a single provider.
+        """
+        if self._system_config is None:
+            raise RuntimeError("Configuration has not been loaded. Call load_all() first.")
+        if not self._system_config.llm_providers:
+            raise RuntimeError("No LLM providers configured.")
+        return self._system_config.llm_providers[0]
 
     def get_prompt_template(
         self,
@@ -608,30 +625,15 @@ class ConfigManager:
 
         return merged, loaded_paths
 
-    def _load_env_llm_config(self) -> LLMProviderConfig:
-        """Parse ``.env`` (if present) and return an ``LLMProviderConfig``.
-
-        Recognised environment variables (all optional):
-
-        * ``LLM_PROVIDER`` -> ``provider``
-        * ``LLM_API_KEY`` -> ``api_key``
-        * ``LLM_BASE_URL`` -> ``base_url``
-        * ``LLM_MODEL`` -> ``model``
-        * ``LLM_MAX_TOKENS`` -> ``max_tokens``
-        * ``LLM_TEMPERATURE`` -> ``temperature``
-        * ``LLM_TIMEOUT`` -> ``timeout``
-        * ``LLM_MAX_RETRIES`` -> ``max_retries``
-
-        Returns:
-            An ``LLMProviderConfig`` with values overridden by the environment.
-        """
-        # Search for .env in multiple locations (config_dir, package root, CWD)
+    def _load_dotenv_files(self) -> None:
+        """Load the first available ``.env`` file into the process environment."""
         env_loaded = False
         candidates = [self.config_dir / ".env"]
 
         # Also check the package root directory (one level above this file's package)
         try:
             import traffic_analyzer as _ta
+
             pkg_root = Path(_ta.__file__).resolve().parent.parent
             candidates.append(pkg_root / ".env")
         except Exception:
@@ -651,58 +653,91 @@ class ConfigManager:
                 logger.info("Loaded environment variables from CWD .env")
             else:
                 logger.error(
-                    "[config_manager:_load_env_llm_config] ENV_FILE_NOT_FOUND | searched=%s",
+                    "[config_manager:_load_dotenv_files] ENV_FILE_NOT_FOUND | searched=%s",
                     ", ".join(str(p) for p in candidates),
                 )
 
+    _ENV_NUMERIC_FIELDS = (
+        ("MAX_TOKENS", "max_tokens", int),
+        ("TEMPERATURE", "temperature", float),
+        ("TIMEOUT", "timeout", float),
+        ("MAX_RETRIES", "max_retries", int),
+        ("CACHE_MAX_SIZE", "cache_max_size", int),
+    )
+
+    def _build_llm_config_from_env(
+        self, prefix: Optional[str] = None
+    ) -> LLMProviderConfig:
+        """Build a single ``LLMProviderConfig`` from environment variables.
+
+        Args:
+            prefix: If ``None``, read the legacy ``LLM_*`` variables (and
+                ``VLM_PROVIDER``). If given, read ``{prefix}_*`` variables, e.g.
+                ``LLM_PROVIDER_0_PROVIDER``.
+
+        Returns:
+            An ``LLMProviderConfig`` with values overridden by the environment.
+        """
         kwargs: Dict[str, Any] = {}
 
-        # Support both VLM_PROVIDER (used in .env template) and LLM_PROVIDER
-        provider = os.getenv("VLM_PROVIDER") or os.getenv("LLM_PROVIDER")
+        if prefix is None:
+            # Support both VLM_PROVIDER (used in .env template) and LLM_PROVIDER
+            provider = os.getenv("VLM_PROVIDER") or os.getenv("LLM_PROVIDER")
+        else:
+            provider = os.getenv(f"{prefix}_PROVIDER")
+
         if provider:
             kwargs["provider"] = provider
 
-        # Provider-specific API key overrides generic LLM_API_KEY
+        # Provider-specific API key overrides generic/prefixed key
         if provider:
             specific_api_key = os.getenv(f"{provider.upper()}_API_KEY")
             if specific_api_key:
                 kwargs["api_key"] = specific_api_key
 
-        if api_key := os.getenv("LLM_API_KEY"):
+        if prefix is None:
+            api_key = os.getenv("LLM_API_KEY")
+        else:
+            api_key = os.getenv(f"{prefix}_API_KEY")
+        if api_key:
             kwargs.setdefault("api_key", api_key)
-        if base_url := os.getenv("LLM_BASE_URL"):
+
+        if prefix is None:
+            base_url = os.getenv("LLM_BASE_URL")
+        else:
+            base_url = os.getenv(f"{prefix}_BASE_URL")
+        if base_url:
             kwargs["base_url"] = base_url
 
-        # Provider-specific base_url overrides the generic one
-        provider = kwargs.get("provider") or os.getenv("LLM_PROVIDER", "")
+        # Provider-specific base_url overrides the generic/prefixed one
+        provider = kwargs.get("provider") or provider or ""
         if provider:
             specific_base_url = os.getenv(f"{provider.upper()}_BASE_URL")
             if specific_base_url:
                 kwargs["base_url"] = specific_base_url
 
-        # Provider-specific model overrides generic LLM_MODEL
-        provider = kwargs.get("provider") or os.getenv("LLM_PROVIDER", "")
+        # Provider-specific model overrides generic/prefixed one
         if provider:
             specific_model = os.getenv(f"{provider.upper()}_MODEL")
             if specific_model:
                 kwargs["model"] = specific_model
 
-        if model := os.getenv("LLM_MODEL"):
+        if prefix is None:
+            model = os.getenv("LLM_MODEL")
+        else:
+            model = os.getenv(f"{prefix}_MODEL")
+        if model:
             kwargs.setdefault("model", model)
 
-        for env_name, attr_name, cast in (
-            ("LLM_MAX_TOKENS", "max_tokens", int),
-            ("LLM_TEMPERATURE", "temperature", float),
-            ("LLM_TIMEOUT", "timeout", float),
-            ("LLM_MAX_RETRIES", "max_retries", int),
-            ("LLM_CACHE_MAX_SIZE", "cache_max_size", int),
-        ):
-            if (val := os.getenv(env_name)) is not None:
+        for base_name, attr_name, cast in self._ENV_NUMERIC_FIELDS:
+            env_name = f"LLM_{base_name}" if prefix is None else f"{prefix}_{base_name}"
+            val = os.getenv(env_name)
+            if val is not None:
                 try:
                     kwargs[attr_name] = cast(val)
                 except (ValueError, TypeError) as exc:
                     logger.error(
-                        "[config_manager:_load_env_llm_config] ENV_PARSE_ERROR | var=%s value=%s | %s",
+                        "[config_manager:_build_llm_config_from_env] ENV_PARSE_ERROR | var=%s value=%s | %s",
                         env_name,
                         val,
                         exc,
@@ -710,7 +745,10 @@ class ConfigManager:
                     )
 
         # Boolean flag for cache enable/disable
-        cache_enabled = os.getenv("LLM_ENABLE_CACHE")
+        if prefix is None:
+            cache_enabled = os.getenv("LLM_ENABLE_CACHE")
+        else:
+            cache_enabled = os.getenv(f"{prefix}_ENABLE_CACHE")
         if cache_enabled is not None:
             kwargs["enable_cache"] = cache_enabled.lower() in ("1", "true", "yes", "on")
 
@@ -725,9 +763,47 @@ class ConfigManager:
                 kwargs["disk_cache_max_entries"] = int(disk_cache_max)
             except (ValueError, TypeError) as exc:
                 logger.error(
-                    "[config_manager:_load_env_llm_config] ENV_PARSE_ERROR | var=TRAFFIC_ANALYZER_DISK_CACHE_MAX_ENTRIES value=%s | %s",
+                    "[config_manager:_build_llm_config_from_env] ENV_PARSE_ERROR | var=TRAFFIC_ANALYZER_DISK_CACHE_MAX_ENTRIES value=%s | %s",
                     disk_cache_max,
                     exc,
                 )
 
         return LLMProviderConfig(**kwargs)
+
+    def _load_env_llm_config(self) -> LLMProviderConfig:
+        """Parse ``.env`` (if present) and return a single ``LLMProviderConfig``.
+
+        Kept for backwards compatibility; new code should prefer
+        :meth:`_load_env_llm_providers`.
+        """
+        self._load_dotenv_files()
+        return self._build_llm_config_from_env(prefix=None)
+
+    def _load_env_llm_providers(self) -> List[LLMProviderConfig]:
+        """Parse ``.env`` (if present) and return a list of ``LLMProviderConfig``.
+
+        If indexed variables such as ``LLM_PROVIDER_0_PROVIDER`` or
+        ``LLM_PROVIDER_1_PROVIDER`` are present, those providers are used.
+        Otherwise the legacy single-provider ``LLM_*`` variables are read and
+        returned as a one-element list.
+        """
+        self._load_dotenv_files()
+
+        indices = set()
+        for key in os.environ:
+            if key.startswith("LLM_PROVIDER_") and key.endswith("_PROVIDER"):
+                try:
+                    idx = int(key[len("LLM_PROVIDER_") : -len("_PROVIDER")])
+                    indices.add(idx)
+                except ValueError:
+                    pass
+
+        if not indices:
+            return [self._build_llm_config_from_env(prefix=None)]
+
+        providers: List[LLMProviderConfig] = []
+        for i in range(max(indices) + 1):
+            providers.append(
+                self._build_llm_config_from_env(prefix=f"LLM_PROVIDER_{i}")
+            )
+        return providers

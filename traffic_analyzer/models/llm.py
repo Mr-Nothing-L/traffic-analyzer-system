@@ -74,6 +74,7 @@ class LLMResponse(BaseModel):
     raw_text: str = ""
     parsed_data: Dict[str, Any] = Field(default_factory=dict)
     model: str = ""
+    provider: str = ""
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
@@ -87,6 +88,7 @@ class LLMCallRecord(BaseModel):
     timestamp: datetime = Field(default_factory=datetime.now)
     template_id: str
     model: str
+    provider: str = ""
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int

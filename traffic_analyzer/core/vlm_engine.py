@@ -15,7 +15,7 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from jinja2 import Template, UndefinedError, StrictUndefined
 
@@ -32,6 +32,7 @@ from traffic_analyzer.models.schemas import (
 )
 
 from traffic_analyzer.core.vlm_exceptions import (
+    AllProvidersExhaustedError,
     FatalAPIError,
     PromptRenderError,
     ProviderNotSupportedError,
@@ -54,6 +55,7 @@ from traffic_analyzer.core.vlm_response_parser import (
 from traffic_analyzer.core.vlm_error_classifier import (
     _is_fatal_api_error,
     _is_retryable_error,
+    is_failover_trigger,
 )
 
 from traffic_analyzer.core.vlm_provider_clients import (
@@ -124,26 +126,49 @@ class VLMInferenceEngine:
 
     SUPPORTED_PROVIDERS = ("anthropic", "google", "aliyun")
 
-    def __init__(self, config: LLMProviderConfig) -> None:
-        """Initialize the engine with provider configuration.
+    def __init__(
+        self,
+        config: Union[LLMProviderConfig, List[LLMProviderConfig]],
+    ) -> None:
+        """Initialize the engine with one or more provider configurations.
 
         Args:
-            config: Provider configuration including API key, model,
-                timeout, and retry settings.
+            config: A single provider configuration or a prioritized list of
+                providers. When multiple providers are given, the engine fails
+                over to the next provider on quota / auth / rate-limit / 5xx
+                errors.
 
         Raises:
-            ProviderNotSupportedError: If the provider is not supported.
+            ProviderNotSupportedError: If no providers are configured or a
+                provider is not supported.
         """
-        self.config = config
-        self.provider = config.provider.lower().strip()
-        if self.provider not in self.SUPPORTED_PROVIDERS:
+        if isinstance(config, LLMProviderConfig):
+            providers = [config]
+        else:
+            providers = list(config)
+
+        if not providers:
             raise ProviderNotSupportedError(
-                f"Provider '{self.provider}' is not supported. "
-                f"Supported: {self.SUPPORTED_PROVIDERS}"
+                "At least one LLM provider must be configured."
             )
 
-        self._client: Optional[Any] = None
-        self._init_client()
+        self._providers: List[LLMProviderConfig] = []
+        for cfg in providers:
+            normalized = cfg.provider.lower().strip()
+            if normalized not in self.SUPPORTED_PROVIDERS:
+                raise ProviderNotSupportedError(
+                    f"Provider '{normalized}' is not supported. "
+                    f"Supported: {self.SUPPORTED_PROVIDERS}"
+                )
+            # Keep normalized provider name without mutating the caller's object.
+            self._providers.append(cfg.model_copy(update={"provider": normalized}))
+
+        self._clients: List[Any] = []
+        self._current_provider_index: int = 0
+        for cfg in self._providers:
+            self._current_provider_index = len(self._clients)
+            self._clients.append(self._init_client_for_provider(cfg))
+        self._current_provider_index = 0
 
         # Usage statistics
         self._total_calls: int = 0
@@ -155,8 +180,8 @@ class VLMInferenceEngine:
         self._failed_calls: int = 0
 
         # Response cache (LRU, bounded by config.cache_max_size)
-        self._cache_enabled: bool = getattr(config, "enable_cache", True)
-        self._cache_max_size: int = getattr(config, "cache_max_size", 128)
+        self._cache_enabled: bool = getattr(self.config, "enable_cache", True)
+        self._cache_max_size: int = getattr(self.config, "cache_max_size", 128)
         self._cache: OrderedDict[str, LLMResponse] = OrderedDict()
         self._cache_hits: int = 0
         self._cache_misses: int = 0
@@ -165,38 +190,59 @@ class VLMInferenceEngine:
         # Disk cache (cross-process persistent cache)
         self._disk_cache: Optional[DiskCache] = None
         self._disk_cache_hits: int = 0
-        disk_cache_path = getattr(config, "disk_cache_path", None)
+        disk_cache_path = getattr(self.config, "disk_cache_path", None)
         if disk_cache_path:
             try:
                 self._disk_cache = DiskCache(
                     db_path=disk_cache_path,
-                    max_entries=getattr(config, "disk_cache_max_entries", 2000),
+                    max_entries=getattr(self.config, "disk_cache_max_entries", 2000),
                 )
                 logger.info("[VLMInferenceEngine] Disk cache enabled: %s", disk_cache_path)
             except Exception as exc:
                 logger.warning("[VLMInferenceEngine] Disk cache init failed: %s", exc)
 
-    def _init_client(self) -> None:
-        """Initialize the underlying SDK client based on provider."""
+    @property
+    def config(self) -> LLMProviderConfig:
+        """Return the currently active provider configuration."""
+        return self._providers[self._current_provider_index]
+
+    @property
+    def provider(self) -> str:
+        """Return the currently active provider name."""
+        return self._providers[self._current_provider_index].provider
+
+    @property
+    def _client(self) -> Any:
+        """Return the SDK client for the currently active provider."""
+        return self._clients[self._current_provider_index]
+
+    def _init_client_for_provider(self, config: LLMProviderConfig) -> Any:
+        """Initialize the underlying SDK client for a single provider."""
         # Create an http client that bypasses system proxies to avoid
         # socks:// proxy issues (httpx does not support SOCKS by default).
-        http_client = httpx.Client(proxy=None, trust_env=False, timeout=self.config.timeout)
+        http_client = httpx.Client(proxy=None, trust_env=False, timeout=config.timeout)
+        provider = config.provider.lower().strip()
 
-        if self.provider == "anthropic":
-            kwargs = {"api_key": self.config.api_key, "http_client": http_client}
-            if self.config.base_url:
-                kwargs["base_url"] = self.config.base_url
-            self._client = anthropic.Anthropic(**kwargs)
-        elif self.provider == "google":
+        if provider == "anthropic":
+            kwargs = {"api_key": config.api_key, "http_client": http_client}
+            if config.base_url:
+                kwargs["base_url"] = config.base_url
+            return anthropic.Anthropic(**kwargs)
+        elif provider == "google":
             import google.generativeai as genai
-            genai.configure(api_key=self.config.api_key)
-            self._client = genai
-        elif self.provider == "aliyun":
-            base_url = self.config.base_url or "https://dashscope.aliyuncs.com/compatible-mode/v1"
-            self._client = openai.OpenAI(
-                api_key=self.config.api_key,
+            genai.configure(api_key=config.api_key)
+            return genai
+        elif provider == "aliyun":
+            base_url = config.base_url or "https://dashscope.aliyuncs.com/compatible-mode/v1"
+            return openai.OpenAI(
+                api_key=config.api_key,
                 base_url=base_url,
                 http_client=http_client,
+            )
+        else:
+            raise ProviderNotSupportedError(
+                f"Provider '{provider}' is not supported. "
+                f"Supported: {self.SUPPORTED_PROVIDERS}"
             )
 
     # ------------------------------------------------------------------
@@ -372,8 +418,9 @@ class VLMInferenceEngine:
                 exc_info=True,
             )
         except Exception as exc:
-            # Fatal API errors (quota/auth) must propagate up to stop batch processing
-            if _is_fatal_api_error(exc):
+            # Fatal API errors (quota/auth/all-providers-exhausted) must propagate
+            # up to stop batch processing.
+            if _is_fatal_api_error(exc) or isinstance(exc, AllProvidersExhaustedError):
                 raise FatalAPIError(f"API unusable: {exc}") from exc
             error_message = str(exc)
             retry_count = getattr(exc, "_retry_count", retry_count)
@@ -404,6 +451,7 @@ class VLMInferenceEngine:
             raw_text=raw_text,
             parsed_data=parsed_data,
             model=self.config.model,
+            provider=self.provider,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
@@ -546,6 +594,7 @@ class VLMInferenceEngine:
             raw_text=raw_text,
             parsed_data=parsed_data,
             model=self.config.model,
+            provider=self.provider,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
@@ -588,6 +637,7 @@ class VLMInferenceEngine:
                 raw_text="",
                 parsed_data={},
                 model=self.config.model,
+                provider=self.provider,
                 prompt_tokens=0,
                 completion_tokens=0,
                 total_tokens=0,
@@ -665,6 +715,7 @@ class VLMInferenceEngine:
             raw_text=raw_text,
             parsed_data=parsed_data,
             model=self.config.model,
+            provider=self.provider,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
@@ -730,7 +781,7 @@ class VLMInferenceEngine:
         user_prompt: str,
         images: List[Any],
     ) -> Tuple[str, int, int, int, int]:
-        """Execute the provider-specific API call with manual retry logic.
+        """Execute the API call with per-provider retry and provider failover.
 
         Returns:
             Tuple of (raw_text, prompt_tokens, completion_tokens, total_tokens, retry_count).
@@ -739,50 +790,84 @@ class VLMInferenceEngine:
         # PipelineStep no longer performs retries — all retry logic lives here.
         last_error: Optional[Exception] = None
         retry_count = 0
-        max_retries = max(1, self.config.max_retries)
+        start_index = self._current_provider_index
+        num_providers = len(self._providers)
 
-        for attempt in range(max_retries):
-            try:
-                result = self._execute_once(system_prompt, user_prompt, images)
-                return (*result, retry_count)
-            except Exception as exc:
-                last_error = exc
-                if not _is_retryable_error(exc):
-                    # Non-retryable error — re-raise immediately to avoid
-                    # wasting API calls on errors that will never succeed.
+        for provider_idx in range(start_index, num_providers):
+            self._current_provider_index = provider_idx
+            max_retries = max(1, self.config.max_retries)
+            last_error = None
+
+            for attempt in range(max_retries):
+                try:
+                    result = self._execute_once(system_prompt, user_prompt, images)
+                    return (*result, retry_count)
+                except Exception as exc:
+                    last_error = exc
+                    if not _is_retryable_error(exc):
+                        # Non-retryable error: decide whether to failover or give up.
+                        if is_failover_trigger(exc) and provider_idx < num_providers - 1:
+                            next_provider = self._providers[provider_idx + 1].provider
+                            logger.error(
+                                "[vlm_engine:_execute_with_retry] FAILOVER | from_provider=%s to_provider=%s reason=%s",
+                                self.provider,
+                                next_provider,
+                                exc,
+                            )
+                            break
+                        # Either not a failover trigger or no more providers.
+                        logger.error(
+                            "[vlm_engine:_execute_with_retry] NON_RETRYABLE | provider=%s attempt=%d/%d | error=%s",
+                            self.provider,
+                            attempt + 1,
+                            max_retries,
+                            exc,
+                            exc_info=True,
+                        )
+                        setattr(last_error, "_retry_count", retry_count)
+                        raise last_error
+                    if attempt < max_retries - 1:
+                        retry_count += 1
+                        wait_sec = min(2 ** attempt, 30)
+                        logger.error(
+                            "[vlm_engine:_execute_with_retry] RETRY | provider=%s attempt=%d/%d wait=%.1fs | error=%s",
+                            self.provider,
+                            attempt + 1,
+                            max_retries,
+                            wait_sec,
+                            exc,
+                            exc_info=True,
+                        )
+                        time.sleep(wait_sec)
+                    else:
+                        break
+
+            # Provider exhausted its retries. Failover if the final error warrants it
+            # and another provider is available; otherwise propagate the error.
+            if last_error is not None:
+                if is_failover_trigger(last_error) and provider_idx < num_providers - 1:
+                    next_provider = self._providers[provider_idx + 1].provider
                     logger.error(
-                        "[vlm_engine:_execute_with_retry] NON_RETRYABLE | attempt=%d/%d | error=%s",
-                        attempt + 1,
-                        max_retries,
-                        exc,
-                        exc_info=True,
+                        "[vlm_engine:_execute_with_retry] FAILOVER | from_provider=%s to_provider=%s reason=%s",
+                        self.provider,
+                        next_provider,
+                        last_error,
                     )
-                    setattr(last_error, "_retry_count", retry_count)
-                    raise last_error
-                if attempt < max_retries - 1:
-                    retry_count += 1
-                    wait_sec = min(2 ** attempt, 30)
-                    logger.error(
-                        "[vlm_engine:_execute_with_retry] RETRY | attempt=%d/%d wait=%.1fs | error=%s",
-                        attempt + 1,
-                        max_retries,
-                        wait_sec,
-                        exc,
-                        exc_info=True,
-                    )
-                    time.sleep(wait_sec)
-                else:
-                    break
+                    continue
+                logger.error(
+                    "[vlm_engine:_execute_with_retry] MAX_RETRIES_EXCEEDED | provider=%s attempts=%d last_error=%s",
+                    self.provider,
+                    retry_count,
+                    last_error,
+                    exc_info=True,
+                )
+                setattr(last_error, "_retry_count", retry_count)
+                raise last_error
 
         if last_error is not None:
-            logger.error(
-                "[vlm_engine:_execute_with_retry] MAX_RETRIES_EXCEEDED | attempts=%d last_error=%s",
-                retry_count,
-                last_error,
-                exc_info=True,
-            )
-            setattr(last_error, "_retry_count", retry_count)
-            raise last_error
+            raise AllProvidersExhaustedError(
+                f"All providers exhausted. Last error: {last_error}"
+            ) from last_error
         raise RuntimeError("Unknown error during VLM call")
 
     # ------------------------------------------------------------------
@@ -941,6 +1026,7 @@ class VLMInferenceEngine:
             call_id=str(uuid.uuid4()),
             template_id=template_id,
             model=response.model or self.config.model,
+            provider=response.provider or self.provider,
             prompt_tokens=response.prompt_tokens,
             completion_tokens=response.completion_tokens,
             total_tokens=response.total_tokens,

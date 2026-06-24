@@ -12,6 +12,7 @@ import httpx
 import openai
 
 from traffic_analyzer.core.vlm_exceptions import (
+    AllProvidersExhaustedError,
     PromptRenderError,
     ResponseParseError,
     SchemaValidationError,
@@ -102,6 +103,9 @@ def _is_fatal_api_error(exc: Exception) -> bool:
     for candidate in candidates:
         if candidate is None:
             continue
+        # All providers exhausted — fatal by definition
+        if isinstance(candidate, AllProvidersExhaustedError):
+            return True
         # OpenAI SDK — auth / permission / quota
         if isinstance(
             candidate,
@@ -121,5 +125,106 @@ def _is_fatal_api_error(exc: Exception) -> bool:
         )
         if any(kw in msg for kw in fatal_keywords):
             return True
+
+    return False
+
+
+# Keywords that indicate account-level issues and should trigger a provider
+# failover rather than retrying the same provider indefinitely.
+_FAILOVER_KEYWORDS = (
+    "quota",
+    "insufficient",
+    "balance",
+    "billing",
+    "exhausted",
+    "余额",
+    "配额",
+    "欠费",
+    "未授权",
+    "invalid api key",
+    "access denied",
+)
+
+
+def _error_message_matches_failover_keywords(exc: Exception) -> bool:
+    """Return True if *exc*'s string representation contains failover keywords."""
+    msg = str(exc).lower()
+    return any(kw in msg for kw in _FAILOVER_KEYWORDS)
+
+
+def is_failover_trigger(exc: Exception) -> bool:
+    """Return True if *exc* should trigger a provider failover.
+
+    Failover is appropriate for provider-side account or capacity issues that
+    are unlikely to resolve by retrying the same provider:
+
+      - Rate limits (rate will not improve by immediate retry).
+      - Authentication / permission / quota / billing errors.
+      - Server-side 5xx errors (provider may be degraded).
+      - Error messages containing quota / balance / billing keywords.
+
+    Failover is NOT appropriate for:
+
+      - Prompt/render/parse/validation errors (these are client-side).
+      - BadRequest / NotFound errors (likely a client bug).
+      - Transient timeout / connection errors (the provider retry layer should
+        handle those; we only failover after that layer exhausts its retries).
+    """
+    # Our own exceptions — never failover
+    if isinstance(exc, (PromptRenderError, ResponseParseError, SchemaValidationError)):
+        return False
+
+    # Unwrap wrapped exceptions so that SDK-specific checks work even when
+    # errors are chained through wrapper exceptions.
+    cause = getattr(exc, "__cause__", None) or getattr(exc, "__context__", None)
+    candidates = [exc]
+    if cause is not None:
+        candidates.append(cause)
+
+    # Anthropic SDK classes may differ across versions; use getattr defensively.
+    anthropic_rate_limit = getattr(anthropic, "RateLimitError", None)
+    anthropic_auth = getattr(anthropic, "AuthenticationError", None)
+    anthropic_bad_request = getattr(anthropic, "BadRequestError", None)
+
+    for candidate in candidates:
+        if candidate is None:
+            continue
+
+        # OpenAI rate / auth / permission errors
+        if isinstance(
+            candidate,
+            (openai.RateLimitError, openai.AuthenticationError, openai.PermissionDeniedError),
+        ):
+            return True
+
+        # Anthropic rate / auth errors
+        if anthropic_rate_limit and isinstance(candidate, anthropic_rate_limit):
+            return True
+        if anthropic_auth and isinstance(candidate, anthropic_auth):
+            return True
+
+        # OpenAI / Anthropic bad requests — client-side, don't failover
+        if isinstance(candidate, openai.BadRequestError):
+            return False
+        if anthropic_bad_request and isinstance(candidate, anthropic_bad_request):
+            return False
+
+        # OpenAI not found — client-side
+        if isinstance(candidate, openai.NotFoundError):
+            return False
+
+        # Catch-all message-based check for quota / balance / billing keywords.
+        # This must come before the generic 4xx check so that a 401/403/429
+        # response whose body says "quota exhausted" still triggers failover.
+        if _error_message_matches_failover_keywords(candidate):
+            return True
+
+        # OpenAI APIStatusError with HTTP status code
+        if isinstance(candidate, openai.APIStatusError):
+            status = getattr(candidate, "status_code", None) or 0
+            if status >= 500:
+                return True
+            if 400 <= status < 500:
+                return False
 
     return False

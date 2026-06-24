@@ -16,6 +16,7 @@ import httpx
 import pytest
 
 from traffic_analyzer.core.vlm_engine import (
+    FatalAPIError,
     ProviderNotSupportedError,
     PromptRenderError,
     ResponseParseError,
@@ -537,5 +538,80 @@ def test_create_call_record(mock_openai_cls: MagicMock, aliyun_config: LLMProvid
     record = engine.create_call_record("audit", llm_resp)
     assert record.template_id == "audit"
     assert record.model == aliyun_config.model
+    assert record.provider == aliyun_config.provider
     assert record.prompt_tokens == 3
     assert record.success is True
+
+
+# ---------------------------------------------------------------------------
+# Multi-provider / failover
+# ---------------------------------------------------------------------------
+
+
+@patch("traffic_analyzer.core.vlm_engine.anthropic.Anthropic")
+@patch("traffic_analyzer.core.vlm_engine.openai.OpenAI")
+def test_init_with_provider_list(
+    mock_openai_cls: MagicMock,
+    mock_anthropic_cls: MagicMock,
+    anthropic_config: LLMProviderConfig,
+    aliyun_config: LLMProviderConfig,
+) -> None:
+    engine = VLMInferenceEngine([anthropic_config, aliyun_config])
+    assert engine.provider == "anthropic"
+    assert engine.config.model == anthropic_config.model
+    mock_anthropic_cls.assert_called_once()
+    mock_openai_cls.assert_called_once()
+
+
+@patch("traffic_analyzer.core.vlm_engine.anthropic.Anthropic")
+@patch("traffic_analyzer.core.vlm_engine.openai.OpenAI")
+def test_failover_to_second_provider(
+    mock_openai_cls: MagicMock,
+    mock_anthropic_cls: MagicMock,
+    anthropic_config: LLMProviderConfig,
+    aliyun_config: LLMProviderConfig,
+    simple_template: PromptTemplate,
+) -> None:
+    mock_anthropic_client = MagicMock()
+    mock_anthropic_cls.return_value = mock_anthropic_client
+    # First provider raises a quota-style error that triggers failover.
+    mock_anthropic_client.messages.create.side_effect = Exception("quota exceeded")
+
+    mock_aliyun_client = MagicMock()
+    mock_openai_cls.return_value = mock_aliyun_client
+    fake_choice = MagicMock()
+    fake_choice.message.content = json.dumps({"failover": True})
+    fake_response = MagicMock()
+    fake_response.choices = [fake_choice]
+    fake_response.usage = MagicMock(prompt_tokens=4, completion_tokens=2, total_tokens=6)
+    mock_aliyun_client.chat.completions.create.return_value = fake_response
+
+    engine = VLMInferenceEngine([anthropic_config, aliyun_config])
+    resp = engine.call(simple_template, images=[], context_vars={"description": "x"})
+
+    assert resp.success is True
+    assert resp.provider == "aliyun"
+    assert resp.parsed_data == {"failover": True}
+    assert resp.retry_count == 0
+
+
+@patch("traffic_analyzer.core.vlm_engine.anthropic.Anthropic")
+@patch("traffic_analyzer.core.vlm_engine.openai.OpenAI")
+def test_all_providers_exhausted_raises_fatal(
+    mock_openai_cls: MagicMock,
+    mock_anthropic_cls: MagicMock,
+    anthropic_config: LLMProviderConfig,
+    aliyun_config: LLMProviderConfig,
+    simple_template: PromptTemplate,
+) -> None:
+    mock_anthropic_client = MagicMock()
+    mock_anthropic_cls.return_value = mock_anthropic_client
+    mock_anthropic_client.messages.create.side_effect = Exception("quota exceeded")
+
+    mock_aliyun_client = MagicMock()
+    mock_openai_cls.return_value = mock_aliyun_client
+    mock_aliyun_client.chat.completions.create.side_effect = Exception("quota exceeded")
+
+    engine = VLMInferenceEngine([anthropic_config, aliyun_config])
+    with pytest.raises(FatalAPIError):
+        engine.call(simple_template, images=[], context_vars={"description": "x"})

@@ -98,7 +98,7 @@ class AnalysisOrchestrator:
             save_debug_frames=system_config.save_debug_frames,
         )
 
-        vlm_engine = VLMInferenceEngine(system_config.llm_provider)
+        vlm_engine = VLMInferenceEngine(system_config.llm_providers)
         report_generator = ReportGenerator()
 
         # Create pipeline steps
