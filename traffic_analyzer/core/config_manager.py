@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import yaml
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 
 from traffic_analyzer.models.schemas import (
     AdjudicationRule,
@@ -89,6 +89,11 @@ class ConfigManager:
         """
         if config_dir is not None:
             self.config_dir = Path(config_dir).resolve()
+
+        # Load .env into os.environ for non-LLM configuration (e.g. PREFILTER_ENABLE,
+        # SAMPLING_FPS). LLM provider settings are read separately via dotenv_values
+        # so that system environment variables are ignored.
+        self._load_dotenv_files()
 
         # --- event_categories YAML ---
         try:
@@ -657,6 +662,24 @@ class ConfigManager:
                     ", ".join(str(p) for p in candidates),
                 )
 
+    def _load_dotenv_values(self) -> Dict[str, Optional[str]]:
+        """Read the first available ``.env`` file into a dictionary.
+
+        Unlike ``_load_dotenv_files``, this method intentionally does **not**
+        fall back to ``os.environ``; it only considers ``.env`` files. This
+        ensures LLM/VLM API configuration is strictly isolated from shell
+        environment variables.
+
+        Returns:
+            A mapping of variable names to their string values. Only ``.env``
+            files are consulted; system environment variables are excluded.
+        """
+        env = dotenv_values(self.config_dir / ".env")
+        if not env:
+            # 兼容旧位置：项目根目录 .env
+            env = dotenv_values(Path(__file__).resolve().parents[2] / ".env")
+        return env
+
     _ENV_NUMERIC_FIELDS = (
         ("MAX_TOKENS", "max_tokens", int),
         ("TEMPERATURE", "temperature", float),
@@ -666,72 +689,75 @@ class ConfigManager:
     )
 
     def _build_llm_config_from_env(
-        self, prefix: Optional[str] = None
+        self, env: Dict[str, Optional[str]], prefix: Optional[str] = None
     ) -> LLMProviderConfig:
-        """Build a single ``LLMProviderConfig`` from environment variables.
+        """Build a single ``LLMProviderConfig`` from a ``.env`` dictionary.
 
         Args:
+            env: Mapping of variable names to values, typically produced by
+                :func:`dotenv.dotenv_values`. System environment variables must
+                not be mixed into this dictionary.
             prefix: If ``None``, read the legacy ``LLM_*`` variables (and
                 ``VLM_PROVIDER``). If given, read ``{prefix}_*`` variables, e.g.
                 ``LLM_PROVIDER_0_PROVIDER``.
 
         Returns:
-            An ``LLMProviderConfig`` with values overridden by the environment.
+            An ``LLMProviderConfig`` with values overridden by the ``.env`` file.
         """
         kwargs: Dict[str, Any] = {}
 
         if prefix is None:
             # Support both VLM_PROVIDER (used in .env template) and LLM_PROVIDER
-            provider = os.getenv("VLM_PROVIDER") or os.getenv("LLM_PROVIDER")
+            provider = env.get("VLM_PROVIDER") or env.get("LLM_PROVIDER")
         else:
-            provider = os.getenv(f"{prefix}_PROVIDER")
+            provider = env.get(f"{prefix}_PROVIDER")
 
         if provider:
             kwargs["provider"] = provider
 
         # Provider-specific API key overrides generic/prefixed key
         if provider:
-            specific_api_key = os.getenv(f"{provider.upper()}_API_KEY")
+            specific_api_key = env.get(f"{provider.upper()}_API_KEY")
             if specific_api_key:
                 kwargs["api_key"] = specific_api_key
 
         if prefix is None:
-            api_key = os.getenv("LLM_API_KEY")
+            api_key = env.get("LLM_API_KEY")
         else:
-            api_key = os.getenv(f"{prefix}_API_KEY")
+            api_key = env.get(f"{prefix}_API_KEY")
         if api_key:
             kwargs.setdefault("api_key", api_key)
 
         if prefix is None:
-            base_url = os.getenv("LLM_BASE_URL")
+            base_url = env.get("LLM_BASE_URL")
         else:
-            base_url = os.getenv(f"{prefix}_BASE_URL")
+            base_url = env.get(f"{prefix}_BASE_URL")
         if base_url:
             kwargs["base_url"] = base_url
 
         # Provider-specific base_url overrides the generic/prefixed one
         provider = kwargs.get("provider") or provider or ""
         if provider:
-            specific_base_url = os.getenv(f"{provider.upper()}_BASE_URL")
+            specific_base_url = env.get(f"{provider.upper()}_BASE_URL")
             if specific_base_url:
                 kwargs["base_url"] = specific_base_url
 
         # Provider-specific model overrides generic/prefixed one
         if provider:
-            specific_model = os.getenv(f"{provider.upper()}_MODEL")
+            specific_model = env.get(f"{provider.upper()}_MODEL")
             if specific_model:
                 kwargs["model"] = specific_model
 
         if prefix is None:
-            model = os.getenv("LLM_MODEL")
+            model = env.get("LLM_MODEL")
         else:
-            model = os.getenv(f"{prefix}_MODEL")
+            model = env.get(f"{prefix}_MODEL")
         if model:
             kwargs.setdefault("model", model)
 
         for base_name, attr_name, cast in self._ENV_NUMERIC_FIELDS:
             env_name = f"LLM_{base_name}" if prefix is None else f"{prefix}_{base_name}"
-            val = os.getenv(env_name)
+            val = env.get(env_name)
             if val is not None:
                 try:
                     kwargs[attr_name] = cast(val)
@@ -746,18 +772,18 @@ class ConfigManager:
 
         # Boolean flag for cache enable/disable
         if prefix is None:
-            cache_enabled = os.getenv("LLM_ENABLE_CACHE")
+            cache_enabled = env.get("LLM_ENABLE_CACHE")
         else:
-            cache_enabled = os.getenv(f"{prefix}_ENABLE_CACHE")
+            cache_enabled = env.get(f"{prefix}_ENABLE_CACHE")
         if cache_enabled is not None:
             kwargs["enable_cache"] = cache_enabled.lower() in ("1", "true", "yes", "on")
 
         # Disk cache path (cross-process persistent cache)
-        disk_cache_path = os.getenv("TRAFFIC_ANALYZER_DISK_CACHE")
+        disk_cache_path = env.get("TRAFFIC_ANALYZER_DISK_CACHE")
         if disk_cache_path:
             kwargs["disk_cache_path"] = disk_cache_path
 
-        disk_cache_max = os.getenv("TRAFFIC_ANALYZER_DISK_CACHE_MAX_ENTRIES")
+        disk_cache_max = env.get("TRAFFIC_ANALYZER_DISK_CACHE_MAX_ENTRIES")
         if disk_cache_max is not None:
             try:
                 kwargs["disk_cache_max_entries"] = int(disk_cache_max)
@@ -776,8 +802,8 @@ class ConfigManager:
         Kept for backwards compatibility; new code should prefer
         :meth:`_load_env_llm_providers`.
         """
-        self._load_dotenv_files()
-        return self._build_llm_config_from_env(prefix=None)
+        env = self._load_dotenv_values()
+        return self._build_llm_config_from_env(env, prefix=None)
 
     def _load_env_llm_providers(self) -> List[LLMProviderConfig]:
         """Parse ``.env`` (if present) and return a list of ``LLMProviderConfig``.
@@ -787,10 +813,10 @@ class ConfigManager:
         Otherwise the legacy single-provider ``LLM_*`` variables are read and
         returned as a one-element list.
         """
-        self._load_dotenv_files()
+        env = self._load_dotenv_values()
 
         indices = set()
-        for key in os.environ:
+        for key in env:
             if key.startswith("LLM_PROVIDER_") and key.endswith("_PROVIDER"):
                 try:
                     idx = int(key[len("LLM_PROVIDER_") : -len("_PROVIDER")])
@@ -799,11 +825,11 @@ class ConfigManager:
                     pass
 
         if not indices:
-            return [self._build_llm_config_from_env(prefix=None)]
+            return [self._build_llm_config_from_env(env, prefix=None)]
 
         providers: List[LLMProviderConfig] = []
         for i in range(max(indices) + 1):
             providers.append(
-                self._build_llm_config_from_env(prefix=f"LLM_PROVIDER_{i}")
+                self._build_llm_config_from_env(env, prefix=f"LLM_PROVIDER_{i}")
             )
         return providers
