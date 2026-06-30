@@ -2,9 +2,9 @@
 
 # Traffic Analyzer
 
-A multi-modal large vision model (VLM) based traffic event detection framework for highway surveillance video. Supports **10 event categories** (currently **4 active**), outputs a 10-bit binary encoding plus a detailed Markdown analysis report. All event definitions, prompt templates, and adjudication rules are driven by YAML configuration — adding a new event requires zero code changes.
+A multi-modal large vision model (VLM) based traffic event detection framework for highway surveillance video. Supports **10 event categories** (currently **8 active**: 0-7), outputs a 10-bit binary encoding plus a detailed Markdown analysis report. All event definitions, prompt templates, and adjudication rules are driven by YAML configuration — adding a new event requires zero code changes.
 
-> **Current version: v4.0.0** — VLM multi-agent expert + adjudication architecture, with far-distance non-motor vehicle ROI enhancement and an optional tool layer (see [Version Tags](#version-tags)).
+> **Current version: v4.0.0** — VLM multi-agent expert + adjudication architecture, with far-distance ROI evidence enhancement for pedestrians, non-motor vehicles, and road construction. The tool-layer framework is retained but currently has no built-in tools.
 
 ---
 
@@ -22,9 +22,12 @@ Video Input
 2. ExpertAgentLayer (parallel ExpertAgents for active events)
    Each ExpertAgent: single-event VLM call -> EventCandidate
    - Only fact identification (see it, report it)
-   - event_id=4 (Motorcycle Presence) uses an optional far-distance
-     ROI enhancement path: ROI detection -> composite generation ->
-     final classifier, with ROI confidence expressed as a 0-1 score
+   - event_id=3 (Person Presence), event_id=4 (Motorcycle Presence), and
+     event_id=6 (Road Construction) use far-distance ROI evidence
+     enhancement when enabled in the prompt template:
+       * event_id=3/4: per-frame ROI detection -> dual composite
+         (single-frame + motion comparison) -> final classifier
+       * event_id=6: middle-frame multi-ROI gallery -> final classifier
     |
     v
 3. AdjudicationStep (single VLM call, with retry loop)
@@ -42,22 +45,26 @@ Video Input
    - Audit log of every inclusion / exclusion decision
 ```
 
-The default inference pipeline is **VLM-driven**. An optional **tool layer** (Tool Schema + Tool Router) is also provided and can host tools such as a YOLO track tool; tools are not automatically invoked by the default pipeline but can be wired in for future extensions or utility scripts.
+The default inference pipeline is **VLM-driven**. The tool-layer framework (Tool Schema + Tool Router) is retained for future extensions, but currently has no built-in tools.
 
 ---
 
 ## Supported Events
 
-Currently only the following events are `is_active=true`. The remaining event slots (0-2, 7-9) are preserved in the binary encoding but are skipped during inference.
+The following events are `is_active=true`. Event slots 8 and 9 are preserved in the binary encoding but are skipped during inference.
 
 | ID | Code | Name | is_active |
 |---|---|---|---|
+| 0 | A | Illegal Parking | true |
+| 1 | B | Emergency Lane Occupancy | true |
+| 2 | C | Traffic Accident | true |
 | 3 | D | Person Presence in Highway | true |
 | 4 | E | Motorcycle Presence | true |
 | 5 | F | Heavy Congestion | true |
 | 6 | G | Road Construction | true |
+| 7 | H | Vehicle Reversing | true |
 
-Events 0 (Illegal Parking), 1 (Emergency Lane Occupancy), 2 (Traffic Accident), 7 (Vehicle Reversing), 8 (Thrown Objects), and 9 (Lane Change over Solid Line) are currently inactive.
+Events 8 (Thrown Objects) and 9 (Lane Change over Solid Line) are currently inactive.
 
 ---
 
@@ -67,15 +74,15 @@ Events 0 (Illegal Parking), 1 (Emergency Lane Occupancy), 2 (Traffic Accident), 
 
 Each active event gets its own **ExpertAgent** — a dedicated VLM call with a specialized prompt. Agents run in parallel via `ThreadPoolExecutor`. Each agent only performs **fact identification** (what it sees) without any filtering. This separation of concerns makes the system modular and debuggable.
 
-### 2. Far-Distance Non-Motor Vehicle Enhancement (event_id=4)
+### 2. Far-Distance ROI Evidence Enhancement
 
-For motorcycle/non-motor vehicle detection, a dedicated enhancement flow is enabled when `enable_far_object_enhancement: true` is set on the event prompt template:
+Events with `far_object_enhancement.enabled: true` in their prompt template use a dedicated ROI-driven enhancement flow. This is currently enabled for:
 
-1. **ROI detection** — per-frame VLM call returns a normalized bbox, occlusion flag, and a continuous `confidence` in `[0.0, 1.0]`.
-2. **Candidate scoring** — ROIs are ranked by confidence, area, aspect ratio, occlusion, and adjacent-frame motion.
-3. **Composite generation** — dual composites (single-frame + motion-comparison) are generated for the top-K candidates.
-4. **Final classification** — a second VLM call decides whether the cropped ROI is a non-motor vehicle.
-5. **Safe fallback** — a high-confidence, non-occluded candidate can be promoted when the classifier is negative but the ROI evidence is strong.
+- **event_id=3 (Person Presence in Highway)** — per-frame ROI detection returns a normalized bbox, occlusion flag, and a continuous `confidence` in `[0.0, 1.0]`. Top-K candidates are scored by confidence, area, aspect ratio, occlusion, and adjacent-frame motion, then passed through dual composites (single-frame zoom + adjacent-frame motion comparison) to a final classifier that returns a full expert response.
+- **event_id=4 (Motorcycle Presence)** — same per-frame ROI and dual-composite pipeline as event_id=3, specialized for motorcycles/electric bikes/bicycles/tricycles. The final classifier uses a minimal `{detected, reason}` schema and includes a "no identifiable vehicle structure" veto to avoid false positives from dark spots or glare.
+- **event_id=6 (Road Construction)** — uses a **multi-ROI gallery** from the middle frame. The ROI detector returns multiple evidence regions (`cone`, `worker`, `vehicle`, `barrier`, `sign`) with confidence and `on_ground` flags. Up to four regions are arranged into an annotated gallery composite, which is then classified. A construction-specific fallback promotes the candidate when the detected regions satisfy the work-zone definition even if the classifier is negative.
+
+For event_id=3 and event_id=4, a high-confidence, non-occluded candidate can be promoted when the classifier is negative but the ROI evidence is strong. The stage-2 motion-comparison prompt has been refined: if the target is no longer visible in adjacent frames, that absence actually supports a moving non-motor vehicle; static dark spots or glare points should be excluded.
 
 ### 3. Adjudication Step
 
@@ -123,7 +130,7 @@ This makes the pipeline robust against sporadic VLM omissions without discarding
 ### 7. JSON Repair & Sanitization
 
 VLM outputs are automatically hardened before parsing:
-- `_repair_json` in `vlm_engine.py` fixes common syntax errors such as missing commas and trailing commas.
+- `_repair_json` in `vlm_response_parser.py` fixes common syntax errors such as missing commas and trailing commas.
 - `_sanitize_candidate` in `event_detection.py` reconciles inconsistent expert outputs (e.g. `detected=true` paired with content that denies the event).
 
 ---
@@ -135,25 +142,55 @@ traffic_analyzer/
 ├── config/
 │   ├── annotation_spec.yaml       # Annotation spec injected into adjudication prompt
 │   ├── event_categories.yaml      # Event definitions + adjudication_rules
-│   ├── prompts/                   # VLM Prompt templates + adjudication template
+│   ├── prompts/                   # VLM prompt templates (event_*.yaml + common.yaml)
 │   └── .env.example               # Example LLM provider config
 ├── core/
 │   ├── config_manager.py          # Config loading, validation
-│   ├── expert_agent.py            # Single-event detection agent + far-distance enhancement
+│   ├── expert_agent.py            # Compatibility shim for single-event detection agents
+│   ├── expert_agent_far_enhancement.py  # Far-distance ROI evidence enhancement
+│   ├── expert_agent_tools.py      # Tool helpers for expert agents
 │   ├── pipeline_steps.py          # ExpertAgentLayer + AdjudicationStep (with retry loop)
-│   ├── report_generator.py        # Report generation (Markdown / JSON / binary)
+│   ├── report_generator.py        # Compatibility shim for report generation
+│   ├── report_markdown_renderer.py      # Markdown report rendering
+│   ├── report_far_enhancement_renderer.py  # Far-enhancement section rendering
+│   ├── report_text_utils.py       # Report text formatting utilities
 │   ├── video_preprocessor.py      # Video frame extraction
-│   └── vlm_engine.py              # VLM wrapper (multi-provider + cache + JSON repair)
+│   ├── vlm_engine.py              # Compatibility shim for VLM wrapper
+│   ├── vlm_cache.py               # In-memory + disk VLM result cache
+│   ├── vlm_response_parser.py     # VLM response parsing + JSON repair
+│   ├── vlm_provider_clients.py    # Provider-specific API clients
+│   ├── vlm_error_classifier.py    # Classify API errors for failover decisions
+│   └── vlm_exceptions.py          # VLM-related exceptions
 ├── models/
-│   └── schemas.py                 # Pydantic models (EventCandidate, AdjudicationResult, AuditEntry)
+│   ├── schemas.py                 # Compatibility shim re-exporting all Pydantic models
+│   ├── enums.py                   # DetectionMode, ConfidenceLevel
+│   ├── video.py                   # VideoMetadata, Keyframe, KeyframeSequence
+│   ├── scene.py                   # SceneInfo, RoadInfo, DirectionAnalysis, ...
+│   ├── event.py                   # EventCategory, EventCandidate, EventResult, AuditEntry, ...
+│   ├── llm.py                     # LLMResponse, LLMCallRecord, PromptTemplate, ...
+│   ├── report.py                  # Report, BinaryEncoding
+│   ├── config.py                  # SystemConfig, LLMProviderConfig, SamplingConfig
+│   └── context.py                 # AnalysisContext
 ├── orchestrator/
-│   └── analysis_orchestrator.py   # 4-step pipeline orchestrator
+│   ├── analysis_orchestrator.py   # Main 4-step pipeline orchestrator
+│   ├── orchestrator_exceptions.py # Orchestrator-specific exceptions
+│   ├── video_meta_extractor.py    # Video metadata extraction
+│   ├── reject_report_factory.py   # Reject report generation
+│   └── candidate_fallback.py      # Candidate fallback helpers
 ├── tools/
 │   ├── tool_schema.py             # Tool Definition Layer
 │   ├── tool_router.py             # Tool Router Layer
-│   └── tool_registry.py           # Default router registration
+│   └── tool_registry.py           # Default router registration (currently no built-in tools)
 ├── utils/
-│   └── event_detection.py         # Image selection + response parsing + candidate sanitization
+│   ├── event_detection.py         # Image selection + response parsing + candidate sanitization
+│   ├── far_non_motor_enhancer.py  # Far-distance non-motor vehicle enhancement utilities
+│   ├── roi_composite.py           # ROI composite image generation
+│   ├── roi_motion.py              # ROI motion analysis
+│   ├── bbox_geometry.py           # Bounding-box geometry helpers
+│   ├── image_drawing.py           # Image annotation helpers
+│   ├── annotation_spec_loader.py  # Annotation spec loading
+│   ├── construction_evidence_gallery.py  # Construction-event evidence gallery
+│   └── tool_call_logger.py        # Tool-call style logging
 ├── cli.py                         # CLI entry point
 └── __main__.py                    # `python -m traffic_analyzer`
 ```
@@ -169,17 +206,37 @@ cp traffic_analyzer/config/.env.example traffic_analyzer/config/.env
 # Edit .env, set API Key and model
 ```
 
-Supported environment variables:
+LLM settings are read **only from `.env`** in the config directory, not from the shell environment. Two configuration styles are supported:
+
+**Single provider (backward-compatible):**
 
 | Variable | Description | Default |
 |---|---|---|
-| `LLM_PROVIDER` | VLM provider (`anthropic` / `google` / `aliyun`) | `anthropic` |
+| `VLM_PROVIDER` / `LLM_PROVIDER` | VLM provider (`anthropic` / `google` / `aliyun`) | `anthropic` |
 | `LLM_API_KEY` | API Key | - |
 | `LLM_MODEL` | Model name | `claude-sonnet-4-6` |
+
+**Multi-provider failover (recommended):**
+
+| Variable | Description | Example |
+|---|---|---|
+| `LLM_PROVIDER_0_PROVIDER` | Primary provider | `anthropic` |
+| `LLM_PROVIDER_0_API_KEY` | Primary API key | - |
+| `LLM_PROVIDER_0_MODEL` | Primary model | `claude-sonnet-4-6` |
+| `LLM_PROVIDER_1_PROVIDER` | Fallback provider | `aliyun` |
+| `LLM_PROVIDER_1_API_KEY` | Fallback API key | - |
+| `LLM_PROVIDER_1_MODEL` | Fallback model | `qwen-vl-max` |
+
+When indexed `LLM_PROVIDER_N_*` variables are present, they take precedence over the single-provider variables. The orchestrator uses provider 0 first; on quota, authentication, rate-limit, or 5xx errors it automatically fails over to provider 1 (and any additional numbered providers).
+
+Shared inference settings:
+
+| Variable | Description | Default |
+|---|---|---|
 | `LLM_MAX_TOKENS` | Max output tokens | `4096` |
 | `LLM_TEMPERATURE` | Sampling temperature | `0.2` |
 | `LLM_TIMEOUT` | API timeout (seconds) | `120` |
-| `LLM_MAX_RETRIES` | Max retry count | `3` |
+| `LLM_MAX_RETRIES` | Max retry count per provider | `3` |
 | `LLM_ENABLE_CACHE` | Enable in-memory VLM result cache (per-process) | `true` |
 | `LLM_CACHE_MAX_SIZE` | Max in-memory cache entries | `128` |
 | `TRAFFIC_ANALYZER_DISK_CACHE` | Path to SQLite disk cache (cross-process) | - |
@@ -341,7 +398,7 @@ python3 scripts/batch_evaluate.py \
 - **Google** (Gemini)
 - **Aliyun** (Tongyi Qianwen)
 
-Configure provider and API Key in `.env`.
+Configure provider and API Key in `.env`. Multiple providers can be configured for automatic failover.
 
 ---
 
@@ -380,209 +437,8 @@ This logging is a **pure display layer** — it does not affect parallelism, per
 
 | Tag | Branch | Description |
 |---|---|---|
-| `v4.0.0-far-enhancement` | `main` | **Current**. VLM multi-agent expert + adjudication architecture. Only events 3, 4, 5, 6 are active. Adds far-distance non-motor vehicle ROI enhancement for event_id=4 with continuous 0-1 ROI confidence. Includes an optional tool layer (Tool Schema + Tool Router) for extensions such as YOLO tracking. |
+| `v4.0.0-far-enhancement` | `main` | **Current**. VLM multi-agent expert + adjudication architecture. Events 0-7 are active. Adds far-distance ROI evidence enhancement for event_id=3 (pedestrian), event_id=4 (non-motor vehicle), and event_id=6 (road construction) with continuous 0-1 ROI confidence. The tool-layer framework is retained but currently has no built-in tools. |
 | `v2.0.0-multi-agent` | `legacy/v2.0` | Previous stable multi-agent architecture with 8 of 10 events active and a pure-VLM pipeline. |
 | `v1.5.0-legacy` | `legacy/v1.5` | Monolithic architecture. SceneUnderstandingStep (~30s bottleneck) + mixed detection modes (direct_vlm parallel, logic_chain sequential, scene_tag zero-VLM) + PostProcessStep with cross-event inference. |
 
 All new development happens on `main` (v4.0.0).
-
----
-
-## Optional Tool System
-
-The framework provides a **Tool Definition Layer (Tool Schema)** + **Tool Router Layer (Tool Router)** for optional extensions. The default inference pipeline does not invoke tools automatically, but the layers are kept for utility scripts and future capabilities such as YOLO-based tracking.
-
-### Architecture Overview
-
-```
-Model outputs ToolRequest (JSON/Markdown/XML)
-        ↓
-ToolRouter.route() → Parse and validate parameters
-        ↓
-Match ToolDefinition → Execute handler
-        ↓
-Return ToolResponse (success/data/error + elapsed time)
-```
-
-### Adding a New Tool (3 Steps)
-
-#### Step 1: Implement the Tool Function
-
-Create a new file under `traffic_analyzer/tools/`:
-
-```python
-# traffic_analyzer/tools/my_new_tool.py
-
-import logging
-from typing import Optional
-
-logger = logging.getLogger(__name__)
-
-
-def my_new_tool(
-    video_path: str,
-    param1: float = 0.5,
-    param2: Optional[str] = None,
-) -> dict:
-    """Tool implementation. Returns dict, wrapped by ToolResponse."""
-    logger.info(f"my_new_tool: video={video_path}, param1={param1}")
-    
-    # ... your logic ...
-    
-    return {
-        "success": True,
-        "result": "something",
-        "detail": {"param1": param1, "param2": param2},
-    }
-```
-
-**Key constraints**:
-- Parameter names use snake_case, must exactly match `ToolParameter.name` at registration
-- Return value must be JSON-serializable (dict/list/str/int/float/bool/None)
-- Function can be sync or async (async def), Router auto-detects
-
-#### Step 2: Register in Tool Router Layer
-
-Edit `traffic_analyzer/tools/tool_registry.py`, add registration in `create_router()`:
-
-```python
-def create_router() -> ToolRouter:
-    router = ToolRouter()
-    
-    # Register your tools here
-    _register_my_new_tool(router)
-    
-    return router
-```
-
-Then implement the registration function:
-
-```python
-from .my_new_tool import my_new_tool
-from .tool_schema import ParameterType, ToolConstraint, ToolDefinition, ToolParameter, ToolReturn
-
-def _register_my_new_tool(router: ToolRouter) -> None:
-    definition = ToolDefinition(
-        name="my_new_tool",  # Model calls by this name
-        description="Detailed description of what the tool does, for the model. At least 10 chars. Explain purpose, applicable scenarios, input/output.",
-        parameters=[
-            ToolParameter(
-                name="video_path",
-                type=ParameterType.STRING,
-                description="Absolute path to input video (container path)",
-                constraints=ToolConstraint(
-                    required=True,
-                    pattern=r"^/.*\.(mp4|avi|mov|mkv)$",
-                ),
-            ),
-            ToolParameter(
-                name="param1",
-                type=ParameterType.FLOAT,
-                description="Description of param1",
-                constraints=ToolConstraint(
-                    required=False,
-                    min_value=0.0,
-                    max_value=1.0,
-                ),
-                default=0.5,
-            ),
-            ToolParameter(
-                name="param2",
-                type=ParameterType.STRING,
-                description="Description of param2",
-                constraints=ToolConstraint(required=False),
-                default=None,
-            ),
-        ],
-        returns=ToolReturn(
-            type=ParameterType.OBJECT,
-            description="Detailed description of return value, helping the model understand how to use the result",
-        ),
-    )
-    
-    router.register(definition, my_new_tool)
-    logger.info("my_new_tool registered")
-```
-
-**Supported parameter constraints**:
-
-| Constraint | Description | Applicable Types |
-|---|---|---|
-| `required` | Whether the parameter is required | All |
-| `min_value` / `max_value` | Numeric range | integer, float |
-| `min_length` / `max_length` | Length limit | string, array |
-| `pattern` | Regex pattern | string |
-| `enum_values` | Enumerated values | All |
-| `items_type` | Array element type | array |
-
-#### Step 3: Write Tests
-
-Add tests under `tests/tools/`:
-
-```python
-# tests/tools/test_my_new_tool.py
-
-import pytest
-from traffic_analyzer.tools.tool_registry import create_router
-
-
-def test_my_new_tool_registration():
-    """Verify tool is registered"""
-    router = create_router()
-    assert "my_new_tool" in router.list_tools()
-    
-    # Verify parameter definitions
-    definition = router.get_tool("my_new_tool")
-    param_names = [p.name for p in definition.parameters]
-    assert "video_path" in param_names
-
-
-def test_my_new_tool_execution():
-    """Verify tool executes correctly"""
-    router = create_router()
-    resp = router.route(
-        '{"tool_name": "my_new_tool", "arguments": {"video_path": "/data/test.mp4", "param1": 0.8}}'
-    )
-    assert resp.success is True
-    assert resp.data["success"] is True
-
-
-def test_my_new_tool_validation_error():
-    """Verify parameter validation works"""
-    router = create_router()
-    # Missing required parameter
-    resp = router.route('{"tool_name": "my_new_tool", "arguments": {}}')
-    assert resp.success is False
-    assert "Missing required parameter" in resp.error
-```
-
-Run tests:
-
-```bash
-docker-compose exec traffic-agent python3 -m pytest tests/tools/test_my_new_tool.py -v
-```
-
-### How the Model Calls Tools
-
-The Expert Agent's Prompt is injected with available tool JSON Schemas (via `ToolRouter.get_tool_descriptions(format="json")`). The model outputs a call request in this format:
-
-```json
-{
-    "tool_name": "my_new_tool",
-    "arguments": {
-        "video_path": "/data/test_videos/clip.mp4",
-        "param1": 0.8
-    }
-}
-```
-
-Markdown code blocks and XML tags are also supported; the Router parses them automatically.
-
-### Tool Layer File Reference
-
-| File | Description |
-|---|---|
-| `traffic_analyzer/tools/tool_schema.py` | Tool Definition Layer: ToolDefinition, ToolParameter, ToolConstraint, ToolRegistry |
-| `traffic_analyzer/tools/tool_router.py` | Tool Router Layer: ToolRequest, ToolResponse, ToolRouter (sync/async/batch) |
-| `traffic_analyzer/tools/tool_registry.py` | Registration Integration: Default Router singleton, registers all built-in tools |
-| `tests/tools/test_tool_router.py` | Router Tests: 30 tests covering parsing/validation/execution/error handling |

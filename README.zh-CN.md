@@ -2,9 +2,9 @@
 
 # 交通事件分析系统
 
-基于多模态大视觉模型（VLM）的高速公路监控视频交通事件检测框架，支持 **10 类事件识别**（当前 **4 类激活**），输出 10 位二进制编码 + 详细 Markdown 分析报告。所有事件定义、Prompt 模板、裁决规则均通过 YAML 配置驱动，新增事件无需修改代码。
+基于多模态大视觉模型（VLM）的高速公路监控视频交通事件检测框架，支持 **10 类事件识别**（当前 **8 类激活：0-7**），输出 10 位二进制编码 + 详细 Markdown 分析报告。所有事件定义、Prompt 模板、裁决规则均通过 YAML 配置驱动，新增事件无需修改代码。
 
-> **当前版本：v4.0.0** —— VLM 多智能体专家 + 裁决层架构，支持远距离非机动车 ROI 增强，并保留可选的工具层扩展（详见 [版本标签说明](#版本标签说明)）。
+> **当前版本：v4.0.0** —— VLM 多智能体专家 + 裁决层架构，支持行人、非机动车、道路施工的远距离 ROI 证据增强。工具层框架保留，但当前无内置工具。
 
 ---
 
@@ -22,8 +22,10 @@
 2. ExpertAgentLayer（针对激活事件并行运行 ExpertAgent）
    每个 ExpertAgent：单事件 VLM 调用 -> EventCandidate
    - 仅做事实识别（看到就报）
-   - event_id=4（摩托车出现）可选启用远距离 ROI 增强流程：
-     ROI 检测 -> 合成图生成 -> 最终分类器，ROI 置信度使用 0-1 连续量化
+   - event_id=3（高速公路行人出现）、event_id=4（摩托车出现）、
+     event_id=6（道路施工）在 Prompt 模板启用时启用远距离 ROI 证据增强：
+       * event_id=3/4：逐帧 ROI 检测 -> 双图合成（单帧放大 + 运动对比）-> 最终分类器
+       * event_id=6：中间帧多 ROI 画廊 -> 最终分类器
     |
     v
 3. AdjudicationStep（单次 VLM 调用，带重试循环）
@@ -41,22 +43,26 @@
    - 每条包含/排除决策的审计日志
 ```
 
-默认推理流程由 **VLM 驱动**。系统同时提供可选的 **工具层**（工具定义层 + 工具路由层），可用于接入 YOLO 跟踪等工具；默认流水线不会自动调用工具，但工具层可供后续扩展或独立脚本使用。
+默认推理流程由 **VLM 驱动**。工具层框架（工具定义层 + 工具路由层）保留以供后续扩展，但当前无内置工具。
 
 ---
 
 ## 支持的事件
 
-当前仅以下事件 `is_active=true`。其余事件位（0-2、7-9）保留在二进制编码中，但推理时跳过。
+当前以下事件 `is_active=true`。事件位 8、9 保留在二进制编码中，但推理时跳过。
 
 | ID | 编码 | 事件名称 | is_active |
 |---|---|---|---|
+| 0 | A | 违法停车 | true |
+| 1 | B | 应急车道占用 | true |
+| 2 | C | 交通事故 | true |
 | 3 | D | 高速公路行人出现 | true |
 | 4 | E | 摩托车出现 | true |
 | 5 | F | 严重拥堵 | true |
 | 6 | G | 道路施工 | true |
+| 7 | H | 车辆逆行/倒车 | true |
 
-事件 0（违法停车）、1（应急车道占用）、2（交通事故）、7（车辆逆行/倒车）、8（抛洒物）、9（实线变道）当前未激活。
+事件 8（抛洒物）、9（实线变道）当前未激活。
 
 ---
 
@@ -66,15 +72,15 @@
 
 每个激活的事件拥有独立的 **ExpertAgent** —— 一次专用的 VLM 调用，携带针对该事件的专用 Prompt。所有 Agent 通过 `ThreadPoolExecutor` 并行执行。每个 Agent 只负责 **事实识别**（看到什么报什么），不做任何过滤。这种关注点分离使系统模块化且易于调试。
 
-### 2. 远距离非机动车增强（event_id=4）
+### 2. 远距离 ROI 证据增强
 
-针对摩托车/非机动车检测，当事件 Prompt 模板设置 `enable_far_object_enhancement: true` 时，会启用专用增强流程：
+在 Prompt 模板中设置了 `far_object_enhancement.enabled: true` 的事件会启用 ROI 驱动的远距离证据增强流程。当前启用的事件：
 
-1. **ROI 检测**：逐帧 VLM 调用返回归一化 bbox、遮挡标志和 `[0.0, 1.0]` 连续置信度。
-2. **候选评分**：综合置信度、面积、宽高比、遮挡程度和相邻帧运动分数对 ROI 排序。
-3. **合成图生成**：对 top-K 候选生成双图合成（单帧放大 + 相邻帧运动对比）。
-4. **最终分类**：第二次 VLM 调用判断裁剪区域内是否为非机动车。
-5. **安全回退**：当分类器为负但 ROI 证据充分（高置信度、未遮挡）时，可将最优候选提升为阳性结果。
+- **event_id=3（高速公路行人出现）** — 逐帧 ROI 检测返回归一化 bbox、遮挡标志和 `[0.0, 1.0]` 连续置信度。综合置信度、面积、宽高比、遮挡程度和相邻帧运动分数对 top-K 候选排序，生成双图合成（单帧放大 + 相邻帧运动对比）后送入最终分类器，输出完整专家响应格式。
+- **event_id=4（摩托车出现）** — 与 event_id=3 使用相同的逐帧 ROI + 双图合成流程，但针对摩托车/电动车/自行车/三轮车进行专门优化。最终分类器使用最小 `{detected, reason}` 格式，并增加“无可辨识车辆结构”否决规则，避免将暗斑、反光点等误报为非机动车。
+- **event_id=6（道路施工）** — 使用**多 ROI 画廊**：从中间帧提取多个施工证据区域（`cone` 锥桶、`worker` 施工人员、`vehicle` 施工车辆、`barrier` 隔离栏/围挡、`sign` 施工标志牌），附带置信度和 `on_ground` 落地标志；取最多 4 个区域拼成标注画廊，再送入分类器。即使分类器为负，只要 ROI 证据满足施工作业区定义，就会通过施工专用回退逻辑提升为阳性结果。
+
+event_id=3 与 event_id=4 在分类器为负但 ROI 证据充分（高置信度、未遮挡）时，可将最优候选安全回退为阳性。二阶段运动对比图规则已优化：相邻帧看不到目标反而支持其为运动中的非机动车；静止暗斑、反光点等应排除。
 
 ### 3. 裁决步骤 (Adjudication Step)
 
@@ -122,7 +128,7 @@
 ### 7. JSON 修复与候选清洗
 
 VLM 输出在解析前会自动加固：
-- `vlm_engine.py` 中的 `_repair_json` 修复常见语法错误（缺逗号、尾随逗号等）。
+- `vlm_response_parser.py` 中的 `_repair_json` 修复常见语法错误（缺逗号、尾随逗号等）。
 - `event_detection.py` 中的 `_sanitize_candidate` 协调不一致的专家输出（例如 `detected=true` 但内容否认事件）。
 
 ---
@@ -134,25 +140,55 @@ traffic_analyzer/
 ├── config/
 │   ├── annotation_spec.yaml       # 注入裁决 Prompt 的标注规范
 │   ├── event_categories.yaml      # 事件定义 + 裁决规则
-│   ├── prompts/                   # VLM Prompt 模板 + 裁决模板
+│   ├── prompts/                   # VLM Prompt 模板（event_*.yaml + common.yaml）
 │   └── .env.example               # LLM 提供商配置示例
 ├── core/
 │   ├── config_manager.py          # 配置加载、校验
-│   ├── expert_agent.py            # 单事件检测代理 + 远距离增强
+│   ├── expert_agent.py            # 单事件检测代理兼容层
+│   ├── expert_agent_far_enhancement.py  # 远距离 ROI 证据增强
+│   ├── expert_agent_tools.py      # 专家代理工具辅助函数
 │   ├── pipeline_steps.py          # ExpertAgentLayer + AdjudicationStep（含重试）
-│   ├── report_generator.py        # 报告生成（Markdown / JSON / 二进制）
+│   ├── report_generator.py        # 报告生成兼容层
+│   ├── report_markdown_renderer.py      # Markdown 报告渲染
+│   ├── report_far_enhancement_renderer.py  # 增强流程报告渲染
+│   ├── report_text_utils.py       # 报告文本格式化工具
 │   ├── video_preprocessor.py      # 视频帧提取
-│   └── vlm_engine.py              # VLM 封装（多提供商 + 缓存 + JSON 修复）
+│   ├── vlm_engine.py              # VLM 封装兼容层
+│   ├── vlm_cache.py               # 内存 + 磁盘 VLM 结果缓存
+│   ├── vlm_response_parser.py     # VLM 响应解析 + JSON 修复
+│   ├── vlm_provider_clients.py    # 各提供商 API 客户端
+│   ├── vlm_error_classifier.py    # API 错误分类，用于故障转移决策
+│   └── vlm_exceptions.py          # VLM 相关异常
 ├── models/
-│   └── schemas.py                 # Pydantic 模型（EventCandidate, AdjudicationResult, AuditEntry）
+│   ├── schemas.py                 # 兼容层，重新导出所有 Pydantic 模型
+│   ├── enums.py                   # DetectionMode, ConfidenceLevel
+│   ├── video.py                   # VideoMetadata, Keyframe, KeyframeSequence
+│   ├── scene.py                   # SceneInfo, RoadInfo, DirectionAnalysis 等
+│   ├── event.py                   # EventCategory, EventCandidate, EventResult, AuditEntry 等
+│   ├── llm.py                     # LLMResponse, LLMCallRecord, PromptTemplate 等
+│   ├── report.py                  # Report, BinaryEncoding
+│   ├── config.py                  # SystemConfig, LLMProviderConfig, SamplingConfig
+│   └── context.py                 # AnalysisContext
 ├── orchestrator/
-│   └── analysis_orchestrator.py   # 4 步流水线编排器
+│   ├── analysis_orchestrator.py   # 4 步流水线主编排器
+│   ├── orchestrator_exceptions.py # 编排器专用异常
+│   ├── video_meta_extractor.py    # 视频元信息提取
+│   ├── reject_report_factory.py   # 拒绝报告生成
+│   └── candidate_fallback.py      # 候选结果回退辅助
 ├── tools/
 │   ├── tool_schema.py             # 工具定义层
 │   ├── tool_router.py             # 工具路由层
-│   └── tool_registry.py           # 默认 Router 注册
+│   └── tool_registry.py           # 默认 Router 注册（当前无内置工具）
 ├── utils/
-│   └── event_detection.py         # 图像选择 + 响应解析 + 候选清洗
+│   ├── event_detection.py         # 图像选择 + 响应解析 + 候选清洗
+│   ├── far_non_motor_enhancer.py  # 远距离非机动车增强工具函数
+│   ├── roi_composite.py           # ROI 合成图生成
+│   ├── roi_motion.py              # ROI 运动分析
+│   ├── bbox_geometry.py           # 边界框几何辅助
+│   ├── image_drawing.py           # 图像标注辅助
+│   ├── annotation_spec_loader.py  # 标注规范加载
+│   ├── construction_evidence_gallery.py  # 施工事件证据画廊
+│   └── tool_call_logger.py        # Tool-Call 风格日志
 ├── cli.py                         # CLI 入口
 └── __main__.py                    # `python -m traffic_analyzer`
 ```
@@ -168,17 +204,37 @@ cp traffic_analyzer/config/.env.example traffic_analyzer/config/.env
 # 编辑 .env，设置 API Key 和模型
 ```
 
-支持的环境变量：
+LLM 配置**严格只从配置目录下的 `.env` 文件读取**，不读取系统环境变量。支持两种配置方式：
+
+**单提供商（向后兼容）：**
 
 | 变量 | 说明 | 默认值 |
 |---|---|---|
-| `LLM_PROVIDER` | VLM 提供商 (`anthropic` / `google` / `aliyun`) | `anthropic` |
+| `VLM_PROVIDER` / `LLM_PROVIDER` | VLM 提供商 (`anthropic` / `google` / `aliyun`) | `anthropic` |
 | `LLM_API_KEY` | API Key | - |
 | `LLM_MODEL` | 模型名称 | `claude-sonnet-4-6` |
+
+**多提供商故障转移（推荐）：**
+
+| 变量 | 说明 | 示例 |
+|---|---|---|
+| `LLM_PROVIDER_0_PROVIDER` | 主提供商 | `anthropic` |
+| `LLM_PROVIDER_0_API_KEY` | 主提供商 API Key | - |
+| `LLM_PROVIDER_0_MODEL` | 主提供商模型 | `claude-sonnet-4-6` |
+| `LLM_PROVIDER_1_PROVIDER` | 备用提供商 | `aliyun` |
+| `LLM_PROVIDER_1_API_KEY` | 备用提供商 API Key | - |
+| `LLM_PROVIDER_1_MODEL` | 备用提供商模型 | `qwen-vl-max` |
+
+当存在带序号的 `LLM_PROVIDER_N_*` 变量时，优先于单提供商变量。编排器默认使用 provider 0；遇到配额耗尽、鉴权失败、限流或 5xx 错误时，自动切换到 provider 1（以及更多序号提供商）。
+
+共享推理参数：
+
+| 变量 | 说明 | 默认值 |
+|---|---|---|
 | `LLM_MAX_TOKENS` | 最大输出 token | `4096` |
 | `LLM_TEMPERATURE` | 采样温度 | `0.2` |
 | `LLM_TIMEOUT` | API 超时（秒） | `120` |
-| `LLM_MAX_RETRIES` | 最大重试次数 | `3` |
+| `LLM_MAX_RETRIES` | 每个提供商最大重试次数 | `3` |
 | `LLM_ENABLE_CACHE` | 启用 VLM 结果缓存 | `true` |
 | `LLM_CACHE_MAX_SIZE` | 缓存最大条目数 | `128` |
 | `TRAFFIC_ANALYZER_DISK_CACHE` | SQLite 磁盘缓存路径（跨进程） | - |
@@ -340,7 +396,7 @@ python3 scripts/batch_evaluate.py \
 - **Google** (Gemini)
 - **Aliyun** (通义千问)
 
-在 `.env` 中配置提供商和 API Key。
+在 `.env` 中配置提供商和 API Key。可配置多个提供商实现自动故障转移。
 
 ---
 
@@ -379,209 +435,8 @@ TRAFFIC_ANALYZER_TOOL_LOG_LEVEL=macro python -m traffic_analyzer ...  # 仅顶�
 
 | 标签 | 分支 | 说明 |
 |---|---|---|
-| `v4.0.0-far-enhancement` | `main` | **当前版本**。VLM 多智能体专家 + 裁决层架构。当前仅事件 3、4、5、6 激活。新增 event_id=4 远距离非机动车 ROI 增强，ROI 置信度使用 0-1 连续量化。保留可选的工具层（工具定义层 + 工具路由层），可扩展 YOLO 跟踪等能力。 |
+| `v4.0.0-far-enhancement` | `main` | **当前版本**。VLM 多智能体专家 + 裁决层架构。事件 0-7 激活。新增 event_id=3（行人）、event_id=4（非机动车）、event_id=6（道路施工）远距离 ROI 证据增强，ROI 置信度使用 0-1 连续量化。工具层框架保留，但当前无内置工具。 |
 | `v2.0.0-multi-agent` | `legacy/v2.0` | 上一版稳定的多智能体架构，10 个事件中 8 个激活，纯 VLM 流水线。 |
 | `v1.5.0-legacy` | `legacy/v1.5` | 单体架构。SceneUnderstandingStep（约 30 秒瓶颈）+ 混合检测模式（direct_vlm 并行、logic_chain 串行、scene_tag 零 VLM）+ PostProcessStep 跨事件推断。 |
 
 所有新开发在 `main`（v4.0.0）上进行。
-
----
-
-## 可选工具系统
-
-框架提供**工具定义层（Tool Schema）** + **工具路由层（Tool Router）**用于可选扩展。默认推理流水线不会自动调用工具，但工具层可用于独立脚本和后续能力扩展，例如基于 YOLO 的目标跟踪。
-
-### 架构概述
-
-```
-模型输出 ToolRequest (JSON/Markdown/XML)
-        ↓
-ToolRouter.route() → 解析并校验参数
-        ↓
-匹配 ToolDefinition → 执行 handler
-        ↓
-返回 ToolResponse (success/data/error + 耗时)
-```
-
-### 添加新工具（3 步）
-
-#### 第 1 步：实现工具函数
-
-在 `traffic_analyzer/tools/` 下新建文件：
-
-```python
-# traffic_analyzer/tools/my_new_tool.py
-
-import logging
-from typing import Optional
-
-logger = logging.getLogger(__name__)
-
-
-def my_new_tool(
-    video_path: str,
-    param1: float = 0.5,
-    param2: Optional[str] = None,
-) -> dict:
-    """工具实现。返回 dict，会被 ToolResponse 包装。"""
-    logger.info(f"my_new_tool: video={video_path}, param1={param1}")
-    
-    # ... 你的逻辑 ...
-    
-    return {
-        "success": True,
-        "result": "something",
-        "detail": {"param1": param1, "param2": param2},
-    }
-```
-
-**关键约束**：
-- 参数名使用 snake_case，与注册时的 `ToolParameter.name` 严格一致
-- 返回值必须是 JSON 可序列化的类型（dict/list/str/int/float/bool/None）
-- 函数可以是同步或异步（async def），Router 会自动识别
-
-#### 第 2 步：注册到工具路由层
-
-编辑 `traffic_analyzer/tools/tool_registry.py`，在 `create_router()` 中添加注册：
-
-```python
-def create_router() -> ToolRouter:
-    router = ToolRouter()
-    
-    # 新工具
-    _register_my_new_tool(router)
-    
-    return router
-```
-
-然后实现注册函数：
-
-```python
-from .my_new_tool import my_new_tool
-from .tool_schema import ParameterType, ToolConstraint, ToolDefinition, ToolParameter, ToolReturn
-
-def _register_my_new_tool(router: ToolRouter) -> None:
-    definition = ToolDefinition(
-        name="my_new_tool",  # 模型用此名称调用
-        description="工具功能的详细说明，给模型看的，至少10个字。说明工具做什么、适用场景、输入输出。",
-        parameters=[
-            ToolParameter(
-                name="video_path",
-                type=ParameterType.STRING,
-                description="输入视频文件的绝对路径（容器内路径）",
-                constraints=ToolConstraint(
-                    required=True,
-                    pattern=r"^/.*\.(mp4|avi|mov|mkv)$",
-                ),
-            ),
-            ToolParameter(
-                name="param1",
-                type=ParameterType.FLOAT,
-                description="参数1的详细说明",
-                constraints=ToolConstraint(
-                    required=False,
-                    min_value=0.0,
-                    max_value=1.0,
-                ),
-                default=0.5,
-            ),
-            ToolParameter(
-                name="param2",
-                type=ParameterType.STRING,
-                description="参数2的详细说明",
-                constraints=ToolConstraint(required=False),
-                default=None,
-            ),
-        ],
-        returns=ToolReturn(
-            type=ParameterType.OBJECT,
-            description="返回结果的详细说明，帮助模型理解如何使用返回数据",
-        ),
-    )
-    
-    router.register(definition, my_new_tool)
-    logger.info("my_new_tool 注册完成")
-```
-
-**支持的参数约束**：
-
-| 约束 | 说明 | 适用类型 |
-|---|---|---|
-| `required` | 是否必填 | 全部 |
-| `min_value` / `max_value` | 数值范围 | integer, float |
-| `min_length` / `max_length` | 长度限制 | string, array |
-| `pattern` | 正则匹配 | string |
-| `enum_values` | 枚举值列表 | 全部 |
-| `items_type` | 数组元素类型 | array |
-
-#### 第 3 步：编写测试
-
-在 `tests/tools/` 下添加测试：
-
-```python
-# tests/tools/test_my_new_tool.py
-
-import pytest
-from traffic_analyzer.tools.tool_registry import create_router
-
-
-def test_my_new_tool_registration():
-    """验证工具已注册"""
-    router = create_router()
-    assert "my_new_tool" in router.list_tools()
-    
-    # 验证参数定义
-    definition = router.get_tool("my_new_tool")
-    param_names = [p.name for p in definition.parameters]
-    assert "video_path" in param_names
-
-
-def test_my_new_tool_execution():
-    """验证工具可正常执行"""
-    router = create_router()
-    resp = router.route(
-        '{"tool_name": "my_new_tool", "arguments": {"video_path": "/data/test.mp4", "param1": 0.8}}'
-    )
-    assert resp.success is True
-    assert resp.data["success"] is True
-
-
-def test_my_new_tool_validation_error():
-    """验证参数校验生效"""
-    router = create_router()
-    # 缺少必填参数
-    resp = router.route('{"tool_name": "my_new_tool", "arguments": {}}')
-    assert resp.success is False
-    assert "Missing required parameter" in resp.error
-```
-
-运行测试：
-
-```bash
-docker-compose exec traffic-agent python3 -m pytest tests/tools/test_my_new_tool.py -v
-```
-
-### 模型如何调用工具
-
-专家 Agent 的 Prompt 中会注入可用工具的 JSON Schema（通过 `ToolRouter.get_tool_descriptions(format="json")`）。模型输出如下格式的调用请求：
-
-```json
-{
-    "tool_name": "my_new_tool",
-    "arguments": {
-        "video_path": "/data/test_videos/clip.mp4",
-        "param1": 0.8
-    }
-}
-```
-
-也支持 Markdown 代码块和 XML 标签格式，Router 会自动解析。
-
-### 工具层文件清单
-
-| 文件 | 说明 |
-|---|---|
-| `traffic_analyzer/tools/tool_schema.py` | 工具定义层：ToolDefinition, ToolParameter, ToolConstraint, ToolRegistry |
-| `traffic_analyzer/tools/tool_router.py` | 工具路由层：ToolRequest, ToolResponse, ToolRouter（同步/异步/批量） |
-| `traffic_analyzer/tools/tool_registry.py` | 注册集成：默认 Router 单例，注册所有内置工具 |
-| `tests/tools/test_tool_router.py` | 路由层测试：30 项测试覆盖解析/校验/执行/错误处理 |
