@@ -39,12 +39,27 @@ prompt_templates:
           {
             "start_time_sec": <秒>,
             "end_time_sec": <秒>,
-            "evidence_frames": [<帧>],
+            "evidence_frames": [<整数帧号，例如 15, 16, 17>],
             "description": "<车辆类型、颜色、在应急车道上的位置>",
             "reasoning": "<车辆位置描述>"
           }
         ],
         "summary": "<总体评估>"
+      }
+
+      完整示例（仅供参考格式）：
+      {
+        "detected": true,
+        "instances": [
+          {
+            "start_time_sec": 8,
+            "end_time_sec": 14,
+            "evidence_frames": [15, 16, 17],
+            "description": "黑色SUV，占据最右侧应急车道",
+            "reasoning": "车辆整体位于白色实线右侧的应急车道区域内，构成应急车道占用"
+          }
+        ],
+        "summary": "视频中最右侧应急车道有一辆黑色SUV占用。"
       }
 
       未检测到时：{"detected": false, "instances": [], "summary": "未检测到应急车道占用。"}

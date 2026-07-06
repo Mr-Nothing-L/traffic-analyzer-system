@@ -35,12 +35,27 @@ prompt_templates:
           {
             "start_time_sec": <大致开始时间（秒）>,
             "end_time_sec": <大致结束时间（秒）>,
-            "evidence_frames": [<帧索引>],
+            "evidence_frames": [<整数帧号，例如 15, 16, 17>],
             "description": "<观察到的内容：事故类型、涉及车辆、损坏程度、位置>",
             "reasoning": "<简要说明：看到的视觉证据、事故类型判断>"
           }
         ],
         "summary": "<总体评估：事故严重程度、影响范围、涉及车辆数>"
+      }
+
+      完整示例（仅供参考格式）：
+      {
+        "detected": true,
+        "instances": [
+          {
+            "start_time_sec": 10,
+            "end_time_sec": 18,
+            "evidence_frames": [15, 16, 17],
+            "description": "两车追尾，白色轿车与银色SUV，位于第二车道",
+            "reasoning": "观察到白色轿车车头撞击银色SUV车尾，车辆姿态异常，确认发生追尾事故"
+          }
+        ],
+        "summary": "视频第二车道发生一起两车追尾事故，涉及白色轿车与银色SUV。"
       }
 
       如果未检测到交通事故，返回：

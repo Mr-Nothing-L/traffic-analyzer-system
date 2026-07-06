@@ -36,12 +36,27 @@ prompt_templates:
           {
             "start_time_sec": <秒>,
             "end_time_sec": <秒>,
-            "evidence_frames": [<帧>],
+            "evidence_frames": [<整数帧号，例如 15, 16, 17>],
             "description": "<位置+颜色+车型>",
             "reasoning": "检查<车辆特征>，位于<道路位置> → 对比<帧A>和<帧B>中相对于<固定参照物>的位置变化 → 运动方向<方向> vs 正常流向<流向> → <一致/相反> → <正常/逆行>"
           }
         ],
         "summary": "<总体评估>"
+      }
+
+      完整示例（仅供参考格式）：
+      {
+        "detected": true,
+        "instances": [
+          {
+            "start_time_sec": 6,
+            "end_time_sec": 12,
+            "evidence_frames": [15, 16, 17],
+            "description": "左侧道路，红色小轿车",
+            "reasoning": "检查红色小轿车，位于左侧道路 → 对比第15帧和第17帧中相对于护栏的位置变化 → 运动方向远离摄像头 vs 正常流向靠近摄像头 → 相反 → 逆行"
+          }
+        ],
+        "summary": "视频左侧道路存在一辆红色小轿车逆行。"
       }
 
       未检测到时：{"detected": false, "instances": [], "summary": "未检测到逆行车辆。"}

@@ -41,13 +41,32 @@ prompt_templates:
           {
             "start_time_sec": <秒>,
             "end_time_sec": <秒>,
-            "evidence_frames": [<帧>],
+            "evidence_frames": [<整数帧号，例如 15, 16, 17>],
             "description": "<区域+颜色+车型+静止状态>",
             "reasoning": "发现<车辆特征>，位于<区域>，相对于<固定参照物>位置未发生变化 → 判定为静止 → 违法停车"
           }
         ],
         "summary": "<总体评估>"
       }
+
+      完整示例（仅供参考格式）：
+      {
+        "detected": true,
+        "instances": [
+          {
+            "start_time_sec": 12,
+            "end_time_sec": 20,
+            "evidence_frames": [15, 16, 17],
+            "description": "应急车道，白色小型客车，持续静止",
+            "reasoning": "发现白色小型客车位于应急车道，相对于护栏位置未发生变化 → 判定为静止 → 违法停车"
+          }
+        ],
+        "summary": "视频中应急车道存在一辆违法停车的白色小型客车。"
+      }
+
+      重要：
+      - "evidence_frames" 必须是整数帧号列表（如 [15, 16, 17]），不能是时间戳或时间字符串。
+      - 如果视频画面右上角/左上角有时间戳字符串（如 "15:52:20"），不要把它写进 "evidence_frames"。
 
       未检测到时：{"detected": false, "instances": [], "summary": "未检测到违法停车。"}
     output_format_hint: "JSON"
