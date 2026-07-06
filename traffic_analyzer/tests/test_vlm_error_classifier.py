@@ -80,6 +80,23 @@ def test_failover_trigger_openai_4xx_status_error() -> None:
     assert is_failover_trigger(exc) is False
 
 
+def test_failover_trigger_openai_402_payment_required() -> None:
+    exc = _make_openai_error(openai.APIStatusError, 402, "Payment Required")
+    assert is_failover_trigger(exc) is True
+
+
+def test_failover_trigger_anthropic_402_payment_required() -> None:
+    exc = _make_anthropic_error("APIStatusError", "Payment Required", status_code=402)
+    assert is_failover_trigger(exc) is True
+
+
+def test_failover_trigger_message_payment_membership() -> None:
+    exc = RuntimeError(
+        "We're unable to verify your membership benefits at this time."
+    )
+    assert is_failover_trigger(exc) is True
+
+
 def test_failover_trigger_anthropic_rate_limit() -> None:
     exc = _make_anthropic_error("RateLimitError", "rate limited")
     assert is_failover_trigger(exc) is True
@@ -183,6 +200,23 @@ def test_fatal_api_error_auth() -> None:
 
 def test_fatal_api_error_quota_message() -> None:
     exc = RuntimeError("quota exceeded")
+    assert _is_fatal_api_error(exc) is True
+
+
+def test_fatal_api_error_openai_402() -> None:
+    exc = _make_openai_error(openai.APIStatusError, 402, "Payment Required")
+    assert _is_fatal_api_error(exc) is True
+
+
+def test_fatal_api_error_anthropic_402() -> None:
+    exc = _make_anthropic_error("APIStatusError", "Payment Required", status_code=402)
+    assert _is_fatal_api_error(exc) is True
+
+
+def test_fatal_api_error_membership_message() -> None:
+    exc = RuntimeError(
+        "We're unable to verify your membership benefits at this time."
+    )
     assert _is_fatal_api_error(exc) is True
 
 

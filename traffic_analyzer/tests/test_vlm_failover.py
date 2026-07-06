@@ -271,6 +271,38 @@ def test_failover_on_api_status_error_quota_keyword(
 
 @patch("traffic_analyzer.core.vlm_engine.openai.OpenAI")
 @patch("traffic_analyzer.core.vlm_engine.anthropic.Anthropic")
+def test_failover_when_primary_returns_402_payment_required(
+    mock_anthropic_cls: MagicMock,
+    mock_openai_cls: MagicMock,
+    aliyun_primary_config: LLMProviderConfig,
+    anthropic_backup_config: LLMProviderConfig,
+    simple_template: PromptTemplate,
+) -> None:
+    """Primary provider 402 Payment Required -> failover to backup and succeed."""
+    mock_aliyun_client = MagicMock()
+    mock_openai_cls.return_value = mock_aliyun_client
+    mock_aliyun_client.chat.completions.create.side_effect = _make_openai_error(
+        openai.APIStatusError, 402, "Payment Required"
+    )
+
+    mock_anthropic_client = MagicMock()
+    mock_anthropic_cls.return_value = mock_anthropic_client
+    mock_anthropic_client.messages.create.return_value = _anthropic_success_response(
+        {"payment_failover": True}
+    )
+
+    engine = VLMInferenceEngine([aliyun_primary_config, anthropic_backup_config])
+    response = engine.call(
+        simple_template, images=[], context_vars={"description": "test"}
+    )
+
+    assert response.success is True
+    assert response.provider == "anthropic"
+    assert response.parsed_data == {"payment_failover": True}
+
+
+@patch("traffic_analyzer.core.vlm_engine.openai.OpenAI")
+@patch("traffic_analyzer.core.vlm_engine.anthropic.Anthropic")
 def test_bad_request_does_not_trigger_failover(
     mock_anthropic_cls: MagicMock,
     mock_openai_cls: MagicMock,

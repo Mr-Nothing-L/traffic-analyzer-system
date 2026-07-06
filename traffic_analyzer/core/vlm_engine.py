@@ -418,11 +418,15 @@ class VLMInferenceEngine:
                 exc_info=True,
             )
         except Exception as exc:
-            # Fatal API errors (quota/auth/all-providers-exhausted) must propagate
-            # up to stop batch processing.
+            # Fatal API errors (quota/auth/all-providers-exhausted/402 payment)
+            # must propagate up to stop batch processing.
             if _is_fatal_api_error(exc) or isinstance(exc, AllProvidersExhaustedError):
                 raise FatalAPIError(f"API unusable: {exc}") from exc
-            error_message = str(exc)
+            # Surface the error in the response so reports can show what failed
+            # instead of an empty raw_text snippet.
+            error_summary = f"{type(exc).__name__}: {exc}"
+            raw_text = error_summary
+            error_message = error_summary
             retry_count = getattr(exc, "_retry_count", retry_count)
             logger.error(
                 "[vlm_engine:call] UNEXPECTED_ERROR | template_id=%s images=%d schema=%s | %s",

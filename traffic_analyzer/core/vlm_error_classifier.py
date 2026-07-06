@@ -106,20 +106,29 @@ def _is_fatal_api_error(exc: Exception) -> bool:
         # All providers exhausted — fatal by definition
         if isinstance(candidate, AllProvidersExhaustedError):
             return True
-        # OpenAI SDK — auth / permission / quota
+        # OpenAI SDK — auth / permission / quota / 402 payment required
         if isinstance(
             candidate,
             (openai.AuthenticationError, openai.PermissionDeniedError),
         ):
             return True
-        # Anthropic SDK — auth
+        if isinstance(candidate, openai.APIStatusError):
+            status = getattr(candidate, "status_code", None) or 0
+            if status == 402:
+                return True
+        # Anthropic SDK — auth / 402 payment required
         anthropic_auth = getattr(anthropic, "AuthenticationError", None)
         if anthropic_auth and isinstance(candidate, anthropic_auth):
             return True
-        # Check error message for quota / balance / billing keywords
+        if isinstance(candidate, anthropic.APIStatusError):
+            status = getattr(candidate, "status_code", None) or 0
+            if status == 402:
+                return True
+        # Check error message for quota / balance / billing / payment keywords
         msg = str(candidate).lower()
         fatal_keywords = (
             "quota", "insufficient", "balance", "billing", "exhausted",
+            "payment required", "membership", "unable to verify your membership benefits",
             "unauthorized", "invalid api key", "access denied",
             "余额", "配额", "欠费", "未授权", "无效的",
         )
@@ -137,6 +146,9 @@ _FAILOVER_KEYWORDS = (
     "balance",
     "billing",
     "exhausted",
+    "payment required",
+    "membership",
+    "unable to verify your membership benefits",
     "余额",
     "配额",
     "欠费",
@@ -219,10 +231,16 @@ def is_failover_trigger(exc: Exception) -> bool:
         if _error_message_matches_failover_keywords(candidate):
             return True
 
-        # OpenAI APIStatusError with HTTP status code
-        if isinstance(candidate, openai.APIStatusError):
+        # OpenAI / Anthropic APIStatusError with HTTP status code
+        if isinstance(
+            candidate, (openai.APIStatusError, anthropic.APIStatusError)
+        ):
             status = getattr(candidate, "status_code", None) or 0
             if status >= 500:
+                return True
+            # 402 Payment Required means the account is not billable/membership
+            # is inactive; switch to another provider immediately.
+            if status == 402:
                 return True
             if 400 <= status < 500:
                 return False
