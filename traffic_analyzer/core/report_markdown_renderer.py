@@ -374,6 +374,10 @@ def _render_event_result(result: EventResult, expert_candidates: Optional[List[D
             or raw_vlm_response.get("motion_composite_image_path")
             or raw_vlm_response.get("gallery_image_path")
             or raw_vlm_response.get("far_enhancement")
+            or raw_vlm_response.get("mask_overlay_image_path")
+            or raw_vlm_response.get("vehicle_boxes_image_path")
+            or raw_vlm_response.get("zoom_grid_image_path")
+            or raw_vlm_response.get("occupancy_detection")
         )
         if has_far_evidence:
             lines.extend(

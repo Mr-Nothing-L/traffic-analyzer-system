@@ -30,6 +30,9 @@ def _render_far_enhancement(
     elif event_id == 6:
         title = "施工证据合成图"
         composite_alt = "施工证据合成图"
+    elif event_id == 1:
+        title = "应急车道占用增强证据"
+        composite_alt = "应急车道占用增强证据"
     else:
         title = "远距离目标增强证据"
         composite_alt = "远距离目标增强"
@@ -118,5 +121,72 @@ def _render_far_enhancement(
                 f"| {entry.get('frame', '—')} | {has_candidate_str} | {bbox_str} | {area_str} | {aspect_str} | {confidence_str} | {motion_str} | {reason_str} |"
             )
         lines.append("")
+
+    # Emergency lane occupancy enhancement evidence.
+    if event_id == 1:
+        occupancy = raw_vlm_response.get("occupancy_detection") or {}
+        mask_overlay = raw_vlm_response.get("mask_overlay_image_path")
+        vehicle_boxes = raw_vlm_response.get("vehicle_boxes_image_path")
+        zoom_grid = raw_vlm_response.get("zoom_grid_image_path")
+        single_zooms = raw_vlm_response.get("single_zoom_image_paths") or []
+        calibration_reasoning = occupancy.get("calibration_reasoning")
+        rois = occupancy.get("rois") or []
+        has_any = (
+            mask_overlay
+            or vehicle_boxes
+            or zoom_grid
+            or rois
+            or single_zooms
+            or calibration_reasoning
+        )
+        if has_any:
+            lines.append(f"#### {title}")
+            lines.append("")
+
+        if mask_overlay:
+            lines.append(f"**应急车道/导流区掩膜叠加图**: `{mask_overlay}`")
+            lines.append("")
+            lines.append(f"![应急车道掩膜叠加]({mask_overlay})")
+            lines.append("")
+
+        if vehicle_boxes:
+            lines.append(f"**车辆 ROI 标注图**: `{vehicle_boxes}`")
+            lines.append("")
+            lines.append(f"![车辆 ROI 标注]({vehicle_boxes})")
+            lines.append("")
+
+        if zoom_grid:
+            lines.append(f"**车辆 ROI 放大网格图**: `{zoom_grid}`")
+            lines.append("")
+            lines.append(f"![车辆 ROI 放大网格]({zoom_grid})")
+            lines.append("")
+
+        if rois:
+            vehicle_overlaps = occupancy.get("vehicle_overlaps") or {}
+            lines.append("| 车辆ID | 标签 | 区域 | bbox | overlap | 标定理由 |")
+            lines.append("|--------|------|------|------|---------|----------|")
+            for roi in rois:
+                roi_id = roi.get("id", "—")
+                label = roi.get("label", "—")
+                zone = roi.get("zone", "—")
+                rel_box = str(roi.get("rel_box", "—"))
+                overlap = vehicle_overlaps.get(roi_id)
+                overlap_str = f"{float(overlap):.2f}" if isinstance(overlap, (int, float)) else "—"
+                reason = roi.get("reason", "—")
+                lines.append(
+                    f"| {roi_id} | {label} | {zone} | {rel_box} | {overlap_str} | {reason} |"
+                )
+            lines.append("")
+
+        if single_zooms:
+            for vehicle_id, zoom_path in single_zooms:
+                lines.append(f"![{vehicle_id} 放大图]({zoom_path})")
+            lines.append("")
+
+        if calibration_reasoning:
+            lines.append("**复核理由**:")
+            lines.append("")
+            lines.append(str(calibration_reasoning))
+            lines.append("")
 
     return lines
