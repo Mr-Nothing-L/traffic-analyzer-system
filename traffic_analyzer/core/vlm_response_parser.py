@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 from traffic_analyzer.core.vlm_exceptions import (
     ResponseParseError,
@@ -36,6 +36,67 @@ def _repair_json(text: str) -> str:
     text = re.sub(r',(\s*[}\]])', r'\1', text)
 
     return text
+
+
+def _find_balanced_brace_substrings(text: str) -> List[str]:
+    """Return all top-level balanced `{...}` substrings in *text*.
+
+    Uses a simple brace stack so nested objects (e.g. `{"a": {"b": 1}}`)
+    are returned as one complete substring instead of being split at the
+    first inner `}`.
+    """
+    results: List[str] = []
+    stack: List[str] = []
+    start = -1
+    for i, ch in enumerate(text):
+        if ch == "{":
+            if not stack:
+                start = i
+            stack.append("{")
+        elif ch == "}":
+            if stack:
+                stack.pop()
+                if not stack and start >= 0:
+                    results.append(text[start : i + 1])
+                    start = -1
+    return results
+
+
+def _try_parse_json_candidate(candidate: str) -> Optional[Dict[str, Any]]:
+    """Try to parse *candidate* as a JSON object (or object array).
+
+    Also attempts auto-repair of common VLM JSON syntax errors.
+    """
+    candidate = candidate.strip()
+    if not candidate:
+        return None
+
+    try:
+        result = json.loads(candidate)
+        if isinstance(result, dict):
+            return result
+        if isinstance(result, list) and result and isinstance(result[0], dict):
+            return result[0]
+    except json.JSONDecodeError:
+        pass
+
+    repaired = _repair_json(candidate)
+    try:
+        result = json.loads(repaired)
+        if isinstance(result, dict):
+            logger.debug(
+                "[vlm_engine:_extract_json_from_text] JSON_REPAIRED | "
+                "original_len=%d repaired_len=%d",
+                len(candidate),
+                len(repaired),
+            )
+            return result
+        if isinstance(result, list) and result and isinstance(result[0], dict):
+            return result[0]
+    except json.JSONDecodeError:
+        pass
+
+    return None
 
 
 def _extract_json_from_text(text: str) -> Dict[str, Any]:
@@ -68,58 +129,41 @@ def _extract_json_from_text(text: str) -> Dict[str, Any]:
         except json.JSONDecodeError:
             pass
 
-        # Try to find a JSON object or array block
-        # Look for ```json ... ``` fenced code blocks first
-        fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-        if fenced:
-            try:
-                return json.loads(fenced.group(1))
-            except json.JSONDecodeError:
-                pass
+        # Look for ```json ... ``` fenced code blocks first.
+        # Capture the full content between the fences so nested JSON objects
+        # (e.g. {"event_results": [{...}]}) are not truncated by a greedy
+        # `{.*?}` regex.
+        fenced_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text, re.DOTALL)
+        if fenced_match:
+            fenced_content = fenced_match.group(1).strip()
+            # Try parsing the whole fenced content as JSON.
+            result = _try_parse_json_candidate(fenced_content)
+            if result is not None:
+                return result
 
-        # Fallback: find all JSON objects and merge them if multiple found
-        # (VLM sometimes outputs partial JSONs that should be merged)
-        matches = re.findall(r"\{[\s\S]*?\}", text)
+            # Whole block is not valid JSON; try each balanced object inside.
+            for candidate in _find_balanced_brace_substrings(fenced_content):
+                result = _try_parse_json_candidate(candidate)
+                if result is not None:
+                    return result
+
+        # Fallback: find all balanced JSON objects in the full text and merge
+        # them if multiple are found (VLM sometimes outputs partial JSONs that
+        # should be merged).
+        matches = _find_balanced_brace_substrings(text)
         if len(matches) >= 2:
-            # Try to merge all valid JSON objects
             merged = {}
             for candidate in matches:
-                try:
-                    result = json.loads(candidate)
-                    if isinstance(result, dict):
-                        merged.update(result)
-                except json.JSONDecodeError:
-                    continue
+                result = _try_parse_json_candidate(candidate)
+                if isinstance(result, dict):
+                    merged.update(result)
             if merged:
                 return merged
         elif len(matches) == 1:
             candidate = matches[0]
-            # Try strict parse first
-            try:
-                result = json.loads(candidate)
-                if isinstance(result, dict):
-                    return result
-                if isinstance(result, list) and result and isinstance(result[0], dict):
-                    return result[0]
-            except json.JSONDecodeError:
-                pass
-
-            # Try auto-repair common VLM JSON errors
-            repaired = _repair_json(candidate)
-            try:
-                result = json.loads(repaired)
-                if isinstance(result, dict):
-                    logger.debug(
-                        "[vlm_engine:_extract_json_from_text] JSON_REPAIRED | "
-                        "original_len=%d repaired_len=%d",
-                        len(candidate),
-                        len(repaired),
-                    )
-                    return result
-                if isinstance(result, list) and result and isinstance(result[0], dict):
-                    return result[0]
-            except json.JSONDecodeError:
-                pass
+            result = _try_parse_json_candidate(candidate)
+            if result is not None:
+                return result
 
             # Still failed — raise with the original error for clarity
             try:
