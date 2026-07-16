@@ -5,18 +5,18 @@
 prompt_templates:
 
   # ---------------------------------------------------------------------------
-  # 3a. Far Emergency Lane ROI Detection (helper for event_id=1)
+  # 3a. Emergency Lane Calibration (helper for event_id=1)
   # ---------------------------------------------------------------------------
-  - template_id: "emergency_lane_roi_detection"
-    name: "应急车道占用车辆 ROI 检测"
+  - template_id: "emergency_lane_calibration"
+    name: "应急车道/导流区标定"
     system_prompt: |
-      你是一名高速公路交通监控分析师。你的任务是在单帧高速公路监控图像中标定应急车道/导流区多边形，并标定其中占用车辆的 ROI。
+      你是一名高速公路交通监控分析师。你的任务是在单帧高速公路监控图像中标定应急车道/路肩多边形和导流区/鱼骨线多边形。
       所有文本字段必须使用中文。
       直接输出可解析的 JSON，不要输出思考过程、分析步骤或任何自然语言解释。
     user_prompt: |
       输入为单帧高速公路监控图像。
 
-      任务：标定以下两类道路区域多边形，并在区域内标定占用车辆 ROI。
+      任务：标定以下两类道路区域多边形。
 
       区域定义：
       - emergency_lane（应急车道/路肩）：紧挨护栏或道路最边缘，通常以白色实线或路缘为界的紧急停车/通行区域。
@@ -33,6 +33,64 @@ prompt_templates:
       {
         "emergency_polygon_rel": [[x1,y1],[x2,y2],...] 或 null,
         "chevron_polygon_rel": [[x1,y1],[x2,y2],...] 或 null,
+        "summary": "..."
+      }
+
+      约束：
+      - 所有坐标均为相对于画面宽高的 [0.0, 1.0] 归一化坐标。
+      - 多边形按顺时针或逆时针顺序给出，首尾不必闭合。
+      - 若画面中不存在某类区域，对应字段返回 null。
+      - 只标定道路区域多边形，不要输出车辆 ROI。
+
+      正确示例（画面右侧为应急车道）：
+      {
+        "emergency_polygon_rel": [[0.75,0.0],[1.0,0.0],[1.0,1.0],[0.75,1.0]],
+        "chevron_polygon_rel": null,
+        "summary": "画面右侧为应急车道，已标定多边形。"
+      }
+
+      正确示例（画面中央隔离带附近的区域不属于应急车道，应排除）：
+      {
+        "emergency_polygon_rel": [[0.0,0.55],[0.12,0.55],[0.12,1.0],[0.0,1.0]],
+        "chevron_polygon_rel": null,
+        "summary": "画面左侧边缘为应急车道，已标定多边形；中央隔离带区域已排除。"
+      }
+
+      未检测到相关区域时：
+      {
+        "emergency_polygon_rel": null,
+        "chevron_polygon_rel": null,
+        "summary": "画面中未识别到应急车道或导流区。"
+      }
+
+      直接输出 JSON，不要输出任何自然语言解释、分析步骤或思考过程。
+    output_format_hint: "JSON"
+
+  # ---------------------------------------------------------------------------
+  # 3b. Emergency Lane Vehicle ROI Detection (helper for event_id=1)
+  # ---------------------------------------------------------------------------
+  - template_id: "emergency_lane_vehicle_roi"
+    name: "应急车道占用车辆 ROI 检测"
+    system_prompt: |
+      你是一名高速公路交通监控分析师。你的任务是在已标定的应急车道/导流区多边形内，检测占用车辆的 ROI。
+      所有文本字段必须使用中文。
+      直接输出可解析的 JSON，不要输出思考过程、分析步骤或任何自然语言解释。
+    user_prompt: |
+      输入为单帧高速公路监控图像，以及已标定的应急车道/导流区多边形。
+
+      已标定多边形（相对于画面宽高的 [0.0, 1.0] 归一化坐标）：
+      - 应急车道多边形：{{ emergency_polygon_rel | default('null', true) }}
+      - 导流区多边形：{{ chevron_polygon_rel | default('null', true) }}
+
+      任务：在上述多边形区域内标定占用车辆 ROI。
+
+      必须排除的区域：
+      - 中央分隔带/中央隔离带/绿化带/护栏：道路正中间分隔对向车道的带状区域。双车道中央的绿化带、护栏、中央分隔带不属于应急车道，停在其附近的车辆不计入应急车道占用。
+      - 对向车道：画面另一侧或隔离带对面、车流方向相反的车道。
+      - 正常行车道：普通白色虚线/实线划分的车道，不含应急车道。
+
+      输出 JSON 格式（仅返回一个 JSON 对象，不要 Markdown 代码块）：
+      {
         "rois": [
           {
             "id": "V1",
@@ -47,36 +105,22 @@ prompt_templates:
 
       约束：
       - 所有坐标均为相对于画面宽高的 [0.0, 1.0] 归一化坐标。
-      - 多边形按顺时针或逆时针顺序给出，首尾不必闭合。
-      - 若画面中不存在某类区域，对应字段返回 null。
-      - 只标定确实位于应急车道或导流区内的车辆；若车辆仅在正常行车道、中央分隔带或对向车道，不要标定。
+      - 只标定确实位于应急车道或导流区多边形内的车辆；若车辆仅在正常行车道、中央分隔带或对向车道，不要标定。
       - 不要标定已驶离或仅短暂压线的车辆；优先标定明显停驻、行驶或停放于应急车道/导流区内的车辆。
       - `label` 示例：白色轿车、黑色SUV、黄色工程车、蓝色货车。
 
       正确示例（画面右侧应急车道有一辆白色轿车）：
       {
-        "emergency_polygon_rel": [[0.75,0.0],[1.0,0.0],[1.0,1.0],[0.75,1.0]],
-        "chevron_polygon_rel": null,
         "rois": [
           {"id":"V1","label":"白色轿车","zone":"emergency_lane","reason":"车辆整体位于最右侧应急车道区域内","rel_box":[0.78,0.45,0.95,0.62]}
         ],
         "summary": "画面右侧应急车道有一辆白色轿车占用。"
       }
 
-      正确示例（画面中央隔离带附近的车辆不属于应急车道占用，应排除）：
+      正确示例（已标定区域内无占用车辆）：
       {
-        "emergency_polygon_rel": [[0.0,0.55],[0.12,0.55],[0.12,1.0],[0.0,1.0]],
-        "chevron_polygon_rel": null,
         "rois": [],
-        "summary": "画面左侧边缘为应急车道，但未发现其中存在占用车辆；中央隔离带附近车辆已排除。"
-      }
-
-      未检测到 ROI 时：
-      {
-        "emergency_polygon_rel": null,
-        "chevron_polygon_rel": null,
-        "rois": [],
-        "summary": "画面中未识别到应急车道或导流区内的占用车辆。"
+        "summary": "已标定的应急车道/导流区区域内未发现占用车辆。"
       }
 
       直接输出 JSON，不要输出任何自然语言解释、分析步骤或思考过程。
@@ -120,6 +164,6 @@ prompt_templates:
     output_format_hint: "JSON"
     far_object_enhancement:
       enabled: true
-      roi_template_id: "emergency_lane_roi_detection"
+      roi_template_id: "emergency_lane_calibration"
       frame_selection: "middle"
       enable_motion_filter: false

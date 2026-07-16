@@ -252,12 +252,39 @@ def _build_aliyun_payload(
 # Provider-specific callers
 # ---------------------------------------------------------------------------
 
+def _try_anthropic_create(
+    client: Any,
+    kwargs: Dict[str, Any],
+) -> Any:
+    """Create an Anthropic message, disabling thinking when supported.
+
+    Some Anthropic-compatible endpoints (and Claude 4.x models) default to
+    adaptive/extended thinking, which can consume the entire output token
+    budget and leave no parseable text. We therefore attempt to disable
+    thinking; if the endpoint rejects that parameter, we fall back to the
+    original request without it.
+    """
+    bad_request_cls = getattr(anthropic, "BadRequestError", Exception)
+    kwargs_disabled = {**kwargs, "thinking": {"type": "disabled"}}
+    try:
+        return client.messages.create(**kwargs_disabled)
+    except bad_request_cls as exc:
+        error_text = str(exc).lower()
+        if "thinking" in error_text:
+            logger.warning(
+                "Anthropic rejected thinking=disabled (%s); retrying without thinking parameter",
+                exc,
+            )
+            return client.messages.create(**kwargs)
+        raise
+
+
 def _call_anthropic(
     client: Any,
     kwargs: Dict[str, Any],
 ) -> Tuple[str, int, int, int]:
     """Call Anthropic and return (text, prompt_tokens, completion_tokens, total_tokens)."""
-    response = client.messages.create(**kwargs)
+    response = _try_anthropic_create(client, kwargs)
     text_parts: List[str] = []
     thinking_parts: List[str] = []
 
@@ -304,7 +331,7 @@ def _call_anthropic_with_tools(
         (text, tool_use_blocks, prompt_tokens, completion_tokens, total_tokens)
         tool_use_blocks: list of {"name": str, "id": str, "input": dict}
     """
-    response = client.messages.create(**kwargs)
+    response = _try_anthropic_create(client, kwargs)
     text_parts: List[str] = []
     thinking_parts: List[str] = []
     tool_uses: List[Dict[str, Any]] = []

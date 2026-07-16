@@ -419,7 +419,7 @@ class TestExpertAgentIntegration:
         """Full far-enhancement flow should generate occupancy evidence images."""
         agent, engine = make_agent(
             {
-                "emergency_lane_roi_detection": [
+                "emergency_lane_calibration": [
                     {
                         "emergency_polygon_rel": [
                             [0.65, 0.2],
@@ -428,6 +428,11 @@ class TestExpertAgentIntegration:
                             [0.65, 0.8],
                         ],
                         "chevron_polygon_rel": None,
+                        "summary": "画面右侧为应急车道",
+                    },
+                ],
+                "emergency_lane_vehicle_roi": [
+                    {
                         "rois": [
                             {
                                 "id": "V1",
@@ -494,25 +499,33 @@ class TestExpertAgentIntegration:
             assert (base_dir / "04_zoom_grid.jpg").exists()
             assert (base_dir / "zoom" / "V1_黄色工程车_zoom4x.jpg").exists()
 
-        # Both VLM calls should have been made.
-        roi_calls = [c for c in engine.calls if c["template_id"] == "emergency_lane_roi_detection"]
+        # All three VLM calls should have been made.
+        calibration_calls = [
+            c for c in engine.calls if c["template_id"] == "emergency_lane_calibration"
+        ]
+        vehicle_roi_calls = [
+            c for c in engine.calls if c["template_id"] == "emergency_lane_vehicle_roi"
+        ]
         final_calls = [
             c for c in engine.calls if c["template_id"] == "emergency_lane_occupancy_detection"
         ]
-        assert len(roi_calls) == 1
+        assert len(calibration_calls) == 1
+        assert len(vehicle_roi_calls) == 1
         assert len(final_calls) == 1
         assert len(final_calls[0]["images"]) == 3
+        # Vehicle ROI call should receive the calibrated polygons as context.
+        assert vehicle_roi_calls[0]["context_vars"]["emergency_polygon_rel"] is not None
+        assert vehicle_roi_calls[0]["context_vars"]["chevron_polygon_rel"] is None
 
     def test_detect_emergency_lane_occupancy_no_rois(self, make_agent: Any) -> None:
-        """When no ROIs are detected, the flow should return a negative candidate."""
+        """When calibration finds no zones, the flow should return a negative candidate."""
         agent, engine = make_agent(
             {
-                "emergency_lane_roi_detection": [
+                "emergency_lane_calibration": [
                     {
                         "emergency_polygon_rel": None,
                         "chevron_polygon_rel": None,
-                        "rois": [],
-                        "summary": "画面中未识别到应急车道或导流区内的占用车辆。",
+                        "summary": "画面中未识别到应急车道或导流区。",
                     },
                 ],
             }
@@ -531,7 +544,118 @@ class TestExpertAgentIntegration:
             assert candidate.event_id == 1
             assert "occupancy_detection" in candidate.raw_vlm_response
 
-        # No final classifier call should be made when there are no ROIs.
+        # No vehicle ROI or final classifier call should be made when no zones are found.
+        vehicle_roi_calls = [
+            c for c in engine.calls if c["template_id"] == "emergency_lane_vehicle_roi"
+        ]
+        final_calls = [
+            c for c in engine.calls if c["template_id"] == "emergency_lane_occupancy_detection"
+        ]
+        assert len(vehicle_roi_calls) == 0
+        assert len(final_calls) == 0
+
+    def test_detect_emergency_lane_occupancy_empty_vehicle_rois(
+        self, make_agent: Any
+    ) -> None:
+        """When calibration finds zones but no vehicles, return a negative candidate."""
+        agent, engine = make_agent(
+            {
+                "emergency_lane_calibration": [
+                    {
+                        "emergency_polygon_rel": [
+                            [0.65, 0.2],
+                            [0.95, 0.2],
+                            [0.95, 0.8],
+                            [0.65, 0.8],
+                        ],
+                        "chevron_polygon_rel": None,
+                        "summary": "画面右侧为应急车道",
+                    },
+                ],
+                "emergency_lane_vehicle_roi": [
+                    {
+                        "rois": [],
+                        "summary": "已标定区域内无占用车辆",
+                    },
+                ],
+            }
+        )
+
+        context = _make_analysis_context(num_frames=3, vlm_max_frames=6)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch(
+                "traffic_analyzer.core.expert_agent._FAR_ENHANCEMENT_OUTPUT_DIR",
+                Path(tmpdir),
+            ):
+                candidate = agent.detect(context)
+
+            assert candidate.detected is False
+            assert candidate.event_id == 1
+            occupancy = candidate.raw_vlm_response["occupancy_detection"]
+            assert occupancy["emergency_polygon_rel"] is not None
+            assert occupancy["rois"] == []
+
+        # No final classifier call should be made when there are no vehicle ROIs.
+        final_calls = [
+            c for c in engine.calls if c["template_id"] == "emergency_lane_occupancy_detection"
+        ]
+        assert len(final_calls) == 0
+
+    def test_detect_emergency_lane_occupancy_calibration_fails(
+        self, make_agent: Any
+    ) -> None:
+        """If the calibration VLM call fails, the flow returns a negative candidate."""
+        agent, engine = make_agent({})
+        context = _make_analysis_context(num_frames=3, vlm_max_frames=6)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch(
+                "traffic_analyzer.core.expert_agent._FAR_ENHANCEMENT_OUTPUT_DIR",
+                Path(tmpdir),
+            ):
+                candidate = agent.detect(context)
+
+        assert candidate.detected is False
+        assert candidate.event_id == 1
+        assert "增强检测失败" in candidate.summary
+        final_calls = [
+            c for c in engine.calls if c["template_id"] == "emergency_lane_occupancy_detection"
+        ]
+        assert len(final_calls) == 0
+
+    def test_detect_emergency_lane_occupancy_vehicle_roi_fails(
+        self, make_agent: Any
+    ) -> None:
+        """If calibration succeeds but vehicle ROI detection fails, return negative."""
+        agent, engine = make_agent(
+            {
+                "emergency_lane_calibration": [
+                    {
+                        "emergency_polygon_rel": [
+                            [0.65, 0.2],
+                            [0.95, 0.2],
+                            [0.95, 0.8],
+                            [0.65, 0.8],
+                        ],
+                        "chevron_polygon_rel": None,
+                        "summary": "画面右侧为应急车道",
+                    },
+                ],
+            }
+        )
+        context = _make_analysis_context(num_frames=3, vlm_max_frames=6)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch(
+                "traffic_analyzer.core.expert_agent._FAR_ENHANCEMENT_OUTPUT_DIR",
+                Path(tmpdir),
+            ):
+                candidate = agent.detect(context)
+
+        assert candidate.detected is False
+        assert candidate.event_id == 1
+        assert "增强检测失败" in candidate.summary
         final_calls = [
             c for c in engine.calls if c["template_id"] == "emergency_lane_occupancy_detection"
         ]

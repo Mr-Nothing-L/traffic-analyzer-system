@@ -102,10 +102,10 @@ _ROI_DETECTION_SCHEMA: Dict[str, Any] = {
     },
 }
 
-# JSON schema for the emergency lane / chevron ROI detection used by event_id=1.
-_EMERGENCY_LANE_ROI_SCHEMA: Dict[str, Any] = {
+# JSON schema for the emergency lane / chevron polygon calibration used by event_id=1.
+_EMERGENCY_LANE_CALIBRATION_SCHEMA: Dict[str, Any] = {
     "type": "object",
-    "required": ["emergency_polygon_rel", "chevron_polygon_rel", "rois", "summary"],
+    "required": ["emergency_polygon_rel", "chevron_polygon_rel"],
     "properties": {
         "emergency_polygon_rel": {
             "anyOf": [
@@ -135,6 +135,15 @@ _EMERGENCY_LANE_ROI_SCHEMA: Dict[str, Any] = {
                 {"type": "null"},
             ]
         },
+        "summary": {"type": "string"},
+    },
+}
+
+# JSON schema for the vehicle ROI detection inside calibrated emergency lane / chevron polygons.
+_EMERGENCY_LANE_VEHICLE_ROI_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "required": ["rois", "summary"],
+    "properties": {
         "rois": {
             "type": "array",
             "items": {
@@ -1104,15 +1113,20 @@ class FarEnhancementDetector:
         """Far-distance enhancement branch for emergency lane occupancy (event_id=1).
 
         1. Select the middle frame.
-        2. Run the ``emergency_lane_roi_detection`` template to obtain the
-           emergency lane / chevron polygons and the vehicle ROIs inside them.
-        3. Generate mask overlay, red-box vehicle annotation, zoom grid and
+        2. Run the ``emergency_lane_calibration`` template to obtain the
+           emergency lane / chevron polygons.
+        3. Run the ``emergency_lane_vehicle_roi`` template to detect vehicles
+           inside the calibrated polygons.
+        4. Generate mask overlay, red-box vehicle annotation, zoom grid and
            per-vehicle zoom crops.
-        4. Compute each ROI's overlap with its declared zone polygon.
-        5. Run the final ``emergency_lane_occupancy_detection`` classifier on
+        5. Compute each ROI's overlap with its declared zone polygon.
+        6. Run the final ``emergency_lane_occupancy_detection`` classifier on
            the annotated vehicle image and zoom grid.
-        6. Return an EventCandidate that always includes the occupancy evidence
+        7. Return an EventCandidate that always includes the occupancy evidence
            paths, even when the classifier is negative.
+
+        ``roi_template`` is kept in the signature for caller compatibility but
+        the two helper templates are loaded explicitly by ID.
         """
         if not images:
             return None
@@ -1127,19 +1141,100 @@ class FarEnhancementDetector:
             selected_index,
         )
 
-        # --- ROI calibration on the middle frame ---------------------------
+        # --- Load the two helper templates explicitly ----------------------
         try:
-            roi_response = self.vlm_engine.call(
-                template=roi_template,
+            calibration_template = self.config_manager.get_prompt_template(
+                "emergency_lane_calibration"
+            )
+            vehicle_roi_template = self.config_manager.get_prompt_template(
+                "emergency_lane_vehicle_roi"
+            )
+        except (KeyError, RuntimeError) as exc:
+            logger.warning(
+                "[expert_agent:_detect_emergency_lane_occupancy] TEMPLATE_LOAD_ERROR | event_id=%d | %s",
+                self.category.event_id,
+                exc,
+            )
+            return None
+
+        # --- Step A: polygon calibration on the middle frame ---------------
+        try:
+            calibration_response = self.vlm_engine.call(
+                template=calibration_template,
                 images=[frame],
                 context_vars=context_vars,
-                response_schema=_EMERGENCY_LANE_ROI_SCHEMA,
+                response_schema=_EMERGENCY_LANE_CALIBRATION_SCHEMA,
             )
         except FatalAPIError:
             raise
         except Exception as exc:
             logger.error(
-                "[expert_agent:_detect_emergency_lane_occupancy] ROI_CALL_ERROR | event_id=%d frame=%d | %s",
+                "[expert_agent:_detect_emergency_lane_occupancy] CALIBRATION_CALL_ERROR | event_id=%d frame=%d | %s",
+                self.category.event_id,
+                selected_index,
+                exc,
+                exc_info=True,
+            )
+            return None
+
+        if not calibration_response.success or not isinstance(
+            calibration_response.parsed_data, dict
+        ):
+            logger.warning(
+                "[expert_agent:_detect_emergency_lane_occupancy] CALIBRATION_PARSE_ERROR | event_id=%d frame=%d",
+                self.category.event_id,
+                selected_index,
+            )
+            return None
+
+        calibration_parsed = calibration_response.parsed_data
+        emergency_polygon_rel = calibration_parsed.get("emergency_polygon_rel") or None
+        chevron_polygon_rel = calibration_parsed.get("chevron_polygon_rel") or None
+        calibration_summary = str(calibration_parsed.get("summary", ""))
+
+        occupancy_detection: Dict[str, Any] = {
+            "selected_frame_index": selected_index,
+            "emergency_polygon_rel": emergency_polygon_rel,
+            "chevron_polygon_rel": chevron_polygon_rel,
+            "calibration_summary": calibration_summary,
+            "rois": [],
+            "calibration_reasoning": calibration_summary,
+        }
+
+        # --- Step B: early negative when no zone is calibrated -------------
+        if not emergency_polygon_rel and not chevron_polygon_rel:
+            logger.info(
+                "[expert_agent:_detect_emergency_lane_occupancy] NO_ZONES | event_id=%d frame=%d",
+                self.category.event_id,
+                selected_index,
+            )
+            return EventCandidate(
+                detected=False,
+                event_id=self.category.event_id,
+                event_name=self.category.name_zh,
+                summary=f"未检测到{self.category.name_zh}。",
+                raw_vlm_response={"occupancy_detection": occupancy_detection},
+                raw_vlm_text=getattr(calibration_response, "raw_text", "") or "",
+            )
+
+        # --- Step C: vehicle ROI detection inside calibrated polygons ------
+        roi_context_vars = {
+            **context_vars,
+            "emergency_polygon_rel": emergency_polygon_rel,
+            "chevron_polygon_rel": chevron_polygon_rel,
+        }
+        try:
+            roi_response = self.vlm_engine.call(
+                template=vehicle_roi_template,
+                images=[frame],
+                context_vars=roi_context_vars,
+                response_schema=_EMERGENCY_LANE_VEHICLE_ROI_SCHEMA,
+            )
+        except FatalAPIError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "[expert_agent:_detect_emergency_lane_occupancy] VEHICLE_ROI_CALL_ERROR | event_id=%d frame=%d | %s",
                 self.category.event_id,
                 selected_index,
                 exc,
@@ -1149,25 +1244,21 @@ class FarEnhancementDetector:
 
         if not roi_response.success or not isinstance(roi_response.parsed_data, dict):
             logger.warning(
-                "[expert_agent:_detect_emergency_lane_occupancy] ROI_PARSE_ERROR | event_id=%d frame=%d",
+                "[expert_agent:_detect_emergency_lane_occupancy] VEHICLE_ROI_PARSE_ERROR | event_id=%d frame=%d",
                 self.category.event_id,
                 selected_index,
             )
             return None
 
-        parsed = roi_response.parsed_data
-        emergency_polygon_rel = parsed.get("emergency_polygon_rel") or None
-        chevron_polygon_rel = parsed.get("chevron_polygon_rel") or None
-        rois = parsed.get("rois", []) or []
-        roi_summary = str(parsed.get("summary", ""))
+        roi_parsed = roi_response.parsed_data
+        rois = roi_parsed.get("rois", []) or []
+        vehicle_roi_summary = str(roi_parsed.get("summary", ""))
 
-        occupancy_detection: Dict[str, Any] = {
-            "selected_frame_index": selected_index,
-            "emergency_polygon_rel": emergency_polygon_rel,
-            "chevron_polygon_rel": chevron_polygon_rel,
-            "rois": rois,
-            "calibration_reasoning": roi_summary,
-        }
+        occupancy_detection["rois"] = rois
+        occupancy_detection["vehicle_roi_summary"] = vehicle_roi_summary
+        occupancy_detection["calibration_reasoning"] = (
+            f"{calibration_summary}；{vehicle_roi_summary}".strip("；")
+        )
 
         # --- No ROI: return negative candidate with calibration data -------
         if not rois:
