@@ -170,6 +170,7 @@ class ConfigManager:
         # Read optional frame count limits from env
         su_min_frames = os.getenv("SCENE_UNDERSTANDING_MIN_FRAMES")
         vlm_max_frames = os.getenv("VLM_MAX_FRAMES")
+        expert_enable_reflection = os.getenv("EXPERT_ENABLE_REFLECTION")
         system_kwargs: Dict[str, Any] = {}
         if su_min_frames is not None:
             try:
@@ -181,6 +182,8 @@ class ConfigManager:
                 system_kwargs["vlm_max_frames"] = int(vlm_max_frames)
             except ValueError:
                 logger.warning("Invalid VLM_MAX_FRAMES value '%s', using default", vlm_max_frames)
+        if expert_enable_reflection is not None:
+            system_kwargs["expert_enable_reflection"] = expert_enable_reflection.lower() in ("1", "true", "yes", "on")
 
         # --- SystemConfig build ---
         try:

@@ -60,6 +60,10 @@ class SystemConfig(BaseModel):
     vlm_max_frames: int = Field(
         default_factory=lambda: int(os.getenv("VLM_MAX_FRAMES", "10"))
     )
+    expert_enable_reflection: bool = Field(
+        default_factory=lambda: os.getenv("EXPERT_ENABLE_REFLECTION", "true").lower()
+        in ("1", "true", "yes", "on")
+    )
 
     @model_validator(mode="after")
     def _sync_llm_providers(self) -> "SystemConfig":

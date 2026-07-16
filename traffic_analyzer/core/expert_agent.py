@@ -30,7 +30,11 @@ from traffic_analyzer.models.schemas import (
     EventInstance,
     PromptTemplate,
 )
-from traffic_analyzer.utils.event_detection import parse_expert_response, select_event_images
+from traffic_analyzer.utils.event_detection import (
+    parse_expert_response,
+    reflect_expert_candidate,
+    select_event_images,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -176,27 +180,27 @@ class ExpertAgent:
             context_vars["video_meta"] = context.video_meta.model_dump()
 
         # -- 5. Far-distance object enhancement (template-driven) ---------------
+        candidate: Optional[EventCandidate] = None
         if enable_far_enhancement:
-            enhanced_candidate = self._detect_with_far_enhancement(
+            candidate = self._detect_with_far_enhancement(
                 context=context,
                 images=images,
                 template=template,
                 context_vars=context_vars,
             )
-            if enhanced_candidate is not None:
-                return enhanced_candidate
-            logger.info(
-                "[expert_agent:detect] FAR_ENHANCEMENT_FALLBACK | event_id=%d event_name=%s",
-                self.category.event_id,
-                self.category.name_zh,
-            )
+            if candidate is None:
+                logger.info(
+                    "[expert_agent:detect] FAR_ENHANCEMENT_FALLBACK | event_id=%d event_name=%s",
+                    self.category.event_id,
+                    self.category.name_zh,
+                )
 
             # Emergency lane occupancy (event_id=1) uses a template that expects
             # exactly the two generated composites (vehicle boxes + zoom grid).
             # Passing the original raw frames again leads to a prompt/image
             # mismatch and repeated JSON parse failures, so return a negative
             # candidate directly instead of falling back to raw images.
-            if self.category.event_id == 1:
+            if candidate is None and self.category.event_id == 1:
                 logger.warning(
                     "[expert_agent:detect] FAR_ENHANCEMENT_FAILED_NEGATIVE | "
                     "event_id=%d event_name=%s reason=增强检测失败，无法生成有效证据",
@@ -210,39 +214,69 @@ class ExpertAgent:
                     summary="应急车道增强检测失败，无法生成有效证据",
                 )
 
-        # -- 6. VLM call -------------------------------------------------------
-        try:
-            response = self.vlm_engine.call(
-                template=template,
-                images=images,
-                context_vars=context_vars,
-                response_schema=_EXPERT_RESPONSE_SCHEMA,
-            )
-        except FatalAPIError:
-            # Propagate fatal API errors (quota/auth) to stop batch processing
-            raise
-        except Exception as exc:
-            logger.error(
-                "[expert_agent:detect] VLM_ERROR | event_id=%d event_name=%s | %s",
-                self.category.event_id,
+        # -- 6. Direct VLM call (fallback when far enhancement is disabled or
+        #     returned no candidate) --------------------------------------------
+        if candidate is None:
+            try:
+                response = self.vlm_engine.call(
+                    template=template,
+                    images=images,
+                    context_vars=context_vars,
+                    response_schema=_EXPERT_RESPONSE_SCHEMA,
+                )
+            except FatalAPIError:
+                # Propagate fatal API errors (quota/auth) to stop batch processing
+                raise
+            except Exception as exc:
+                logger.error(
+                    "[expert_agent:detect] VLM_ERROR | event_id=%d event_name=%s | %s",
+                    self.category.event_id,
+                    self.category.name_zh,
+                    exc,
+                    exc_info=True,
+                )
+                return EventCandidate(
+                    event_id=self.category.event_id,
+                    event_name=self.category.name_zh,
+                    detected=False,
+                    summary=f"VLM call failed: {exc}",
+                )
+
+            candidate = parse_expert_response(response, self.category)
+            logger.debug(
+                "ExpertAgent[%s]: detected=%s instances=%d",
                 self.category.name_zh,
-                exc,
-                exc_info=True,
-            )
-            return EventCandidate(
-                event_id=self.category.event_id,
-                event_name=self.category.name_zh,
-                detected=False,
-                summary=f"VLM call failed: {exc}",
+                candidate.detected,
+                len(candidate.instances),
             )
 
-        candidate = parse_expert_response(response, self.category)
-        logger.debug(
-            "ExpertAgent[%s]: detected=%s instances=%d",
-            self.category.name_zh,
-            candidate.detected,
-            len(candidate.instances),
+        # -- 7. Optional self-consistency reflection ---------------------------
+        reflection_enabled = (
+            context.config.expert_enable_reflection
+            if context.config is not None
+            else True
         )
+        if reflection_enabled:
+            try:
+                reflection_template = self.config_manager.get_prompt_template(
+                    "expert_response_reflection"
+                )
+            except (KeyError, RuntimeError) as exc:
+                logger.warning(
+                    "[expert_agent:detect] REFLECTION_TEMPLATE_MISSING | event_id=%d event_name=%s | %s",
+                    self.category.event_id,
+                    self.category.name_zh,
+                    exc,
+                )
+                return candidate
+
+            candidate = reflect_expert_candidate(
+                candidate=candidate,
+                category=self.category,
+                vlm_engine=self.vlm_engine,
+                reflection_template=reflection_template,
+            )
+
         return candidate
 
     @property

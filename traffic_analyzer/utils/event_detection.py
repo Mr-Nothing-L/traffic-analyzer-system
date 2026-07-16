@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
-from typing import Any, List
+from typing import Any, Dict, List
 
 from traffic_analyzer.models.schemas import (
     AnalysisContext,
@@ -13,6 +14,185 @@ from traffic_analyzer.models.schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# JSON schema for the expert-response reflection step.
+# Mirrors _EXPERT_RESPONSE_SCHEMA but is intentionally local so that
+# event_detection.py does not depend on expert_agent internals.
+_REFLECTION_RESPONSE_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "required": ["detected"],
+    "properties": {
+        "detected": {"type": "boolean"},
+        "summary": {"type": "string"},
+        "instances": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "start_time_sec": {"type": "number"},
+                    "end_time_sec": {"type": "number"},
+                    "evidence_frames": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                    },
+                    "description": {"type": "string"},
+                    "reasoning": {"type": "string"},
+                },
+            },
+        },
+    },
+}
+
+
+def reflect_expert_candidate(
+    candidate: EventCandidate,
+    category: EventCategory,
+    vlm_engine: Any,
+    reflection_template: Any,
+) -> EventCandidate:
+    """Run a text-only reflection/consistency check on an ExpertAgent candidate.
+
+    The reflection VLM checks whether ``detected`` matches the textual
+    ``summary`` and ``instances`` reasoning. If they are inconsistent it
+    returns a corrected candidate; otherwise it returns the original JSON.
+
+    This function is fail-open: any parsing or VLM failure returns the
+    original candidate unchanged.
+    """
+    candidate_json: str
+    try:
+        candidate_dict = {
+            "event_id": candidate.event_id,
+            "event_name": candidate.event_name,
+            "detected": candidate.detected,
+            "summary": candidate.summary,
+            "instances": [
+                {
+                    "start_time_sec": inst.start_time_sec,
+                    "end_time_sec": inst.end_time_sec,
+                    "evidence_frames": inst.evidence_frames,
+                    "description": inst.description,
+                    "reasoning": inst.reasoning,
+                }
+                for inst in candidate.instances
+            ],
+        }
+        candidate_json = json.dumps(candidate_dict, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        logger.warning(
+            "[reflect_expert_candidate] SERIALIZE_ERROR | event_id=%d event_name=%s | %s",
+            candidate.event_id,
+            candidate.event_name,
+            exc,
+            exc_info=True,
+        )
+        return candidate
+
+    context_vars = {
+        "event_name": category.name_zh,
+        "event_definition": category.definition,
+        "candidate_json": candidate_json,
+    }
+
+    # Render once for diagnostics; the engine call renders again internally.
+    try:
+        rendered_system, rendered_user = vlm_engine.render_prompt(
+            reflection_template, context_vars
+        )
+        logger.debug(
+            "[reflect_expert_candidate] RENDERED | event_id=%d event_name=%s system_len=%d user_len=%d",
+            candidate.event_id,
+            candidate.event_name,
+            len(rendered_system),
+            len(rendered_user),
+        )
+    except Exception as exc:
+        logger.warning(
+            "[reflect_expert_candidate] RENDER_WARNING | event_id=%d event_name=%s | %s",
+            candidate.event_id,
+            candidate.event_name,
+            exc,
+        )
+
+    try:
+        response = vlm_engine.call(
+            template=reflection_template,
+            images=[],
+            context_vars=context_vars,
+            response_schema=_REFLECTION_RESPONSE_SCHEMA,
+        )
+    except Exception as exc:
+        logger.warning(
+            "[reflect_expert_candidate] VLM_ERROR | event_id=%d event_name=%s | %s",
+            candidate.event_id,
+            candidate.event_name,
+            exc,
+            exc_info=True,
+        )
+        return candidate
+
+    if not response.success or not isinstance(response.parsed_data, dict):
+        logger.warning(
+            "[reflect_expert_candidate] PARSE_ERROR | event_id=%d event_name=%s raw_text=%s",
+            candidate.event_id,
+            candidate.event_name,
+            getattr(response, "raw_text", "")[:200],
+        )
+        return candidate
+
+    data = response.parsed_data
+    original_detected = candidate.detected
+
+    # Update detected flag if present.
+    if "detected" in data:
+        candidate.detected = bool(data["detected"])
+
+    # Update summary if provided, preserving original if empty/missing.
+    if data.get("summary"):
+        candidate.summary = str(data["summary"])
+
+    # Update instances if provided, preserving original if empty/missing.
+    instances_data = data.get("instances")
+    if isinstance(instances_data, list):
+        new_instances = []
+        for inst in instances_data:
+            if not isinstance(inst, dict):
+                continue
+            evidence_frames = inst.get("evidence_frames", [])
+            if not isinstance(evidence_frames, list):
+                evidence_frames = []
+            new_instances.append(
+                EventInstance(
+                    event_id=category.event_id,
+                    event_name=category.name_zh,
+                    start_time_sec=float(inst.get("start_time_sec", 0.0)),
+                    end_time_sec=float(inst.get("end_time_sec", 0.0)),
+                    evidence_frames=[int(f) for f in evidence_frames if isinstance(f, (int, float))],
+                    description=str(inst.get("description", "")),
+                    reasoning=str(inst.get("reasoning", "")),
+                )
+            )
+        if new_instances:
+            candidate.instances = new_instances
+
+    if candidate.detected != original_detected:
+        logger.warning(
+            "[reflect_expert_candidate] AUTO_CORRECT detected=%s→%s | event_id=%d event_name=%s",
+            original_detected,
+            candidate.detected,
+            candidate.event_id,
+            candidate.event_name,
+        )
+    else:
+        logger.info(
+            "[reflect_expert_candidate] CONSISTENT | event_id=%d event_name=%s detected=%s",
+            candidate.event_id,
+            candidate.event_name,
+            candidate.detected,
+        )
+
+    return candidate
 
 
 def _sanitize_candidate(candidate: EventCandidate) -> EventCandidate:

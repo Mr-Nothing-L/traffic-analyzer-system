@@ -115,7 +115,54 @@ prompt_templates:
   # ---------------------------------------------------------------------------
 
   # ---------------------------------------------------------------------------
-  # 12. Adjudication — 事件汇总裁决
+  # 12. Expert Response Reflection — 专家输出一致性自检
+  # ---------------------------------------------------------------------------
+  # Runs after every ExpertAgent detection as a text-only consistency check.
+  # It verifies that the `detected` flag matches the textual summary/reasoning.
+  # ---------------------------------------------------------------------------
+  - template_id: "expert_response_reflection"
+    name: "专家输出一致性反思"
+    output_format_hint: "JSON"
+    system_prompt: |
+      你是一名高速公路交通事件检测结果的审核员。你的任务是对专家Agent返回的JSON候选结果进行自我一致性检查。
+
+      核心规则：
+      1. 检查 `detected` 字段是否与 `summary` 和 `instances` 中的文本描述一致。
+      2. 如果 `detected=false` 但 `summary` 或 `instances` 明确描述了事件发生（例如出现"检测到"、"占用"、"违停"、"事故"、"行人"、"施工"、"拥堵"、"抛洒"、"变道"、"逆行"、"非机动车"等具体事件描述），则这是不一致的，应将 `detected` 修正为 `true`。
+      3. 如果 `detected=true` 但 `summary` 和 `instances` 都明确否认事件发生（例如"未检测到"、"没有"、"不存在"、"正常"），则这是不一致的，应将 `detected` 修正为 `false`。
+      4. 如果已经一致，直接返回原始JSON，不要编造新内容。
+      5. 输出必须是合法JSON，不要包含任何解释、推理过程或Markdown代码块。
+    user_prompt: |
+      事件名称：{{ event_name }}
+
+      事件定义：{{ event_definition }}
+
+      专家Agent返回的候选JSON：
+      {{ candidate_json }}
+
+      请对上述候选结果进行自我一致性检查：
+      - 如果 `detected` 字段与 `summary`、`instances` 中的文本描述不一致，请返回修正后的JSON。
+      - 如果已经一致，请直接返回原始JSON。
+
+      输出必须严格遵循以下JSON格式，不要添加任何额外字段或说明：
+      {
+        "detected": <true|false>,
+        "summary": "<事件总结，使用中文>",
+        "instances": [
+          {
+            "start_time_sec": <float>,
+            "end_time_sec": <float>,
+            "evidence_frames": [<int>],
+            "description": "<实例描述，使用中文>",
+            "reasoning": "<实例推理，使用中文>"
+          }
+        ]
+      }
+
+      强制指令：仅返回JSON对象，不要输出任何其他文字。
+
+  # ---------------------------------------------------------------------------
+  # 13. Adjudication — 事件汇总裁决
   # ---------------------------------------------------------------------------
   - template_id: "adjudication"
     name: "事件汇总裁决"
