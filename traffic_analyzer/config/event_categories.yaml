@@ -181,40 +181,10 @@ event_categories:
 # =============================================================================
 
 adjudication_rules:
-  - rule_id: "accident_suppresses_parking"
-    name: "事故优先于违停"
-    description: "如果检测到交通事故，则同一区域的违法停车应被排除。事故场景中的静止车辆属于事故的一部分，不应再单独标记为违停。"
-    priority: 100
-
-  - rule_id: "construction_excludes_emergency"
-    name: "施工区域排除应急车道占用"
-    description: "如果车辆明确位于施工区域内（有锥桶、施工车辆、作业人员等标识），则不应判定为应急车道占用。施工车辆/人员有权限使用该区域。"
-    priority: 90
-
-  - rule_id: "motorcycle_excludes_emergency"
-    name: "摩托车排除应急车道占用"
-    description: "当应急车道出现摩托车时，优先判定为'摩托车出现'事件。不应将同一辆摩托车同时标记为应急车道占用（避免重复）。"
-    priority: 80
-
-  - rule_id: "accident_debris_excludes_thrown_object"
-    name: "事故碎片排除抛洒物"
-    description: "如果检测到交通事故，则事故现场散落的碎片、零件等不应判定为抛洒物。这些碎片属于事故的一部分，由事故事件统一覆盖。"
-    priority: 90
-
-  - rule_id: "construction_excludes_reversing"
-    name: "施工区域排除逆行"
-    description: "施工区域内作业的工程车辆（如压路机、洒水车等）的往返移动不属于逆行/倒车。施工区域内正常的施工车辆移动不触发逆行事件。"
-    priority: 85
-
   - rule_id: "emergency_parking_both"
     name: "应急车道静止触发双事件"
     description: "当车辆在应急车道上静止停放时，应同时触发'违法停车'和'应急车道占用'两个事件。这两个事件不是互斥的，可以同时存在。"
-    priority: 70
-
-  - rule_id: "construction_does_not_affect_parking"
-    name: "施工区域静止属于违法停车"
-    description: "施工区域内或周边的工程车、作业车辆、机动车静止停放，仍然应判定为违法停车。"
-    priority: 65
+    priority: 95
 
 # =============================================================================
 # 自定义事件示例（取消注释即可启用）

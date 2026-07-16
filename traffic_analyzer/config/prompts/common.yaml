@@ -182,6 +182,10 @@ prompt_templates:
       标注规范：
       {{ annotation_spec }}
 
+      冲突解决指引：
+      - 当 annotation_spec 与 adjudication_rules 冲突时，以 adjudication_rules 为准。
+      - emergency_parking_both 规则必须严格执行：应急车道静止车辆必须同时判定为违法停车和应急车道占用。
+
       裁决任务：
       - event_results 必须仅包含 candidates_json 中的候选事件，不得新增或删除 event_id；未检测到的事件保留 event_id 与 event_name，detected=false。
       {% if previously_missing_event_ids %}
