@@ -188,6 +188,10 @@ prompt_templates:
 
       裁决任务：
       - event_results 必须仅包含 candidates_json 中的候选事件，不得新增或删除 event_id；未检测到的事件保留 event_id 与 event_name，detected=false。
+      - 对于每个事件，你可以根据业务规则和视觉观察修正 detected 判断和 summary 描述，也可以修正 instances 中每个实例的 description / reasoning。
+      - **严禁新增或减少 instance 数量**。instances 的条目数必须与专家初步检测结果完全一致。
+      - **严禁修改 instances 中的 start_time_sec、end_time_sec、evidence_frames**。时空范围和证据帧必须保持专家输出不变。
+      - 如果检测到事件但没有视觉证据支持新增实例，不得凭空添加实例。
       {% if previously_missing_event_ids %}
       - 上一次输出遗漏了 event_id={{ previously_missing_event_ids }}，本次必须补齐。
       {% endif %}

@@ -522,25 +522,58 @@ class AdjudicationStep(PipelineStep):
             if eid not in active_event_ids:
                 continue
             present_active_ids.add(eid)
-            instances = []
-            for inst in er.get("instances", []):
-                instances.append(
-                    EventInstance(
-                        event_id=eid,
-                        event_name=er.get("event_name", ""),
-                        event_name_en=er.get("event_name_en", ""),
-                        start_time_sec=inst.get("start_time_sec", 0.0),
-                        end_time_sec=inst.get("end_time_sec", 0.0),
-                        description=inst.get("description", ""),
-                        reasoning=inst.get("reasoning", ""),
+            candidate = context.event_candidates.get(eid)
+            candidate_instances = candidate.instances if candidate is not None else []
+            adjudication_instances_raw = er.get("instances", [])
+            detected = er.get("detected", False)
+
+            if not detected:
+                # Ruling layer says not detected: drop all instances.
+                instances: List[EventInstance] = []
+            elif candidate is None:
+                # No candidate available; keep the parsed adjudication instances as-is.
+                instances = []
+                for inst in adjudication_instances_raw:
+                    instances.append(
+                        EventInstance(
+                            event_id=eid,
+                            event_name=er.get("event_name", ""),
+                            event_name_en=er.get("event_name_en", ""),
+                            start_time_sec=inst.get("start_time_sec", 0.0),
+                            end_time_sec=inst.get("end_time_sec", 0.0),
+                            evidence_frames=inst.get("evidence_frames", []),
+                            description=inst.get("description", ""),
+                            reasoning=inst.get("reasoning", ""),
+                        )
                     )
-                )
+            elif len(candidate_instances) == 0:
+                # No visual evidence in the candidate; do not allow the ruling layer
+                # to invent new instances.
+                instances = []
+            elif len(adjudication_instances_raw) != len(candidate_instances):
+                # Ruling layer changed the instance count; ignore its instances and
+                # keep the expert candidate's spatio-temporal evidence unchanged.
+                instances = list(candidate_instances)
+            else:
+                # Same instance count: apply description/reasoning corrections while
+                # preserving candidate's spatio-temporal bounds and evidence frames.
+                instances = []
+                for cand_inst, adj_inst in zip(candidate_instances, adjudication_instances_raw):
+                    instances.append(
+                        cand_inst.model_copy(
+                            update={
+                                "description": adj_inst.get("description", cand_inst.description),
+                                "reasoning": adj_inst.get("reasoning", cand_inst.reasoning),
+                            }
+                        )
+                    )
+
             event_results.append(
                 EventResult(
                     event_id=eid,
                     event_name=er.get("event_name", ""),
                     event_name_en=er.get("event_name_en", ""),
-                    detected=er.get("detected", False),
+                    detected=detected,
                     summary=er.get("summary", ""),
                     instances=instances,
                     reasoning=er.get("reasoning", ""),
