@@ -1301,7 +1301,7 @@ class FarEnhancementDetector:
         try:
             response = self.vlm_engine.call(
                 template=template,
-                images=[vehicles_path, zoom_grid_path],
+                images=[masks_path, vehicles_path, zoom_grid_path],
                 context_vars=context_vars,
                 response_schema=_EXPERT_RESPONSE_SCHEMA,
             )

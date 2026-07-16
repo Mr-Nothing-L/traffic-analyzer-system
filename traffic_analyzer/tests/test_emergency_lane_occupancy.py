@@ -501,7 +501,7 @@ class TestExpertAgentIntegration:
         ]
         assert len(roi_calls) == 1
         assert len(final_calls) == 1
-        assert len(final_calls[0]["images"]) == 2
+        assert len(final_calls[0]["images"]) == 3
 
     def test_detect_emergency_lane_occupancy_no_rois(self, make_agent: Any) -> None:
         """When no ROIs are detected, the flow should return a negative candidate."""
