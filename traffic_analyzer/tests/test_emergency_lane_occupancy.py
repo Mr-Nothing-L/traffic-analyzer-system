@@ -536,3 +536,23 @@ class TestExpertAgentIntegration:
             c for c in engine.calls if c["template_id"] == "emergency_lane_occupancy_detection"
         ]
         assert len(final_calls) == 0
+
+    def test_far_enhancement_failure_does_not_fallback_to_raw_frames(
+        self,
+        make_agent: Any,
+    ) -> None:
+        """If the emergency lane far-enhancement flow fails, do not fall back to raw frames."""
+        agent, engine = make_agent({})
+        context = _make_analysis_context(num_frames=3, vlm_max_frames=6)
+
+        with patch.object(agent, "_detect_with_far_enhancement", return_value=None):
+            candidate = agent.detect(context)
+
+        assert candidate.detected is False
+        assert candidate.event_id == 1
+        assert "增强检测失败" in candidate.summary
+
+        final_calls = [
+            c for c in engine.calls if c["template_id"] == "emergency_lane_occupancy_detection"
+        ]
+        assert len(final_calls) == 0

@@ -258,11 +258,34 @@ def _call_anthropic(
 ) -> Tuple[str, int, int, int]:
     """Call Anthropic and return (text, prompt_tokens, completion_tokens, total_tokens)."""
     response = client.messages.create(**kwargs)
-    text = ""
+    text_parts: List[str] = []
+    thinking_parts: List[str] = []
+
     if response.content:
         for block in response.content:
-            if getattr(block, "type", None) == "text":
-                text += block.text
+            block_type = getattr(block, "type", None)
+            if block_type == "text":
+                text_parts.append(block.text)
+            elif block_type == "thinking":
+                thinking_parts.append(getattr(block, "thinking", ""))
+
+    if text_parts:
+        text = "".join(text_parts)
+    elif thinking_parts:
+        text = (
+            "[THINKING_ONLY_RESPONSE]\n"
+            + "\n".join(thinking_parts)
+            + "\n[END_THINKING_ONLY_RESPONSE]"
+        )
+        logger.warning(
+            "Anthropic response contained only thinking blocks (no text); "
+            "stop_reason=%s output_tokens=%s",
+            getattr(response, "stop_reason", None),
+            getattr(response.usage, "output_tokens", None) if response.usage else None,
+        )
+    else:
+        text = ""
+
     usage = response.usage
     prompt_tokens = getattr(usage, "input_tokens", 0)
     completion_tokens = getattr(usage, "output_tokens", 0)
@@ -282,20 +305,40 @@ def _call_anthropic_with_tools(
         tool_use_blocks: list of {"name": str, "id": str, "input": dict}
     """
     response = client.messages.create(**kwargs)
-    text = ""
+    text_parts: List[str] = []
+    thinking_parts: List[str] = []
     tool_uses: List[Dict[str, Any]] = []
 
     if response.content:
         for block in response.content:
             block_type = getattr(block, "type", None)
             if block_type == "text":
-                text += block.text
+                text_parts.append(block.text)
+            elif block_type == "thinking":
+                thinking_parts.append(getattr(block, "thinking", ""))
             elif block_type == "tool_use":
                 tool_uses.append({
                     "name": getattr(block, "name", ""),
                     "id": getattr(block, "id", ""),
                     "input": getattr(block, "input", {}),
                 })
+
+    if text_parts:
+        text = "".join(text_parts)
+    elif thinking_parts:
+        text = (
+            "[THINKING_ONLY_RESPONSE]\n"
+            + "\n".join(thinking_parts)
+            + "\n[END_THINKING_ONLY_RESPONSE]"
+        )
+        logger.warning(
+            "Anthropic response contained only thinking blocks (no text); "
+            "stop_reason=%s output_tokens=%s",
+            getattr(response, "stop_reason", None),
+            getattr(response.usage, "output_tokens", None) if response.usage else None,
+        )
+    else:
+        text = ""
 
     usage = response.usage
     prompt_tokens = getattr(usage, "input_tokens", 0)

@@ -191,6 +191,25 @@ class ExpertAgent:
                 self.category.name_zh,
             )
 
+            # Emergency lane occupancy (event_id=1) uses a template that expects
+            # exactly the two generated composites (vehicle boxes + zoom grid).
+            # Passing the original raw frames again leads to a prompt/image
+            # mismatch and repeated JSON parse failures, so return a negative
+            # candidate directly instead of falling back to raw images.
+            if self.category.event_id == 1:
+                logger.warning(
+                    "[expert_agent:detect] FAR_ENHANCEMENT_FAILED_NEGATIVE | "
+                    "event_id=%d event_name=%s reason=增强检测失败，无法生成有效证据",
+                    self.category.event_id,
+                    self.category.name_zh,
+                )
+                return EventCandidate(
+                    event_id=self.category.event_id,
+                    event_name=self.category.name_zh,
+                    detected=False,
+                    summary="应急车道增强检测失败，无法生成有效证据",
+                )
+
         # -- 6. VLM call -------------------------------------------------------
         try:
             response = self.vlm_engine.call(
