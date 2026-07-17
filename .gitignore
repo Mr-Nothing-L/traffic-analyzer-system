@@ -49,6 +49,11 @@ Thumbs.db
 # Claude workspace
 .claude/
 
+# Tool / editor local configs
+.condarc
+.cursor/
+.codegraph/
+
 # Error logs
 error/
 
