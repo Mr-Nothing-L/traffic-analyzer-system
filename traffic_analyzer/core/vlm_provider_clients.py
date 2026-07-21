@@ -392,11 +392,15 @@ def _call_google(
     client_model: Any,
     contents: Any,
     generation_config: Dict[str, Any],
+    timeout: Optional[float] = None,
 ) -> Tuple[str, int, int, int]:
     """Call Google GenAI and return (text, prompt_tokens, completion_tokens, total_tokens)."""
+    # Align per-request timeout with the other providers (config.timeout)
+    request_options = {"timeout": timeout} if timeout is not None else None
     response = client_model.generate_content(
         contents,
         generation_config=generation_config,
+        request_options=request_options,
     )
     text = ""
     if response.parts:

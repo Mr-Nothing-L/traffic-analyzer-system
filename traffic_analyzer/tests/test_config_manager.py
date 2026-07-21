@@ -265,6 +265,8 @@ class TestEnvParsing:
             "LLM_PROVIDER_1_TEMPERATURE",
             "LLM_PROVIDER_1_TIMEOUT",
             "LLM_PROVIDER_1_MAX_RETRIES",
+            "SCENE_UNDERSTANDING_MIN_FRAMES",
+            "VLM_MAX_FRAMES",
         ]
         preserved = {k: os.environ.pop(k, None) for k in keys}
         yield
@@ -396,6 +398,38 @@ class TestEnvParsing:
         # Primary provider is the first one
         assert config.llm_provider == p0
         assert mgr.get_llm_provider() == p0
+
+    def test_sparse_provider_indices_create_no_phantom(self, temp_config_dir: Path) -> None:
+        """Only LLM_PROVIDER_1_* set must not fabricate a phantom index-0 provider."""
+        env_content = textwrap.dedent(
+            """\
+            LLM_PROVIDER_1_PROVIDER=openai
+            LLM_PROVIDER_1_API_KEY=sk-only
+            LLM_PROVIDER_1_BASE_URL=https://api.openai.com/v1
+            LLM_PROVIDER_1_MODEL=gpt-4o
+            """
+        )
+        (temp_config_dir / ".env").write_text(env_content, encoding="utf-8")
+
+        mgr = ConfigManager(str(temp_config_dir))
+        config = mgr.load_all()
+
+        assert len(config.llm_providers) == 1
+        assert config.llm_providers[0].provider == "openai"
+        assert config.llm_providers[0].api_key == "sk-only"
+        assert config.llm_provider.provider == "openai"
+
+    def test_invalid_frame_count_env_falls_back_to_default(self, temp_config_dir: Path) -> None:
+        """Non-integer SCENE_UNDERSTANDING_MIN_FRAMES/VLM_MAX_FRAMES must not crash load."""
+        (temp_config_dir / ".env").write_text(
+            "SCENE_UNDERSTANDING_MIN_FRAMES=abc\nVLM_MAX_FRAMES=xyz\n", encoding="utf-8"
+        )
+
+        mgr = ConfigManager(str(temp_config_dir))
+        config = mgr.load_all()
+
+        assert config.scene_understanding_min_frames == 10
+        assert config.vlm_max_frames == 10
 
 
 # ---------------------------------------------------------------------------
@@ -601,6 +635,37 @@ class TestEdgeCases:
         with pytest.raises(ValueError, match="must be a mapping"):
             mgr.load_all()
 
+    def test_malformed_yaml_raises(self, tmp_path: Path) -> None:
+        """Syntax-broken YAML must fail fast, not silently load empty config."""
+        config_dir = tmp_path / "config"
+        config_dir.mkdir()
+        prompts_dir = config_dir / "prompts"
+        prompts_dir.mkdir()
+
+        # Broken event_categories.yaml
+        (config_dir / "event_categories.yaml").write_text(
+            "event_categories: [\n  - unclosed bracket\n", encoding="utf-8"
+        )
+        (prompts_dir / "empty.yaml").write_text(
+            yaml.safe_dump({"prompt_templates": []}), encoding="utf-8"
+        )
+
+        mgr = ConfigManager(str(config_dir))
+        with pytest.raises(yaml.YAMLError):
+            mgr.load_all()
+
+        # Broken prompts yaml
+        (config_dir / "event_categories.yaml").write_text(
+            yaml.safe_dump({"event_categories": []}), encoding="utf-8"
+        )
+        (prompts_dir / "empty.yaml").write_text(
+            "prompt_templates: [\n  - unclosed bracket\n", encoding="utf-8"
+        )
+
+        mgr = ConfigManager(str(config_dir))
+        with pytest.raises(yaml.YAMLError):
+            mgr.load_all()
+
 
 # ---------------------------------------------------------------------------
 # Split prompt_templates directory
@@ -699,3 +764,180 @@ class TestSplitPromptTemplates:
         tmpl = mgr.get_prompt_template("illegal_parking")
         assert "from second" in tmpl.system_prompt
         assert "Duplicate prompt template" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Regression tests: event_id integrity and unsupported configuration
+# ---------------------------------------------------------------------------
+
+
+class TestEventIdIntegrity:
+    def test_duplicate_event_id_raises(self, temp_config_dir: Path) -> None:
+        """Duplicate event_ids must fail fast instead of silently overwriting."""
+        cats = {
+            "event_categories": [
+                {
+                    "event_id": 0,
+                    "event_code": "A",
+                    "name": "First",
+                    "name_zh": "第一",
+                    "description": "desc",
+                    "detection_mode": "expert_agent",
+                    "prompt_template_id": "illegal_parking",
+                    "is_active": True,
+                },
+                {
+                    "event_id": 0,
+                    "event_code": "A2",
+                    "name": "Second",
+                    "name_zh": "第二",
+                    "description": "desc",
+                    "detection_mode": "expert_agent",
+                    "prompt_template_id": "illegal_parking",
+                    "is_active": True,
+                },
+            ]
+        }
+        (temp_config_dir / "event_categories.yaml").write_text(
+            yaml.safe_dump(cats), encoding="utf-8"
+        )
+
+        mgr = ConfigManager(str(temp_config_dir))
+        with pytest.raises(ValueError, match="Duplicate event_id 0"):
+            mgr.load_all()
+
+    def test_duplicate_adjudication_rule_id_raises(self, temp_config_dir: Path) -> None:
+        """Duplicate adjudication rule_ids must fail fast at load time."""
+        cats = {
+            "event_categories": [
+                {
+                    "event_id": 0,
+                    "event_code": "A",
+                    "name": "Illegal Parking",
+                    "name_zh": "违法停车",
+                    "description": "desc",
+                    "detection_mode": "expert_agent",
+                    "prompt_template_id": "illegal_parking",
+                    "is_active": True,
+                }
+            ],
+            "adjudication_rules": [
+                {"rule_id": "r1", "name": "first", "description": "d", "priority": 10},
+                {"rule_id": "r1", "name": "second", "description": "d", "priority": 20},
+            ],
+        }
+        (temp_config_dir / "event_categories.yaml").write_text(
+            yaml.safe_dump(cats), encoding="utf-8"
+        )
+
+        mgr = ConfigManager(str(temp_config_dir))
+        with pytest.raises(ValueError, match="Duplicate adjudication rule_id 'r1'"):
+            mgr.load_all()
+
+    def _write_categories_and_spec(self, config_dir: Path, categories: list) -> None:
+        """Overwrite categories YAML and a matching annotation_spec."""
+        (config_dir / "event_categories.yaml").write_text(
+            yaml.safe_dump({"event_categories": categories}), encoding="utf-8"
+        )
+        annotation_spec = {
+            "annotation_spec": {
+                "version": "1.0",
+                "events": [
+                    {
+                        "event_id": cat["event_id"],
+                        "action_label": cat["name_zh"],
+                        "description": "desc",
+                        "boundary_conditions": [],
+                    }
+                    for cat in categories
+                ],
+            }
+        }
+        (config_dir / "annotation_spec.yaml").write_text(
+            yaml.safe_dump(annotation_spec, allow_unicode=True), encoding="utf-8"
+        )
+
+    def test_event_id_gap_reported(self, temp_config_dir: Path) -> None:
+        """Non-continuous event_ids must be reported (encoding bits would shift)."""
+        categories = [
+            {
+                "event_id": 0,
+                "event_code": "A",
+                "name": "Cat Zero",
+                "name_zh": "事件零",
+                "description": "desc",
+                "detection_mode": "expert_agent",
+                "prompt_template_id": "illegal_parking",
+                "is_active": True,
+            },
+            {
+                "event_id": 2,
+                "event_code": "C",
+                "name": "Cat Two",
+                "name_zh": "事件二",
+                "description": "desc",
+                "detection_mode": "expert_agent",
+                "prompt_template_id": "emergency_lane",
+                "is_active": True,
+            },
+        ]
+        self._write_categories_and_spec(temp_config_dir, categories)
+
+        mgr = ConfigManager(str(temp_config_dir))
+        mgr.load_all()
+        errors = mgr.validate_config()
+        assert any("continuous" in e for e in errors)
+
+    def test_active_non_expert_detection_mode_rejected(self, temp_config_dir: Path) -> None:
+        """Active categories with detection_mode != expert_agent have no execution path."""
+        categories = [
+            {
+                "event_id": 0,
+                "event_code": "A",
+                "name": "Direct Active",
+                "name_zh": "直接活跃",
+                "description": "desc",
+                "detection_mode": "direct_vlm",
+                "is_active": True,
+            },
+            {
+                "event_id": 1,
+                "event_code": "B",
+                "name": "Direct Inactive",
+                "name_zh": "直接未激活",
+                "description": "desc",
+                "detection_mode": "direct_vlm",
+                "is_active": False,
+            },
+        ]
+        self._write_categories_and_spec(temp_config_dir, categories)
+
+        mgr = ConfigManager(str(temp_config_dir))
+        mgr.load_all()
+        errors = mgr.validate_config()
+        mode_errors = [e for e in errors if "detection_mode" in e]
+        # Only the active category is rejected; the inactive one just holds its bit.
+        assert len(mode_errors) == 1
+        assert "id=0" in mode_errors[0]
+
+    def test_active_category_declaring_tools_rejected(self, temp_config_dir: Path) -> None:
+        """Declared tools have no effect while the tool registry is empty."""
+        categories = [
+            {
+                "event_id": 0,
+                "event_code": "A",
+                "name": "Tool User",
+                "name_zh": "工具用户",
+                "description": "desc",
+                "detection_mode": "expert_agent",
+                "prompt_template_id": "illegal_parking",
+                "tools": ["some_tool"],
+                "is_active": True,
+            }
+        ]
+        self._write_categories_and_spec(temp_config_dir, categories)
+
+        mgr = ConfigManager(str(temp_config_dir))
+        mgr.load_all()
+        errors = mgr.validate_config()
+        assert any("tool registry is empty" in e for e in errors)

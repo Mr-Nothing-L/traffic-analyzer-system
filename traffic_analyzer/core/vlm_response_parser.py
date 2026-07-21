@@ -43,13 +43,26 @@ def _find_balanced_brace_substrings(text: str) -> List[str]:
 
     Uses a simple brace stack so nested objects (e.g. `{"a": {"b": 1}}`)
     are returned as one complete substring instead of being split at the
-    first inner `}`.
+    first inner `}`.  Double-quoted strings are tracked (with `\\` escapes)
+    so braces inside string values do not corrupt the balance count.
     """
     results: List[str] = []
     stack: List[str] = []
     start = -1
+    in_string = False
+    escaped = False
     for i, ch in enumerate(text):
-        if ch == "{":
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
             if not stack:
                 start = i
             stack.append("{")
@@ -149,15 +162,24 @@ def _extract_json_from_text(text: str) -> Dict[str, Any]:
 
         # Fallback: find all balanced JSON objects in the full text and merge
         # them if multiple are found (VLM sometimes outputs partial JSONs that
-        # should be merged).
+        # should be merged).  The first parseable object containing "detected"
+        # is authoritative; other objects only fill in keys that are still
+        # missing so a trailing partial fragment cannot overwrite good values.
         matches = _find_balanced_brace_substrings(text)
         if len(matches) >= 2:
-            merged = {}
+            parsed: List[Dict[str, Any]] = []
             for candidate in matches:
                 result = _try_parse_json_candidate(candidate)
                 if isinstance(result, dict):
-                    merged.update(result)
-            if merged:
+                    parsed.append(result)
+            if parsed:
+                base_index = next(
+                    (i for i, obj in enumerate(parsed) if "detected" in obj), 0
+                )
+                merged = dict(parsed[base_index])
+                for obj in parsed[:base_index] + parsed[base_index + 1:]:
+                    for key, value in obj.items():
+                        merged.setdefault(key, value)
                 return merged
         elif len(matches) == 1:
             candidate = matches[0]

@@ -94,3 +94,39 @@ def test_find_balanced_brace_substrings_unbalanced_ignored() -> None:
     text = '{"a": 1'  # missing closing brace
     matches = _find_balanced_brace_substrings(text)
     assert matches == []
+
+
+def test_find_balanced_brace_substrings_ignores_braces_in_strings() -> None:
+    """Braces inside JSON string values (common in Chinese summaries) must not
+    truncate the candidate."""
+    text = '{"detected": true, "summary": "路段}积水"}'
+    matches = _find_balanced_brace_substrings(text)
+    assert matches == [text]
+
+
+def test_find_balanced_brace_substrings_escaped_quote_in_string() -> None:
+    text = '{"summary": "a \\" } b"}'
+    matches = _find_balanced_brace_substrings(text)
+    assert matches == [text]
+
+
+def test_extract_json_with_brace_inside_string_value() -> None:
+    """Regression test: a `}` inside a string value truncated the candidate."""
+    text = '{"detected": true, "confidence": 0.9, "summary": "车道}有行人"}'
+    result = _extract_json_from_text(text)
+    assert result == {"detected": True, "confidence": 0.9, "summary": "车道}有行人"}
+
+
+def test_merge_prefers_object_with_detected_and_does_not_overwrite() -> None:
+    """A trailing partial fragment must not overwrite the complete object."""
+    text = '{"detected": true, "confidence": 0.9} {"confidence": 0.1}'
+    result = _extract_json_from_text(text)
+    assert result == {"detected": True, "confidence": 0.9}
+
+
+def test_merge_detected_object_wins_regardless_of_position() -> None:
+    """The first parseable object containing "detected" is authoritative;
+    other objects only fill in missing keys."""
+    text = '{"extra": 1} {"detected": true} {"detected": false, "count": 2}'
+    result = _extract_json_from_text(text)
+    assert result == {"extra": 1, "detected": True, "count": 2}

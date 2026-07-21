@@ -25,7 +25,11 @@ from traffic_analyzer.models.schemas import (
     SystemConfig,
     VideoMetadata,
 )
-from traffic_analyzer.utils.event_detection import reflect_expert_candidate
+from traffic_analyzer.utils.event_detection import (
+    parse_expert_response,
+    reflect_expert_candidate,
+    select_event_images,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -225,6 +229,144 @@ class TestReflectExpertCandidate:
 
         assert result is candidate
         assert result.detected is False
+
+    def test_reflection_string_false_overrides_detected_to_false(self) -> None:
+        """Regression: bool('false') is True; a string detected field must be
+        normalized strictly so 'false' does not keep the candidate positive."""
+        category = _make_category()
+        candidate = _make_candidate(detected=True, summary="检测到白色SUV占用应急车道。")
+        engine = _MockVLMEngine(
+            responses=[{"detected": "false", "summary": "未检测到应急车道占用。"}]
+        )
+        template = _MockTemplate()
+
+        result = reflect_expert_candidate(candidate, category, engine, template)
+
+        assert result.detected is False
+
+    def test_reflection_tolerates_malformed_instance_fields(self) -> None:
+        """Malformed reflection instances are dropped; null numeric fields fall
+        back to defaults instead of raising TypeError."""
+        category = _make_category()
+        candidate = _make_candidate(detected=True, summary="检测到白色SUV占用应急车道。")
+        engine = _MockVLMEngine(
+            responses=[
+                {
+                    "detected": True,
+                    "summary": "检测到白色SUV占用应急车道。",
+                    "instances": [
+                        None,
+                        {
+                            "start_time_sec": None,
+                            "end_time_sec": None,
+                            "evidence_frames": None,
+                            "description": "白色SUV在应急车道内静止。",
+                            "reasoning": "车辆完全位于应急车道实线外侧，构成占用。",
+                        },
+                    ],
+                }
+            ]
+        )
+        template = _MockTemplate()
+
+        result = reflect_expert_candidate(candidate, category, engine, template)
+
+        assert result.detected is True
+        assert len(result.instances) == 1
+        assert result.instances[0].start_time_sec == 0.0
+        assert result.instances[0].end_time_sec == 0.0
+        assert result.instances[0].evidence_frames == []
+
+
+# ---------------------------------------------------------------------------
+# parse_expert_response tests
+# ---------------------------------------------------------------------------
+
+
+class TestParseExpertResponse:
+    def test_malformed_instances_are_dropped_not_fatal(self) -> None:
+        """A single malformed instance must not crash parsing or drop the event."""
+        category = _make_category()
+        response = _MockResponse(
+            {
+                "detected": True,
+                "summary": "检测到白色SUV占用应急车道。",
+                "instances": [
+                    None,
+                    "garbage",
+                    {
+                        "start_time_sec": None,
+                        "end_time_sec": "abc",
+                        "evidence_frames": None,
+                        "description": "时间字段畸形",
+                        "reasoning": "车辆占用应急车道。",
+                    },
+                    {
+                        "start_time_sec": 1.0,
+                        "end_time_sec": 2.0,
+                        "evidence_frames": [1, "x", 2.0],
+                        "description": "白色SUV在应急车道内静止。",
+                        "reasoning": "车辆完全位于应急车道实线外侧，构成占用。",
+                    },
+                ],
+            }
+        )
+
+        candidate = parse_expert_response(response, category)
+
+        assert candidate.detected is True
+        assert len(candidate.instances) == 2
+        # Malformed numeric fields fall back to defaults; null evidence list → [].
+        assert candidate.instances[0].start_time_sec == 0.0
+        assert candidate.instances[0].end_time_sec == 0.0
+        assert candidate.instances[0].evidence_frames == []
+        # Non-numeric entries are filtered out of evidence_frames.
+        assert candidate.instances[1].evidence_frames == [1, 2]
+
+    @pytest.mark.parametrize(
+        ("raw_detected", "expected"),
+        [
+            (True, True),
+            ("true", True),
+            (" TRUE ", True),
+            ("false", False),
+            ("False", False),
+            ("yes", False),
+            (1, False),
+            (None, False),
+        ],
+    )
+    def test_detected_strict_bool_normalization(
+        self, raw_detected: Any, expected: bool
+    ) -> None:
+        """Only True/'true' (case-insensitive, stripped) counts as detected."""
+        category = _make_category()
+        response = _MockResponse(
+            {
+                "detected": raw_detected,
+                "summary": "检测到白色SUV占用应急车道。",
+                "instances": [],
+            }
+        )
+
+        candidate = parse_expert_response(response, category)
+
+        assert candidate.detected is expected
+
+
+# ---------------------------------------------------------------------------
+# select_event_images tests
+# ---------------------------------------------------------------------------
+
+
+class TestSelectEventImages:
+    def test_max_frames_one_returns_single_frame(self) -> None:
+        """VLM_MAX_FRAMES=1 must not raise ZeroDivisionError."""
+        context = _make_analysis_context(num_frames=5)
+
+        images = select_event_images(context, 1)
+
+        assert len(images) == 1
 
 
 # ---------------------------------------------------------------------------

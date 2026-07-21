@@ -176,7 +176,15 @@ class VideoPreprocessor:
 
         Returns:
             List of extracted Keyframes.
+
+        Raises:
+            VideoPreprocessorError: If ``target_fps`` is not positive.
         """
+        if target_fps <= 0:
+            raise VideoPreprocessorError(
+                f"target_fps must be positive, got {target_fps}"
+            )
+
         try:
             original_fps = metadata.fps
             if original_fps <= 0:
@@ -459,7 +467,8 @@ class VideoPreprocessor:
         return True, "", brightness
 
     def _check_bitrate(self, metadata: VideoMetadata) -> Tuple[bool, str]:
-        if metadata.bitrate < self.config.prefilter_min_bitrate:
+        # bitrate <= 0 means unknown (file streams often report 0); only compare positive values
+        if metadata.bitrate > 0 and metadata.bitrate < self.config.prefilter_min_bitrate:
             return False, f"比特率过低({metadata.bitrate} < {self.config.prefilter_min_bitrate})"
         return True, ""
 
@@ -566,6 +575,8 @@ class VideoPreprocessor:
                 ]
                 all_frames = self._deduplicate_keyframes(all_frames)
                 logger.info("Fixed FPS sampling: %d frames retained (FPS=%.1f)", len(all_frames), self.config.coarse_fps)
+            except VideoPreprocessorError:
+                raise
             except Exception as exc:
                 logger.error(
                     "[video_preprocessor:process] SAMPLING_ERROR | video=%s | %s",

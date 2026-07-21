@@ -319,6 +319,32 @@ class TestGenerate:
         assert report.binary_encoding.detected_events == [2]
         assert report.binary_encoding.event_count == 1
 
+    def test_generate_error_fallback_uses_valid_encoding(
+        self,
+        generator: ReportGenerator,
+        event_results: List[EventResult],
+        scene_info: SceneInfo,
+        video_meta: VideoMetadata,
+        usage_stats: Dict[str, Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The generate() fallback report must not construct an illegal encoding."""
+        def _raise(*args: Any, **kwargs: Any) -> None:
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(generator, "to_binary_encoding", _raise)
+        report = generator.generate(
+            event_results=event_results,
+            scene_info=scene_info,
+            video_meta=video_meta,
+            usage_stats=usage_stats,
+        )
+        assert report.binary_encoding.encoding_string == "_".join(["_"] * 10)
+        assert report.binary_encoding.event_count == 0
+        assert report.binary_encoding.detected_events == []
+        assert "报告生成失败" in report.final_classification
+        assert "boom" in report.overall_traffic_description
+
 
 class TestToJson:
     def test_json_roundtrip(
@@ -470,6 +496,28 @@ class TestToMarkdown:
         assert "未检测到任何事件类别" in md
         assert "暂无处置建议" in md
 
+    def test_reasoning_chain_empty_strings_render(
+        self,
+        generator: ReportGenerator,
+        scene_info: SceneInfo,
+        video_meta: VideoMetadata,
+        usage_stats: Dict[str, Any],
+    ) -> None:
+        """Reasoning-chain cells must render without degrading the whole report."""
+        report = generator.generate(
+            event_results=[EventResult(event_id=0, event_name="A", detected=False)],
+            scene_info=scene_info,
+            video_meta=video_meta,
+            usage_stats=usage_stats,
+            reasoning_chain=[
+                {"event_id": 0, "event_name": "", "decision": "", "thought_process": "", "basis": ""},
+            ],
+        )
+        md = generator.to_markdown(report)
+
+        assert "逐事件推理链" in md
+        assert "报告渲染过程中发生错误" not in md
+
 
 class TestToBinaryEncoding:
     def test_basic_encoding(
@@ -542,6 +590,15 @@ class TestToBinaryEncoding:
         results = [EventResult(event_id=0, event_name="A", detected=True)]
         be = generator.to_binary_encoding(results, total_categories=1)
         assert isinstance(be, BinaryEncoding)
+
+    def test_error_fallback_uses_valid_encoding(
+        self, generator: ReportGenerator
+    ) -> None:
+        """The except-branch placeholder must satisfy the BinaryEncoding validator."""
+        be = generator.to_binary_encoding([object()], total_categories=3)
+        assert be.encoding_string == "_".join(["_"] * 10)
+        assert be.event_count == 0
+        assert be.detected_events == []
 
 
 class TestDisposalRecommendations:

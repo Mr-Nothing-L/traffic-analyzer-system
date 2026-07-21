@@ -30,7 +30,11 @@ from traffic_analyzer.utils.emergency_lane_occupancy import (
     draw_vehicle_rois,
     generate_masks_overlay,
 )
-from traffic_analyzer.utils.event_detection import parse_expert_response
+from traffic_analyzer.utils.event_detection import (
+    _parse_strict_bool,
+    _safe_float,
+    parse_expert_response,
+)
 from traffic_analyzer.utils.far_non_motor_enhancer import (
     compute_bbox_area_px,
     compute_bbox_aspect_ratio,
@@ -590,7 +594,7 @@ class FarEnhancementDetector:
                 return None
 
         parsed = response.parsed_data
-        detected = bool(parsed.get("detected", False))
+        detected = _parse_strict_bool(parsed.get("detected", False))
 
         # Preserve the classifier's raw output before any car-semantic override.
         # This lets fallback distinguish "classifier was negative" from
@@ -608,6 +612,11 @@ class FarEnhancementDetector:
             final_summary = str(parsed.get("summary", ""))
             frame_info["raw_final_reason"] = final_summary
             final_instances = parsed.get("instances") or []
+            if not isinstance(final_instances, list):
+                final_instances = []
+            final_instances = [
+                inst for inst in final_instances if isinstance(inst, dict)
+            ]
 
             # Structured car veto: if the classifier explicitly says the boxed
             # target is a four-wheel vehicle, override detected=false. Fallback
@@ -637,13 +646,18 @@ class FarEnhancementDetector:
             if detected:
                 normalized_instances: List[EventInstance] = []
                 for inst in final_instances:
+                    evidence_frames = inst.get("evidence_frames")
+                    if not isinstance(evidence_frames, list):
+                        evidence_frames = []
                     normalized_instances.append(
                         EventInstance(
                             event_id=self.category.event_id,
                             event_name=self.category.name_zh,
-                            start_time_sec=float(inst.get("start_time_sec", 0.0)),
-                            end_time_sec=float(inst.get("end_time_sec", 0.0)),
-                            evidence_frames=inst.get("evidence_frames")
+                            start_time_sec=_safe_float(inst.get("start_time_sec", 0.0)),
+                            end_time_sec=_safe_float(inst.get("end_time_sec", 0.0)),
+                            evidence_frames=[
+                                int(f) for f in evidence_frames if isinstance(f, (int, float))
+                            ]
                             or [global_index, frame_info["adjacent_index"]],
                             description=str(inst.get("description", ""))
                             or final_summary,
@@ -2219,6 +2233,24 @@ class FarEnhancementDetector:
         # detected=True so the expert raw output stays consistent with the
         # per-frame ROI evidence table.
         # ------------------------------------------------------------------
+        if not top_candidates:
+            # top_k <= 0 (or no candidates survived scoring): nothing to
+            # classify, return the standard negative candidate.
+            logger.info(
+                "[expert_agent:_detect_with_far_enhancement] NO_POSITIVE_CANDIDATES | event_id=%d",
+                self.category.event_id,
+            )
+            return EventCandidate(
+                detected=False,
+                event_id=self.category.event_id,
+                event_name=self.category.name_zh,
+                summary=f"未检测到{self.category.name_zh}。",
+                raw_vlm_response={
+                    "far_enhancement": {
+                        "frame_analysis_log": frame_analysis_log,
+                    }
+                },
+            )
         best_candidate = top_candidates[0]
         if "composite_path" in best_candidate and self.category.event_id in (3, 4):
             fallback_candidate = self._accept_fallback(

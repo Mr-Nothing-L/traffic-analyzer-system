@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from typing import Any, Dict, List
 from unittest.mock import MagicMock, patch
 
@@ -20,6 +21,7 @@ import pytest
 from traffic_analyzer.core.vlm_engine import (
     FatalAPIError,
     VLMInferenceEngine,
+    _compute_cache_key,
 )
 from traffic_analyzer.models.schemas import LLMProviderConfig, PromptTemplate
 
@@ -426,3 +428,54 @@ def test_subsequent_calls_use_backup_provider(
 
     assert mock_aliyun_client.chat.completions.create.call_count == 1
     assert mock_anthropic_client.messages.create.call_count == 2
+
+
+@patch("traffic_analyzer.core.vlm_engine.openai.OpenAI")
+@patch("traffic_analyzer.core.vlm_engine.anthropic.Anthropic")
+def test_in_flight_call_immune_to_concurrent_provider_index_flip(
+    mock_anthropic_cls: MagicMock,
+    mock_openai_cls: MagicMock,
+    aliyun_primary_config: LLMProviderConfig,
+    anthropic_backup_config: LLMProviderConfig,
+    simple_template: PromptTemplate,
+    tmp_path: Path,
+) -> None:
+    """A failover flipping the shared provider index mid-call must not relabel
+    an in-flight response nor poison the disk cache with the wrong model."""
+    mock_aliyun_client = MagicMock()
+    mock_openai_cls.return_value = mock_aliyun_client
+    mock_anthropic_cls.return_value = MagicMock()
+
+    primary = aliyun_primary_config.model_copy(
+        update={"enable_cache": True, "disk_cache_path": str(tmp_path / "vlm_cache.db")}
+    )
+    engine = VLMInferenceEngine([primary, anthropic_backup_config])
+
+    def _serve_then_flip_index(*args: Any, **kwargs: Any) -> MagicMock:
+        # Simulate another thread completing a failover (aliyun -> anthropic)
+        # while this call is still in flight.
+        with engine._provider_lock:
+            engine._current_provider_index = 1
+        return _aliyun_success_response({"served_by": "aliyun"})
+
+    mock_aliyun_client.chat.completions.create.side_effect = _serve_then_flip_index
+
+    response = engine.call(
+        simple_template, images=[], context_vars={"description": "race"}
+    )
+
+    # The response was served by aliyun and must be labeled as such even
+    # though the shared index moved on before call() built the response.
+    assert response.success is True
+    assert response.provider == "aliyun"
+    assert response.model == "qwen-vl-max"
+
+    # The disk cache entry must be recorded under the serving provider/model,
+    # not under whatever provider the shared index points at afterwards.
+    system_prompt, user_prompt = VLMInferenceEngine.render_prompt(
+        simple_template, {"description": "race"}
+    )
+    cache_key = _compute_cache_key(system_prompt, user_prompt, [])
+    assert engine._disk_cache is not None
+    assert engine._disk_cache.get(cache_key, "aliyun", "qwen-vl-max") is not None
+    assert engine._disk_cache.get(cache_key, "anthropic", "claude-sonnet-4-6") is None

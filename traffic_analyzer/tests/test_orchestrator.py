@@ -16,6 +16,7 @@ from traffic_analyzer.models.schemas import (
     BinaryEncoding,
     EventCandidate,
     EventCategory,
+    EventInstance,
     EventResult,
     Keyframe,
     KeyframeSequence,
@@ -29,10 +30,12 @@ from traffic_analyzer.models.schemas import (
     VideoMetadata,
 )
 from traffic_analyzer.core.pipeline_steps import AdjudicationStep, ExpertAgentLayer
+from traffic_analyzer.core.report_generator import ReportGenerator
 from traffic_analyzer.orchestrator.analysis_orchestrator import (
     AnalysisOrchestrator,
     OrchestratorError,
 )
+from traffic_analyzer.orchestrator.reject_report_factory import generate_reject_report
 
 
 # ---------------------------------------------------------------------------
@@ -353,6 +356,46 @@ class TestAnalyze:
         report = orch.analyze(temp_video)
         assert isinstance(report, Report)
 
+    def test_preprocess_failure_returns_reject_report(
+        self,
+        orchestrator: AnalysisOrchestrator,
+        temp_video: str,
+    ) -> None:
+        """Corrupted video must be rejected, not reported as traffic-normal."""
+        orchestrator.video_preprocessor.process.side_effect = Exception(
+            "Cannot open video"
+        )
+        report = orchestrator.analyze(temp_video)
+        assert report.rejected
+        assert report.reject_reason
+        orchestrator._expert_agent_layer.execute.assert_not_called()
+        orchestrator._adjudication_step.execute.assert_not_called()
+
+        # Same result when process() returns empty frames without raising
+        orchestrator.video_preprocessor.process.side_effect = None
+        orchestrator.video_preprocessor.process.return_value = KeyframeSequence(
+            coarse_frames=[], precision_frames=[]
+        )
+        report = orchestrator.analyze(temp_video)
+        assert report.rejected
+        orchestrator._expert_agent_layer.execute.assert_not_called()
+
+    def test_reject_report_passes_total_categories_and_reject_classification(
+        self,
+        orchestrator: AnalysisOrchestrator,
+        temp_video: str,
+    ) -> None:
+        """Reject reports must carry the full category width and a reject conclusion."""
+        orchestrator.video_preprocessor.process.side_effect = Exception(
+            "Cannot open video"
+        )
+        report = orchestrator.analyze(temp_video)
+        assert report.rejected
+        call_kwargs = orchestrator.report_generator.generate.call_args.kwargs
+        assert call_kwargs.get("total_categories") == 3
+        assert "未进行事件检测" in report.final_classification
+        assert "交通状况正常" not in report.final_classification
+
 
 # ---------------------------------------------------------------------------
 # Video metadata extraction
@@ -387,6 +430,72 @@ class TestExtractVideoMeta:
 # ---------------------------------------------------------------------------
 # Pipeline step unit tests
 # ---------------------------------------------------------------------------
+
+
+def _make_adjudication_step(parsed_data: Dict[str, Any]) -> AdjudicationStep:
+    """Build an AdjudicationStep whose mocked VLM returns *parsed_data*."""
+    config_manager = MagicMock()
+    config_manager.get_active_event_categories.return_value = [
+        EventCategory(
+            event_id=0,
+            event_code="A",
+            name="Active A",
+            name_zh="活跃A",
+            description="Active.",
+            detection_mode="expert_agent",
+            prompt_template_id="tpl",
+            is_active=True,
+        ),
+        EventCategory(
+            event_id=1,
+            event_code="B",
+            name="Active B",
+            name_zh="活跃B",
+            description="Active.",
+            detection_mode="expert_agent",
+            prompt_template_id="tpl",
+            is_active=True,
+        ),
+    ]
+    config_manager.get_adjudication_rules.return_value = []
+    config_manager.get_prompt_template.return_value = PromptTemplate(
+        template_id="adjudication",
+        name="Adjudication",
+        system_prompt="",
+        user_prompt="",
+    )
+    config_manager.config_dir = Path("/fake/config")
+
+    vlm_response = MagicMock()
+    vlm_response.success = True
+    vlm_response.parsed_data = parsed_data
+    vlm_response.raw_text = ""
+
+    vlm_engine = MagicMock()
+    vlm_engine.call.return_value = vlm_response
+
+    return AdjudicationStep(config_manager, vlm_engine)
+
+
+def _make_adjudication_context() -> AnalysisContext:
+    """Context with normal (non-abnormal) candidates for events 0 and 1."""
+    context = AnalysisContext()
+    context.event_candidates[0] = EventCandidate(
+        event_id=0,
+        event_name="Active A",
+        detected=True,
+        summary="candidate zero summary",
+        instances=[EventInstance(event_id=0, event_name="Active A", description="inst")],
+        raw_vlm_text="raw text",
+    )
+    context.event_candidates[1] = EventCandidate(
+        event_id=1,
+        event_name="Active B",
+        detected=False,
+        summary="no",
+        raw_vlm_text="raw text",
+    )
+    return context
 
 
 class TestAdjudicationStep:
@@ -465,3 +574,119 @@ class TestAdjudicationStep:
         assert result_ids == {0, 1}
         assert all(r.event_id in {0, 1} for r in adjudication_result.audit_log)
         assert all(rc["event_id"] in {0, 1} for rc in adjudication_result.reasoning_chain)
+
+    def test_entries_without_event_id_do_not_shadow_event_zero(self) -> None:
+        """Malformed entries lacking event_id must be skipped, not adjudicated
+        as event 0 (which would also block backfill from the real candidate)."""
+        step = _make_adjudication_step(
+            {
+                "event_results": [
+                    {"event_name": "畸形条目", "detected": True, "summary": "missing event_id"},
+                    {"event_id": 1, "event_name": "Active B", "detected": False, "summary": "no"},
+                ],
+                "audit_log": [
+                    {"event_name": "畸形条目", "action": "included", "reason": ""},
+                    {"event_id": 1, "event_name": "Active B", "action": "included", "reason": "", "rule_id": None},
+                ],
+                "reasoning_chain": [
+                    {"event_name": "畸形条目", "decision": "保留", "thought_process": "x", "basis": "y"},
+                    {"event_id": 1, "event_name": "Active B", "decision": "排除", "thought_process": "t", "basis": "b"},
+                ],
+                "adjudication_reasoning": "test",
+            }
+        )
+        context = _make_adjudication_context()
+
+        result = step.execute(context)
+        assert result.success
+        adjudication_result = result.data
+        by_id = {r.event_id: r for r in adjudication_result.event_results}
+        assert set(by_id) == {0, 1}
+        # Event 0 must be backfilled from the real candidate, not the malformed entry.
+        assert by_id[0].detected
+        assert by_id[0].summary == "candidate zero summary"
+        # Malformed audit/reasoning entries are dropped entirely.
+        assert len(adjudication_result.audit_log) == 1
+        assert adjudication_result.audit_log[0].event_id == 1
+        assert len(adjudication_result.reasoning_chain) == 1
+        assert adjudication_result.reasoning_chain[0]["event_id"] == 1
+
+    def test_reasoning_chain_null_fields_coerced_to_strings(self) -> None:
+        """Null fields in the VLM reasoning_chain must not poison the Markdown report."""
+        step = _make_adjudication_step(
+            {
+                "event_results": [
+                    {"event_id": 0, "event_name": "Active A", "detected": True, "summary": "yes"},
+                    {"event_id": 1, "event_name": "Active B", "detected": False, "summary": "no"},
+                ],
+                "audit_log": [],
+                "reasoning_chain": [
+                    {"event_id": 0, "event_name": None, "decision": None, "thought_process": None, "basis": None},
+                ],
+                "adjudication_reasoning": "test",
+            }
+        )
+        context = _make_adjudication_context()
+
+        result = step.execute(context)
+        assert result.success
+        chain = result.data.reasoning_chain
+        assert len(chain) == 1
+        assert chain[0]["event_id"] == 0
+        for field in ("event_name", "decision", "thought_process", "basis"):
+            assert chain[0][field] == ""
+
+        # The produced chain must render without degrading the whole report.
+        generator = ReportGenerator()
+        report = generator.generate(
+            event_results=result.data.event_results,
+            scene_info=None,
+            video_meta=VideoMetadata(
+                file_path="t.mp4",
+                file_name="t.mp4",
+                duration_sec=1.0,
+                fps=25.0,
+                total_frames=25,
+                width=640,
+                height=480,
+            ),
+            usage_stats={},
+            reasoning_chain=chain,
+        )
+        md = generator.to_markdown(report)
+        assert "逐事件推理链" in md
+        assert "报告渲染过程中发生错误" not in md
+
+
+# ---------------------------------------------------------------------------
+# Reject report factory
+# ---------------------------------------------------------------------------
+
+
+class TestRejectReportFactory:
+    def test_reject_report_has_full_width_encoding_and_consistent_conclusion(self) -> None:
+        """Rejected reports must not carry an empty encoding or a 'traffic normal' conclusion."""
+        video_meta = VideoMetadata(
+            file_path="reject.mp4",
+            file_name="reject.mp4",
+            duration_sec=10.0,
+            fps=30.0,
+            total_frames=300,
+            width=640,
+            height=480,
+        )
+        report = generate_reject_report(
+            report_generator=ReportGenerator(),
+            video_meta=video_meta,
+            reject_reason="画面模糊",
+            usage_stats={},
+            total_categories=10,
+        )
+        assert report.rejected
+        assert report.reject_reason == "画面模糊"
+        assert report.binary_encoding.encoding_string == "0_0_0_0_0_0_0_0_0_0"
+        assert report.binary_encoding.event_count == 0
+        assert report.binary_encoding.detected_events == []
+        assert "未进行事件检测" in report.final_classification
+        assert "交通状况正常" not in report.final_classification
+        assert "画面模糊" in report.overall_traffic_description

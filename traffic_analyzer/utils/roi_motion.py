@@ -136,8 +136,8 @@ def _draw_panel_annotations(
     draw = ImageDraw.Draw(annotated)
     draw.rectangle(draw_box, outline="#FF0000", width=3)
 
-    cx = int(round((orig_px[0] + orig_px[2]) / 2.0 * scale_x))
-    cy = int(round((orig_px[1] + orig_px[3]) / 2.0 * scale_y))
+    cx = int(round(((orig_px[0] + orig_px[2]) / 2.0 - enlarged_px[0]) * scale_x))
+    cy = int(round(((orig_px[1] + orig_px[3]) / 2.0 - enlarged_px[1]) * scale_y))
     cross_len = max(6, int(round(min(panel_w, panel_h) * 0.015)))
     _draw_crosshair(draw, cx, cy, cross_len, fill="#FFD700")
 

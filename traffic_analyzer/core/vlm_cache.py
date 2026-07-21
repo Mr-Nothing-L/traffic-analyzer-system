@@ -18,6 +18,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from pydantic import ValidationError
+
 from traffic_analyzer.models.schemas import LLMResponse
 
 logger = logging.getLogger(__name__)
@@ -97,8 +99,22 @@ class DiskCache:
                 (now, cache_key),
             )
             conn.commit()
-            data = json.loads(row[0])
-            return LLMResponse(**data)
+            try:
+                data = json.loads(row[0])
+                return LLMResponse(**data)
+            except (ValueError, TypeError, ValidationError) as exc:
+                # Corrupt or stale-format row: treat as a miss and delete it so
+                # the same cache key does not stay a permanent false negative.
+                logger.debug("[DiskCache] GET dropping corrupt row: %s", exc)
+                try:
+                    conn.execute(
+                        "DELETE FROM vlm_cache WHERE cache_key = ?",
+                        (cache_key,),
+                    )
+                    conn.commit()
+                except sqlite3.Error:
+                    pass
+                return None
         except sqlite3.Error as exc:
             logger.debug("[DiskCache] GET error: %s", exc)
             return None
@@ -119,7 +135,7 @@ class DiskCache:
             conn.commit()
             # Prune if over max_entries
             self._prune(conn)
-        except sqlite3.Error as exc:
+        except (sqlite3.Error, ValueError, TypeError, ValidationError) as exc:
             logger.debug("[DiskCache] SET error: %s", exc)
 
     def _prune(self, conn: "sqlite3.Connection") -> None:

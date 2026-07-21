@@ -48,7 +48,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     output_path = _resolve_path(args.output) if args.output else None
 
     # Pass --min-frames to the system via environment variables
-    if args.min_frames != 30:
+    if args.min_frames is not None:
         os.environ["SCENE_UNDERSTANDING_MIN_FRAMES"] = str(args.min_frames)
         os.environ["VLM_MAX_FRAMES"] = str(args.min_frames)
         logger.info("Max VLM input frames set to %d (scene_understanding + expert_agent)", args.min_frames)
@@ -199,7 +199,7 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_parser.add_argument(
         "--min-frames", "-m",
         type=int,
-        default=10,
+        default=None,
         help="Minimum number of frames for scene understanding (default: 10). Lower = faster but less accurate.",
     )
     analyze_parser.set_defaults(func=cmd_analyze)

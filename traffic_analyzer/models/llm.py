@@ -25,7 +25,7 @@ class FarObjectEnhancementConfig(BaseModel):
     enable_motion_filter: bool = True
     motion_score_threshold: float = 1.0
     motion_penalty: float = 5.0
-    top_k: int = 2
+    top_k: int = Field(default=2, ge=1)
     frame_selection: str = "all"  # "all" = per-frame ROI scan; "middle" = single middle frame (e.g. construction)
 
 
@@ -80,6 +80,7 @@ class LLMResponse(BaseModel):
     total_tokens: int = 0
     latency_ms: float = 0.0
     retry_count: int = 0
+    error_message: Optional[str] = None
 
 
 class LLMCallRecord(BaseModel):

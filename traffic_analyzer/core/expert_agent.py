@@ -188,19 +188,13 @@ class ExpertAgent:
                 template=template,
                 context_vars=context_vars,
             )
-            if candidate is None:
-                logger.info(
-                    "[expert_agent:detect] FAR_ENHANCEMENT_FALLBACK | event_id=%d event_name=%s",
-                    self.category.event_id,
-                    self.category.name_zh,
-                )
-
-            # Emergency lane occupancy (event_id=1) uses a template that expects
-            # exactly the two generated composites (vehicle boxes + zoom grid).
-            # Passing the original raw frames again leads to a prompt/image
-            # mismatch and repeated JSON parse failures, so return a negative
+            # Templates with far_object_enhancement enabled expect exactly the
+            # generated composites (vehicle boxes + zoom grid), not the original
+            # raw frames. Feeding raw frames to such a template leads to a
+            # prompt/image mismatch and repeated JSON parse failures, so when
+            # the enhanced flow fails to produce a candidate, return a negative
             # candidate directly instead of falling back to raw images.
-            if candidate is None and self.category.event_id == 1:
+            if candidate is None:
                 logger.warning(
                     "[expert_agent:detect] FAR_ENHANCEMENT_FAILED_NEGATIVE | "
                     "event_id=%d event_name=%s reason=增强检测失败，无法生成有效证据",
@@ -211,11 +205,10 @@ class ExpertAgent:
                     event_id=self.category.event_id,
                     event_name=self.category.name_zh,
                     detected=False,
-                    summary="应急车道增强检测失败，无法生成有效证据",
+                    summary=f"{self.category.name_zh}增强检测失败，无法生成有效证据",
                 )
 
-        # -- 6. Direct VLM call (fallback when far enhancement is disabled or
-        #     returned no candidate) --------------------------------------------
+        # -- 6. Direct VLM call (used when far enhancement is disabled) --------
         if candidate is None:
             try:
                 response = self.vlm_engine.call(

@@ -114,7 +114,7 @@ class ReportGenerator:
                 overall_traffic_description=f"报告生成过程中发生错误: {exc}",
                 event_results=[],
                 binary_encoding=BinaryEncoding(
-                    encoding_string="error",
+                    encoding_string="_".join(["_"] * 10),
                     event_count=0,
                     detected_events=[],
                 ),
@@ -221,7 +221,7 @@ class ReportGenerator:
                 exc_info=True,
             )
             return BinaryEncoding(
-                encoding_string="error",
+                encoding_string="_".join(["_"] * 10),
                 event_count=0,
                 detected_events=[],
             )

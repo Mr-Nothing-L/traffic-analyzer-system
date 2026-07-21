@@ -329,6 +329,32 @@ class TestVisualizationUtilities:
             == 0.0
         )
 
+    def test_compute_roi_zone_overlap_small_bbox_not_inflated(self) -> None:
+        """Small bboxes must not get inflated overlap from inclusive rectangle endpoints."""
+        zone = [[0.5, 0.0], [1.0, 0.0], [1.0, 1.0], [0.5, 1.0]]
+        # 5x5 px bbox (x 47..52, y 10..15): only columns 50-51 fall inside the zone.
+        overlap = compute_roi_zone_overlap(
+            [0.47, 0.10, 0.52, 0.15],
+            zone,
+            img_width=100,
+            img_height=100,
+        )
+        assert overlap == pytest.approx(2 * 5 / 25)
+
+        summary = build_occupancy_summary(
+            "test_video",
+            [
+                {
+                    "id": "V1",
+                    "label": "白色轿车",
+                    "zone": "emergency_lane",
+                    "rel_box": [0.47, 0.10, 0.52, 0.15],
+                }
+            ],
+            {"V1": overlap},
+        )
+        assert summary["occupied_count"] == 0
+
     def test_build_occupancy_summary_structure(
         self,
         sample_rois: List[Dict[str, Any]],

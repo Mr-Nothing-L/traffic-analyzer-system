@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import argparse
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, List
 from unittest.mock import MagicMock, patch
@@ -232,3 +234,65 @@ class TestMain:
         with pytest.raises(SystemExit) as exc_info:
             main([])
         assert exc_info.value.code != 0
+
+
+# ---------------------------------------------------------------------------
+# --min-frames regression tests
+# ---------------------------------------------------------------------------
+
+
+class TestCmdAnalyzeMinFrames:
+    def _make_args(self, extra: List[str]) -> argparse.Namespace:
+        parser = build_parser()
+        return parser.parse_args(["analyze", "--video", "test.mp4", *extra])
+
+    @patch("traffic_analyzer.cli.Path.exists")
+    @patch("traffic_analyzer.cli.AnalysisOrchestrator")
+    def test_explicit_min_frames_30_sets_env(
+        self,
+        mock_orchestrator_cls: MagicMock,
+        mock_exists: MagicMock,
+    ) -> None:
+        """--min-frames 30 must not be silently ignored (sentinel mismatch)."""
+        mock_exists.return_value = True
+        mock_orchestrator = MagicMock()
+        mock_orchestrator_cls.from_config_dir.return_value = mock_orchestrator
+        report = MagicMock()
+        report.rejected = False
+        report.model_dump_json.return_value = "{}"
+        mock_orchestrator.analyze.return_value = report
+
+        args = self._make_args(["--min-frames", "30"])
+        with patch.dict(os.environ):
+            os.environ.pop("SCENE_UNDERSTANDING_MIN_FRAMES", None)
+            os.environ.pop("VLM_MAX_FRAMES", None)
+            ret = cmd_analyze(args)
+            assert ret == 0
+            assert os.environ["SCENE_UNDERSTANDING_MIN_FRAMES"] == "30"
+            assert os.environ["VLM_MAX_FRAMES"] == "30"
+
+    @patch("traffic_analyzer.cli.Path.exists")
+    @patch("traffic_analyzer.cli.AnalysisOrchestrator")
+    def test_omitted_min_frames_leaves_env_untouched(
+        self,
+        mock_orchestrator_cls: MagicMock,
+        mock_exists: MagicMock,
+    ) -> None:
+        """Without --min-frames, no env override should be applied."""
+        mock_exists.return_value = True
+        mock_orchestrator = MagicMock()
+        mock_orchestrator_cls.from_config_dir.return_value = mock_orchestrator
+        report = MagicMock()
+        report.rejected = False
+        report.model_dump_json.return_value = "{}"
+        mock_orchestrator.analyze.return_value = report
+
+        args = self._make_args([])
+        assert args.min_frames is None
+        with patch.dict(os.environ):
+            os.environ.pop("SCENE_UNDERSTANDING_MIN_FRAMES", None)
+            os.environ.pop("VLM_MAX_FRAMES", None)
+            ret = cmd_analyze(args)
+            assert ret == 0
+            assert "SCENE_UNDERSTANDING_MIN_FRAMES" not in os.environ
+            assert "VLM_MAX_FRAMES" not in os.environ

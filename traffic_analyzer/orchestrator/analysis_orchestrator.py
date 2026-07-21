@@ -180,6 +180,7 @@ class AnalysisOrchestrator:
                 reject_reason=str(exc),
                 checks=getattr(exc, "checks", None),
                 usage_stats=self.vlm_engine.get_usage_stats(),
+                total_categories=len(self.config_manager.get_event_categories()),
             )
         except Exception as exc:
             logger.error(
@@ -189,6 +190,20 @@ class AnalysisOrchestrator:
                 exc_info=True,
             )
             keyframes = KeyframeSequence(coarse_frames=[], precision_frames=[])
+        if not keyframes.coarse_frames and not keyframes.precision_frames:
+            reject_reason = "视频无法打开/解码失败，无可用帧"
+            logger.warning(
+                "[orchestrator:analyze] PREPROCESS_REJECT | video=%s | reason=%s",
+                video_path,
+                reject_reason,
+            )
+            return generate_reject_report(
+                report_generator=self.report_generator,
+                video_meta=video_meta,
+                reject_reason=reject_reason,
+                usage_stats=self.vlm_engine.get_usage_stats(),
+                total_categories=len(self.config_manager.get_event_categories()),
+            )
         step_times["preprocessing"] = time.perf_counter() - t0
         context.keyframes = keyframes
         logger.info("  Coarse frames: %d", len(keyframes.coarse_frames))

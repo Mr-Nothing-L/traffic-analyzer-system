@@ -188,6 +188,57 @@ def test_retryable_error_rate_limit() -> None:
     assert _is_retryable_error(exc) is True
 
 
+def test_retryable_error_anthropic_internal_server_error() -> None:
+    exc = _make_anthropic_error("InternalServerError", "internal error", status_code=500)
+    assert _is_retryable_error(exc) is True
+
+
+def test_retryable_error_anthropic_overloaded() -> None:
+    exc = _make_anthropic_error("OverloadedError", "overloaded", status_code=529)
+    assert _is_retryable_error(exc) is True
+
+
+def test_retryable_error_anthropic_status_503() -> None:
+    exc = _make_anthropic_error("APIStatusError", "service unavailable", status_code=503)
+    assert _is_retryable_error(exc) is True
+
+
+def test_retryable_error_anthropic_api_connection_error() -> None:
+    import anthropic
+
+    cls = getattr(anthropic, "APIConnectionError", None)
+    if cls is None:
+        pytest.skip("anthropic.APIConnectionError not available")
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    exc = cls(request=request)
+    assert _is_retryable_error(exc) is True
+
+
+def test_retryable_error_anthropic_bad_request_still_not_retryable() -> None:
+    exc = _make_anthropic_error("BadRequestError", "bad request", status_code=400)
+    assert _is_retryable_error(exc) is False
+
+
+def test_retryable_error_google_service_unavailable() -> None:
+    gexc = pytest.importorskip("google.api_core.exceptions")
+    assert _is_retryable_error(gexc.ServiceUnavailable("service unavailable")) is True
+
+
+def test_retryable_error_google_deadline_exceeded() -> None:
+    gexc = pytest.importorskip("google.api_core.exceptions")
+    assert _is_retryable_error(gexc.DeadlineExceeded("deadline exceeded")) is True
+
+
+def test_retryable_error_google_resource_exhausted() -> None:
+    gexc = pytest.importorskip("google.api_core.exceptions")
+    assert _is_retryable_error(gexc.ResourceExhausted("rate limited")) is True
+
+
+def test_retryable_error_google_invalid_argument_not_retryable() -> None:
+    gexc = pytest.importorskip("google.api_core.exceptions")
+    assert _is_retryable_error(gexc.InvalidArgument("bad request")) is False
+
+
 def test_retryable_error_bad_request() -> None:
     exc = _make_openai_error(openai.BadRequestError, 400, "bad request")
     assert _is_retryable_error(exc) is False

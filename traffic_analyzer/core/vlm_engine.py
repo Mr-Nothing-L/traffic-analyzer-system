@@ -169,6 +169,10 @@ class VLMInferenceEngine:
             self._current_provider_index = len(self._clients)
             self._clients.append(self._init_client_for_provider(cfg))
         self._current_provider_index = 0
+        # Guards the sticky provider index: several expert threads share this
+        # engine, so reads/writes of _current_provider_index must hold this
+        # lock (the in-flight provider context itself is kept in locals).
+        self._provider_lock = threading.Lock()
 
         # Usage statistics
         self._total_calls: int = 0
@@ -341,14 +345,27 @@ class VLMInferenceEngine:
         cache_key = ""
         if self._cache_enabled:
             cache_key = _compute_cache_key(system_prompt, user_prompt, images)
+            # Resolve the provider that would serve this call (under lock) so a
+            # response cached before a failover is not returned for the new one.
+            with self._provider_lock:
+                active_config = self._providers[self._current_provider_index]
             with self._cache_lock:
                 cached = self._cache.get(cache_key)
-                if cached is not None:
+                if (
+                    cached is not None
+                    and cached.provider == active_config.provider
+                    and cached.model == active_config.model
+                ):
                     self._cache_hits += 1
                     # Move to end (most recently used)
                     self._cache.move_to_end(cache_key)
                     logger.debug("[cache] MEM HIT for key %s... (%d cached)", cache_key[:16], len(self._cache))
                     return copy.deepcopy(cached)
+                if cached is not None:
+                    logger.debug(
+                        "[cache] MEM SKIP provider/model mismatch for key %s...",
+                        cache_key[:16],
+                    )
                 self._cache_misses += 1
 
             # Memory miss — try disk cache
@@ -372,15 +389,22 @@ class VLMInferenceEngine:
         success = False
         error_message: Optional[str] = None
         prompt_tokens = completion_tokens = total_tokens = 0
+        # Index of the provider that actually served the request (set on success).
+        served_provider_index: Optional[int] = None
 
         template_id = getattr(template, "template_id", "unknown")
         try:
-            raw_text, prompt_tokens, completion_tokens, total_tokens, retry_count = (
-                self._execute_with_retry(
-                    system_prompt=system_prompt,
-                    user_prompt=user_prompt,
-                    images=images,
-                )
+            (
+                raw_text,
+                prompt_tokens,
+                completion_tokens,
+                total_tokens,
+                retry_count,
+                served_provider_index,
+            ) = self._execute_with_retry(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                images=images,
             )
             parsed_data = _extract_json_from_text(raw_text)
             if response_schema:
@@ -450,12 +474,23 @@ class VLMInferenceEngine:
             if not success:
                 self._failed_calls += 1
 
+        # Label the response from the provider that actually served the call.
+        # Reading self.provider/self.config here would race with a concurrent
+        # failover flipping the shared provider index mid-call.
+        if served_provider_index is not None:
+            served_config = self._providers[served_provider_index]
+            response_provider = served_config.provider
+            response_model = served_config.model
+        else:
+            response_provider = self.provider
+            response_model = self.config.model
+
         response = LLMResponse(
             success=success,
             raw_text=raw_text,
             parsed_data=parsed_data,
-            model=self.config.model,
-            provider=self.provider,
+            model=response_model,
+            provider=response_provider,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
@@ -473,7 +508,7 @@ class VLMInferenceEngine:
                 logger.debug("[cache] MEM STORED key %s... (size=%d)", cache_key[:16], len(self._cache))
             # Also write to disk cache for cross-process sharing
             if self._disk_cache is not None:
-                self._disk_cache.set(cache_key, self.provider, self.config.model, response)
+                self._disk_cache.set(cache_key, response_provider, response_model, response)
                 logger.debug("[cache] DISK STORED key %s...", cache_key[:16])
 
         return response
@@ -507,10 +542,18 @@ class VLMInferenceEngine:
             (LLMResponse, tool_use_blocks)
             If tool_use_blocks is non-empty, caller must execute tools and call again.
         """
-        if self.provider != "anthropic":
+        # Snapshot the active provider once: a concurrent failover must not
+        # swap client/config between the payload build and the dispatch below.
+        with self._provider_lock:
+            provider_index = self._current_provider_index
+        provider = self._providers[provider_index].provider
+        config = self._providers[provider_index]
+        client = self._clients[provider_index]
+
+        if provider != "anthropic":
             logger.warning(
                 "[vlm_engine:call_with_tools] FALLBACK | provider=%s not anthropic, using string-based tool parsing",
-                self.provider,
+                provider,
             )
             # Fallback to regular call
             response = self.call(template, images, context_vars, response_schema)
@@ -523,9 +566,9 @@ class VLMInferenceEngine:
             system_prompt,
             user_prompt,
             images,
-            self.config.model,
-            self.config.max_tokens,
-            self.config.temperature,
+            config.model,
+            config.max_tokens,
+            config.temperature,
         )
         kwargs["tools"] = tool_definitions
         kwargs["tool_choice"] = tool_choice if tool_choice else {"type": "auto"}
@@ -542,7 +585,7 @@ class VLMInferenceEngine:
         template_id = getattr(template, "template_id", "unknown")
         try:
             raw_text, tool_uses, prompt_tokens, completion_tokens, total_tokens = (
-                _call_anthropic_with_tools(self._client, kwargs)
+                _call_anthropic_with_tools(client, kwargs)
             )
 
             # If no tool uses, try to parse JSON from text
@@ -597,8 +640,8 @@ class VLMInferenceEngine:
             success=success,
             raw_text=raw_text,
             parsed_data=parsed_data,
-            model=self.config.model,
-            provider=self.provider,
+            model=config.model,
+            provider=provider,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
@@ -631,17 +674,24 @@ class VLMInferenceEngine:
         Returns:
             LLMResponse with final analysis.
         """
-        if self.provider != "anthropic":
+        # Snapshot the active provider once (see call_with_tools).
+        with self._provider_lock:
+            provider_index = self._current_provider_index
+        provider = self._providers[provider_index].provider
+        config = self._providers[provider_index]
+        client = self._clients[provider_index]
+
+        if provider != "anthropic":
             logger.error(
                 "[vlm_engine:call_with_tool_results] ERROR | provider=%s not anthropic",
-                self.provider,
+                provider,
             )
             return LLMResponse(
                 success=False,
                 raw_text="",
                 parsed_data={},
-                model=self.config.model,
-                provider=self.provider,
+                model=config.model,
+                provider=provider,
                 prompt_tokens=0,
                 completion_tokens=0,
                 total_tokens=0,
@@ -665,9 +715,9 @@ class VLMInferenceEngine:
         messages.append({"role": "user", "content": tool_content})
 
         kwargs = {
-            "model": self.config.model,
-            "max_tokens": self.config.max_tokens,
-            "temperature": self.config.temperature,
+            "model": config.model,
+            "max_tokens": config.max_tokens,
+            "temperature": config.temperature,
             "messages": messages,
         }
         if system_prompt:
@@ -683,7 +733,7 @@ class VLMInferenceEngine:
         template_id = getattr(template, "template_id", "unknown")
         try:
             raw_text, _, prompt_tokens, completion_tokens, total_tokens = (
-                _call_anthropic_with_tools(self._client, kwargs)
+                _call_anthropic_with_tools(client, kwargs)
             )
             parsed_data = _extract_json_from_text(raw_text)
             if response_schema:
@@ -718,8 +768,8 @@ class VLMInferenceEngine:
             success=success,
             raw_text=raw_text,
             parsed_data=parsed_data,
-            model=self.config.model,
-            provider=self.provider,
+            model=config.model,
+            provider=provider,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
@@ -732,48 +782,70 @@ class VLMInferenceEngine:
         system_prompt: str,
         user_prompt: str,
         images: List[Any],
+        provider_index: Optional[int] = None,
     ) -> Tuple[str, int, int, int]:
-        """Execute a single provider-specific API call (no retry)."""
+        """Execute a single provider-specific API call (no retry).
+
+        Args:
+            system_prompt: Rendered system prompt.
+            user_prompt: Rendered user prompt.
+            images: List of images.
+            provider_index: Provider to dispatch to. Resolved from the shared
+                sticky index when omitted; callers doing failover must pass it
+                explicitly so a concurrent failover cannot swap provider,
+                config, and client mid-call.
+        """
+        if provider_index is None:
+            with self._provider_lock:
+                provider_index = self._current_provider_index
+        provider = self._providers[provider_index].provider
+        config = self._providers[provider_index]
+        client = self._clients[provider_index]
         try:
-            if self.provider == "anthropic":
+            if provider == "anthropic":
                 _, kwargs = _build_anthropic_payload(
                     system_prompt,
                     user_prompt,
                     images,
-                    self.config.model,
-                    self.config.max_tokens,
-                    self.config.temperature,
+                    config.model,
+                    config.max_tokens,
+                    config.temperature,
                 )
-                return _call_anthropic(self._client, kwargs)
-            elif self.provider == "google":
+                return _call_anthropic(client, kwargs)
+            elif provider == "google":
                 contents, kwargs = _build_google_payload(
                     system_prompt,
                     user_prompt,
                     images,
-                    self.config.model,
-                    self.config.max_tokens,
-                    self.config.temperature,
+                    config.model,
+                    config.max_tokens,
+                    config.temperature,
                 )
-                return _call_google(self._client.GenerativeModel(self.config.model), contents, kwargs)
-            elif self.provider == "aliyun":
+                return _call_google(
+                    client.GenerativeModel(config.model),
+                    contents,
+                    kwargs["generation_config"],
+                    timeout=config.timeout,
+                )
+            elif provider == "aliyun":
                 _, kwargs = _build_aliyun_payload(
                     system_prompt,
                     user_prompt,
                     images,
-                    self.config.model,
-                    self.config.max_tokens,
-                    self.config.temperature,
+                    config.model,
+                    config.max_tokens,
+                    config.temperature,
                 )
-                return _call_aliyun(self._client, kwargs)
+                return _call_aliyun(client, kwargs)
             else:
-                raise ProviderNotSupportedError(f"Provider {self.provider} not supported")
+                raise ProviderNotSupportedError(f"Provider {provider} not supported")
         except ProviderNotSupportedError:
             raise
         except Exception as exc:
             logger.error(
                 "[vlm_engine:_execute_once] PROVIDER_ERROR | provider=%s model=%s | %s",
-                self.provider,
-                self.config.model,
+                provider,
+                config.model,
                 exc,
                 exc_info=True,
             )
@@ -784,45 +856,74 @@ class VLMInferenceEngine:
         system_prompt: str,
         user_prompt: str,
         images: List[Any],
-    ) -> Tuple[str, int, int, int, int]:
+    ) -> Tuple[str, int, int, int, int, int]:
         """Execute the API call with per-provider retry and provider failover.
 
         Returns:
-            Tuple of (raw_text, prompt_tokens, completion_tokens, total_tokens, retry_count).
+            Tuple of (raw_text, prompt_tokens, completion_tokens, total_tokens,
+            retry_count, provider_index) where provider_index identifies the
+            provider that actually served the request.
         """
         # NOTE: This is the sole retry layer for VLM API calls.
         # PipelineStep no longer performs retries — all retry logic lives here.
         last_error: Optional[Exception] = None
         retry_count = 0
-        start_index = self._current_provider_index
+        # The provider index is a local for the rest of this call; the shared
+        # sticky index is only read here (under lock) and updated on success.
+        with self._provider_lock:
+            start_index = self._current_provider_index
         num_providers = len(self._providers)
 
         for provider_idx in range(start_index, num_providers):
-            self._current_provider_index = provider_idx
-            max_retries = max(1, self.config.max_retries)
+            provider = self._providers[provider_idx].provider
+            max_retries = max(1, self._providers[provider_idx].max_retries)
             last_error = None
 
             for attempt in range(max_retries):
                 try:
-                    result = self._execute_once(system_prompt, user_prompt, images)
-                    return (*result, retry_count)
+                    result = self._execute_once(
+                        system_prompt, user_prompt, images, provider_index=provider_idx
+                    )
+                    # Sticky failover: subsequent calls start from the provider
+                    # that served this request.
+                    with self._provider_lock:
+                        self._current_provider_index = provider_idx
+                    return (*result, retry_count, provider_idx)
                 except Exception as exc:
                     last_error = exc
                     if not _is_retryable_error(exc):
                         # Non-retryable error: decide whether to failover or give up.
-                        if is_failover_trigger(exc) and provider_idx < num_providers - 1:
-                            next_provider = self._providers[provider_idx + 1].provider
+                        if is_failover_trigger(exc):
+                            if provider_idx < num_providers - 1:
+                                next_provider = self._providers[provider_idx + 1].provider
+                                logger.error(
+                                    "[vlm_engine:_execute_with_retry] FAILOVER | from_provider=%s to_provider=%s reason=%s",
+                                    provider,
+                                    next_provider,
+                                    exc,
+                                )
+                                break
+                            # Failover-trigger error on the LAST provider means
+                            # the whole provider chain is down: escalate so the
+                            # batch aborts instead of silently reporting empty
+                            # results for every event.
                             logger.error(
-                                "[vlm_engine:_execute_with_retry] FAILOVER | from_provider=%s to_provider=%s reason=%s",
-                                self.provider,
-                                next_provider,
+                                "[vlm_engine:_execute_with_retry] ALL_PROVIDERS_EXHAUSTED | provider=%s | error=%s",
+                                provider,
                                 exc,
+                                exc_info=True,
                             )
-                            break
-                        # Either not a failover trigger or no more providers.
+                            setattr(last_error, "_retry_count", retry_count)
+                            exhausted = AllProvidersExhaustedError(
+                                f"All providers exhausted. Last error: {last_error}"
+                            )
+                            setattr(exhausted, "_retry_count", retry_count)
+                            raise exhausted from last_error
+                        # Plain client-side error (e.g. HTTP 400): not an outage,
+                        # propagate unchanged.
                         logger.error(
                             "[vlm_engine:_execute_with_retry] NON_RETRYABLE | provider=%s attempt=%d/%d | error=%s",
-                            self.provider,
+                            provider,
                             attempt + 1,
                             max_retries,
                             exc,
@@ -835,7 +936,7 @@ class VLMInferenceEngine:
                         wait_sec = min(2 ** attempt, 30)
                         logger.error(
                             "[vlm_engine:_execute_with_retry] RETRY | provider=%s attempt=%d/%d wait=%.1fs | error=%s",
-                            self.provider,
+                            provider,
                             attempt + 1,
                             max_retries,
                             wait_sec,
@@ -853,14 +954,31 @@ class VLMInferenceEngine:
                     next_provider = self._providers[provider_idx + 1].provider
                     logger.error(
                         "[vlm_engine:_execute_with_retry] FAILOVER | from_provider=%s to_provider=%s reason=%s",
-                        self.provider,
+                        provider,
                         next_provider,
                         last_error,
                     )
                     continue
+                # Retries exhausted on the LAST provider (always a retryable
+                # error here): total outage — escalate as fatal so callers can
+                # abort the batch instead of emitting all-zero reports.
+                if provider_idx == num_providers - 1:
+                    logger.error(
+                        "[vlm_engine:_execute_with_retry] ALL_PROVIDERS_EXHAUSTED | provider=%s attempts=%d last_error=%s",
+                        provider,
+                        retry_count,
+                        last_error,
+                        exc_info=True,
+                    )
+                    setattr(last_error, "_retry_count", retry_count)
+                    exhausted = AllProvidersExhaustedError(
+                        f"All providers exhausted. Last error: {last_error}"
+                    )
+                    setattr(exhausted, "_retry_count", retry_count)
+                    raise exhausted from last_error
                 logger.error(
                     "[vlm_engine:_execute_with_retry] MAX_RETRIES_EXCEEDED | provider=%s attempts=%d last_error=%s",
-                    self.provider,
+                    provider,
                     retry_count,
                     last_error,
                     exc_info=True,
@@ -1036,5 +1154,9 @@ class VLMInferenceEngine:
             total_tokens=response.total_tokens,
             latency_ms=response.latency_ms,
             success=response.success,
-            error_message=None if response.success else response.raw_text or "Unknown error",
+            error_message=(
+                None
+                if response.success
+                else response.error_message or response.raw_text or "Unknown error"
+            ),
         )

@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, patch, ANY
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
 from traffic_analyzer.core.vlm_engine import (
     FatalAPIError,
@@ -26,7 +27,13 @@ from traffic_analyzer.core.vlm_engine import (
     _extract_json_from_text,
     _validate_schema_basic,
 )
-from traffic_analyzer.models.schemas import LLMProviderConfig, PromptTemplate
+from traffic_analyzer.core.vlm_exceptions import AllProvidersExhaustedError
+from traffic_analyzer.models.schemas import (
+    FarObjectEnhancementConfig,
+    LLMProviderConfig,
+    LLMResponse,
+    PromptTemplate,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -311,11 +318,17 @@ def test_call_anthropic_all_retries_exhausted(
     mock_client.messages.create.side_effect = httpx.TimeoutException("Persistent failure")
 
     engine = VLMInferenceEngine(anthropic_config)
-    resp = engine.call(simple_template, images=[], context_vars={"description": "x"})
 
-    assert resp.success is False
+    # A persistent timeout on the only provider is a total outage: it must
+    # escalate to a fatal error instead of silently returning a failed
+    # response (which reports would render as "no events / traffic normal").
+    with pytest.raises(FatalAPIError) as exc_info:
+        engine.call(simple_template, images=[], context_vars={"description": "x"})
+
+    assert isinstance(exc_info.value.__cause__, AllProvidersExhaustedError)
     # max_retries=2 means 2 attempts total (initial + 1 retry), retry_count=1
-    assert resp.retry_count == 1
+    assert getattr(exc_info.value.__cause__, "_retry_count", None) == 1
+    assert mock_client.messages.create.call_count == 2
 
 
 @patch("traffic_analyzer.core.vlm_engine.anthropic.Anthropic")
@@ -387,6 +400,12 @@ def test_call_google_success(
     assert resp.success is True
     assert resp.parsed_data == {"google_result": 42}
     assert resp.total_tokens == 30
+
+    # Regression: generation_config must be the flat config dict, not the
+    # nested {"model": ..., "generation_config": {...}} payload kwargs.
+    gen_cfg = mock_model_instance.generate_content.call_args.kwargs["generation_config"]
+    assert "max_output_tokens" in gen_cfg
+    assert "model" not in gen_cfg
 
 
 # ---------------------------------------------------------------------------
@@ -615,3 +634,166 @@ def test_all_providers_exhausted_raises_fatal(
     engine = VLMInferenceEngine([anthropic_config, aliyun_config])
     with pytest.raises(FatalAPIError):
         engine.call(simple_template, images=[], context_vars={"description": "x"})
+
+
+# ---------------------------------------------------------------------------
+# Memory cache provider/model validation
+# ---------------------------------------------------------------------------
+
+
+@patch("traffic_analyzer.core.vlm_engine.anthropic.Anthropic")
+def test_memory_cache_hit_when_provider_model_match(
+    mock_anthropic_cls: MagicMock,
+    anthropic_config: LLMProviderConfig,
+    simple_template: PromptTemplate,
+) -> None:
+    mock_client = MagicMock()
+    mock_anthropic_cls.return_value = mock_client
+    ok = MagicMock()
+    ok.content = [MagicMock(type="text", text=json.dumps({"ok": True}))]
+    ok.usage = MagicMock(input_tokens=4, output_tokens=2)
+    mock_client.messages.create.return_value = ok
+
+    engine = VLMInferenceEngine(anthropic_config)
+    resp1 = engine.call(simple_template, images=[], context_vars={"description": "x"})
+    resp2 = engine.call(simple_template, images=[], context_vars={"description": "x"})
+
+    assert resp1.success is True
+    assert resp2.success is True
+    # Second identical call is served from the memory cache
+    assert mock_client.messages.create.call_count == 1
+
+
+@patch("traffic_analyzer.core.vlm_engine.anthropic.Anthropic")
+@patch("traffic_analyzer.core.vlm_engine.openai.OpenAI")
+def test_memory_cache_skips_entry_from_other_provider(
+    mock_openai_cls: MagicMock,
+    mock_anthropic_cls: MagicMock,
+    anthropic_config: LLMProviderConfig,
+    aliyun_config: LLMProviderConfig,
+    simple_template: PromptTemplate,
+) -> None:
+    """After a failover, a memory-cached response from the previous provider
+    must be treated as a miss (the disk cache already filters provider/model)."""
+    mock_anthropic_client = MagicMock()
+    mock_anthropic_cls.return_value = mock_anthropic_client
+    ok = MagicMock()
+    ok.content = [MagicMock(type="text", text=json.dumps({"ok": "anthropic"}))]
+    ok.usage = MagicMock(input_tokens=4, output_tokens=2)
+    mock_anthropic_client.messages.create.return_value = ok
+
+    mock_aliyun_client = MagicMock()
+    mock_openai_cls.return_value = mock_aliyun_client
+    choice = MagicMock()
+    choice.message.content = json.dumps({"ok": "aliyun"})
+    aliyun_resp = MagicMock()
+    aliyun_resp.choices = [choice]
+    aliyun_resp.usage = MagicMock(prompt_tokens=4, completion_tokens=2, total_tokens=6)
+    mock_aliyun_client.chat.completions.create.return_value = aliyun_resp
+
+    engine = VLMInferenceEngine([anthropic_config, aliyun_config])
+    resp1 = engine.call(simple_template, images=[], context_vars={"description": "x"})
+    assert resp1.success is True
+    assert resp1.provider == "anthropic"
+
+    # Simulate a failover: the sticky provider index moved to aliyun.
+    with engine._provider_lock:
+        engine._current_provider_index = 1
+
+    resp2 = engine.call(simple_template, images=[], context_vars={"description": "x"})
+    assert resp2.success is True
+    assert resp2.provider == "aliyun"
+    assert resp2.parsed_data == {"ok": "aliyun"}
+    assert mock_aliyun_client.chat.completions.create.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Google request timeout
+# ---------------------------------------------------------------------------
+
+
+@patch("google.generativeai.configure")
+@patch("google.generativeai.GenerativeModel")
+def test_call_google_uses_config_timeout(
+    mock_generative_model: MagicMock,
+    mock_configure: MagicMock,
+    google_config: LLMProviderConfig,
+    simple_template: PromptTemplate,
+) -> None:
+    mock_model_instance = MagicMock()
+    mock_generative_model.return_value = mock_model_instance
+
+    fake_response = MagicMock()
+    fake_response.parts = [MagicMock(text=json.dumps({"ok": True}))]
+    fake_response.usage_metadata = MagicMock(
+        prompt_token_count=1,
+        candidates_token_count=1,
+        total_token_count=2,
+    )
+    mock_model_instance.generate_content.return_value = fake_response
+
+    engine = VLMInferenceEngine(google_config)
+    resp = engine.call(simple_template, images=[], context_vars={"description": "z"})
+
+    assert resp.success is True
+    _, kwargs = mock_model_instance.generate_content.call_args
+    assert kwargs["request_options"] == {"timeout": google_config.timeout}
+
+
+# ---------------------------------------------------------------------------
+# error_message plumbing
+# ---------------------------------------------------------------------------
+
+
+def test_llm_response_accepts_error_message() -> None:
+    resp = LLMResponse(success=False, raw_text="", error_message="boom")
+    assert resp.error_message == "boom"
+
+
+@patch("traffic_analyzer.core.vlm_engine.openai.OpenAI")
+def test_batch_call_failure_preserves_error_message(
+    mock_openai_cls: MagicMock, aliyun_config: LLMProviderConfig
+) -> None:
+    """The error_message kwarg must survive LLMResponse construction so audit
+    records do not degenerate to 'Unknown error'."""
+    mock_client = MagicMock()
+    mock_openai_cls.return_value = mock_client
+    # Fatal error -> call() raises FatalAPIError -> batch_call records it
+    mock_client.chat.completions.create.side_effect = Exception("quota exceeded")
+
+    engine = VLMInferenceEngine(aliyun_config)
+    template = PromptTemplate(template_id="t", name="T", user_prompt="hi")
+    results = engine.batch_call([{"template": template, "images": []}], parallel=False)
+
+    assert len(results) == 1
+    assert results[0].success is False
+    assert results[0].error_message is not None
+    assert "API unusable" in results[0].error_message
+
+    record = engine.create_call_record("t", results[0])
+    assert record.error_message is not None
+    assert record.error_message != "Unknown error"
+
+
+@patch("traffic_analyzer.core.vlm_engine.openai.OpenAI")
+def test_create_call_record_uses_error_message(
+    mock_openai_cls: MagicMock, aliyun_config: LLMProviderConfig
+) -> None:
+    mock_openai_cls.return_value = MagicMock()
+    engine = VLMInferenceEngine(aliyun_config)
+
+    response = LLMResponse(success=False, raw_text="", error_message="quota exceeded")
+    record = engine.create_call_record("audit", response)
+    assert record.error_message == "quota exceeded"
+
+
+# ---------------------------------------------------------------------------
+# FarObjectEnhancementConfig validation
+# ---------------------------------------------------------------------------
+
+
+def test_far_object_enhancement_top_k_lower_bound() -> None:
+    assert FarObjectEnhancementConfig().top_k == 2
+    assert FarObjectEnhancementConfig(top_k=1).top_k == 1
+    with pytest.raises(ValidationError):
+        FarObjectEnhancementConfig(top_k=0)

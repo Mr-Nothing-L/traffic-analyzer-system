@@ -17,6 +17,7 @@ def generate_reject_report(
     reject_reason: str,
     checks: Optional[Dict[str, Any]] = None,
     usage_stats: Optional[Dict[str, Any]] = None,
+    total_categories: Optional[int] = None,
 ) -> Report:
     """Generate a report for a video rejected by the preprocessor prefilter.
 
@@ -26,6 +27,8 @@ def generate_reject_report(
         reject_reason: Human-readable reason for rejection.
         checks: Optional prefilter check details for debugging.
         usage_stats: Optional LLM usage statistics.
+        total_categories: Total configured event categories, used to give the
+            binary encoding its full bit width (no detection was performed).
 
     Returns:
         A Report marked as rejected.
@@ -37,9 +40,11 @@ def generate_reject_report(
         usage_stats=usage_stats,
         analysis_duration_sec=0.0,
         overall_traffic_description=f"视频被预处理筛除: {reject_reason}",
+        total_categories=total_categories,
     )
     report.rejected = True
     report.reject_reason = reject_reason
+    report.final_classification = "视频被筛除/无法分析，未进行事件检测。"
     # Store prefilter checks in context for debugging
     if checks:
         logger.info("[orchestrator:analyze] PREFILTER_CHECKS | %s", checks)

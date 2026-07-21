@@ -20,6 +20,32 @@ from traffic_analyzer.core.vlm_exceptions import (
 
 logger = logging.getLogger(__name__)
 
+# Google API core transient errors — optional dependency, only present when
+# the Google provider SDK is installed.
+try:
+    from google.api_core import exceptions as _google_api_exceptions
+except ImportError:  # pragma: no cover
+    _google_api_exceptions = None
+
+_GOOGLE_TRANSIENT_ERRORS: tuple = ()
+if _google_api_exceptions is not None:
+    _GOOGLE_TRANSIENT_ERRORS = tuple(
+        exc_cls
+        for exc_cls in (
+            getattr(_google_api_exceptions, name, None)
+            for name in (
+                "ServiceUnavailable",
+                "InternalServerError",
+                "DeadlineExceeded",
+                "GatewayTimeout",
+                "TooManyRequests",
+                "ResourceExhausted",
+                "Aborted",
+            )
+        )
+        if exc_cls is not None
+    )
+
 
 def _is_retryable_error(exc: Exception) -> bool:
     """Return True if *exc* is a transient error worth retrying.
@@ -65,16 +91,35 @@ def _is_retryable_error(exc: Exception) -> bool:
         # Anthropic SDK errors (use getattr for safety in case SDK version differs)
         anthropic_rate_limit = getattr(anthropic, "RateLimitError", None)
         anthropic_timeout = getattr(anthropic, "APITimeoutError", None)
+        anthropic_connection = getattr(anthropic, "APIConnectionError", None)
+        anthropic_internal = getattr(anthropic, "InternalServerError", None)
+        anthropic_overloaded = getattr(anthropic, "OverloadedError", None)
+        anthropic_status = getattr(anthropic, "APIStatusError", None)
         anthropic_auth = getattr(anthropic, "AuthenticationError", None)
         anthropic_bad_request = getattr(anthropic, "BadRequestError", None)
         if anthropic_rate_limit and isinstance(candidate, anthropic_rate_limit):
             return True
         if anthropic_timeout and isinstance(candidate, anthropic_timeout):
             return True
+        if anthropic_connection and isinstance(candidate, anthropic_connection):
+            return True
+        if anthropic_internal and isinstance(candidate, anthropic_internal):
+            return True
+        if anthropic_overloaded and isinstance(candidate, anthropic_overloaded):
+            return True
+        if anthropic_status and isinstance(candidate, anthropic_status):
+            # 5xx server errors are retryable; 4xx client errors are not
+            status = getattr(candidate, "status_code", None) or 0
+            if status >= 500:
+                return True
         if anthropic_auth and isinstance(candidate, anthropic_auth):
             return False
         if anthropic_bad_request and isinstance(candidate, anthropic_bad_request):
             return False
+
+        # Google API core transient errors (rate limit, 5xx, deadline exceeded)
+        if _GOOGLE_TRANSIENT_ERRORS and isinstance(candidate, _GOOGLE_TRANSIENT_ERRORS):
+            return True
 
         # httpx timeouts
         if isinstance(candidate, httpx.TimeoutException):

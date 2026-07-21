@@ -2206,3 +2206,149 @@ def test_construction_gallery_keeps_cone_on_ground_for_fallback(
 
     final_calls = [c for c in engine.calls if c["template_id"] == "road_construction_detection"]
     assert len(final_calls) == 1
+
+
+def test_far_enhancement_failure_returns_negative_for_enabled_events(make_agent) -> None:
+    """When the far-enhancement flow fails, any template with far_object_enhancement
+    enabled must return a negative candidate instead of falling back to raw frames."""
+    agent, engine = make_agent({})
+
+    with patch.object(agent, "_detect_with_far_enhancement", return_value=None):
+        candidate = agent.detect(_make_analysis_context())
+
+    assert candidate.detected is False
+    assert candidate.event_id == 4
+    assert "增强检测失败" in candidate.summary
+    # The direct VLM call with raw frames must not happen.
+    final_calls = [
+        c for c in engine.calls if c["template_id"] == "non_motor_vehicle_detection"
+    ]
+    assert len(final_calls) == 0
+
+
+def test_top_k_zero_returns_negative_without_index_error(
+    make_agent, config_manager, non_motor_category, analysis_context
+) -> None:
+    """top_k <= 0 yields an empty top-candidate list; must not raise IndexError."""
+    template = config_manager.get_prompt_template(non_motor_category.prompt_template_id)
+    template.far_object_enhancement.top_k = 0
+    agent, _ = make_agent(
+        {
+            "far_non_motor_roi_detection": [
+                _roi_response([0.50, 0.50, 0.65, 0.70], "frame 0 distant target"),
+                _roi_response(None, "no candidate frame 1"),
+                _roi_response(None, "no candidate frame 2"),
+            ],
+        }
+    )
+
+    candidate = _detect_with_patched_dir(agent, analysis_context)
+
+    assert candidate.detected is False
+    assert candidate.event_id == 4
+    assert "未检测到" in candidate.summary
+
+
+def test_final_classifier_string_false_detected_stays_negative(
+    make_agent, analysis_context
+) -> None:
+    """Regression: detected='false' (string) must not evaluate to True."""
+    agent, _ = make_agent(
+        {
+            "far_non_motor_roi_detection": [
+                _roi_response(
+                    [0.50, 0.50, 0.65, 0.70],
+                    "frame 0 distant target",
+                    occluded=True,
+                ),
+                _roi_response(None, "no candidate frame 1"),
+                _roi_response(None, "no candidate frame 2"),
+            ],
+            "non_motor_vehicle_detection": [
+                {"detected": "false", "reason": "红框内为路侧设备箱，不是非机动车"},
+            ],
+        }
+    )
+
+    candidate = _detect_with_patched_dir(agent, analysis_context)
+
+    assert candidate.detected is False
+    assert candidate.event_id == 4
+
+
+def test_pedestrian_final_classifier_tolerates_malformed_instances(
+    make_agent, pedestrian_category, analysis_context
+) -> None:
+    """Malformed instance entries must not crash the pedestrian branch."""
+    agent, _ = make_agent(
+        {
+            "far_pedestrian_roi_detection": [
+                _roi_response(
+                    [0.50, 0.50, 0.55, 0.75],
+                    "frame 0 distant pedestrian",
+                    confidence=0.90,
+                ),
+                _roi_response(None, "no candidate frame 1"),
+                _roi_response(None, "no candidate frame 2"),
+            ],
+            "pedestrian_detection": [
+                _pedestrian_final_response(
+                    True,
+                    "第0帧红框内为一名站立行人",
+                    instances=[
+                        None,
+                        {
+                            "start_time_sec": None,
+                            "end_time_sec": None,
+                            "evidence_frames": "junk",
+                            "description": "应急车道边缘站立行人",
+                            "reasoning": "红框内可见直立人形轮廓",
+                        },
+                    ],
+                ),
+            ],
+        },
+        category=pedestrian_category,
+    )
+
+    candidate = _detect_with_patched_dir(agent, analysis_context)
+
+    assert candidate.detected is True
+    assert len(candidate.instances) == 1
+    assert candidate.instances[0].start_time_sec == 0.0
+    assert candidate.instances[0].end_time_sec == 0.0
+    assert candidate.instances[0].evidence_frames == [0, 1]
+
+
+def test_pedestrian_final_classifier_tolerates_non_list_instances(
+    make_agent, pedestrian_category, analysis_context
+) -> None:
+    """A non-list instances field is treated as empty, not iterated as keys."""
+    agent, _ = make_agent(
+        {
+            "far_pedestrian_roi_detection": [
+                _roi_response(
+                    [0.50, 0.50, 0.55, 0.75],
+                    "frame 0 distant pedestrian",
+                    confidence=0.90,
+                ),
+                _roi_response(None, "no candidate frame 1"),
+                _roi_response(None, "no candidate frame 2"),
+            ],
+            "pedestrian_detection": [
+                _pedestrian_final_response(
+                    True,
+                    "第0帧红框内为一名站立行人",
+                    instances={"start_time_sec": 0.0},
+                ),
+            ],
+        },
+        category=pedestrian_category,
+    )
+
+    candidate = _detect_with_patched_dir(agent, analysis_context)
+
+    assert candidate.detected is True
+    assert len(candidate.instances) == 1
+    assert candidate.instances[0].description == "第0帧红框内为一名站立行人"
+    assert candidate.instances[0].evidence_frames == [0, 1]

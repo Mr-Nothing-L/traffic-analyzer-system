@@ -98,7 +98,7 @@ class ConfigManager:
         # --- event_categories YAML ---
         try:
             raw_event_categories = self._load_yaml("event_categories")
-        except (FileNotFoundError, ValueError):
+        except (FileNotFoundError, ValueError, yaml.YAMLError):
             raise  # critical config missing or malformed — must fail fast
         except Exception as exc:
             logger.error(
@@ -112,7 +112,7 @@ class ConfigManager:
         # --- prompt_templates YAML (split directory with fallback) ---
         try:
             raw_prompt_templates, prompt_files_loaded = self._load_prompt_templates()
-        except (FileNotFoundError, ValueError):
+        except (FileNotFoundError, ValueError, yaml.YAMLError):
             raise  # critical config missing or malformed — must fail fast
         except Exception as exc:
             logger.error(
@@ -135,11 +135,16 @@ class ConfigManager:
             )
             llm_providers = [LLMProviderConfig()]
 
-        # Build lookup tables
-        self._event_categories = {
-            cat["event_id"]: EventCategory.model_validate(cat)
-            for cat in raw_event_categories.get("event_categories", [])
-        }
+        # Build lookup tables; duplicate event_ids would silently overwrite each
+        # other and misalign the binary encoding, so fail fast instead.
+        self._event_categories = {}
+        for cat in raw_event_categories.get("event_categories", []):
+            event_id = cat["event_id"]
+            if event_id in self._event_categories:
+                raise ValueError(
+                    f"Duplicate event_id {event_id} in {self._YAML_FILES['event_categories']}"
+                )
+            self._event_categories[event_id] = EventCategory.model_validate(cat)
 
         # Load cross-event inference rules
         self._inference_rules = {
@@ -147,11 +152,16 @@ class ConfigManager:
             for rule in raw_event_categories.get("cross_event_inference_rules", [])
         }
 
-        # Load adjudication rules
-        self._adjudication_rules = {
-            rule["rule_id"]: AdjudicationRule.model_validate(rule)
-            for rule in raw_event_categories.get("adjudication_rules", [])
-        }
+        # Load adjudication rules; duplicate rule_ids would silently overwrite
+        # each other, so fail fast instead.
+        self._adjudication_rules = {}
+        for rule in raw_event_categories.get("adjudication_rules", []):
+            rule_id = rule["rule_id"]
+            if rule_id in self._adjudication_rules:
+                raise ValueError(
+                    f"Duplicate adjudication rule_id '{rule_id}' in {self._YAML_FILES['event_categories']}"
+                )
+            self._adjudication_rules[rule_id] = AdjudicationRule.model_validate(rule)
 
         # Group prompt templates by template_id to support multiple versions
         self._prompt_templates: Dict[str, Dict[str, PromptTemplate]] = {}
@@ -177,11 +187,16 @@ class ConfigManager:
                 system_kwargs["scene_understanding_min_frames"] = int(su_min_frames)
             except ValueError:
                 logger.warning("Invalid SCENE_UNDERSTANDING_MIN_FRAMES value '%s', using default", su_min_frames)
+                # Pass the SystemConfig field default (models/config.py) explicitly;
+                # otherwise the field default_factory would re-parse the invalid
+                # env value and crash.
+                system_kwargs["scene_understanding_min_frames"] = 10
         if vlm_max_frames is not None:
             try:
                 system_kwargs["vlm_max_frames"] = int(vlm_max_frames)
             except ValueError:
                 logger.warning("Invalid VLM_MAX_FRAMES value '%s', using default", vlm_max_frames)
+                system_kwargs["vlm_max_frames"] = 10
         if expert_enable_reflection is not None:
             system_kwargs["expert_enable_reflection"] = expert_enable_reflection.lower() in ("1", "true", "yes", "on")
 
@@ -357,8 +372,16 @@ class ConfigManager:
         2. Every ``EventCategory`` with ``detection_mode == expert_agent`` has a
            valid ``prompt_template_id``.
         3. Cross-event inference rules reference valid event IDs.
-        4. Adjudication rules have valid priorities and unique IDs.
+        4. Adjudication rules have valid priorities (duplicate rule_ids already
+           fail at load time).
         5. Prompt template A/B traffic percentages sum to 100%.
+        6. Tools referenced in event categories exist in prompt templates;
+           active categories declaring tools are rejected because the tool
+           registry currently registers none.
+        7. Event IDs are continuous from 0 — inactive categories included, since
+           they still occupy a bit in the binary encoding.
+        8. Active categories use ``expert_agent``, the only detection mode with
+           an execution path.
 
         Returns:
             A list of human-readable error messages. An empty list indicates a
@@ -449,14 +472,8 @@ class ConfigManager:
                     f"Inference rule '{rule.rule_id}' has empty source_description_keywords."
                 )
 
-        # 4. Adjudication rule validation
-        adjudication_rule_ids: set[str] = set()
+        # 4. Adjudication rule validation (duplicate rule_ids fail at load time)
         for rule in self._adjudication_rules.values():
-            if rule.rule_id in adjudication_rule_ids:
-                errors.append(
-                    f"Adjudication rule_id '{rule.rule_id}' is duplicated."
-                )
-            adjudication_rule_ids.add(rule.rule_id)
             if rule.priority < 0 or rule.priority > 1000:
                 errors.append(
                     f"Adjudication rule '{rule.rule_id}' has priority {rule.priority} "
@@ -484,6 +501,13 @@ class ConfigManager:
         # 6. Validate tools referenced in event categories exist in prompt templates
         for cat in self._event_categories.values():
             if cat.tools:
+                if cat.is_active:
+                    # The tool registry registers no tools yet, so any declared
+                    # tools would silently do nothing.
+                    errors.append(
+                        f"EventCategory '{cat.name}' (id={cat.event_id}) declares tools "
+                        f"{cat.tools} but the tool registry is empty; declared tools have no effect."
+                    )
                 if cat.prompt_template_id:
                     template_versions = self._prompt_templates.get(cat.prompt_template_id, {})
                     if template_versions:
@@ -501,6 +525,25 @@ class ConfigManager:
                             f"EventCategory '{cat.name}' (id={cat.event_id}) has tools {cat.tools} "
                             f"but prompt template '{cat.prompt_template_id}' not found."
                         )
+
+        # 7. Event IDs must be continuous from 0; a gap silently shrinks the
+        # binary encoding width and drops higher events from the encoding.
+        # Inactive categories still occupy a bit, so all categories count.
+        sorted_ids = sorted(self._event_categories.keys())
+        if sorted_ids != list(range(len(sorted_ids))):
+            errors.append(
+                f"event_categories.yaml event_ids must be continuous from 0, got {sorted_ids}."
+            )
+
+        # 8. Only expert_agent has an execution path; an active category using
+        # any other detection mode would silently pin its encoding bit to 0.
+        for cat in self._event_categories.values():
+            if cat.is_active and cat.detection_mode.value != "expert_agent":
+                errors.append(
+                    f"EventCategory '{cat.name}' (id={cat.event_id}) is active but uses "
+                    f"detection_mode={cat.detection_mode.value}; only expert_agent is "
+                    f"currently implemented."
+                )
 
         return errors
 
@@ -831,7 +874,10 @@ class ConfigManager:
             return [self._build_llm_config_from_env(env, prefix=None)]
 
         providers: List[LLMProviderConfig] = []
-        for i in range(max(indices) + 1):
+        # Only build providers for indices that are actually defined; iterating
+        # 0..max would fabricate an empty default provider for each gap (e.g.
+        # only LLM_PROVIDER_1_* set -> phantom anthropic provider at index 0).
+        for i in sorted(indices):
             providers.append(
                 self._build_llm_config_from_env(env, prefix=f"LLM_PROVIDER_{i}")
             )

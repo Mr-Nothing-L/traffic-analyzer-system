@@ -16,6 +16,28 @@ from traffic_analyzer.models.schemas import (
 logger = logging.getLogger(__name__)
 
 
+def _parse_strict_bool(value: Any) -> bool:
+    """Strict boolean normalization for VLM outputs.
+
+    Only ``True`` or the string ``'true'`` (case-insensitive, stripped) is
+    treated as True; everything else is False. This prevents the classic
+    ``bool('false') is True`` false positive.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() == "true"
+    return False
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    """Convert *value* to float, falling back to *default* on malformed input."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 # JSON schema for the expert-response reflection step.
 # Mirrors _EXPERT_RESPONSE_SCHEMA but is intentionally local so that
 # event_detection.py does not depend on expert_agent internals.
@@ -146,7 +168,7 @@ def reflect_expert_candidate(
 
     # Update detected flag if present.
     if "detected" in data:
-        candidate.detected = bool(data["detected"])
+        candidate.detected = _parse_strict_bool(data["detected"])
 
     # Update summary if provided, preserving original if empty/missing.
     if data.get("summary"):
@@ -166,8 +188,8 @@ def reflect_expert_candidate(
                 EventInstance(
                     event_id=category.event_id,
                     event_name=category.name_zh,
-                    start_time_sec=float(inst.get("start_time_sec", 0.0)),
-                    end_time_sec=float(inst.get("end_time_sec", 0.0)),
+                    start_time_sec=_safe_float(inst.get("start_time_sec", 0.0)),
+                    end_time_sec=_safe_float(inst.get("end_time_sec", 0.0)),
                     evidence_frames=[int(f) for f in evidence_frames if isinstance(f, (int, float))],
                     description=str(inst.get("description", "")),
                     reasoning=str(inst.get("reasoning", "")),
@@ -195,65 +217,6 @@ def reflect_expert_candidate(
     return candidate
 
 
-def _sanitize_candidate(candidate: EventCandidate) -> EventCandidate:
-    """Post-process candidate to fix common VLM inconsistencies.
-
-    Handles the case where VLM outputs detected=true but the summary or
-    all instance reasonings explicitly deny the event.
-    """
-    if not candidate.detected:
-        return candidate
-
-    summary = candidate.summary or ""
-    instances = candidate.instances
-
-    # Case 1: detected=true but summary explicitly says "not detected"
-    denial_markers = ["未检测到", "没有检测到", "未出现", "不存在"]
-    if any(m in summary for m in denial_markers) and not instances:
-        logger.warning(
-            "[sanitize] AUTO_CORRECT detected=true→false | event_id=%d event_name=%s | "
-            "summary denies detection and no instances",
-            candidate.event_id,
-            candidate.event_name,
-        )
-        candidate.detected = False
-        return candidate
-
-    # Case 2: detected=true but every instance reasoning ends with "正常"
-    # (e.g. "...一致 → 正常" or "...未进入应急车道")
-    if instances:
-        all_normal = True
-        for inst in instances:
-            reasoning = inst.reasoning or ""
-            # If any instance clearly confirms the event, keep detected=true
-            if reasoning and (
-                "逆行" in reasoning
-                or "违停" in reasoning
-                or "停车" in reasoning
-                or "事故" in reasoning
-                or "占用" in reasoning
-                or "施工" in reasoning
-                or "拥堵" in reasoning
-                or "抛洒" in reasoning
-                or "变道" in reasoning
-                or "行人" in reasoning
-                or "摩托" in reasoning
-            ):
-                all_normal = False
-                break
-        if all_normal:
-            logger.warning(
-                "[sanitize] AUTO_CORRECT detected=true→false | event_id=%d event_name=%s | "
-                "all instance reasonings describe normal conditions",
-                candidate.event_id,
-                candidate.event_name,
-            )
-            candidate.detected = False
-            return candidate
-
-    return candidate
-
-
 def select_event_images(context: AnalysisContext, vlm_max_frames: int) -> List[Any]:
     """Select up to *vlm_max_frames* coarse keyframes (evenly distributed) for VLM detection."""
     images: List[Any] = []
@@ -264,8 +227,13 @@ def select_event_images(context: AnalysisContext, vlm_max_frames: int) -> List[A
 
     coarse = context.keyframes.coarse_frames
     if len(coarse) > max_frames:
-        indices = [int(i * (len(coarse) - 1) / (max_frames - 1)) for i in range(max_frames)]
-        selected = [coarse[i] for i in indices]
+        if max_frames <= 1:
+            # Degenerate config (e.g. VLM_MAX_FRAMES=1): take the middle frame
+            # instead of dividing by (max_frames - 1) == 0.
+            selected = [coarse[len(coarse) // 2]]
+        else:
+            indices = [int(i * (len(coarse) - 1) / (max_frames - 1)) for i in range(max_frames)]
+            selected = [coarse[i] for i in indices]
     else:
         selected = coarse
 
@@ -282,22 +250,42 @@ def parse_expert_response(response: Any, category: EventCategory) -> EventCandid
     """
     if response.success and isinstance(response.parsed_data, dict):
         data = response.parsed_data
-        detected = bool(data.get("detected", False))
+        detected = _parse_strict_bool(data.get("detected", False))
         instances_data = data.get("instances", [])
         instances = []
         if isinstance(instances_data, list):
             for inst in instances_data:
-                if isinstance(inst, dict):
+                if not isinstance(inst, dict):
+                    logger.warning(
+                        "[parse_expert_response] MALFORMED_INSTANCE | event_id=%d event_name=%s | not an object: %r",
+                        category.event_id,
+                        category.name_zh,
+                        inst,
+                    )
+                    continue
+                evidence_frames = inst.get("evidence_frames", [])
+                if not isinstance(evidence_frames, list):
+                    evidence_frames = []
+                try:
                     instances.append(
                         EventInstance(
                             event_id=category.event_id,
                             event_name=category.name_zh,
-                            start_time_sec=float(inst.get("start_time_sec", 0.0)),
-                            end_time_sec=float(inst.get("end_time_sec", 0.0)),
-                            evidence_frames=inst.get("evidence_frames", []),
+                            start_time_sec=_safe_float(inst.get("start_time_sec", 0.0)),
+                            end_time_sec=_safe_float(inst.get("end_time_sec", 0.0)),
+                            evidence_frames=[
+                                int(f) for f in evidence_frames if isinstance(f, (int, float))
+                            ],
                             description=str(inst.get("description", "")),
                             reasoning=str(inst.get("reasoning", "")),
                         )
+                    )
+                except (TypeError, ValueError) as exc:
+                    logger.warning(
+                        "[parse_expert_response] MALFORMED_INSTANCE | event_id=%d event_name=%s | %s",
+                        category.event_id,
+                        category.name_zh,
+                        exc,
                     )
         candidate = EventCandidate(
             event_id=category.event_id,
@@ -308,7 +296,7 @@ def parse_expert_response(response: Any, category: EventCategory) -> EventCandid
             raw_vlm_response=data,
             raw_vlm_text=response.raw_text if hasattr(response, "raw_text") else "",
         )
-        return _sanitize_candidate(candidate)
+        return candidate
 
     return EventCandidate(
         event_id=category.event_id,

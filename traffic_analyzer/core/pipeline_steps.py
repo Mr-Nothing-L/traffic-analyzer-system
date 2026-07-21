@@ -518,8 +518,8 @@ class AdjudicationStep(PipelineStep):
         event_results: List[EventResult] = []
         present_active_ids: set[int] = set()
         for er in data.get("event_results", []):
-            eid = er.get("event_id", 0)
-            if eid not in active_event_ids:
+            eid = er.get("event_id")
+            if not isinstance(eid, int) or eid not in active_event_ids:
                 continue
             present_active_ids.add(eid)
             candidate = context.event_candidates.get(eid)
@@ -622,8 +622,8 @@ class AdjudicationStep(PipelineStep):
         # Filter audit_log to active event IDs only
         audit_log: List[AuditEntry] = []
         for entry in data.get("audit_log", []):
-            eid = entry.get("event_id", 0)
-            if eid not in active_event_ids:
+            eid = entry.get("event_id")
+            if not isinstance(eid, int) or eid not in active_event_ids:
                 continue
             audit_log.append(
                 AuditEntry(
@@ -642,15 +642,15 @@ class AdjudicationStep(PipelineStep):
         reasoning_chain: List[Dict[str, Any]] = []
         for rc in data.get("reasoning_chain", []):
             if isinstance(rc, dict):
-                eid = rc.get("event_id", 0)
-                if eid not in active_event_ids:
+                eid = rc.get("event_id")
+                if not isinstance(eid, int) or eid not in active_event_ids:
                     continue
                 reasoning_chain.append({
                     "event_id": eid,
-                    "event_name": rc.get("event_name", ""),
-                    "decision": rc.get("decision", ""),
-                    "thought_process": rc.get("thought_process", ""),
-                    "basis": rc.get("basis", ""),
+                    "event_name": str(rc.get("event_name") or ""),
+                    "decision": str(rc.get("decision") or ""),
+                    "thought_process": str(rc.get("thought_process") or ""),
+                    "basis": str(rc.get("basis") or ""),
                 })
 
         logger.info(

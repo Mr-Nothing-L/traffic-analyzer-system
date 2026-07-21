@@ -2,443 +2,426 @@
 
 # Traffic Analyzer
 
-A multi-modal large vision model (VLM) based traffic event detection framework for highway surveillance video. Supports **10 event categories** (currently **8 active**: 0-7), outputs a 10-bit binary encoding plus a detailed Markdown analysis report. All event definitions, prompt templates, and adjudication rules are driven by YAML configuration — adding a new event requires zero code changes.
+VLM (vision-language model) based traffic event detection for highway surveillance
+video. Input: a video clip. Output: a **10-bit binary event code** plus a structured
+analysis report (JSON or Markdown). Event definitions, prompts, adjudication rules,
+and thresholds are all YAML-driven — adding or tuning an event needs no code changes.
 
-> **Current version: v4.0.0** — VLM multi-agent expert + adjudication architecture, with far-distance ROI evidence enhancement for pedestrians, non-motor vehicles, and road construction. The tool-layer framework is retained but currently has no built-in tools.
+**Current version: 4.0.0** — parallel ExpertAgent layer + single-call adjudication, with
+far-distance ROI evidence enhancement and a reflection consistency check per candidate.
 
----
+## Overview
 
-## Architecture Overview (v4.0.0)
+Each video runs through a four-step pipeline:
 
-```
-Video Input
-    |
-    v
-1. Video Preprocessing
-   - Coarse sampling + precision keyframe extraction
-   - Two-stage sampling (dense early + uniform late)
-    |
-    v
-2. ExpertAgentLayer (parallel ExpertAgents for active events)
-   Each ExpertAgent: single-event VLM call -> EventCandidate
-   - Only fact identification (see it, report it)
-   - event_id=3 (Person Presence), event_id=4 (Motorcycle Presence), and
-     event_id=6 (Road Construction) use far-distance ROI evidence
-     enhancement when enabled in the prompt template:
-       * event_id=3/4: per-frame ROI detection -> dual composite
-         (single-frame + motion comparison) -> final classifier
-       * event_id=6: middle-frame multi-ROI gallery -> final classifier
-    |
-    v
-3. AdjudicationStep (single VLM call, with retry loop)
-   Input: all EventCandidates + keyframes + business rules + annotation spec
-   Output: final EventResults + AuditLog
-   - Resolves conflicts (e.g. accident suppresses parking)
-   - Applies business rules from YAML
-   - Retries up to 5 times if event_results are incomplete
-    |
-    v
-4. Report Generation
-   - Markdown report (human-readable, per-step timing)
-   - JSON report
-   - Binary encoding {bit_0_bit_1_..._bit_9}
-   - Audit log of every inclusion / exclusion decision
-```
-
-The default inference pipeline is **VLM-driven**. The tool-layer framework (Tool Schema + Tool Router) is retained for future extensions, but currently has no built-in tools.
-
----
-
-## Supported Events
-
-The following events are `is_active=true`. Event slots 8 and 9 are preserved in the binary encoding but are skipped during inference.
-
-| ID | Code | Name | is_active |
-|---|---|---|---|
-| 0 | A | Illegal Parking | true |
-| 1 | B | Emergency Lane Occupancy | true |
-| 2 | C | Traffic Accident | true |
-| 3 | D | Person Presence in Highway | true |
-| 4 | E | Motorcycle Presence | true |
-| 5 | F | Heavy Congestion | true |
-| 6 | G | Road Construction | true |
-| 7 | H | Vehicle Reversing | true |
-
-Events 8 (Thrown Objects) and 9 (Lane Change over Solid Line) are currently inactive.
-
----
+1. **Video preprocessing** — metadata extraction, optional quality prefilter (may
+   reject), then fixed-FPS frame extraction. Zero usable frames also rejects.
+2. **Expert Agent layer** — one `ExpertAgent` per active event category, run in parallel
+   (`ThreadPoolExecutor`); each reports only facts ("see it, report it"). Events with
+   far-object enhancement use a multi-stage ROI pipeline; every candidate passes an
+   optional reflection check.
+3. **Adjudication** — a single VLM call rules on all candidates with business rules and
+   the annotation spec, producing final per-event results plus an audit log (with a
+   retry loop for missing results).
+4. **Report generation** — per-event results, binary encoding, audit log, token usage,
+   rendered as JSON or Markdown.
 
 ## Key Features
 
-### 1. Expert Agent Layer
-
-Each active event gets its own **ExpertAgent** — a dedicated VLM call with a specialized prompt. Agents run in parallel via `ThreadPoolExecutor`. Each agent only performs **fact identification** (what it sees) without any filtering. This separation of concerns makes the system modular and debuggable.
-
-### 2. Far-Distance ROI Evidence Enhancement
-
-Events with `far_object_enhancement.enabled: true` in their prompt template use a dedicated ROI-driven enhancement flow. This is currently enabled for:
-
-- **event_id=3 (Person Presence in Highway)** — per-frame ROI detection returns a normalized bbox, occlusion flag, and a continuous `confidence` in `[0.0, 1.0]`. Top-K candidates are scored by confidence, area, aspect ratio, occlusion, and adjacent-frame motion, then passed through dual composites (single-frame zoom + adjacent-frame motion comparison) to a final classifier that returns a full expert response.
-- **event_id=4 (Motorcycle Presence)** — same per-frame ROI and dual-composite pipeline as event_id=3, specialized for motorcycles/electric bikes/bicycles/tricycles. The final classifier uses a minimal `{detected, reason}` schema and includes a "no identifiable vehicle structure" veto to avoid false positives from dark spots or glare.
-- **event_id=6 (Road Construction)** — uses a **multi-ROI gallery** from the middle frame. The ROI detector returns multiple evidence regions (`cone`, `worker`, `vehicle`, `barrier`, `sign`) with confidence and `on_ground` flags. Up to four regions are arranged into an annotated gallery composite, which is then classified. A construction-specific fallback promotes the candidate when the detected regions satisfy the work-zone definition even if the classifier is negative.
-
-For event_id=3 and event_id=4, a high-confidence, non-occluded candidate can be promoted when the classifier is negative but the ROI evidence is strong. The stage-2 motion-comparison prompt has been refined: if the target is no longer visible in adjacent frames, that absence actually supports a moving non-motor vehicle; static dark spots or glare points should be excluded.
-
-### 3. Adjudication Step
-
-A **single VLM call** receives all expert candidates, keyframes, and business rules, then outputs:
-- Final `EventResult` for each event (detected / not detected)
-- `AuditLog` recording every inclusion / exclusion decision with reasoning
-- `adjudication_reasoning` explaining the overall decision process
-
-Business rules are defined in `event_categories.yaml` under `adjudication_rules:`. Example rules:
-- **Accident suppresses parking** — stationary vehicles in an accident scene are part of the accident, not illegal parking
-- **Construction excludes emergency lane** — vehicles inside a construction zone are not emergency lane violations
-- **Motorcycle excludes emergency lane** — a motorcycle on the shoulder is tagged as "motorcycle presence", not "emergency lane occupancy"
-
-### 4. Audit Log
-
-Every event that is excluded during adjudication is recorded with a reason and the triggering rule ID. This makes the system transparent and helps debug false negatives.
-
-```json
-{
-  "event_id": 0,
-  "event_name": "Illegal Parking",
-  "action": "excluded",
-  "reason": "Vehicle is part of an accident scene",
-  "rule_id": "accident_suppresses_parking"
-}
-```
-
-### 5. Config-Driven Design
-
-All of the following are defined in YAML — no code changes needed:
-- Event definitions (`event_categories.yaml`)
-- Prompt templates (`prompts/*.yaml`)
-- Adjudication rules (`event_categories.yaml`)
-- Annotation spec (`annotation_spec.yaml`)
-
-### 6. Adjudication Retry Loop
-
-The adjudication step runs in a loop of up to **5 attempts**. If the adjudicator's `event_results` are incomplete, the system:
-- Checks whether the corresponding expert outputs are abnormal; if so, re-runs only those experts.
-- Otherwise, re-runs adjudication with a prompt hint listing the events it previously omitted.
-- After 5 attempts, any still-missing events are backfilled from the original expert candidates.
-
-This makes the pipeline robust against sporadic VLM omissions without discarding good expert signals.
-
-### 7. JSON Repair & Sanitization
-
-VLM outputs are automatically hardened before parsing:
-- `_repair_json` in `vlm_response_parser.py` fixes common syntax errors such as missing commas and trailing commas.
-- `_sanitize_candidate` in `event_detection.py` reconciles inconsistent expert outputs (e.g. `detected=true` paired with content that denies the event).
-
----
-
-## Project Structure
-
-```
-traffic_analyzer/
-├── config/
-│   ├── annotation_spec.yaml       # Annotation spec injected into adjudication prompt
-│   ├── event_categories.yaml      # Event definitions + adjudication_rules
-│   ├── prompts/                   # VLM prompt templates (event_*.yaml + common.yaml)
-│   └── .env.example               # Example LLM provider config
-├── core/
-│   ├── config_manager.py          # Config loading, validation
-│   ├── expert_agent.py            # Compatibility shim for single-event detection agents
-│   ├── expert_agent_far_enhancement.py  # Far-distance ROI evidence enhancement
-│   ├── expert_agent_tools.py      # Tool helpers for expert agents
-│   ├── pipeline_steps.py          # ExpertAgentLayer + AdjudicationStep (with retry loop)
-│   ├── report_generator.py        # Compatibility shim for report generation
-│   ├── report_markdown_renderer.py      # Markdown report rendering
-│   ├── report_far_enhancement_renderer.py  # Far-enhancement section rendering
-│   ├── report_text_utils.py       # Report text formatting utilities
-│   ├── video_preprocessor.py      # Video frame extraction
-│   ├── vlm_engine.py              # Compatibility shim for VLM wrapper
-│   ├── vlm_cache.py               # In-memory + disk VLM result cache
-│   ├── vlm_response_parser.py     # VLM response parsing + JSON repair
-│   ├── vlm_provider_clients.py    # Provider-specific API clients
-│   ├── vlm_error_classifier.py    # Classify API errors for failover decisions
-│   └── vlm_exceptions.py          # VLM-related exceptions
-├── models/
-│   ├── schemas.py                 # Compatibility shim re-exporting all Pydantic models
-│   ├── enums.py                   # DetectionMode, ConfidenceLevel
-│   ├── video.py                   # VideoMetadata, Keyframe, KeyframeSequence
-│   ├── scene.py                   # SceneInfo, RoadInfo, DirectionAnalysis, ...
-│   ├── event.py                   # EventCategory, EventCandidate, EventResult, AuditEntry, ...
-│   ├── llm.py                     # LLMResponse, LLMCallRecord, PromptTemplate, ...
-│   ├── report.py                  # Report, BinaryEncoding
-│   ├── config.py                  # SystemConfig, LLMProviderConfig, SamplingConfig
-│   └── context.py                 # AnalysisContext
-├── orchestrator/
-│   ├── analysis_orchestrator.py   # Main 4-step pipeline orchestrator
-│   ├── orchestrator_exceptions.py # Orchestrator-specific exceptions
-│   ├── video_meta_extractor.py    # Video metadata extraction
-│   ├── reject_report_factory.py   # Reject report generation
-│   └── candidate_fallback.py      # Candidate fallback helpers
-├── tools/
-│   ├── tool_schema.py             # Tool Definition Layer
-│   ├── tool_router.py             # Tool Router Layer
-│   └── tool_registry.py           # Default router registration (currently no built-in tools)
-├── utils/
-│   ├── event_detection.py         # Image selection + response parsing + candidate sanitization
-│   ├── far_non_motor_enhancer.py  # Far-distance non-motor vehicle enhancement utilities
-│   ├── roi_composite.py           # ROI composite image generation
-│   ├── roi_motion.py              # ROI motion analysis
-│   ├── bbox_geometry.py           # Bounding-box geometry helpers
-│   ├── image_drawing.py           # Image annotation helpers
-│   ├── annotation_spec_loader.py  # Annotation spec loading
-│   ├── construction_evidence_gallery.py  # Construction-event evidence gallery
-│   └── tool_call_logger.py        # Tool-call style logging
-├── cli.py                         # CLI entry point
-└── __main__.py                    # `python -m traffic_analyzer`
-```
-
----
+- **YAML-driven events** — definitions, detection mode, prompt references, thresholds,
+  and adjudication rules live in `traffic_analyzer/config/event_categories.yaml`;
+  prompts live in `traffic_analyzer/config/prompts/*.yaml`. Inactive events keep their
+  bit in the encoding but are skipped (always report 0).
+- **Expert-agent detection** — the only detection mode with an execution path. One
+  specialist prompt per event; agents run in parallel and return structured
+  `EventCandidate` objects (detected flag, summary, time-bounded instances).
+- **Far-object enhancement** — events with `far_object_enhancement.enabled: true` in
+  their prompt template (currently events **1, 3, 4, 6**) use a multi-stage ROI
+  pipeline: ROI detection → evidence compositing → final classifier.
+- **Reflection consistency check** — each candidate is re-checked by a text-only VLM
+  pass (`expert_response_reflection` template) that corrects `detected` when it
+  contradicts the summary/instances. Fail-open; on by default.
+- **Multi-provider VLM with retry/failover** — Anthropic, Google, Aliyun; per-provider
+  retry with backoff; sticky failover on rate-limit/auth/quota/5xx errors; total
+  exhaustion aborts loudly (`FatalAPIError`) instead of emitting all-zero reports.
+- **Two-layer response cache** — in-memory LRU plus optional SQLite disk cache, keyed by
+  SHA-256 of prompt + images, filtered by provider + model; corrupt rows self-heal.
+- **Reject paths for bad videos** — prefilter failures or undecodable videos produce a
+  reject report, CLI exit code 2, and no output file.
+- **`validate-config` guardrails** — fail-fast duplicate-ID detection plus
+  cross-reference checks (see [Configuration](#configuration)).
 
 ## Quick Start
 
-### 1. Configure LLM Provider
+### Requirements
+
+- Python 3.10+ (Docker image uses 3.11)
+- `pip install -r requirements.txt` (runtime) and `pip install -r requirements-dev.txt` (tests)
+
+### 1. Configure the VLM provider
 
 ```bash
 cp traffic_analyzer/config/.env.example traffic_analyzer/config/.env
-# Edit .env, set API Key and model
+# edit .env: set API key(s) and model(s)
 ```
 
-LLM settings are read **only from `.env`** in the config directory, not from the shell environment. Two configuration styles are supported:
+LLM settings are read **only from `.env`** (config directory, or repo root as a legacy
+fallback) — shell environment variables for provider/key/model are ignored. See
+[VLM Providers & Caching](#vlm-providers--caching) for the variable list.
 
-**Single provider (backward-compatible):**
-
-| Variable | Description | Default |
-|---|---|---|
-| `VLM_PROVIDER` / `LLM_PROVIDER` | VLM provider (`anthropic` / `google` / `aliyun`) | `anthropic` |
-| `LLM_API_KEY` | API Key | - |
-| `LLM_MODEL` | Model name | `claude-sonnet-4-6` |
-
-**Multi-provider failover (recommended):**
-
-| Variable | Description | Example |
-|---|---|---|
-| `LLM_PROVIDER_0_PROVIDER` | Primary provider | `anthropic` |
-| `LLM_PROVIDER_0_API_KEY` | Primary API key | - |
-| `LLM_PROVIDER_0_MODEL` | Primary model | `claude-sonnet-4-6` |
-| `LLM_PROVIDER_1_PROVIDER` | Fallback provider | `aliyun` |
-| `LLM_PROVIDER_1_API_KEY` | Fallback API key | - |
-| `LLM_PROVIDER_1_MODEL` | Fallback model | `qwen-vl-max` |
-
-When indexed `LLM_PROVIDER_N_*` variables are present, they take precedence over the single-provider variables. The orchestrator uses provider 0 first; on quota, authentication, rate-limit, or 5xx errors it automatically fails over to provider 1 (and any additional numbered providers).
-
-Shared inference settings:
-
-| Variable | Description | Default |
-|---|---|---|
-| `LLM_MAX_TOKENS` | Max output tokens | `4096` |
-| `LLM_TEMPERATURE` | Sampling temperature | `0.2` |
-| `LLM_TIMEOUT` | API timeout (seconds) | `120` |
-| `LLM_MAX_RETRIES` | Max retry count per provider | `3` |
-| `LLM_ENABLE_CACHE` | Enable in-memory VLM result cache (per-process) | `true` |
-| `LLM_CACHE_MAX_SIZE` | Max in-memory cache entries | `128` |
-| `TRAFFIC_ANALYZER_DISK_CACHE` | Path to SQLite disk cache (cross-process) | - |
-| `TRAFFIC_ANALYZER_DISK_CACHE_MAX_ENTRIES` | Max disk cache entries | `2000` |
-| `VLM_MAX_FRAMES` | Max frames per VLM call | `10` |
-| `PROMPT_VERSION_{TEMPLATE_ID}` | Force a specific prompt version | - |
-
-### 2. Install pre-commit hook (recommended)
+### 2. Validate the configuration
 
 ```bash
-pip install pre-commit
-pre-commit install
+python3 -m traffic_analyzer validate-config --config-dir ./traffic_analyzer/config
 ```
 
-Automatically validates config changes on commit to prevent invalid YAML from being committed.
+A pre-commit hook runs this check on config changes (`pip install pre-commit && pre-commit
+install`, see `.pre-commit-config.yaml`).
 
-### 3. Validate Configuration
-
-```bash
-python3 -m traffic_analyzer validate-config \
-  --config-dir ./traffic_analyzer/config
-```
-
-### 4. Run Analysis
+### 3. Run analysis
 
 ```bash
-# Basic usage (default 10 frames)
+# Markdown report written to a file
 python3 -m traffic_analyzer analyze \
   --video ./path/to/video.mp4 \
   --format markdown \
-  --output ./report.md
+  --output ./output/report.md
 
-# More frames (better accuracy, slower)
+# JSON to stdout (default format), more frames per VLM call
 python3 -m traffic_analyzer analyze \
   --video ./path/to/video.mp4 \
-  --format markdown \
-  --output ./report.md \
-  --min-frames 30
+  --min-frames 20
 ```
 
-### 5. Python API
+`--min-frames N` sets both `SCENE_UNDERSTANDING_MIN_FRAMES` and `VLM_MAX_FRAMES` for the
+run (default: 10). Other flags: `--config-dir`, `--scene-understanding <json>` (inject a
+pre-computed `SceneInfo`), global `--log-level`.
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | Success; report written to `--output` or stdout |
+| 1 | Error: video/config not found, analysis crash, fatal API exhaustion |
+| 2 | Video rejected (prefilter failure or zero usable frames); **no report file is written** |
+
+### Python API
 
 ```python
 from traffic_analyzer.orchestrator.analysis_orchestrator import AnalysisOrchestrator
 
 orch = AnalysisOrchestrator.from_config_dir('traffic_analyzer/config')
 report = orch.analyze('path/to/video.mp4')
-print(report.binary_encoding.encoding_string)
-print(report.event_results)
+print(report.binary_encoding.encoding_string)   # e.g. 1_0_1_0_0_0_0_0_0_0
 ```
 
----
+## Code Structure
 
-## Batch Inference & Evaluation
+```
+traffic_analyzer/
+├── cli.py                              # argparse CLI: analyze / validate-config, exit codes
+├── __main__.py                         # enables `python -m traffic_analyzer`
+├── __init__.py                         # __version__ = "4.0.0"
+├── config/
+│   ├── event_categories.yaml           # Event definitions + adjudication_rules
+│   ├── annotation_spec.yaml            # Business annotation spec injected into adjudication
+│   ├── .env.example                    # Template for LLM provider / inference settings
+│   └── prompts/                        # 18 prompt templates in 11 YAML files
+│       ├── common.yaml                 # scene_understanding / reflection / adjudication templates
+│       └── event_0.yaml … event_9.yaml # Per-event expert prompts + ROI templates
+├── core/
+│   ├── config_manager.py               # Config loading (.env + YAML), validation, version selection
+│   ├── pipeline_steps.py               # PipelineStep base, ExpertAgentLayer, AdjudicationStep
+│   ├── expert_agent.py                 # ExpertAgent: single-event detection flow
+│   ├── expert_agent_far_enhancement.py # Far-distance ROI enhancement pipelines (events 1/3/4/6)
+│   ├── expert_agent_tools.py           # ToolCallExecutor (unused while registry is empty)
+│   ├── video_preprocessor.py           # Metadata, prefilter, fixed-FPS sampling + dedup
+│   ├── vlm_engine.py                   # VLMInferenceEngine: retry, failover, cache, usage stats
+│   ├── vlm_provider_clients.py         # Provider-specific payload builders + API calls
+│   ├── vlm_error_classifier.py         # Retryable / failover-trigger / fatal error rules
+│   ├── vlm_cache.py                    # DiskCache (SQLite) + cache-key computation
+│   ├── vlm_response_parser.py          # JSON extraction/repair from VLM text
+│   ├── vlm_exceptions.py               # VLM exception types
+│   ├── report_generator.py             # Report assembly + binary encoding
+│   ├── report_markdown_renderer.py     # Markdown report rendering (Chinese UI)
+│   ├── report_far_enhancement_renderer.py  # Far-enhancement evidence sections
+│   └── report_text_utils.py            # Report text formatting helpers
+├── models/
+│   ├── config.py                       # SystemConfig, LLMProviderConfig, SamplingConfig
+│   ├── event.py                        # EventCategory, EventCandidate, EventResult, AuditEntry
+│   ├── video.py                        # VideoMetadata, Keyframe, KeyframeSequence
+│   ├── scene.py                        # SceneInfo, RoadInfo, DirectionAnalysis, …
+│   ├── llm.py                          # LLMResponse, PromptTemplate, LLMCallRecord, …
+│   ├── report.py                       # Report, BinaryEncoding
+│   ├── context.py                      # AnalysisContext (shared pipeline state)
+│   ├── enums.py                        # DetectionMode, ConfidenceLevel
+│   └── schemas.py                      # Re-exports all model modules
+├── orchestrator/
+│   ├── analysis_orchestrator.py        # Main 4-step pipeline wiring (analyze())
+│   ├── video_meta_extractor.py         # Lightweight video metadata extraction
+│   ├── reject_report_factory.py        # Reject report construction
+│   ├── candidate_fallback.py           # Candidate → EventResult fallback conversion
+│   └── orchestrator_exceptions.py      # Orchestrator exception types
+├── tools/                              # RESERVED — schema/router exist, registry is empty
+│   ├── tool_schema.py                  # Tool definition layer
+│   ├── tool_router.py                  # Tool routing layer
+│   └── tool_registry.py                # Default router factory (registers zero tools)
+├── utils/
+│   ├── event_detection.py              # Image selection, response parsing, reflection check
+│   ├── emergency_lane_occupancy.py     # Event-1 evidence images (masks, boxes, zoom grids)
+│   ├── far_non_motor_enhancer.py       # Non-motor vehicle enhancement helpers
+│   ├── roi_composite.py                # ROI composite image generation
+│   ├── roi_motion.py                   # Adjacent-frame ROI motion analysis
+│   ├── construction_evidence_gallery.py# Event-6 multi-ROI evidence gallery
+│   ├── bbox_geometry.py                # Bounding-box geometry helpers
+│   ├── image_drawing.py                # Image annotation helpers
+│   ├── annotation_spec_loader.py       # annotation_spec.yaml → prompt text
+│   └── tool_call_logger.py             # tool_call trace logging
+└── tests/                              # pytest suite (unit + pipeline-level, VLM mocked)
+    ├── test_*.py                       # 16 test modules (CLI, config, engine, experts, reports)
+    └── tools/test_tool_router.py       # Tool router tests
 
-### Batch Inference (`scripts/batch_infer.py`)
+scripts/
+├── analyze.sh / infer.sh               # Example single-video CLI invocations
+├── batch_infer.py                      # Batch inference over a directory (see Testing)
+└── batch_evaluate.py                   # Ground-truth evaluation → HTML/MD/JSON report
 
-```bash
-python3 scripts/batch_infer.py \
-  --video-dir ./videos \
-  --output-dir ./reports \
-  --log-dir ./logs \
-  --workers 4 \
-  --format markdown \
-  --min-frames 30
+# Root files of note
+requirements.txt / requirements-dev.txt # Runtime / dev dependencies
+.pre-commit-config.yaml                 # Runs validate-config on config changes
+Dockerfile{,.gpu,.cuda}, docker-compose{,.gpu}.yml  # Dev containers (CPU / GPU)
+交通事件数据标注说明文档_v4.5.md          # Annotation authority document (Chinese)
 ```
 
-| Parameter | Description | Default |
+## Analysis Pipeline
+
+`AnalysisOrchestrator.analyze()` (`orchestrator/analysis_orchestrator.py`) runs:
+
+1. **Metadata extraction** (`orchestrator/video_meta_extractor.py`) — duration, fps,
+   resolution, bitrate; needed early so reject reports carry video info.
+2. **Preprocessing** (`core/video_preprocessor.py`):
+   - Optional **prefilter** (`PREFILTER_ENABLE`, code default `false`; the shipped
+     `.env.example` sets `true`) checks duration, bitrate, and night-scene brightness.
+     Failure → `VideoPrefilterError` → **reject report, exit 2, no file saved**.
+   - Single-pass sampling at `SAMPLING_FPS` (default 1.0 fps) with quality scoring
+     and deduplication; the returned precision frame list mirrors the coarse list
+     (the motion-segment precision-sampling code is retained but not in the
+     execution path).
+   - If both frame lists end up empty (undecodable video) → **reject report, exit 2**.
+3. **Expert Agent layer** (`core/pipeline_steps.py: ExpertAgentLayer`):
+   - One `ExpertAgent` per active category in a `ThreadPoolExecutor` (4 workers).
+     Frame selection: up to `VLM_MAX_FRAMES` (default 10) evenly spaced coarse frames.
+   - There is no scene-understanding step: the `scene_understanding` template is
+     injected into every expert prompt as prior knowledge, and a pre-computed
+     `SceneInfo` can be supplied externally via `--scene-understanding`.
+   - **Far-object enhancement** for templates that enable it (events 1, 3, 4, 6):
+     - Event 1 (Emergency Lane Occupancy): lane calibration ROI + vehicle boxes +
+       zoom-grid evidence (`utils/emergency_lane_occupancy.py`).
+     - Events 3/4 (Person / Motorcycle): per-frame ROI detection → top-K scoring →
+       dual composite (single-frame zoom + adjacent-frame motion) → final classifier,
+       with evidence-based promotion/veto rules.
+     - Event 6 (Road Construction): multi-ROI gallery (cone/worker/vehicle/barrier/sign)
+       from the middle frame → gallery classifier + work-zone fallback.
+     - If an enabled enhancement flow fails to produce evidence, the candidate is
+       negative — raw frames are intentionally **not** fed to enhancement prompts.
+   - **Reflection** (default on): `reflect_expert_candidate` re-checks each candidate's
+     `detected` against its summary/instances; fail-open, disable with
+     `EXPERT_ENABLE_REFLECTION=false`.
+   - Expert errors degrade to a `detected=False` error candidate; `FatalAPIError`
+     propagates and aborts the run.
+4. **Adjudication** (`core/pipeline_steps.py: AdjudicationStep`):
+   - One VLM call: all candidates + keyframes + `adjudication_rules` +
+     `annotation_spec.yaml` text, with a JSON-schema-constrained response.
+   - Up to **5 attempts**; missing events trigger re-runs of abnormal experts or a
+     re-prompt listing the omissions; after the last attempt they are backfilled from
+     the raw expert candidates.
+   - Instance handling: negative rulings drop instances; the ruling layer cannot invent
+     instances — it may only edit description/reasoning when the instance count matches.
+   - On total adjudication failure, a fallback returns the raw candidates unfiltered.
+5. **Report generation** (`core/report_generator.py` + renderers):
+   - The **binary encoding** is produced here: width = number of configured categories
+     (10), bit *i* = 1 iff event *i* was adjudicated as detected.
+   - Output: the `Report` model as JSON (default) or Markdown. With `--output`,
+     far-enhancement composites are saved under `<output_dir>/tmp_img` and referenced
+     from the Markdown report.
+
+## Configuration
+
+### `config/event_categories.yaml`
+
+Per category: `event_id`, `event_code`, `name`/`name_zh`, `detection_mode`,
+`prompt_template_id`, `confidence_threshold`, `is_active`, `definition` (injected into
+the expert prompt). Also holds `adjudication_rules` (`rule_id`, `name`, `description`,
+`priority` 0–1000, descending). Currently one rule is configured: `emergency_parking_both`
+(a vehicle stopped on the emergency lane triggers both Illegal Parking and Emergency
+Lane Occupancy).
+
+### `config/prompts/*.yaml`
+
+18 prompt templates across 11 files (`common.yaml` + `event_0..9.yaml`): per-event
+expert prompts, ROI templates for enhancement, `scene_understanding`,
+`expert_response_reflection`, and `adjudication`. Multiple versions of a template are
+supported; selection: env pin → A/B traffic split → latest version.
+
+### `config/annotation_spec.yaml`
+
+Machine-readable digest of the annotation authority document (`交通事件数据标注说明文档_v4.5.md`),
+injected into the adjudication prompt. Its event IDs must exactly match `event_categories.yaml`.
+
+### `.env` variables
+
+Single provider (legacy style) or indexed multi-provider list (takes precedence when any
+`LLM_PROVIDER_<i>_PROVIDER` is present):
+
+| Variable | Default (code) | Description |
 |---|---|---|
-| `--video-dir` / `-v` | Input video directory (required) | - |
-| `--output-dir` / `-o` | Output report directory (required) | - |
-| `--config-dir` / `-c` | Config directory | `./traffic_analyzer/config` |
-| `--format` / `-f` | Output format (`markdown` / `json`) | `markdown` |
-| `--min-frames` / `-m` | VLM max input frames | `30` |
-| `--workers` / `-w` | Parallel workers (ProcessPoolExecutor) | CPU cores |
-| `--log-dir` / `-l` | Per-video log directory | - |
-| `--skip-existing` | Skip videos with existing reports (default) | `true` |
-| `--no-skip-existing` | Force reprocess all videos | - |
+| `VLM_PROVIDER` / `LLM_PROVIDER` | `anthropic` | Provider: `anthropic` / `google` / `aliyun` |
+| `LLM_API_KEY` | — | API key |
+| `LLM_BASE_URL` | — | Custom endpoint |
+| `LLM_MODEL` | `claude-sonnet-4-6` | Model name |
+| `LLM_PROVIDER_<i>_PROVIDER` / `_API_KEY` / `_BASE_URL` / `_MODEL` | — | Indexed provider *i* (0 = primary) |
+| `<PROVIDER>_API_KEY` / `_BASE_URL` / `_MODEL` | — | Provider-specific override (e.g. `ALIYUN_API_KEY`) |
+| `LLM_MAX_TOKENS` / `LLM_TEMPERATURE` / `LLM_TIMEOUT` / `LLM_MAX_RETRIES` | `4096` / `0.2` / `300` / `3` | Inference settings |
+| `LLM_ENABLE_CACHE` / `LLM_CACHE_MAX_SIZE` | `true` / `128` | In-memory response cache |
+| `TRAFFIC_ANALYZER_DISK_CACHE` | — (disabled) | SQLite disk-cache path, e.g. `./output/.vlm_cache.db` |
+| `TRAFFIC_ANALYZER_DISK_CACHE_MAX_ENTRIES` | `2000` | Disk cache capacity (LRU by last access) |
+| `VLM_MAX_FRAMES` | `10` | Max frames per VLM call |
+| `EXPERT_ENABLE_REFLECTION` | `true` | Reflection consistency check on/off |
+| `SAMPLING_FPS` | `1.0` | Coarse/precision sampling rate |
+| `PREFILTER_ENABLE` + `PREFILTER_*` thresholds | `false` | Quality prefilter (`.env.example` enables it) |
+| `PROMPT_VERSION_<TEMPLATE_ID>` | — | Pin a specific prompt version |
+| `TRAFFIC_ANALYZER_TOOL_LOG_LEVEL` | `mid` | `off` / `macro` / `mid` / `fine` (`fine` reserved) |
 
-### Batch Evaluation (`scripts/batch_evaluate.py`)
+### What `validate-config` enforces
+
+- YAML syntax and required files; duplicate `event_id` / duplicate adjudication
+  `rule_id` (both fail-fast at load).
+- `annotation_spec.yaml` event IDs exactly match `event_categories.yaml`.
+- Every expert category references an existing `prompt_template_id`.
+- Event IDs are continuous from 0 (inactive categories included — they still occupy a bit).
+- Active categories must use `expert_agent` mode — the other `DetectionMode` enum values
+  (`direct_vlm`, `logic_chain`, `scene_tag`) have no execution path and are rejected.
+- Active categories declaring tools are rejected (the tool registry is empty).
+- Adjudication rule priorities within [0, 1000]; A/B prompt traffic percentages sum to 100%.
+
+## VLM Providers & Caching
+
+Supported providers (`VLMInferenceEngine.SUPPORTED_PROVIDERS`): **anthropic** (Claude),
+**google** (Gemini), **aliyun** (Qwen-VL, via an OpenAI-compatible endpoint — the `openai`
+SDK acts as its client, but `openai` is not a standalone provider value).
+
+Retry and failover (`core/vlm_engine.py` + `core/vlm_error_classifier.py`):
+
+- Per provider, up to `LLM_MAX_RETRIES` attempts with exponential backoff
+  (`min(2**attempt, 30)`s) for retryable errors: rate limits, connection/timeout, 5xx.
+- **Failover triggers** (retrying the same provider won't help): rate-limit, auth /
+  permission / quota / billing errors, 5xx. The next indexed provider takes over.
+- The serving-provider index is **sticky** and guarded by a lock — after a failover,
+  subsequent calls start from the surviving provider.
+- When the last provider is exhausted, `AllProvidersExhaustedError` → `FatalAPIError`:
+  the analysis (and `batch_infer.py`, via stderr markers) aborts loudly instead of
+  emitting all-zero reports.
+
+Caching (`core/vlm_cache.py` + engine integration):
+
+- Key = SHA-256 of system prompt + user prompt + image bytes. Only successful
+  responses are cached.
+- Layer 1: in-memory LRU (`LLM_CACHE_MAX_SIZE`). Layer 2: optional SQLite disk cache
+  (`TRAFFIC_ANALYZER_DISK_CACHE`) for cross-process sharing in batch runs; disk hits
+  are promoted to memory.
+- A cached response is only returned when **provider and model match** the currently
+  active provider, so a pre-failover response is never replayed for the new provider.
+- Corrupt or stale-format disk rows are treated as a miss and deleted (self-heal).
+
+## Output Format
+
+### Binary encoding
+
+`{bit_0_bit_1_..._bit_9}` — bit *i* corresponds to `event_id` *i*; width = number of
+configured categories (10). Inactive categories keep their bit and always report 0.
+Example: `{1_0_1_0_0_0_0_0_0_0}` = events 0 and 2 detected.
+
+| Bit | Event | Code | Active |
+|---|---|---|---|
+| 0 | Illegal Parking (违法停车) | A | ✓ |
+| 1 | Emergency Lane Occupancy (应急车道占用) | B | ✓ |
+| 2 | Traffic Accident (交通事故) | C | ✓ |
+| 3 | Person Presence in Highway (行人出现) | D | ✓ |
+| 4 | Motorcycle Presence (摩托车出现) | E | ✓ |
+| 5 | Heavy Congestion (拥堵) | F | ✓ |
+| 6 | Road Construction (道路施工) | G | ✓ |
+| 7 | Vehicle Reversing (车辆逆行/倒车) | H | ✓ |
+| 8 | Thrown Objects (抛洒物) | J | ✗ (bit reserved, always 0) |
+| 9 | Lane Change over Solid Line (实线变道) | K | ✗ (bit reserved, always 0) |
+
+### Report
+
+The `Report` model (`models/report.py`) contains: `video_info`, `scene_summary`,
+`overall_traffic_description`, per-event `event_results` (detected flag, summary,
+time-bounded instances with evidence frames), raw `expert_candidates`, `binary_encoding`,
+`final_classification`, `disposal_recommendations`, `adjudication_reasoning` + per-event
+`reasoning_chain`, `audit_log` (exclusions with reason and `rule_id`), `llm_usage_stats`,
+`analysis_duration_sec`, and `rejected` / `reject_reason`.
+
+The Markdown rendering (Chinese UI) sections: 视频信息 → 事件类别分析 (per-event expert
+output, enhancement evidence, adjudicated result, instances) → 最终分类 → 裁决详情 →
+处置建议 → 分析统计.
+
+**Reject reports**: `rejected=true`, empty event results, encoding `0_0_0_0_0_0_0_0_0_0`,
+`final_classification` = "视频被筛除/无法分析，未进行事件检测。". The CLI writes **no
+output file** for rejected videos and exits with code 2.
+
+## Testing
 
 ```bash
-# Default: interactive HTML report
-python3 scripts/batch_evaluate.py \
-  --video-dir ./videos \
-  --report-dir ./reports \
-  --output evaluation_report.html
-
-# With standalone annotation file
-python3 scripts/batch_evaluate.py \
-  --video-dir ./videos \
-  --report-dir ./reports \
-  --gt-mode annotation_file \
-  --annotation-file ./annotations.json \
-  --output evaluation_report.html
-
-# Markdown table report
-python3 scripts/batch_evaluate.py \
-  --video-dir ./videos \
-  --report-dir ./reports \
-  --output evaluation_report.md
-
-# Single-class mode (only evaluate is_active=true events)
-python3 scripts/batch_evaluate.py \
-  --video-dir ./videos \
-  --report-dir ./reports \
-  --single-class \
-  --config-dir ./traffic_analyzer/config \
-  --output evaluation_report.html
+python3 -m pytest traffic_analyzer/tests -q
 ```
 
-| Parameter | Description | Default |
-|---|---|---|
-| `--video-dir` / `-v` | Video directory (for ground-truth extraction) | - |
-| `--report-dir` / `-r` | Report directory (`.md` or `.json`) | - |
-| `--output` | Output path (`.html` / `.md` / `.json`, auto-detected by extension) | `evaluation_report.html` |
-| `--gt-mode` | Ground-truth source (`filename` / `annotation_file`) | `filename` |
-| `--annotation-file` | Annotation file path (JSON or CSV) | - |
-| `--single-class` | Only evaluate `is_active=true` events | - |
-| `--config-dir` / `-c` | Config directory (for `--single-class`) | `./traffic_analyzer/config` |
+The suite (currently 407 passed, 1 skipped — the skip is expected when the installed
+anthropic SDK lacks `OverloadedError`) mocks all VLM calls and covers: config loading
+and validation, CLI and exit codes, video preprocessing, the expert layer, far-enhancement
+pipelines, reflection, adjudication, report generation, providers, retry/failover, caches.
 
-**HTML Interactive Report Features:**
-- Left panel: event statistics table + per-video results table (filterable by pass/fail)
-- Right panel: video player + Markdown report preview
-- Click a table row to play the video, click a report link to preview Markdown
-- All data is inline-embedded using `file://` absolute paths — open directly in a browser, no HTTP server needed
-
-**Full Batch Workflow:**
+Batch workflow helpers:
 
 ```bash
-# 1. Batch inference (4 parallel workers, save logs)
+# Batch inference (4 workers by default; each video runs as a CLI subprocess)
 python3 scripts/batch_infer.py \
   --video-dir ./test_videos \
   --output-dir ./output \
-  --log-dir ./log \
-  --workers 4 \
-  --format markdown
+  --log-dir ./output/logs \
+  --format markdown            # --min-frames default 10; --force to re-run existing
 
-# 2. Generate HTML evaluation report
+# Evaluation against ground truth (from filenames or an annotation file)
 python3 scripts/batch_evaluate.py \
   --video-dir ./test_videos \
   --report-dir ./output \
   --output ./evaluation_report.html \
-  --single-class
-
-# 3. (Optional) Generate Markdown table report
-python3 scripts/batch_evaluate.py \
-  --video-dir ./test_videos \
-  --report-dir ./output \
-  --output ./evaluation_report.md \
-  --single-class
+  --single-class               # only evaluate is_active=true events
 ```
 
----
+`batch_infer.py` skips videos with existing reports unless `--force`, stops the batch
+on fatal API errors, and treats exit code 2 as "rejected, no report expected".
+`batch_evaluate.py` supports `--gt-mode filename|annotation_file`; output format
+(`.html` / `.md` / `.json`) comes from the `--output` extension.
 
-## Supported VLM Providers
+## Known Limitations
 
-- **Anthropic** (Claude) — default recommended
-- **Google** (Gemini)
-- **Aliyun** (Tongyi Qianwen)
-
-Configure provider and API Key in `.env`. Multiple providers can be configured for automatic failover.
-
----
-
-## Tool-Call Style Logging
-
-Runtime output follows modern AI Agent tool-call trace style:
-
-```
-[INFO] 14:30:00 🔧 tool_call: video_preprocessor.process(video='clip.mp4')
-[INFO] 14:30:03   ↳ result: coarse=20, precision=41 | elapsed=3.0s
-[INFO] 14:30:03 🔧 tool_call: expert_agent.detect(event='Person Presence in Highway')
-[INFO] 14:30:15   ↳ result: detected=true | elapsed=12.0s
-[INFO] 14:30:15 🔧 tool_call: adjudication.resolve(candidates=4)
-[INFO] 14:30:28   ↳ result: events=2, audit_entries=1 | elapsed=13.0s
-```
-
-Control granularity via `TRAFFIC_ANALYZER_TOOL_LOG_LEVEL`:
-
-| Value | Behavior |
-|---|---|
-| `off` | No tool_call logs |
-| `macro` | Top-level calls only |
-| `mid` | Top-level + nested (default) |
-| `fine` | Reserved for future expansion |
-
-```bash
-TRAFFIC_ANALYZER_TOOL_LOG_LEVEL=off python -m traffic_analyzer ...    # silent
-TRAFFIC_ANALYZER_TOOL_LOG_LEVEL=macro python -m traffic_analyzer ...  # top only
-```
-
-This logging is a **pure display layer** — it does not affect parallelism, performance, or results. The binary encoding output is identical regardless of log level.
-
----
-
-## Version Tags
-
-| Tag | Branch | Description |
-|---|---|---|
-| `v4.0.0-far-enhancement` | `main` | **Current**. VLM multi-agent expert + adjudication architecture. Events 0-7 are active. Adds far-distance ROI evidence enhancement for event_id=3 (pedestrian), event_id=4 (non-motor vehicle), and event_id=6 (road construction) with continuous 0-1 ROI confidence. The tool-layer framework is retained but currently has no built-in tools. |
-| `v2.0.0-multi-agent` | `legacy/v2.0` | Previous stable multi-agent architecture with 8 of 10 events active and a pure-VLM pipeline. |
-| `v1.5.0-legacy` | `legacy/v1.5` | Monolithic architecture. SceneUnderstandingStep (~30s bottleneck) + mixed detection modes (direct_vlm parallel, logic_chain sequential, scene_tag zero-VLM) + PostProcessStep with cross-event inference. |
-
-All new development happens on `main` (v4.0.0).
+- **Only `expert_agent` mode is implemented.** The `DetectionMode` enum still carries
+  `direct_vlm` / `logic_chain` / `scene_tag`, but they have no execution path and
+  `validate-config` rejects active categories that use them.
+- **The tool subsystem is an empty shell** — `tools/tool_schema.py` / `tool_router.py`
+  are functional, but `tool_registry.py` registers zero tools; `validate-config`
+  rejects active categories that declare tools.
+- **Reflection is fail-open** — if the reflection call fails or returns unparseable
+  output, the original candidate is kept; disable with `EXPERT_ENABLE_REFLECTION=false`.
+- **`batch_infer.py --cv-tracks-dir` is currently broken**: it passes a `--cv-tracks`
+  flag the CLI's `analyze` command does not accept; CV-track cross-validation is not
+  wired into the CLI.
+- **Far-enhancement failure means a negative candidate** — when an enabled enhancement
+  flow cannot produce evidence, no raw-frame fallback is attempted for that event.
+- **Heuristic safeguards** — adjudication instance-count matching, enhancement
+  promotion/veto rules, and prefilter thresholds can misjudge borderline cases.
+- **Markdown reports are rendered in Chinese**, regardless of CLI language.
+- Archived snapshots: tags `v1.1.0`, `v1.5.0-legacy` (branch `legacy/v1.5`),
+  `v2.0.0-multi-agent`. All current development is on `main` (v4.0.0).

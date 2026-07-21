@@ -21,7 +21,7 @@ from traffic_analyzer.core.video_preprocessor import (
     VideoPreprocessor,
     VideoPreprocessorError,
 )
-from traffic_analyzer.models.schemas import Keyframe, SamplingConfig
+from traffic_analyzer.models.schemas import Keyframe, SamplingConfig, VideoMetadata
 
 
 @pytest.fixture
@@ -295,3 +295,85 @@ class TestVideoPreprocessor:
         result = proc.process(synthetic_video_path)
         # Precision frames should exist but be limited by segment count
         assert isinstance(result.precision_frames, list)
+
+    def test_check_bitrate_unknown_bitrate_passes(self) -> None:
+        """bitrate <= 0 (unknown for file streams) should pass the bitrate check."""
+        proc = VideoPreprocessor(
+            config=SamplingConfig(
+                prefilter_enabled=True,
+                prefilter_min_bitrate=10000,
+            ),
+            save_debug_frames=False,
+        )
+        metadata = VideoMetadata(
+            file_path="test.mp4",
+            file_name="test.mp4",
+            duration_sec=10.0,
+            fps=25.0,
+            total_frames=250,
+            width=320,
+            height=240,
+            bitrate=0,
+        )
+        passed, reason = proc._check_bitrate(metadata)
+        assert passed is True
+        assert reason == ""
+
+    def test_check_bitrate_low_positive_bitrate_rejected(self) -> None:
+        """A positive bitrate below the threshold should still be rejected."""
+        proc = VideoPreprocessor(
+            config=SamplingConfig(
+                prefilter_enabled=True,
+                prefilter_min_bitrate=10000,
+            ),
+            save_debug_frames=False,
+        )
+        metadata = VideoMetadata(
+            file_path="test.mp4",
+            file_name="test.mp4",
+            duration_sec=10.0,
+            fps=25.0,
+            total_frames=250,
+            width=320,
+            height=240,
+            bitrate=5000,
+        )
+        passed, reason = proc._check_bitrate(metadata)
+        assert passed is False
+        assert "比特率过低" in reason
+
+    def test_extract_frames_at_fps_nonpositive_target_raises(
+        self,
+        synthetic_video_path: str,
+        preprocessor: VideoPreprocessor,
+    ) -> None:
+        """target_fps <= 0 should raise VideoPreprocessorError, not return []."""
+        cap = cv2.VideoCapture(synthetic_video_path)
+        try:
+            metadata = preprocessor._extract_metadata(synthetic_video_path, cap)
+            with pytest.raises(VideoPreprocessorError):
+                preprocessor._extract_frames_at_fps(
+                    cap=cap,
+                    target_fps=0.0,
+                    metadata=metadata,
+                    output_dir="/tmp",
+                    prefix="frame",
+                )
+        finally:
+            cap.release()
+
+    def test_process_zero_coarse_fps_raises(
+        self,
+        synthetic_video_path: str,
+    ) -> None:
+        """coarse_fps=0 (e.g. SAMPLING_FPS=0) should propagate as an error."""
+        proc = VideoPreprocessor(
+            config=SamplingConfig(
+                coarse_fps=0.0,
+                coarse_quality_threshold=0.0,
+                prefilter_enabled=False,
+            ),
+            save_debug_frames=False,
+        )
+        with pytest.raises(VideoPreprocessorError):
+            proc.process(synthetic_video_path)

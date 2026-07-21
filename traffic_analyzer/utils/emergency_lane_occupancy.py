@@ -431,7 +431,8 @@ def compute_roi_zone_overlap(
         return 0.0
 
     mask_bbox = np.zeros((img_height, img_width), dtype=np.uint8)
-    cv2.rectangle(mask_bbox, (x1, y1), (x2, y2), 1, thickness=-1)
+    # cv2.rectangle 含端点,画到 (x2-1, y2-1) 使掩膜面积与 (x2-x1)*(y2-y1) 一致
+    cv2.rectangle(mask_bbox, (x1, y1), (x2 - 1, y2 - 1), 1, thickness=-1)
 
     pts = _polygon_to_abs_points(zone_polygon_rel, img_width, img_height)
     if pts.size == 0:

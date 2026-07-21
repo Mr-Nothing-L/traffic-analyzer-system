@@ -13,6 +13,7 @@ import pytest
 from traffic_analyzer.core.vlm_provider_clients import (
     _call_anthropic,
     _call_anthropic_with_tools,
+    _call_google,
 )
 
 
@@ -101,3 +102,39 @@ def test_call_anthropic_with_tools_thinking_only() -> None:
     assert "no text produced" in text
     assert tool_uses == []
     assert total_tokens == 120
+
+
+def _make_google_response(text: str = "{}") -> MagicMock:
+    response = MagicMock()
+    response.parts = [SimpleNamespace(text=text)]
+    response.usage_metadata = SimpleNamespace(
+        prompt_token_count=1,
+        candidates_token_count=2,
+        total_token_count=3,
+    )
+    return response
+
+
+def test_call_google_passes_timeout_request_options() -> None:
+    """The per-request timeout must align with the other providers (config.timeout)."""
+    client_model = MagicMock()
+    client_model.generate_content.return_value = _make_google_response()
+
+    text, prompt_tokens, completion_tokens, total_tokens = _call_google(
+        client_model, ["hi"], {"max_output_tokens": 8}, timeout=30.0
+    )
+
+    assert text == "{}"
+    assert total_tokens == 3
+    _, kwargs = client_model.generate_content.call_args
+    assert kwargs["request_options"] == {"timeout": 30.0}
+
+
+def test_call_google_without_timeout_uses_default_request_options() -> None:
+    client_model = MagicMock()
+    client_model.generate_content.return_value = _make_google_response()
+
+    _call_google(client_model, ["hi"], {"max_output_tokens": 8})
+
+    _, kwargs = client_model.generate_content.call_args
+    assert kwargs["request_options"] is None
