@@ -92,9 +92,9 @@ def build_description(
     """Assemble the ``<think>/<answer>`` description for one SFT sample.
 
     The format is fully code-assembled: ``<think>`` iterates event_id 0..9 in
-    fixed order (``【事件名】`` + the rewrite model's thinking), ``<answer>``
-    carries the conclusion (``classN: 事件名`` lines consistent with the
-    ``action`` list) plus weather / time-of-day / scene.
+    fixed order (``事件名：`` + the rewrite model's thinking), ``<answer>``
+    carries weather / time-of-day / scene first and ends with the conclusion
+    (``classN: 事件名`` lines consistent with the ``action`` list).
     """
     thoughts_by_id: Dict[int, Mapping[str, Any]] = {}
     raw_thoughts = resp_data.get("event_thoughts")
@@ -117,13 +117,18 @@ def build_description(
                 if cat.event_id in detected_set
                 else "未发现。"
             )
-        think_lines.append(f"【{cat.name_zh}】{thinking}")
+        think_lines.append(f"{cat.name_zh}：{thinking}")
 
     weather = str(resp_data.get("weather") or "").strip() or "未知"
     time_of_day = str(resp_data.get("time_of_day") or "").strip() or "未知"
     scene = str(resp_data.get("scene") or "").strip() or "未知"
 
-    answer_lines: List[str] = []
+    # Answer order: scene description elements first, conclusion last.
+    answer_lines: List[str] = [
+        f"天气：{weather}",
+        f"时间：{time_of_day}",
+        f"场景：{scene}",
+    ]
     if detected_ids:
         answer_lines.append("最终结论：本视频块检出以下事件。")
         for eid in detected_ids:
@@ -133,13 +138,10 @@ def build_description(
             answer_lines.append(f"class{action_id}: {name_by_id.get(eid, f'event_{eid}')}")
     else:
         answer_lines.append("最终结论：本视频块未检出任何事件，交通状况正常。")
-    answer_lines.append(f"天气：{weather}")
-    answer_lines.append(f"时间：{time_of_day}")
-    answer_lines.append(f"场景：{scene}")
 
     return (
         "<think>\n"
-        + "\n".join(think_lines)
+        + "\n\n".join(think_lines)
         + "\n</think>\n<answer>\n"
         + "\n".join(answer_lines)
         + "\n</answer>"

@@ -258,10 +258,11 @@ class TestBuildDescription:
             _make_resp_data(), _make_event_results(detected_ids=(1,)), categories
         )
 
-        positions = [desc.index(f"【{_NAME_ZH[eid]}】") for eid in range(10)]
+        positions = [desc.index(f"{_NAME_ZH[eid]}：") for eid in range(10)]
         assert positions == sorted(positions)
+        assert "【" not in desc
 
-    def test_answer_contains_conclusion_class_lines_and_scene_elements(self) -> None:
+    def test_answer_scene_elements_first_conclusion_last(self) -> None:
         categories = _make_categories()
         desc = build_description(
             _make_resp_data(), _make_event_results(detected_ids=(1, 2)), categories
@@ -271,12 +272,14 @@ class TestBuildDescription:
         assert "\n</think>\n<answer>\n" in desc
         assert desc.endswith("\n</answer>")
         answer = desc.split("<answer>\n", 1)[1]
-        assert "最终结论" in answer
         assert "class2: 应急车道占用" in answer
         assert "class3: 交通事故" in answer
-        assert "天气：晴天" in answer
-        assert "时间：白天" in answer
-        assert "场景：高速公路双向主路场景" in answer
+        # Order: 天气/时间/场景 first, 最终结论 last.
+        i_weather = answer.index("天气：晴天")
+        i_time = answer.index("时间：白天")
+        i_scene = answer.index("场景：高速公路双向主路场景")
+        i_conclusion = answer.index("最终结论")
+        assert i_weather < i_time < i_scene < i_conclusion
 
     def test_no_detection_conclusion_and_missing_thought_fallback(self) -> None:
         categories = _make_categories()
