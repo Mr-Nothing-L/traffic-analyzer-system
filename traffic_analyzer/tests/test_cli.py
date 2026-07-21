@@ -296,3 +296,80 @@ class TestCmdAnalyzeMinFrames:
             assert ret == 0
             assert "SCENE_UNDERSTANDING_MIN_FRAMES" not in os.environ
             assert "VLM_MAX_FRAMES" not in os.environ
+
+
+# ---------------------------------------------------------------------------
+# --sft-label / --sft-output-dir env-injection tests
+# ---------------------------------------------------------------------------
+
+
+class TestCmdAnalyzeSftLabel:
+    def _make_args(self, extra: List[str]) -> argparse.Namespace:
+        parser = build_parser()
+        return parser.parse_args(["analyze", "--video", "test.mp4", *extra])
+
+    def _mock_orchestrator(self, mock_orchestrator_cls: MagicMock) -> None:
+        mock_orchestrator = MagicMock()
+        mock_orchestrator_cls.from_config_dir.return_value = mock_orchestrator
+        report = MagicMock()
+        report.rejected = False
+        report.model_dump_json.return_value = "{}"
+        mock_orchestrator.analyze.return_value = report
+
+    @patch("traffic_analyzer.cli.Path.exists")
+    @patch("traffic_analyzer.cli.AnalysisOrchestrator")
+    def test_sft_label_sets_env(
+        self,
+        mock_orchestrator_cls: MagicMock,
+        mock_exists: MagicMock,
+    ) -> None:
+        """--sft-label must inject SFT_LABEL_ENABLE=true before config load."""
+        mock_exists.return_value = True
+        self._mock_orchestrator(mock_orchestrator_cls)
+
+        args = self._make_args(["--sft-label"])
+        with patch.dict(os.environ):
+            os.environ.pop("SFT_LABEL_ENABLE", None)
+            ret = cmd_analyze(args)
+            assert ret == 0
+            assert os.environ["SFT_LABEL_ENABLE"] == "true"
+
+    @patch("traffic_analyzer.cli.Path.exists")
+    @patch("traffic_analyzer.cli.AnalysisOrchestrator")
+    def test_sft_output_dir_sets_env(
+        self,
+        mock_orchestrator_cls: MagicMock,
+        mock_exists: MagicMock,
+    ) -> None:
+        """--sft-output-dir X must inject SFT_LABEL_OUTPUT_DIR=X."""
+        mock_exists.return_value = True
+        self._mock_orchestrator(mock_orchestrator_cls)
+
+        args = self._make_args(["--sft-output-dir", "/tmp/sft_out"])
+        with patch.dict(os.environ):
+            os.environ.pop("SFT_LABEL_OUTPUT_DIR", None)
+            ret = cmd_analyze(args)
+            assert ret == 0
+            assert os.environ["SFT_LABEL_OUTPUT_DIR"] == "/tmp/sft_out"
+
+    @patch("traffic_analyzer.cli.Path.exists")
+    @patch("traffic_analyzer.cli.AnalysisOrchestrator")
+    def test_omitted_flags_leave_env_untouched(
+        self,
+        mock_orchestrator_cls: MagicMock,
+        mock_exists: MagicMock,
+    ) -> None:
+        """Without --sft-label/--sft-output-dir, no env override should be applied."""
+        mock_exists.return_value = True
+        self._mock_orchestrator(mock_orchestrator_cls)
+
+        args = self._make_args([])
+        assert args.sft_label is False
+        assert args.sft_output_dir is None
+        with patch.dict(os.environ):
+            os.environ.pop("SFT_LABEL_ENABLE", None)
+            os.environ.pop("SFT_LABEL_OUTPUT_DIR", None)
+            ret = cmd_analyze(args)
+            assert ret == 0
+            assert "SFT_LABEL_ENABLE" not in os.environ
+            assert "SFT_LABEL_OUTPUT_DIR" not in os.environ

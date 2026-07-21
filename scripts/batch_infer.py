@@ -100,6 +100,8 @@ def _run_single(
     config_dir: Path,
     fmt: str,
     min_frames: int,
+    sft_label: bool,
+    sft_output_dir: Optional[str],
     cv_tracks_path: Optional[Path],
     log_path: Optional[Path],
     env: Optional[Dict[str, str]] = None,
@@ -122,6 +124,10 @@ def _run_single(
         "--output", str(output_path),
         "--min-frames", str(min_frames),
     ]
+    if sft_label:
+        cmd += ["--sft-label"]
+    if sft_output_dir:
+        cmd += ["--sft-output-dir", str(sft_output_dir)]
     if cv_tracks_path:
         cmd += ["--cv-tracks", str(cv_tracks_path)]
 
@@ -231,6 +237,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="Max VLM input frames (default: 10).",
     )
     parser.add_argument(
+        "--sft-label",
+        action="store_true",
+        help="Enable SFT label rewrite for each analyzed video.",
+    )
+    parser.add_argument(
+        "--sft-output-dir",
+        default=None,
+        help="Output directory for SFT label samples (default: output/sft_labels).",
+    )
+    parser.add_argument(
         "--cv-tracks-dir",
         default=None,
         help="Optional directory containing CV track JSON files (named <video_stem>.json).",
@@ -323,7 +339,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # ------------------------------------------------------------------
     # Build task list (skip already-processed unless --force)
     # ------------------------------------------------------------------
-    tasks: List[Tuple[Path, Path, Path, str, int, Optional[Path], Optional[Path], Optional[Dict[str, str]]]] = []
+    tasks: List[Tuple[Path, Path, Path, str, int, bool, Optional[str], Optional[Path], Optional[Path], Optional[Dict[str, str]]]] = []
     for video_path in videos:
         output_path = _build_output_path(video_path, output_dir, args.format)
         if output_path.exists() and not args.force:
@@ -344,7 +360,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         tasks.append((
             video_path, output_path, config_dir,
-            args.format, args.min_frames, cv_tracks_path, per_video_log,
+            args.format, args.min_frames, args.sft_label, args.sft_output_dir,
+            cv_tracks_path, per_video_log,
             custom_env,
         ))
 

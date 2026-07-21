@@ -23,6 +23,7 @@ from traffic_analyzer.core.pipeline_steps import (
     ExpertAgentLayer,
 )
 from traffic_analyzer.core.report_generator import ReportGenerator
+from traffic_analyzer.core.sft_label_rewrite import SftLabelRewriteStep
 from traffic_analyzer.core.video_preprocessor import VideoPrefilterError, VideoPreprocessor
 from traffic_analyzer.core.vlm_engine import FatalAPIError, VLMInferenceEngine
 from traffic_analyzer.models.schemas import (
@@ -267,6 +268,26 @@ class AnalysisOrchestrator:
         context.event_results = {r.event_id: r for r in event_results}
         detected_count = sum(1 for r in event_results if r.detected)
         logger.info("  Events detected: %d / %d", detected_count, len(event_results))
+
+        # Step 3.5: SFT label rewrite (optional, auxiliary)
+        if context.config is not None and getattr(context.config, "sft_label_enabled", False):
+            logger.info("[3.5/4] SFT label rewrite...")
+            t0 = time.perf_counter()
+            try:
+                sft_step = SftLabelRewriteStep(self.config_manager, self.vlm_engine)
+                sft_result = sft_step.execute(context)
+                if sft_result.success and sft_result.data:
+                    logger.info("  SFT sample written to: %s", sft_result.data)
+            except FatalAPIError:
+                raise
+            except Exception as exc:
+                logger.error(
+                    "[orchestrator:analyze] SFT_LABEL_REWRITE_ERROR | video=%s | %s",
+                    video_path,
+                    exc,
+                    exc_info=True,
+                )
+            step_times["sft_label_rewrite"] = time.perf_counter() - t0
 
         # Step 4: Report generation
         logger.info("[4/4] Generating report...")

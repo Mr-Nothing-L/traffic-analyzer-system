@@ -398,6 +398,71 @@ class TestAnalyze:
 
 
 # ---------------------------------------------------------------------------
+# Step 3.5: SFT label rewrite mount
+# ---------------------------------------------------------------------------
+
+
+class TestSftLabelRewriteMount:
+    _STEP_CLS = "traffic_analyzer.orchestrator.analysis_orchestrator.SftLabelRewriteStep"
+
+    def test_sft_step_runs_when_enabled(
+        self,
+        orchestrator: AnalysisOrchestrator,
+        temp_video: str,
+    ) -> None:
+        orchestrator.config_manager.load_all.return_value.sft_label_enabled = True
+        with patch(self._STEP_CLS) as mock_step_cls:
+            mock_step = mock_step_cls.return_value
+            mock_step.execute.return_value = MagicMock(
+                success=True, data=Path("/tmp/sft/sample.json")
+            )
+            report = orchestrator.analyze(temp_video)
+        assert isinstance(report, Report)
+        mock_step_cls.assert_called_once_with(
+            orchestrator.config_manager, orchestrator.vlm_engine
+        )
+        mock_step.execute.assert_called_once()
+        orchestrator.report_generator.generate.assert_called_once()
+
+    def test_sft_step_skipped_when_disabled(
+        self,
+        orchestrator: AnalysisOrchestrator,
+        temp_video: str,
+    ) -> None:
+        assert orchestrator.config_manager.load_all.return_value.sft_label_enabled is False
+        with patch(self._STEP_CLS) as mock_step_cls:
+            report = orchestrator.analyze(temp_video)
+        assert isinstance(report, Report)
+        mock_step_cls.assert_not_called()
+
+    def test_sft_step_skipped_when_field_absent(
+        self,
+        orchestrator: AnalysisOrchestrator,
+        temp_video: str,
+    ) -> None:
+        """Configs constructed without sft_label_enabled must not break the pipeline."""
+        config = orchestrator.config_manager.load_all.return_value
+        del config.__dict__["sft_label_enabled"]
+        with patch(self._STEP_CLS) as mock_step_cls:
+            report = orchestrator.analyze(temp_video)
+        assert isinstance(report, Report)
+        mock_step_cls.assert_not_called()
+
+    def test_sft_step_failure_does_not_break_report(
+        self,
+        orchestrator: AnalysisOrchestrator,
+        temp_video: str,
+    ) -> None:
+        """Non-fatal SFT export errors are auxiliary: report generation must continue."""
+        orchestrator.config_manager.load_all.return_value.sft_label_enabled = True
+        with patch(self._STEP_CLS) as mock_step_cls:
+            mock_step_cls.return_value.execute.side_effect = RuntimeError("boom")
+            report = orchestrator.analyze(temp_video)
+        assert isinstance(report, Report)
+        orchestrator.report_generator.generate.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
 # Video metadata extraction
 # ---------------------------------------------------------------------------
 

@@ -53,6 +53,14 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         os.environ["VLM_MAX_FRAMES"] = str(args.min_frames)
         logger.info("Max VLM input frames set to %d (scene_understanding + expert_agent)", args.min_frames)
 
+    # Pass --sft-label / --sft-output-dir to the system via environment variables
+    if args.sft_label:
+        os.environ["SFT_LABEL_ENABLE"] = "true"
+        logger.info("SFT label rewrite enabled")
+    if args.sft_output_dir is not None:
+        os.environ["SFT_LABEL_OUTPUT_DIR"] = args.sft_output_dir
+        logger.info("SFT label output directory set to %s", args.sft_output_dir)
+
     # Load external scene understanding if provided
     scene_understanding: Optional[SceneInfo] = None
     if args.scene_understanding:
@@ -201,6 +209,16 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Minimum number of frames for scene understanding (default: 10). Lower = faster but less accurate.",
+    )
+    analyze_parser.add_argument(
+        "--sft-label",
+        action="store_true",
+        help="Enable SFT label rewrite: export one SFT training sample per video after adjudication.",
+    )
+    analyze_parser.add_argument(
+        "--sft-output-dir",
+        default=None,
+        help="Output directory for SFT label samples (default: output/sft_labels).",
     )
     analyze_parser.set_defaults(func=cmd_analyze)
 

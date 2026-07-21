@@ -64,6 +64,13 @@ class SystemConfig(BaseModel):
         default_factory=lambda: os.getenv("EXPERT_ENABLE_REFLECTION", "true").lower()
         in ("1", "true", "yes", "on")
     )
+    sft_label_enabled: bool = Field(
+        default_factory=lambda: os.getenv("SFT_LABEL_ENABLE", "false").lower()
+        in ("1", "true", "yes", "on")
+    )
+    sft_label_output_dir: str = Field(
+        default_factory=lambda: os.getenv("SFT_LABEL_OUTPUT_DIR", "output/sft_labels")
+    )
 
     @model_validator(mode="after")
     def _sync_llm_providers(self) -> "SystemConfig":

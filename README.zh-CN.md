@@ -87,6 +87,8 @@ python3 -m traffic_analyzer analyze \
 | `--min-frames, -m` | VLM 最大输入帧数（同时设置 `SCENE_UNDERSTANDING_MIN_FRAMES` 与 `VLM_MAX_FRAMES`） | 10（由 `VLM_MAX_FRAMES` 决定） |
 | `--config-dir, -d` | 配置目录 | `./traffic_analyzer/config` |
 | `--scene-understanding, -s` | 外部场景理解 JSON（可选，跳过内置推断） | - |
+| `--sft-label` | 启用 SFT label 模式（裁决后追加 rewrite，每视频产出 1 个训练样本 JSON） | 关闭 |
+| `--sft-output-dir` | SFT 样本输出目录 | `output/sft_labels` |
 
 退出码：
 
@@ -95,6 +97,17 @@ python3 -m traffic_analyzer analyze \
 | 0 | 分析成功 |
 | 1 | 错误：视频/配置不存在、分析异常、API 全部不可用（`FatalAPIError`）等 |
 | 2 | 视频被拒绝（prefilter 筛除或无可用帧），**不保存报告文件** |
+
+#### 可选：SFT label 模式（`--sft-label`）
+
+```bash
+python3 -m traffic_analyzer analyze \
+  --video ./path/to/video.mp4 \
+  --sft-label \
+  --sft-output-dir ./output/sft_labels   # 可选；此即默认值
+```
+
+在裁决之后追加一个 rewrite 步骤：额外一次 VLM 调用**只看原始抽帧 + 裁决结论**（裁决作为特权提示），为每个视频写出 **1 个 SFT 训练样本 JSON** 到 `--sft-output-dir`（默认 `output/sft_labels`）。主报告不受影响；该模式每个视频**多 1 次 VLM 调用**。阳性事件在原始帧中无法锚定的样本会被隔离到 `quarantine/` 子目录，见下文「SFT 样本 JSON」。
 
 ### 5. Python API
 
@@ -299,6 +312,8 @@ Dockerfile / docker-compose.yml           # 可选 CPU 开发容器（另附 Doc
 | `TRAFFIC_ANALYZER_DISK_CACHE_MAX_ENTRIES` | 磁盘缓存容量（超出按最久未访问淘汰） | 2000 |
 | `VLM_MAX_FRAMES` | 每次 VLM 调用的最大输入帧数 | 10 |
 | `EXPERT_ENABLE_REFLECTION` | 专家候选反思一致性检查 | true |
+| `SFT_LABEL_ENABLE` | SFT label 模式（裁决后追加 rewrite；等价 CLI `--sft-label`） | false |
+| `SFT_LABEL_OUTPUT_DIR` | SFT 样本 JSON 输出目录（CLI `--sft-output-dir`） | `output/sft_labels` |
 | `SAMPLING_FPS` | 抽帧帧率 | 1.0 |
 | `PREFILTER_ENABLE` 及 `PREFILTER_*` | 预过滤器开关与阈值（亮度 50、码率 10000、时长 5–15 s） | 代码默认 false（示例文件为 true） |
 | `PROMPT_VERSION_<TEMPLATE_ID>` | 强制指定某模板的版本 | - |
@@ -360,6 +375,42 @@ Markdown 报告主要章节：视频信息 → 事件类别分析（检测总览
 
 视频被 prefilter 筛除或无可用帧时，编排器返回 `rejected=true`、`reject_reason` 填明的报告对象，事件编码为全零宽度占位，且**未执行任何检测**。CLI 对该情况不写出报告文件，直接以退出码 2 结束——下游批量流程应据退出码区分"未检出事件"与"视频不可分析"。
 
+### SFT 样本 JSON（`--sft-label`）
+
+启用 `--sft-label` 后，每个视频额外产出一个训练样本，写入 `<sft-output-dir>/<视频名>.json`（默认 `output/sft_labels`）：
+
+```json
+{
+  "chunk": "chunk #1",
+  "idx": 1,
+  "action": [2],
+  "description": "<think>...</think>\n<answer>...</answer>",
+  "start_timestamp": 0.0,
+  "end_timestamp": 19.734,
+  "chunk_name": "02_Event_129_1748049879151_1.mp4"
+}
+```
+
+- `action` 为检出事件在标注文档中的 action 编号（空数组 = 正常样本）。event_id → action 映射如下（action 9 在标注文档 v4.5 中是"正常"占位，刻意跳过）：
+
+| event_id | 事件 | action |
+|---|---|---|
+| 0 | 违法停车 | 1 |
+| 1 | 应急车道占用 | 2 |
+| 2 | 交通事故 | 3 |
+| 3 | 高速公路行人出现 | 4 |
+| 4 | 摩托车出现 | 5 |
+| 5 | 拥堵 | 6 |
+| 6 | 道路施工 | 7 |
+| 7 | 车辆逆行/倒车 | 8 |
+| 8 | 抛洒物 | 10 |
+| 9 | 实线变道 | 11 |
+
+- `description` 由代码按 rewrite VLM 的响应拼装：
+  - `<think>` — 按 event_id 0–9 固定顺序逐类思考：未检出的事件写"未发现" + 一句理由；检出的事件必须覆盖标注文档 v4.5 规定的必要描述元素（位置/车道类别、来向/去向、车辆或目标类型、视觉描述等）。
+  - `<answer>` — 最终结论（`classN: 事件名` 列表，与 `action` 一致）+ 天气（晴天/雨天/雾天/雪天/阴天）+ 时间（白天/夜间/晨昏）+ 基本交通场景描述（是否有匝道/导流区/收费口，隧道/高速场景，是否有来向/去向车道，车流量大/中/小；不含事件描述）。
+- **隔离（quarantine）**：若任一裁决为阳性的事件在原始帧中无法锚定（`ungrounded_event_ids`），样本改写至 `<sft-output-dir>/quarantine/<视频名>.json`——这类样本会教模型幻觉，不作为训练样本。
+
 ---
 
 ## 测试
@@ -380,3 +431,4 @@ python3 -m pytest traffic_analyzer/tests -q
 - **裁决由 VLM 执行而非硬规则**：`adjudication_rules` 只是嵌入 Prompt 的业务指导，不保证逐字执行；候选回填、实例数对齐等是启发式兜底。
 - **prefilter 阈值是启发式的**（默认时长窗口 5–15 秒等），超长/超短视频需调整 `PREFILTER_*` 或关闭 prefilter。
 - **LLM 配置只认 `.env` 文件**：shell 里 `export` 的同名变量不会生效（`VLM_MAX_FRAMES`、`PREFILTER_*` 等非 LLM 变量仍走进程环境）。
+- **SFT label 样本的锚定隔离与类别均衡**：`--sft-label` 模式下，远距小目标等在原始帧中无法锚定的阳性事件会被写入 `quarantine/` 子目录、不作为训练样本（避免教模型幻觉）；sft_label 样本未做类别均衡，均衡由训练侧控制。

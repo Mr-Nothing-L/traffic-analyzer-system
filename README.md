@@ -97,6 +97,22 @@ python3 -m traffic_analyzer analyze \
 run (default: 10). Other flags: `--config-dir`, `--scene-understanding <json>` (inject a
 pre-computed `SceneInfo`), global `--log-level`.
 
+#### Optional: SFT label mode (`--sft-label`)
+
+```bash
+python3 -m traffic_analyzer analyze \
+  --video ./path/to/video.mp4 \
+  --sft-label \
+  --sft-output-dir ./output/sft_labels   # optional; this is the default
+```
+
+Appends a rewrite step after adjudication: one extra VLM call sees **only the raw
+sampled frames plus the adjudicated verdicts** (privileged hints) and writes **one SFT
+training-sample JSON per video** into `--sft-output-dir` (default `output/sft_labels`).
+The main report is unaffected; the mode costs **+1 VLM call per video**. Samples whose
+positive events cannot be grounded in the raw frames are quarantined — see
+[SFT sample JSON](#sft-sample-json---sft-label).
+
 ### Exit codes
 
 | Code | Meaning |
@@ -287,6 +303,8 @@ Single provider (legacy style) or indexed multi-provider list (takes precedence 
 | `TRAFFIC_ANALYZER_DISK_CACHE_MAX_ENTRIES` | `2000` | Disk cache capacity (LRU by last access) |
 | `VLM_MAX_FRAMES` | `10` | Max frames per VLM call |
 | `EXPERT_ENABLE_REFLECTION` | `true` | Reflection consistency check on/off |
+| `SFT_LABEL_ENABLE` | `false` | SFT label rewrite step after adjudication (CLI: `--sft-label`) |
+| `SFT_LABEL_OUTPUT_DIR` | `output/sft_labels` | Output directory for SFT sample JSON (CLI: `--sft-output-dir`) |
 | `SAMPLING_FPS` | `1.0` | Coarse/precision sampling rate |
 | `PREFILTER_ENABLE` + `PREFILTER_*` thresholds | `false` | Quality prefilter (`.env.example` enables it) |
 | `PROMPT_VERSION_<TEMPLATE_ID>` | — | Pin a specific prompt version |
@@ -371,6 +389,55 @@ output, enhancement evidence, adjudicated result, instances) → 最终分类 �
 `final_classification` = "视频被筛除/无法分析，未进行事件检测。". The CLI writes **no
 output file** for rejected videos and exits with code 2.
 
+### SFT sample JSON (`--sft-label`)
+
+With `--sft-label` enabled, one training sample per video is written to
+`<sft-output-dir>/<video_stem>.json`:
+
+```json
+{
+  "chunk": "chunk #1",
+  "idx": 1,
+  "action": [2],
+  "description": "<think>...</think>\n<answer>...</answer>",
+  "start_timestamp": 0.0,
+  "end_timestamp": 19.734,
+  "chunk_name": "02_Event_129_1748049879151_1.mp4"
+}
+```
+
+- `action` holds the annotation-doc action numbers of the detected events (empty list =
+  normal sample). Mapping from `event_id` (action 9 is a "normal" placeholder in the
+  annotation doc v4.5 and is intentionally skipped):
+
+| event_id | Event | action |
+|---|---|---|
+| 0 | Illegal Parking (违法停车) | 1 |
+| 1 | Emergency Lane Occupancy (应急车道占用) | 2 |
+| 2 | Traffic Accident (交通事故) | 3 |
+| 3 | Person Presence in Highway (行人出现) | 4 |
+| 4 | Motorcycle Presence (摩托车出现) | 5 |
+| 5 | Heavy Congestion (拥堵) | 6 |
+| 6 | Road Construction (道路施工) | 7 |
+| 7 | Vehicle Reversing (车辆逆行/倒车) | 8 |
+| 8 | Thrown Objects (抛洒物) | 10 |
+| 9 | Lane Change over Solid Line (实线变道) | 11 |
+
+- `description` is assembled in code from the rewrite VLM response:
+  - `<think>` — one thinking entry per event category (event_id 0–9, fixed order).
+    Undetected events state "未发现" plus a one-sentence reason; detected events must
+    cover the required description elements of the annotation spec v4.5 (location /
+    lane type, incoming/outgoing direction, vehicle or object type, visual
+    description, …).
+  - `<answer>` — the final conclusion (`classN: 事件名` list, consistent with
+    `action`) plus weather (晴天/雨天/雾天/雪天/阴天), time of day (白天/夜间/晨昏),
+    and a basic traffic-scene description (ramp / gore area / toll gate, tunnel vs.
+    highway, incoming/outgoing lanes, traffic volume 大/中/小) with no event content.
+- **Quarantine**: if any adjudicated-positive event is flagged as not groundable in the
+  raw frames (`ungrounded_event_ids`), the sample is written to
+  `<sft-output-dir>/quarantine/<video_stem>.json` instead — such samples would teach
+  the student to hallucinate.
+
 ## Testing
 
 ```bash
@@ -420,6 +487,11 @@ on fatal API errors, and treats exit code 2 as "rejected, no report expected".
   wired into the CLI.
 - **Far-enhancement failure means a negative candidate** — when an enabled enhancement
   flow cannot produce evidence, no raw-frame fallback is attempted for that event.
+- **SFT label quarantine** — with `--sft-label`, positive events that cannot be
+  grounded in the raw frames (e.g. far-distance small objects visible only in enhanced
+  evidence) are quarantined under `quarantine/` and never emitted as training samples,
+  so the student is not taught to hallucinate. SFT samples are **not class-balanced**;
+  balancing is left to the training side.
 - **Heuristic safeguards** — adjudication instance-count matching, enhancement
   promotion/veto rules, and prefilter thresholds can misjudge borderline cases.
 - **Markdown reports are rendered in Chinese**, regardless of CLI language.

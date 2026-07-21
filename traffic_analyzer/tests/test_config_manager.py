@@ -267,6 +267,8 @@ class TestEnvParsing:
             "LLM_PROVIDER_1_MAX_RETRIES",
             "SCENE_UNDERSTANDING_MIN_FRAMES",
             "VLM_MAX_FRAMES",
+            "SFT_LABEL_ENABLE",
+            "SFT_LABEL_OUTPUT_DIR",
         ]
         preserved = {k: os.environ.pop(k, None) for k in keys}
         yield
@@ -430,6 +432,29 @@ class TestEnvParsing:
 
         assert config.scene_understanding_min_frames == 10
         assert config.vlm_max_frames == 10
+
+    def test_sft_label_defaults(self, temp_config_dir: Path) -> None:
+        """SFT label rewrite is opt-in: disabled by default with the default output dir."""
+        # Empty .env keeps the project-root .env fallback from leaking overrides.
+        (temp_config_dir / ".env").write_text("", encoding="utf-8")
+        mgr = ConfigManager(str(temp_config_dir))
+        config = mgr.load_all()
+
+        assert config.sft_label_enabled is False
+        assert config.sft_label_output_dir == "output/sft_labels"
+
+    def test_sft_label_env_overrides(self, temp_config_dir: Path) -> None:
+        """SFT_LABEL_ENABLE / SFT_LABEL_OUTPUT_DIR env vars must be honored."""
+        (temp_config_dir / ".env").write_text(
+            "SFT_LABEL_ENABLE=true\nSFT_LABEL_OUTPUT_DIR=/tmp/sft_out\n",
+            encoding="utf-8",
+        )
+
+        mgr = ConfigManager(str(temp_config_dir))
+        config = mgr.load_all()
+
+        assert config.sft_label_enabled is True
+        assert config.sft_label_output_dir == "/tmp/sft_out"
 
 
 # ---------------------------------------------------------------------------
