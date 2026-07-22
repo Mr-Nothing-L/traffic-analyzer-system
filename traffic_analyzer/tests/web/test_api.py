@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import io
 import json
+import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -165,6 +168,114 @@ class TestWorkspace:
         assert isinstance(v1["mtime"], float)
         assert v1["has_results"] is True
         assert by_name["v2.avi"]["has_results"] is False
+
+
+# ---------------------------------------------------------------------------
+# Filesystem listing (in-page directory navigator)
+# ---------------------------------------------------------------------------
+
+
+def _make_tree(root: Path) -> Path:
+    """Directory tree: two visible dirs, one hidden dir and a plain file."""
+    (root / "beta").mkdir()
+    (root / "Alpha").mkdir()
+    (root / ".hidden").mkdir()
+    (root / "file.txt").write_text("not a dir", encoding="utf-8")
+    return root
+
+
+class TestFsList:
+    def test_list_dirs_only_sorted(self, tmp_path: Path) -> None:
+        _make_tree(tmp_path)
+        client = TestClient(create_app())
+        resp = client.get("/api/fs/list", params={"path": str(tmp_path)})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["path"] == str(tmp_path.resolve())
+        assert data["parent"] == str(tmp_path.resolve().parent)
+        # Files and dot-dirs are excluded; sorting is case-insensitive.
+        assert [d["name"] for d in data["dirs"]] == ["Alpha", "beta"]
+        assert [d["path"] for d in data["dirs"]] == [
+            str(tmp_path.resolve() / "Alpha"),
+            str(tmp_path.resolve() / "beta"),
+        ]
+
+    def test_hidden_dirs_included_with_flag(self, tmp_path: Path) -> None:
+        _make_tree(tmp_path)
+        client = TestClient(create_app())
+        default = client.get("/api/fs/list", params={"path": str(tmp_path)}).json()["dirs"]
+        assert [d["name"] for d in default] == ["Alpha", "beta"]
+        shown = client.get(
+            "/api/fs/list", params={"path": str(tmp_path), "hidden": 1}
+        ).json()["dirs"]
+        assert [d["name"] for d in shown] == [".hidden", "Alpha", "beta"]
+
+    def test_tilde_expands_to_home(self) -> None:
+        client = TestClient(create_app())
+        resp = client.get("/api/fs/list", params={"path": "~"})
+        assert resp.status_code == 200
+        assert resp.json()["path"] == str(Path.home().resolve())
+
+    def test_relative_path_400(self) -> None:
+        client = TestClient(create_app())
+        resp = client.get("/api/fs/list", params={"path": "some/relative/dir"})
+        assert resp.status_code == 400
+
+    def test_nonexistent_dir_404(self, tmp_path: Path) -> None:
+        client = TestClient(create_app())
+        resp = client.get("/api/fs/list", params={"path": str(tmp_path / "nope")})
+        assert resp.status_code == 404
+
+    def test_plain_file_404(self, tmp_path: Path) -> None:
+        file_path = tmp_path / "file.txt"
+        file_path.write_text("x", encoding="utf-8")
+        client = TestClient(create_app())
+        resp = client.get("/api/fs/list", params={"path": str(file_path)})
+        assert resp.status_code == 404
+
+    def test_symlinked_dir_resolves(self, tmp_path: Path) -> None:
+        real = tmp_path / "real"
+        (real / "sub").mkdir(parents=True)
+        link = tmp_path / "link"
+        link.symlink_to(real)
+        client = TestClient(create_app())
+        data = client.get("/api/fs/list", params={"path": str(link)}).json()
+        assert data["path"] == str(real.resolve())
+        assert data["parent"] == str(real.resolve().parent)
+        assert [d["name"] for d in data["dirs"]] == ["sub"]
+
+    def test_permission_denied_subdir_skipped(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "ok").mkdir()
+        (tmp_path / "denied").mkdir()
+        real_is_dir = Path.is_dir
+
+        def _fake_is_dir(self: Path) -> bool:
+            if self.name == "denied":
+                raise PermissionError("mock: access denied")
+            return real_is_dir(self)
+
+        monkeypatch.setattr(Path, "is_dir", _fake_is_dir)
+        client = TestClient(create_app())
+        data = client.get("/api/fs/list", params={"path": str(tmp_path)}).json()
+        assert [d["name"] for d in data["dirs"]] == ["ok"]
+
+    def test_default_no_workspace_uses_home(self) -> None:
+        client = TestClient(create_app())
+        data = client.get("/api/fs/list").json()
+        assert data["path"] == str(Path.home().resolve())
+
+    def test_default_uses_current_workspace(self, tmp_path: Path) -> None:
+        client = TestClient(create_app(workspace=str(tmp_path)))
+        data = client.get("/api/fs/list").json()
+        assert data["path"] == str(tmp_path.resolve())
+
+    def test_root_has_no_parent(self) -> None:
+        client = TestClient(create_app())
+        data = client.get("/api/fs/list", params={"path": "/"}).json()
+        assert data["path"] == "/"
+        assert data["parent"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -593,3 +704,148 @@ class TestCliWeb:
 
         args = build_parser().parse_args(["web", "--workspace", str(tmp_path / "nope")])
         assert cmd_web(args) == 1
+
+
+# ---------------------------------------------------------------------------
+# Video streaming (/api/videos/{stem}/stream)
+# ---------------------------------------------------------------------------
+
+_FFMPEG = shutil.which("ffmpeg")
+_FFPROBE = shutil.which("ffprobe")
+requires_ffmpeg = pytest.mark.skipif(
+    _FFMPEG is None or _FFPROBE is None, reason="ffmpeg/ffprobe not installed"
+)
+
+
+def _make_tiny_video(path: Path, frames: int = 8) -> Path:
+    """Tiny MPEG-4 Part 2 (mp4v) clip — not browser-native, needs transcode."""
+    import cv2
+    import numpy as np
+
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), 5.0, (64, 48))
+    for i in range(frames):
+        writer.write(np.full((48, 64, 3), i * 20, dtype=np.uint8))
+    writer.release()
+    assert path.stat().st_size > 0
+    return path
+
+
+class TestVideoStream:
+    def test_stream_unknown_stem_404(self, tmp_path: Path) -> None:
+        workspace = _make_workspace(tmp_path)
+        client = TestClient(create_app(workspace=str(workspace)))
+        assert client.get("/api/videos/ghost/stream").status_code == 404
+
+    def test_stream_without_workspace_400(self) -> None:
+        client = TestClient(create_app())
+        assert client.get("/api/videos/v1/stream").status_code == 400
+
+    def test_stream_ffprobe_missing_501(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("traffic_analyzer.web.video_stream._FFPROBE", None)
+        workspace = _make_workspace(tmp_path)
+        client = TestClient(create_app(workspace=str(workspace)))
+        resp = client.get("/api/videos/v1/stream")
+        assert resp.status_code == 501
+        assert "ffprobe" in resp.json()["detail"]
+
+    def test_browser_native_matrix(self) -> None:
+        from traffic_analyzer.web.video_stream import is_browser_native
+
+        assert is_browser_native("h264", ".mp4")
+        assert is_browser_native("h264", ".mov")
+        assert is_browser_native("vp9", ".webm")
+        assert is_browser_native("av1", ".mkv")
+        assert not is_browser_native("hevc", ".mp4")
+        assert not is_browser_native("mpeg4", ".mp4")
+        assert not is_browser_native("h264", ".avi")
+
+    def test_probe_branch_h264_serves_file_directly(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "traffic_analyzer.web.video_stream.probe_video",
+            lambda path: ("mov,mp4,m4a,3gp,3g2,mj2", "h264"),
+        )
+        workspace = _make_workspace(tmp_path)
+        client = TestClient(create_app(workspace=str(workspace)))
+        resp = client.get("/api/videos/v1/stream")
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "video/mp4"
+
+    def test_probe_branch_hevc_goes_to_transcode(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # ffmpeg removed => transcode branch is taken and reports 501.
+        monkeypatch.setattr(
+            "traffic_analyzer.web.video_stream.probe_video", lambda path: ("mp4", "hevc")
+        )
+        monkeypatch.setattr("traffic_analyzer.web.video_stream._FFMPEG", None)
+        workspace = _make_workspace(tmp_path)
+        client = TestClient(create_app(workspace=str(workspace)))
+        resp = client.get("/api/videos/v1/stream")
+        assert resp.status_code == 501
+        assert "ffmpeg" in resp.json()["detail"]
+
+    def test_stream_ss_param_forwarded_to_ffmpeg(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "traffic_analyzer.web.video_stream.probe_video", lambda path: ("mp4", "hevc")
+        )
+        captured: Dict[str, Any] = {}
+
+        class _FakeProc:
+            stdout = io.BytesIO(b"")
+
+            def poll(self) -> int:
+                return 0
+
+            def wait(self) -> int:
+                return 0
+
+            def kill(self) -> None:
+                pass
+
+        def _fake_popen(argv: List[str], **kwargs: Any) -> Any:
+            captured["argv"] = argv
+            return _FakeProc()
+
+        monkeypatch.setattr(
+            "traffic_analyzer.web.video_stream.subprocess.Popen", _fake_popen
+        )
+        workspace = _make_workspace(tmp_path)
+        client = TestClient(create_app(workspace=str(workspace)))
+        resp = client.get("/api/videos/v1/stream", params={"ss": 12.5})
+        assert resp.status_code == 200
+        argv = captured["argv"]
+        assert argv[argv.index("-ss") + 1] == "12.500"
+        assert argv[-2:] == ["mp4", "-"]
+
+    @requires_ffmpeg
+    def test_stream_mp4v_transcodes_to_mp4(self, tmp_path: Path) -> None:
+        _make_tiny_video(tmp_path / "clip.mp4")
+        client = TestClient(create_app(workspace=str(tmp_path)))
+        resp = client.get("/api/videos/clip/stream")
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "video/mp4"
+        assert len(resp.content) > 0
+        assert b"ftyp" in resp.content[:32]
+
+    @requires_ffmpeg
+    def test_stream_h264_range_request_206(self, tmp_path: Path) -> None:
+        clip = tmp_path / "h264clip.mp4"
+        subprocess.run(
+            [
+                _FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i",
+                "testsrc=duration=1:size=64x48:rate=5",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p", str(clip),
+            ],
+            check=True,
+        )
+        client = TestClient(create_app(workspace=str(tmp_path)))
+        resp = client.get("/api/videos/h264clip/stream", headers={"Range": "bytes=0-99"})
+        assert resp.status_code == 206
+        assert resp.headers["content-type"] == "video/mp4"
+        assert len(resp.content) == 100

@@ -15,19 +15,10 @@
         <span id="mock-badge" class="mock-badge" hidden>MOCK</span>
       </div>
       <div class="tb-workspace">
-        <button id="btn-workspace" class="btn btn-ghost" title="选择工作区目录">
+        <button id="btn-workspace" class="btn btn-ghost" title="浏览服务器目录选择工作区">
           <span class="ws-icon">⌂</span>
-          <span id="ws-path" class="ws-path">未设置工作区</span>
+          <span id="ws-path" class="ws-path">选择工作区…</span>
         </button>
-        <div id="ws-panel" class="ws-panel" hidden>
-          <label class="ws-panel-label" for="ws-input">工作区路径（含视频文件的目录）</label>
-          <div class="ws-panel-row">
-            <input id="ws-input" type="text" placeholder="/path/to/workspace" spellcheck="false">
-            <button id="ws-ok" class="btn btn-primary btn-sm">确定</button>
-            <button id="ws-cancel" class="btn btn-ghost btn-sm">取消</button>
-          </div>
-          <div id="ws-error" class="ws-error" hidden></div>
-        </div>
       </div>
       <div class="tb-spacer"></div>
       <button id="btn-infer" class="btn btn-primary" disabled>开始推理</button>
@@ -49,6 +40,26 @@
       </div>
     </aside>
     <main id="main"></main>
+  </div>
+
+  <div id="dir-modal" class="dir-backdrop" hidden>
+    <div class="dir-dialog" role="dialog" aria-modal="true" aria-labelledby="dir-modal-title" tabindex="-1">
+      <div class="dir-head">
+        <span class="dir-title" id="dir-modal-title">选择工作区</span>
+        <button id="dir-close" class="dir-close" title="关闭 (Esc)">✕</button>
+      </div>
+      <div class="dir-pathbar">
+        <div id="dir-crumbs" class="dir-crumbs"></div>
+        <input id="dir-input" type="text" spellcheck="false" placeholder="输入绝对路径,回车跳转" hidden>
+        <button id="dir-edit" class="btn btn-ghost btn-sm" title="手动输入路径">✎</button>
+      </div>
+      <div id="dir-list" class="dir-list"></div>
+      <div class="dir-foot">
+        <span id="dir-selected" class="dir-selected"></span>
+        <button id="dir-cancel" class="btn btn-ghost">取消</button>
+        <button id="dir-confirm" class="btn btn-primary">选择此文件夹</button>
+      </div>
+    </div>
   </div>
 
   <div id="toast-root" aria-live="polite"></div>

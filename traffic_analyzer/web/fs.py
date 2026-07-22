@@ -1,0 +1,64 @@
+"""Server-side directory listing for the in-page workspace picker.
+
+``GET /api/fs/list`` backs the frontend's directory-navigator modal: it
+replaces the old native OS folder dialog (zenity/tkinter) so workspace
+selection also works on headless or remote servers. Only *subdirectories*
+are returned — the picker never needs file names.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from fastapi import APIRouter, HTTPException, Query, Request
+
+router = APIRouter()
+
+
+@router.get("/api/fs/list")
+def list_dirs(
+    request: Request,
+    path: Optional[str] = Query(default=None),
+    hidden: bool = Query(default=False),
+) -> Dict[str, Any]:
+    """List the subdirectories of ``path`` (absolute; ``~`` is expanded).
+
+    Without ``path`` the current workspace is listed, or the user's home
+    directory when no workspace is selected yet. Symlinks are resolved and
+    the returned ``path`` is the normalized absolute path; entries that
+    cannot be stat'ed (e.g. permission denied) are skipped silently.
+    """
+    if not path:
+        workspace = request.app.state.workspace.get()
+        base = workspace if workspace is not None else Path.home()
+    else:
+        base = Path(path).expanduser()
+        if not base.is_absolute():
+            raise HTTPException(status_code=400, detail=f"Not an absolute path: {path}")
+    if not base.is_dir():
+        raise HTTPException(status_code=404, detail=f"Not a directory: {base}")
+    base = base.resolve()
+
+    try:
+        entries = sorted(base.iterdir(), key=lambda p: p.name.lower())
+    except OSError as exc:
+        raise HTTPException(status_code=404, detail=f"Cannot list directory: {base}") from exc
+
+    dirs: List[Dict[str, str]] = []
+    for entry in entries:
+        if not hidden and entry.name.startswith("."):
+            continue
+        try:
+            if not entry.is_dir():  # follows symlinks
+                continue
+        except OSError:
+            continue  # unreadable entry (permission denied, dangling mount, ...)
+        dirs.append({"name": entry.name, "path": str(entry)})
+
+    parent = base.parent
+    return {
+        "path": str(base),
+        "parent": str(parent) if parent != base else None,
+        "dirs": dirs,
+    }

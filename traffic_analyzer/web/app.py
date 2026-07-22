@@ -20,7 +20,9 @@ from traffic_analyzer.web import (
     evaluate,
     evidence_api,
     frames,
+    fs,
     jobs,
+    video_stream,
     workspace as workspace_mod,
 )
 
@@ -44,9 +46,11 @@ def create_app(workspace: Optional[str] = None) -> FastAPI:
             logger.warning("Preset workspace is not a directory, ignored: %s", preset)
 
     app.include_router(workspace_mod.router)
+    app.include_router(fs.router)
     app.include_router(jobs.router)
     app.include_router(evidence_api.router)
     app.include_router(frames.router)
+    app.include_router(video_stream.router)
     app.include_router(evaluate.router)
 
     # Static frontend (developed in parallel) — must not crash when missing.

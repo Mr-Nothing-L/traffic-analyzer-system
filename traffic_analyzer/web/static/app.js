@@ -110,6 +110,24 @@ const mockDb = {
   tickCount: 0,
 };
 
+// 目录弹窗用的模拟文件系统(?mock=1)
+const mockFsTree = {
+  '/': ['home', 'media', 'mock'],
+  '/home': ['wanji'],
+  '/home/wanji': ['projects', 'Videos'],
+  '/home/wanji/projects': [],
+  '/home/wanji/Videos': [],
+  '/media': ['usb'],
+  '/media/usb': [],
+  '/mock': ['datasets', 'empty', 'workspace'],
+  '/mock/datasets': ['labeled', 'raw'],
+  '/mock/datasets/labeled': [],
+  '/mock/datasets/raw': [],
+  '/mock/empty': [],
+  '/mock/workspace': ['analysis'],
+  '/mock/workspace/analysis': [],
+};
+
 const EVENT_NAMES_10 = ['违法停车', '应急车道占用', '交通事故', '高速公路行人出现', '摩托车出现',
   '拥堵', '道路施工', '车辆逆行/倒车', '抛洒物', '实线变道'];
 
@@ -272,6 +290,18 @@ async function mockApi(path, opts) {
     if (!body.path || typeof body.path !== 'string') throw new ApiError(400, 'path 必填');
     mockDb.workspace = { path: body.path };
     return mockDb.workspace;
+  }
+  const fsMatch = path.match(/^\/api\/fs\/list(?:\?(.*))?$/);
+  if (fsMatch && method === 'GET') {
+    const q = new URLSearchParams(fsMatch[1] || '');
+    const p = q.get('path') || (mockDb.workspace && mockDb.workspace.path) || '/mock';
+    const names = mockFsTree[p];
+    if (!names) throw new ApiError(404, 'Not a directory: ' + p);
+    return {
+      path: p,
+      parent: p === '/' ? null : (p.slice(0, p.lastIndexOf('/')) || '/'),
+      dirs: names.map(n => ({ name: n, path: (p === '/' ? '' : p) + '/' + n })),
+    };
   }
   if (path === '/api/workspace/videos') return mockDb.workspace.path ? mockDb.videos : [];
 
@@ -487,7 +517,7 @@ function renderWelcome() {
     + (state.workspace && state.workspace.path
       ? '<p>当前工作区:<span class="hint-kbd">' + esc(state.workspace.path) + '</span></p>'
         + '<p>在左侧勾选视频后点击「开始推理」;点击视频名查看 SFT 标注、分析报告与可视化证据。</p>'
-      : '<p>请先点击顶部「未设置工作区」按钮,选择包含视频文件的目录。</p>')
+      : '<p>请先点击顶部「选择工作区…」按钮,选择包含视频文件的目录。</p>')
     + '<p>开发模式:在地址后追加 <span class="hint-kbd">?mock=1</span> 可使用内置模拟数据。</p>'
     + '</div>'
     + '<div id="eval-card-slot"></div>'
@@ -507,12 +537,6 @@ function skeletons() {
 async function selectVideo(stem) {
   const v = state.videos.find(v => v.stem === stem);
   if (!v) return;
-  if (!v.has_results) {
-    const job = latestJobForStem(stem);
-    toast(job && (job.status === 'running' || job.status === 'queued')
-      ? '该视频正在推理队列中' : '该视频尚未推理,无结果可查看');
-    return;
-  }
   state.currentStem = stem;
   state.evTabIdx = 0;
   state.results = null;
@@ -536,31 +560,117 @@ function renderResults() {
   runCleanups();
   const stem = state.currentStem;
   const r = state.results || {};
+  const hasResults = !!(r.sft_label || r.report_md || r.evidence);
   const main = $('#main');
-  main.innerHTML =
+  let html =
     '<div class="cards">'
-    + '<div class="card" id="card-sft"><div class="card-head"><span class="card-title">SFT 标注详情</span>'
+    + '<div class="card" id="card-preview"><div class="card-head"><span class="card-title">视频预览</span>'
     + '<span class="card-sub">' + esc(stem) + '</span></div>'
-    + '<div class="card-body" id="sft-body"></div></div>'
+    + '<div class="card-body" id="preview-body"></div></div>';
 
-    + '<div class="card" id="card-report"><div class="card-head"><span class="card-title">分析报告</span></div>'
-    + '<div class="card-body" id="report-body"></div></div>'
+  if (hasResults) {
+    html +=
+      '<div class="card" id="card-sft"><div class="card-head"><span class="card-title">SFT 标注详情</span>'
+      + '<span class="card-sub">' + esc(stem) + '</span></div>'
+      + '<div class="card-body" id="sft-body"></div></div>'
 
-    + '<div class="card" id="card-evidence"><div class="card-head"><span class="card-title">证据编辑</span>'
-    + '<span class="card-sub">拖拽多边形端点 / 证据框角点进行调整</span><span class="spacer"></span>'
-    + '<span class="dirty-flag" id="dirty-flag" hidden>● 未保存</span>'
-    + '<button class="btn btn-ghost btn-sm" id="btn-ev-reset" disabled>重置</button>'
-    + '<button class="btn btn-primary btn-sm" id="btn-ev-save" disabled>保存</button></div>'
-    + '<div id="ev-tabs" class="ev-tabs"></div>'
-    + '<div class="card-body" id="ev-body"></div></div>'
+      + '<div class="card" id="card-report"><div class="card-head"><span class="card-title">分析报告</span></div>'
+      + '<div class="card-body" id="report-body"></div></div>'
 
-    + '<div id="eval-card-slot"></div>'
-    + '</div>';
+      + '<div class="card" id="card-evidence"><div class="card-head"><span class="card-title">证据编辑</span>'
+      + '<span class="card-sub">拖拽多边形端点 / 证据框角点进行调整</span><span class="spacer"></span>'
+      + '<span class="dirty-flag" id="dirty-flag" hidden>● 未保存</span>'
+      + '<button class="btn btn-ghost btn-sm" id="btn-ev-reset" disabled>重置</button>'
+      + '<button class="btn btn-primary btn-sm" id="btn-ev-save" disabled>保存</button></div>'
+      + '<div id="ev-tabs" class="ev-tabs"></div>'
+      + '<div class="card-body" id="ev-body"></div></div>';
+  } else {
+    const job = latestJobForStem(stem);
+    const note = job && (job.status === 'running' || job.status === 'queued')
+      ? '该视频正在推理队列中,完成后此处将展示 SFT 标注、分析报告与证据。'
+      : '该视频尚未推理,暂无分析结果。在左侧勾选后点击「开始推理」即可分析。';
+    html += '<div class="card"><div class="card-body empty-note">' + esc(note) + '</div></div>';
+  }
 
-  renderSftBody(r.sft_label);
-  renderReportBody(r.report_md, stem);
-  renderEvidenceCard(stem);
+  html += '<div id="eval-card-slot"></div></div>';
+  main.innerHTML = html;
+
+  mountPreview(stem, r.evidence && r.evidence.video);
+  if (hasResults) {
+    renderSftBody(r.sft_label);
+    renderReportBody(r.report_md, stem);
+    renderEvidenceCard(stem);
+  }
   renderEvalCard();
+}
+
+/* ------------------------------------------------------------ 视频预览卡 */
+function streamUrl(stem, ss) {
+  if (MOCK) return null; // mock 模式无真实视频流,直接走逐帧预览
+  let url = '/api/videos/' + encodeURIComponent(stem) + '/stream';
+  if (ss != null && ss > 0) url += '?ss=' + ss.toFixed(2);
+  return url;
+}
+
+function mountPreview(stem, videoInfo) {
+  const body = $('#preview-body');
+  if (!body) return;
+  const url = streamUrl(stem);
+  body.innerHTML =
+    '<div class="pv-wrap" id="pv-wrap">'
+    + '<video id="pv-video" controls preload="metadata" playsinline></video></div>'
+    + '<div id="pv-stepper" hidden></div>';
+
+  const showStepper = hint => {
+    $('#pv-wrap').hidden = true;
+    mountFrameStepper($('#pv-stepper'), stem, videoInfo, hint);
+  };
+
+  if (!url) { showStepper('模拟模式下无真实视频流,以下为逐帧预览。'); return; }
+
+  const video = $('#pv-video');
+  video.addEventListener('error', () => {
+    showStepper('浏览器无法直接播放该视频(编码不受支持或转码服务不可用),已切换为逐帧预览。');
+  });
+  // 转码流不可 seek:拖动进度条时改用 ?ss= 重新起播
+  video.addEventListener('seeking', () => {
+    if (video.seekable && video.seekable.length > 0) return;
+    const t = video.currentTime;
+    if (!(t > 0)) return;
+    video.src = streamUrl(stem, t);
+    video.play().catch(() => { /* 用户未交互时忽略自动播放限制 */ });
+  });
+  video.src = url;
+}
+
+function mountFrameStepper(mount, stem, videoInfo, hint) {
+  const total = videoInfo && videoInfo.duration_sec && videoInfo.fps
+    ? Math.max(1, Math.round(videoInfo.duration_sec * videoInfo.fps))
+    : 300; // 无元数据时的默认帧数上限
+  mount.hidden = false;
+  mount.innerHTML =
+    '<div class="pv-hint"><span>' + esc(hint) + '</span>'
+    + '<button class="btn btn-ghost btn-sm" id="pv-retry">重试播放</button></div>'
+    + '<div class="pv-stage"><img id="pv-img" alt="帧预览"></div>'
+    + '<div class="pv-slider-row">'
+    + '<input type="range" id="pv-slider" min="0" max="' + (total - 1) + '" value="0" step="1">'
+    + '<span class="pv-idx" id="pv-idx">0 / ' + (total - 1) + '</span></div>';
+
+  const img = $('#pv-img', mount);
+  const slider = $('#pv-slider', mount);
+  const idxLabel = $('#pv-idx', mount);
+  img.src = frameUrl(stem, 0);
+  slider.addEventListener('input', () => {
+    const idx = +slider.value;
+    idxLabel.textContent = idx + ' / ' + slider.max;
+    img.src = frameUrl(stem, idx);
+  });
+  img.addEventListener('error', () => {
+    // 帧索引超出实际范围:收紧滑块上限
+    const idx = +slider.value;
+    if (idx > 0) { slider.max = String(idx - 1); slider.value = String(idx - 1); slider.dispatchEvent(new Event('input')); }
+  });
+  $('#pv-retry', mount).addEventListener('click', () => mountPreview(stem, videoInfo));
 }
 
 /* ------------------------------------------------------------ SFT 卡 */
@@ -1219,24 +1329,162 @@ async function loadEvalLatest() {
 /* ================================================================
    动作:工作区 / 推理
    ================================================================ */
-async function setWorkspace(path) {
+// 工作区已切换后的统一刷新(目录弹窗确认后调用)
+async function applyWorkspace(ws) {
+  state.workspace = ws;
+  $('#ws-path').textContent = ws.path;
+  state.currentStem = null;
+  state.checked.clear();
+  state.evalData = null;
+  await Promise.all([loadVideos(), loadEvalLatest()]);
+  renderWelcome();
+  renderSidebar();
+  syncButtons();
+}
+
+/* ================================================================
+   工作区目录弹窗(浏览服务器文件系统,替代原生系统对话框)
+   ================================================================ */
+const dirModal = { open: false, cwd: null, parent: null, dirs: [], selected: null, loading: false };
+
+// 点击「选择工作区…」:打开页内目录导航弹窗
+function browseWorkspace() {
+  dirModal.open = true;
+  $('#dir-modal').hidden = false;
+  $('#dir-input').hidden = true;
+  $('#dir-crumbs').hidden = false;
+  $('.dir-dialog').focus();
+  const start = state.workspace && state.workspace.path ? state.workspace.path : null;
+  navDir(start); // 无 path 时后端回退到当前工作区或用户主目录
+}
+
+function closeDirModal() {
+  dirModal.open = false;
+  $('#dir-modal').hidden = true;
+  $('#btn-workspace').focus();
+}
+
+async function navDir(path) {
+  dirModal.loading = true;
+  renderDirList();
+  let data = null;
   try {
-    state.workspace = await api('/api/workspace', { method: 'POST', body: { path: path } });
-    $('#ws-path').textContent = state.workspace.path;
-    $('#ws-panel').hidden = true;
-    $('#ws-error').hidden = true;
-    state.currentStem = null;
-    state.checked.clear();
-    state.evalData = null;
-    await Promise.all([loadVideos(), loadEvalLatest()]);
-    renderWelcome();
-    renderSidebar();
-    syncButtons();
+    data = await api(path ? '/api/fs/list?path=' + encodeURIComponent(path) : '/api/fs/list');
   } catch (e) {
-    const err = $('#ws-error');
-    err.textContent = '设置失败(' + e.status + '):' + e.message;
-    err.hidden = false;
+    toast('读取目录失败(' + e.status + '):' + e.message, 'err');
   }
+  dirModal.loading = false;
+  if (data) {
+    dirModal.cwd = data.path;
+    dirModal.parent = data.parent;
+    dirModal.dirs = data.dirs || [];
+    dirModal.selected = data.path; // 当前目录即默认选择
+    $('#dir-input').hidden = true;
+    $('#dir-crumbs').hidden = false;
+    renderDirCrumbs();
+  }
+  renderDirList();
+  renderDirFoot();
+}
+
+function renderDirCrumbs() {
+  const cwd = dirModal.cwd || '/';
+  const parts = cwd.split('/').filter(Boolean);
+  let html = '<span class="dir-crumb" data-path="/" title="/">/</span>';
+  let acc = '';
+  parts.forEach((p, i) => {
+    acc += '/' + p;
+    html += '<span class="dir-crumb-sep">›</span>'
+      + '<span class="dir-crumb' + (i === parts.length - 1 ? ' current' : '') + '" data-path="'
+      + esc(acc) + '" title="' + esc(acc) + '">' + esc(p) + '</span>';
+  });
+  const crumbs = $('#dir-crumbs');
+  crumbs.innerHTML = html;
+  $$('.dir-crumb', crumbs).forEach(c => c.addEventListener('click', () => navDir(c.dataset.path)));
+}
+
+function renderDirList() {
+  const list = $('#dir-list');
+  if (dirModal.loading) {
+    list.innerHTML = '<div class="dir-state"><div class="dir-spinner"></div>加载中…</div>';
+    return;
+  }
+  if (!dirModal.cwd) {
+    list.innerHTML = '<div class="dir-state">无法读取目录,可点击 ✎ 手动输入路径</div>';
+    return;
+  }
+  let html = '';
+  if (dirModal.parent) {
+    html += '<div class="dir-row dir-up" data-path="' + esc(dirModal.parent) + '">'
+      + '<span class="dir-ico">⬆</span><span class="dir-name">..</span></div>';
+  }
+  html += dirModal.dirs.map(d =>
+    '<div class="dir-row' + (dirModal.selected === d.path ? ' selected' : '')
+    + '" data-path="' + esc(d.path) + '" data-dir="1">'
+    + '<span class="dir-ico">📁</span><span class="dir-name">' + esc(d.name) + '</span></div>'
+  ).join('');
+  if (!dirModal.dirs.length) html += '<div class="dir-state">此目录没有子文件夹</div>';
+  list.innerHTML = html;
+
+  $$('.dir-row', list).forEach(row => {
+    row.addEventListener('click', () => {
+      if (row.dataset.dir) selectDirRow(row); // 单击选中
+      else navDir(row.dataset.path);          // 「..」直接进入上级
+    });
+    row.addEventListener('dblclick', () => {
+      if (row.dataset.dir) navDir(row.dataset.path); // 双击进入
+    });
+  });
+}
+
+function selectDirRow(row) {
+  dirModal.selected = row.dataset.path;
+  $$('#dir-list .dir-row').forEach(r => r.classList.toggle('selected', r === row));
+  renderDirFoot();
+}
+
+function renderDirFoot() {
+  const el = $('#dir-selected');
+  el.textContent = dirModal.selected || dirModal.cwd || '';
+  el.title = el.textContent;
+}
+
+function showDirInput() {
+  const input = $('#dir-input');
+  $('#dir-crumbs').hidden = true;
+  input.hidden = false;
+  input.value = dirModal.cwd || '';
+  input.focus();
+  input.select();
+}
+
+async function confirmDir() {
+  const path = dirModal.selected || dirModal.cwd;
+  if (!path) return;
+  const btn = $('#dir-confirm');
+  btn.disabled = true;
+  try {
+    const ws = await api('/api/workspace', { method: 'POST', body: { path: path } });
+    await applyWorkspace(ws);
+    closeDirModal();
+    toast('已选择工作区:' + ws.path);
+  } catch (e) {
+    toast('设置工作区失败(' + e.status + '):' + e.message, 'err');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ESC 关闭;Tab 在弹窗内循环(简易焦点陷阱)
+function dirModalKeys(e) {
+  if (!dirModal.open) return;
+  if (e.key === 'Escape') { closeDirModal(); return; }
+  if (e.key !== 'Tab') return;
+  const els = $$('#dir-modal button, #dir-modal input').filter(el => !el.hidden && !el.disabled);
+  if (!els.length) return;
+  const first = els[0], last = els[els.length - 1];
+  if (e.shiftKey && document.activeElement === first) { last.focus(); e.preventDefault(); }
+  else if (!e.shiftKey && document.activeElement === last) { first.focus(); e.preventDefault(); }
 }
 
 async function loadVideos() {
@@ -1315,28 +1563,27 @@ async function pollJobs() {
 function initToolbar() {
   if (MOCK) $('#mock-badge').hidden = false;
 
-  const panel = $('#ws-panel');
-  $('#btn-workspace').addEventListener('click', () => {
-    panel.hidden = !panel.hidden;
-    if (!panel.hidden) {
-      $('#ws-input').value = (state.workspace && state.workspace.path) || '';
-      $('#ws-input').focus();
+  $('#btn-workspace').addEventListener('click', browseWorkspace);
+  $('#dir-close').addEventListener('click', closeDirModal);
+  $('#dir-cancel').addEventListener('click', closeDirModal);
+  $('#dir-confirm').addEventListener('click', confirmDir);
+  $('#dir-edit').addEventListener('click', showDirInput);
+  $('#dir-modal').addEventListener('mousedown', e => {
+    if (e.target === e.currentTarget) closeDirModal(); // 点击遮罩关闭
+  });
+  $('#dir-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter') {
+      const p = e.target.value.trim();
+      if (p) navDir(p);
+      e.stopPropagation();
+    }
+    if (e.key === 'Escape') {
+      $('#dir-input').hidden = true;
+      $('#dir-crumbs').hidden = false;
+      e.stopPropagation(); // 仅退出输入态,不关闭弹窗
     }
   });
-  $('#ws-cancel').addEventListener('click', () => { panel.hidden = true; });
-  $('#ws-ok').addEventListener('click', () => {
-    const p = $('#ws-input').value.trim();
-    if (p) setWorkspace(p);
-  });
-  $('#ws-input').addEventListener('keydown', e => {
-    if (e.key === 'Enter') { const p = e.target.value.trim(); if (p) setWorkspace(p); }
-    if (e.key === 'Escape') panel.hidden = true;
-  });
-  document.addEventListener('click', e => {
-    if (!panel.hidden && !panel.contains(e.target) && !$('#btn-workspace').contains(e.target)) {
-      panel.hidden = true;
-    }
-  });
+  document.addEventListener('keydown', dirModalKeys);
 
   $('#btn-infer').addEventListener('click', startInfer);
   $('#btn-evaluate').addEventListener('click', runEvaluate);
