@@ -53,6 +53,15 @@ def create_app(workspace: Optional[str] = None) -> FastAPI:
     app.include_router(video_stream.router)
     app.include_router(evaluate.router)
 
+    @app.middleware("http")
+    async def _no_cache_static(request, call_next):
+        # The SPA must always revalidate: a stale cached app.js/index.html
+        # breaks the UI after upgrades (heuristic caching otherwise applies).
+        response = await call_next(request)
+        if request.url.path in ("/", "/index.html", "/app.js", "/style.css"):
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
     # Static frontend (developed in parallel) — must not crash when missing.
     try:
         app.mount(

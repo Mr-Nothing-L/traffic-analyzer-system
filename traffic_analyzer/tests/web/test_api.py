@@ -849,3 +849,25 @@ class TestVideoStream:
         assert resp.status_code == 206
         assert resp.headers["content-type"] == "video/mp4"
         assert len(resp.content) == 100
+
+
+# ---------------------------------------------------------------------------
+# Static asset cache headers
+# ---------------------------------------------------------------------------
+
+
+class TestStaticCacheHeaders:
+    """SPA assets must always revalidate so upgrades don't break on stale cache."""
+
+    def test_index_and_assets_send_no_cache(self) -> None:
+        client = TestClient(create_app())
+        for path in ("/", "/app.js", "/style.css"):
+            resp = client.get(path)
+            assert resp.status_code == 200, path
+            assert resp.headers.get("cache-control") == "no-cache", path
+
+    def test_api_responses_not_affected(self) -> None:
+        client = TestClient(create_app())
+        resp = client.get("/api/jobs")
+        assert resp.status_code == 200
+        assert "cache-control" not in resp.headers
