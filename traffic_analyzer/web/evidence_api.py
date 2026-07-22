@@ -1,4 +1,4 @@
-"""Result reading and evidence editing endpoints.
+"""Result reading and evidence/SFT editing endpoints.
 
 Reads ``report.md`` / ``<stem>.json`` / ``<stem>_evidence.json`` from
 ``<workspace>/analysis/<stem>/`` and serves the copied composite images.
@@ -10,6 +10,7 @@ only allows edits to the user-editable coordinate/label fields:
 - ``events[*].evidence_regions[*].box_rel``
 - ``events[*].evidence_regions[*].label``
 
+The SFT PUT endpoint only allows ``description`` / ``action`` edits.
 Any other difference versus the on-disk version is rejected with 422.
 """
 
@@ -19,6 +20,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import yaml
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, field_validator
@@ -26,6 +28,14 @@ from pydantic import BaseModel, ConfigDict, field_validator
 from traffic_analyzer.web import workspace as workspace_mod
 
 router = APIRouter()
+
+# Repository root (traffic_analyzer/web/evidence_api.py -> parents[2]).
+_EVENT_CATEGORIES_YAML = (
+    Path(__file__).resolve().parents[2]
+    / "traffic_analyzer"
+    / "config"
+    / "event_categories.yaml"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +120,37 @@ class Evidence(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# SFT sample (only description / action are user-editable)
+# ---------------------------------------------------------------------------
+
+# 标注文档 v4.5 的合法 action 编号(action 9 = 正常占位,不出现)。
+_ALLOWED_ACTION_IDS = frozenset({1, 2, 3, 4, 5, 6, 7, 8, 10, 11})
+
+
+class SftSample(BaseModel):
+    """完整 SFT 样本;chunk/idx/时间戳/chunk_name 与磁盘版本不一致时拒绝。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    chunk: Any
+    idx: Any
+    action: List[int]
+    description: str
+    start_timestamp: Any
+    end_timestamp: Any
+    chunk_name: Any
+
+    @field_validator("action")
+    @classmethod
+    def _check_action_ids(cls, value: List[int]) -> List[int]:
+        if not all(a in _ALLOWED_ACTION_IDS for a in value):
+            raise ValueError(
+                f"action ids must be a subset of {sorted(_ALLOWED_ACTION_IDS)}"
+            )
+        return value
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -139,6 +180,14 @@ def _strip_editable(payload: Dict[str, Any]) -> Dict[str, Any]:
             if isinstance(region, dict):
                 region["box_rel"] = _MASK
                 region["label"] = _MASK
+    return copy
+
+
+def _strip_sft_editable(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """与 ``_strip_editable`` 同理:仅 description / action 允许不同。"""
+    copy = json.loads(json.dumps(payload, ensure_ascii=False))
+    copy["description"] = _MASK
+    copy["action"] = _MASK
     return copy
 
 
@@ -200,6 +249,47 @@ def put_evidence(stem: str, body: Evidence, request: Request) -> Dict[str, Any]:
         )
 
     evidence_path.write_text(
+        json.dumps(new_payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return new_payload
+
+
+@router.get("/api/config/events")
+def get_config_events() -> List[Dict[str, Any]]:
+    """事件类别配置(供 SFT 编辑器按事件分框),按 event_id 排序。"""
+    data = yaml.safe_load(_EVENT_CATEGORIES_YAML.read_text(encoding="utf-8")) or {}
+    events = [
+        {
+            "event_id": int(cat["event_id"]),
+            "name_zh": str(cat.get("name_zh") or ""),
+            "is_active": bool(cat.get("is_active", True)),
+        }
+        for cat in data.get("event_categories") or []
+    ]
+    events.sort(key=lambda e: e["event_id"])
+    return events
+
+
+@router.put("/api/results/{stem}/sft")
+def put_sft(stem: str, body: SftSample, request: Request) -> Dict[str, Any]:
+    workspace = workspace_mod.require_workspace(request)
+    workspace_mod.validate_stem(stem)
+    sft_path = workspace_mod.analysis_dir(workspace, stem) / f"{stem}.json"
+    disk = _read_json(sft_path)
+    if disk is None:
+        raise HTTPException(status_code=404, detail="SFT file not found")
+
+    new_payload = body.model_dump()
+    if not isinstance(disk, dict) or _strip_sft_editable(disk) != _strip_sft_editable(
+        new_payload
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="Only description and action may be modified",
+        )
+
+    sft_path.write_text(
         json.dumps(new_payload, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )

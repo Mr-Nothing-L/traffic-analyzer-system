@@ -126,6 +126,22 @@ def stream_video(
     video = workspace_mod.find_video(workspace, stem)
     if video is None:
         raise HTTPException(status_code=404, detail="Video not found")
+    return _stream_response(video, ss)
+
+
+@router.get("/api/workspace/stream")
+def stream_workspace_video(
+    request: Request, path: str, ss: Optional[float] = Query(None, ge=0)
+) -> object:
+    """Stream a workspace-relative video file (nested tree videos)."""
+    workspace = workspace_mod.require_workspace(request)
+    video = workspace_mod.resolve_workspace_file(workspace, path)
+    if video.suffix.lower() not in workspace_mod.VIDEO_EXTENSIONS:
+        raise HTTPException(status_code=404, detail="Not a video file")
+    return _stream_response(video, ss)
+
+
+def _stream_response(video: Path, ss: Optional[float]) -> object:
     _container, codec = probe_video(video)
     if is_browser_native(codec, video.suffix):
         media_type = _MEDIA_TYPES.get(video.suffix.lower(), "application/octet-stream")

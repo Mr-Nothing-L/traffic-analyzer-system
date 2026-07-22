@@ -8,6 +8,7 @@ and an ``images/`` subdirectory.
 
 from __future__ import annotations
 
+import os
 import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -70,20 +71,108 @@ def find_video(workspace: Path, stem: str) -> Optional[Path]:
 
 
 def list_videos(workspace: Path) -> List[Dict[str, Any]]:
+    """All videos in the workspace at any depth (dot-dirs skipped).
+
+    Each entry carries the workspace-relative path (``rel``) used by the
+    frontend as its unique key; ``has_results`` follows the flat
+    ``analysis/<stem>/`` contract for every depth.
+    """
     videos: List[Dict[str, Any]] = []
-    for path in sorted(workspace.iterdir()):
-        if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS:
-            stat = path.stat()
+    root = workspace.resolve()
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        for name in filenames:
+            path = Path(dirpath) / name
+            if path.suffix.lower() not in VIDEO_EXTENSIONS:
+                continue
+            resolved = path.resolve()
+            if resolved != root and root not in resolved.parents:
+                continue  # symlink escaping the workspace
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
             videos.append(
                 {
-                    "name": path.name,
+                    "name": name,
                     "stem": path.stem,
+                    "rel": path.relative_to(root).as_posix(),
                     "size": stat.st_size,
                     "mtime": stat.st_mtime,
                     "has_results": has_results(workspace, path.stem),
                 }
             )
+    videos.sort(key=lambda v: v["rel"])
     return videos
+
+
+def _resolve_confined(workspace: Path, rel: str, detail: str) -> Path:
+    """Resolve a workspace-relative path, rejecting anything escaping the root."""
+    if rel:
+        segments = rel.split("/")
+        if any(seg in ("", ".", "..") for seg in segments):
+            raise HTTPException(status_code=404, detail=detail)
+    root = workspace.resolve()
+    target = (root / rel).resolve()
+    if target != root and root not in target.parents:
+        raise HTTPException(status_code=404, detail=detail)
+    return target
+
+
+def resolve_tree_dir(workspace: Path, rel: str) -> Path:
+    """Resolve a workspace-relative dir, rejecting anything escaping the root."""
+    target = _resolve_confined(workspace, rel, "Unknown tree path")
+    if not target.is_dir():
+        raise HTTPException(status_code=404, detail="Unknown tree path")
+    return target
+
+
+def resolve_workspace_file(workspace: Path, rel: str) -> Path:
+    """Resolve a workspace-relative file, rejecting anything escaping the root."""
+    target = _resolve_confined(workspace, rel, "Unknown workspace file")
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="Unknown workspace file")
+    return target
+
+
+def list_tree(workspace: Path, rel: str) -> Dict[str, Any]:
+    """One directory level of the workspace (dirs first, dotfiles skipped).
+
+    Video entries carry ``stem`` and ``has_results`` at any depth; results
+    follow the flat ``workspace/analysis/<stem>/`` contract.
+    """
+    target = resolve_tree_dir(workspace, rel)
+    entries: List[Dict[str, Any]] = []
+    try:
+        children = list(target.iterdir())
+    except OSError:
+        raise HTTPException(status_code=404, detail="Unknown tree path")
+    for path in children:
+        if path.name.startswith("."):
+            continue
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        child_rel = f"{rel}/{path.name}" if rel else path.name
+        if path.is_dir():
+            entries.append({"name": path.name, "rel": child_rel, "type": "dir"})
+        else:
+            is_video = path.suffix.lower() in VIDEO_EXTENSIONS
+            entry: Dict[str, Any] = {
+                "name": path.name,
+                "rel": child_rel,
+                "type": "file",
+                "is_video": is_video,
+                "size": stat.st_size,
+                "mtime": stat.st_mtime,
+            }
+            if is_video:
+                entry["stem"] = path.stem
+                entry["has_results"] = has_results(workspace, path.stem)
+            entries.append(entry)
+    entries.sort(key=lambda e: (e["type"] != "dir", e["name"].lower()))
+    return {"path": rel, "entries": entries}
 
 
 class WorkspaceSetRequest(BaseModel):
@@ -108,3 +197,8 @@ def set_workspace(body: WorkspaceSetRequest, request: Request) -> Dict[str, Any]
 @router.get("/api/workspace/videos")
 def get_workspace_videos(request: Request) -> List[Dict[str, Any]]:
     return list_videos(require_workspace(request))
+
+
+@router.get("/api/workspace/tree")
+def get_workspace_tree(request: Request, path: str = "") -> Dict[str, Any]:
+    return list_tree(require_workspace(request), path)

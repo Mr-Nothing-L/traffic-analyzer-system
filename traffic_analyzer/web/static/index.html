@@ -24,13 +24,12 @@
       <button id="btn-infer" class="btn btn-primary" disabled>开始推理</button>
       <button id="btn-evaluate" class="btn btn-ghost" disabled>精度评估</button>
     </div>
-    <div id="progress-dock" class="progress-dock" hidden></div>
   </header>
 
   <div id="layout">
     <aside id="sidebar">
       <div class="side-head">
-        <span class="side-title">工作区视频</span>
+        <span class="side-title">工作区文件</span>
         <label class="side-all" title="全选/取消全选">
           <input type="checkbox" id="check-all">
         </label>
@@ -39,6 +38,7 @@
         <div class="side-empty">设置工作区后列出视频</div>
       </div>
     </aside>
+    <div id="splitter" title="拖动调整侧栏宽度,双击复位"></div>
     <main id="main"></main>
   </div>
 
@@ -47,6 +47,10 @@
       <div class="dir-head">
         <span class="dir-title" id="dir-modal-title">选择工作区</span>
         <button id="dir-close" class="dir-close" title="关闭 (Esc)">✕</button>
+      </div>
+      <div class="dir-recent">
+        <label class="dir-recent-label" for="dir-recent-select">最近使用</label>
+        <select id="dir-recent-select" class="dir-recent-select"></select>
       </div>
       <div class="dir-pathbar">
         <div id="dir-crumbs" class="dir-crumbs"></div>

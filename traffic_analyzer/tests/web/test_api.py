@@ -14,6 +14,7 @@ from typing import Any, Dict, List
 from unittest.mock import MagicMock
 
 import pytest
+import yaml
 from fastapi.testclient import TestClient
 
 from traffic_analyzer.cli import build_parser, main
@@ -164,10 +165,121 @@ class TestWorkspace:
 
         v1 = by_name["v1.mp4"]
         assert v1["stem"] == "v1"
+        assert v1["rel"] == "v1.mp4"
         assert v1["size"] == 0
         assert isinstance(v1["mtime"], float)
         assert v1["has_results"] is True
         assert by_name["v2.avi"]["has_results"] is False
+
+    def test_list_videos_recursive(self, tmp_path: Path) -> None:
+        """Nested videos are listed with their workspace-relative path."""
+        workspace = _make_tree_workspace(tmp_path)
+        _make_results(workspace, "nested")
+        client = TestClient(create_app(workspace=str(workspace)))
+
+        videos = client.get("/api/workspace/videos").json()
+        by_rel = {v["rel"]: v for v in videos}
+        assert set(by_rel) == {"sub/nested.mp4", "v1.mp4", "v2.avi"}
+        nested = by_rel["sub/nested.mp4"]
+        assert nested["name"] == "nested.mp4"
+        assert nested["stem"] == "nested"
+        assert nested["has_results"] is True
+        # Sorted by rel.
+        assert [v["rel"] for v in videos] == sorted(by_rel)
+
+
+# ---------------------------------------------------------------------------
+# Workspace file tree
+# ---------------------------------------------------------------------------
+
+
+def _make_tree_workspace(tmp_path: Path) -> Path:
+    """Workspace with nested dirs, videos at two levels, dotfiles, plain files."""
+    (tmp_path / "v1.mp4").write_bytes(b"")
+    (tmp_path / "v2.avi").write_bytes(b"")
+    (tmp_path / "notes.txt").write_text("doc", encoding="utf-8")
+    (tmp_path / ".hidden").write_text("x", encoding="utf-8")
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "nested.mp4").write_bytes(b"")
+    (sub / "readme.md").write_text("hi", encoding="utf-8")
+    (tmp_path / ".hiddendir").mkdir()
+    return tmp_path
+
+
+class TestWorkspaceTree:
+    def test_tree_requires_workspace(self) -> None:
+        client = TestClient(create_app())
+        assert client.get("/api/workspace/tree").status_code == 400
+
+    def test_tree_root_listing(self, tmp_path: Path) -> None:
+        workspace = _make_tree_workspace(tmp_path)
+        _make_results(workspace, "v1")
+        client = TestClient(create_app(workspace=str(workspace)))
+
+        data = client.get("/api/workspace/tree").json()
+        assert data["path"] == ""
+        # Dirs first, then files, case-insensitive; dotfiles skipped.
+        # (analysis/ comes from _make_results.)
+        assert [e["name"] for e in data["entries"]] == [
+            "analysis", "sub", "notes.txt", "v1.mp4", "v2.avi"
+        ]
+        by_name = {e["name"]: e for e in data["entries"]}
+        assert by_name["sub"]["type"] == "dir"
+        assert by_name["sub"]["rel"] == "sub"
+        assert by_name["notes.txt"]["is_video"] is False
+        assert by_name["v1.mp4"]["is_video"] is True
+        assert by_name["v1.mp4"]["stem"] == "v1"
+        assert by_name["v1.mp4"]["has_results"] is True
+        assert by_name["v2.avi"]["has_results"] is False
+        assert isinstance(by_name["v1.mp4"]["size"], int)
+        assert isinstance(by_name["v1.mp4"]["mtime"], float)
+
+    def test_tree_nested_listing(self, tmp_path: Path) -> None:
+        workspace = _make_tree_workspace(tmp_path)
+        client = TestClient(create_app(workspace=str(workspace)))
+
+        data = client.get("/api/workspace/tree", params={"path": "sub"}).json()
+        assert data["path"] == "sub"
+        assert [e["name"] for e in data["entries"]] == ["nested.mp4", "readme.md"]
+        nested = data["entries"][0]
+        assert nested["rel"] == "sub/nested.mp4"
+        assert nested["is_video"] is True
+        assert nested["stem"] == "nested"
+        assert nested["has_results"] is False
+
+    def test_tree_nested_has_results(self, tmp_path: Path) -> None:
+        """Nested videos report has_results via the flat analysis/<stem>/ contract."""
+        workspace = _make_tree_workspace(tmp_path)
+        _make_results(workspace, "nested")
+        client = TestClient(create_app(workspace=str(workspace)))
+
+        data = client.get("/api/workspace/tree", params={"path": "sub"}).json()
+        nested = data["entries"][0]
+        assert nested["stem"] == "nested"
+        assert nested["has_results"] is True
+
+    def test_tree_path_traversal_404(self, tmp_path: Path) -> None:
+        workspace = _make_tree_workspace(tmp_path)
+        client = TestClient(create_app(workspace=str(workspace)))
+        assert client.get("/api/workspace/tree", params={"path": ".."}).status_code == 404
+        assert client.get("/api/workspace/tree", params={"path": "../.."}).status_code == 404
+        assert client.get("/api/workspace/tree", params={"path": "sub/../../etc"}).status_code == 404
+
+    def test_tree_symlink_escape_404(self, tmp_path: Path) -> None:
+        workspace = _make_tree_workspace(tmp_path)
+        outside = tmp_path.parent / "outside_tree_test"
+        outside.mkdir(exist_ok=True)
+        (workspace / "link").symlink_to(outside)
+        client = TestClient(create_app(workspace=str(workspace)))
+        # The symlink itself is listed as a dir but cannot be opened.
+        assert client.get("/api/workspace/tree", params={"path": "link"}).status_code == 404
+
+    def test_tree_file_path_404(self, tmp_path: Path) -> None:
+        workspace = _make_tree_workspace(tmp_path)
+        client = TestClient(create_app(workspace=str(workspace)))
+        assert client.get("/api/workspace/tree", params={"path": "notes.txt"}).status_code == 404
+        assert client.get("/api/workspace/tree", params={"path": "nope"}).status_code == 404
 
 
 # ---------------------------------------------------------------------------
@@ -396,6 +508,124 @@ class TestEvidencePut:
 
 
 # ---------------------------------------------------------------------------
+# Event config + SFT editing
+# ---------------------------------------------------------------------------
+
+
+def _sft_payload() -> Dict[str, Any]:
+    """完整的 SFT 样本(与 <stem>.json 契约的 7 个键一致)。"""
+    return {
+        "chunk": "chunk #1",
+        "idx": 1,
+        "action": [2],
+        "description": (
+            "<think>\n违法停车：未发现。\n\n应急车道占用：一辆白色小车静止于应急车道。\n"
+            "</think>\n<answer>\n天气：晴天\n时间：白天\n场景：高速公路主路。\n"
+            "最终结论：本视频块检出以下事件。\nclass2: 应急车道占用\n</answer>"
+        ),
+        "start_timestamp": 0.0,
+        "end_timestamp": 15.0,
+        "chunk_name": "v1.mp4",
+    }
+
+
+class TestConfigEvents:
+    def test_events_match_yaml(self) -> None:
+        client = TestClient(create_app())
+        resp = client.get("/api/config/events")
+        assert resp.status_code == 200
+
+        yaml_path = (
+            Path(__file__).resolve().parents[3]
+            / "traffic_analyzer"
+            / "config"
+            / "event_categories.yaml"
+        )
+        data = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+        expected = sorted(
+            (
+                {
+                    "event_id": c["event_id"],
+                    "name_zh": c["name_zh"],
+                    "is_active": c.get("is_active", True),
+                }
+                for c in data["event_categories"]
+            ),
+            key=lambda e: e["event_id"],
+        )
+        assert resp.json() == expected
+        # 当前配置:0-7 激活,8 抛洒物 / 9 实线变道 未激活。
+        assert [e["is_active"] for e in resp.json()] == [True] * 8 + [False] * 2
+
+
+class TestSftPut:
+    def _client(self, tmp_path: Path) -> TestClient:
+        workspace = _make_workspace(tmp_path)
+        _make_results(workspace, "v1")
+        # _make_results 写入的 SFT 缺字段,覆盖为契约完整的样本。
+        (workspace / "analysis" / "v1" / "v1.json").write_text(
+            json.dumps(_sft_payload(), ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        return TestClient(create_app(workspace=str(workspace)))
+
+    def test_put_description_and_action_ok(self, tmp_path: Path) -> None:
+        client = self._client(tmp_path)
+        payload = _sft_payload()
+        payload["action"] = [2, 3]
+        payload["description"] = "<think>\n改写过。\n</think>\n<answer>\n天气：阴天\n</answer>"
+        resp = client.put("/api/results/v1/sft", json=payload)
+        assert resp.status_code == 200
+        assert resp.json() == payload
+
+        disk = json.loads(
+            (tmp_path / "analysis" / "v1" / "v1.json").read_text(encoding="utf-8")
+        )
+        assert disk == payload
+
+    @pytest.mark.parametrize(
+        "mutate",
+        [
+            lambda p: p.update({"chunk": "chunk #2"}),
+            lambda p: p.update({"idx": 2}),
+            lambda p: p.update({"start_timestamp": 1.0}),
+            lambda p: p.update({"end_timestamp": 20.0}),
+            lambda p: p.update({"chunk_name": "other.mp4"}),
+        ],
+    )
+    def test_put_non_editable_change_422(self, tmp_path: Path, mutate: Any) -> None:
+        client = self._client(tmp_path)
+        payload = _sft_payload()
+        mutate(payload)
+        resp = client.put("/api/results/v1/sft", json=payload)
+        assert resp.status_code == 422
+        # 磁盘文件未被改动。
+        disk = json.loads(
+            (tmp_path / "analysis" / "v1" / "v1.json").read_text(encoding="utf-8")
+        )
+        assert disk == _sft_payload()
+
+    def test_put_missing_file_404(self, tmp_path: Path) -> None:
+        workspace = _make_workspace(tmp_path)
+        client = TestClient(create_app(workspace=str(workspace)))
+        resp = client.put("/api/results/v1/sft", json=_sft_payload())
+        assert resp.status_code == 404
+
+    def test_put_bad_stem_404(self, tmp_path: Path) -> None:
+        client = self._client(tmp_path)
+        resp = client.put("/api/results/a..b/sft", json=_sft_payload())
+        assert resp.status_code == 404
+
+    @pytest.mark.parametrize("action", [[9], [0], [12], [-1], [1.5], [2, 9]])
+    def test_put_invalid_action_422(self, tmp_path: Path, action: List[Any]) -> None:
+        client = self._client(tmp_path)
+        payload = _sft_payload()
+        payload["action"] = action
+        resp = client.put("/api/results/v1/sft", json=payload)
+        assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
 # Result images
 # ---------------------------------------------------------------------------
 
@@ -496,6 +726,73 @@ class TestJobs:
         client = TestClient(create_app(workspace=str(workspace)))
         resp = client.post("/api/infer", json={"stems": ["ghost"]})
         assert resp.status_code == 404
+
+    def test_build_infer_command_nested_rel(self, tmp_path: Path) -> None:
+        """argv points at workspace/<rel> video and flat analysis/<stem>/ output."""
+        from traffic_analyzer.web.jobs import build_infer_command
+
+        argv = build_infer_command(tmp_path, "sub/nested.mp4", "nested")
+        assert argv[argv.index("--video") + 1] == str(tmp_path / "sub" / "nested.mp4")
+        assert argv[argv.index("--output") + 1] == str(
+            tmp_path / "analysis" / "nested" / "report.md"
+        )
+        assert argv[argv.index("--sft-output-dir") + 1] == str(
+            tmp_path / "analysis" / "nested"
+        )
+
+    def test_infer_nested_rel(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        workspace = _make_tree_workspace(tmp_path)
+        captured: Dict[str, Any] = {}
+
+        def _spy(ws: Path, rel: str, stem: str) -> List[str]:
+            captured["rel"] = rel
+            captured["stem"] = stem
+            return [sys.executable, "-c", "print('ok')"]
+
+        monkeypatch.setattr("traffic_analyzer.web.jobs.build_infer_command", _spy)
+        client = TestClient(create_app(workspace=str(workspace)))
+
+        resp = client.post("/api/infer", json={"rels": ["sub/nested.mp4"]})
+        assert resp.status_code == 200
+        assert captured == {"rel": "sub/nested.mp4", "stem": "nested"}
+
+        job = _wait_for_job(client, resp.json()["job_ids"][0])
+        assert job["status"] == "done"
+        assert job["stem"] == "nested"
+        assert job["rel"] == "sub/nested.mp4"
+        # Flat results contract: analysis/<stem>/ was created up front.
+        assert (workspace / "analysis" / "nested").is_dir()
+
+    def test_infer_duplicate_stem_rels_400(self, tmp_path: Path) -> None:
+        """Two rels sharing a stem would collide in analysis/<stem>/."""
+        (tmp_path / "a").mkdir()
+        (tmp_path / "b").mkdir()
+        (tmp_path / "a" / "dup.mp4").write_bytes(b"")
+        (tmp_path / "b" / "dup.mp4").write_bytes(b"")
+        client = TestClient(create_app(workspace=str(tmp_path)))
+
+        resp = client.post("/api/infer", json={"rels": ["a/dup.mp4", "b/dup.mp4"]})
+        assert resp.status_code == 400
+        detail = resp.json()["detail"]
+        assert "dup" in detail
+        assert "a/dup.mp4" in detail
+        assert "b/dup.mp4" in detail
+        # Whole request rejected: no jobs were queued.
+        assert client.get("/api/jobs").json() == []
+
+    def test_infer_rel_traversal_404(self, tmp_path: Path) -> None:
+        workspace = _make_tree_workspace(tmp_path)
+        client = TestClient(create_app(workspace=str(workspace)))
+        assert client.post("/api/infer", json={"rels": ["../v1.mp4"]}).status_code == 404
+        assert client.post(
+            "/api/infer", json={"rels": ["sub/../../etc/passwd.mp4"]}
+        ).status_code == 404
+
+    def test_infer_rel_not_a_video_404(self, tmp_path: Path) -> None:
+        workspace = _make_tree_workspace(tmp_path)
+        client = TestClient(create_app(workspace=str(workspace)))
+        assert client.post("/api/infer", json={"rels": ["notes.txt"]}).status_code == 404
+        assert client.post("/api/infer", json={"rels": ["ghost.mp4"]}).status_code == 404
 
     def test_infer_without_workspace_400(self) -> None:
         client = TestClient(create_app())
@@ -675,6 +972,67 @@ class TestFrames:
         assert _FakeCapture.instances == 2
 
 
+class TestVideoMeta:
+    """Meta endpoints (cv2-based) + workspace-rel frame endpoint."""
+
+    def test_meta_real_video(self, tmp_path: Path) -> None:
+        workspace = _make_workspace(tmp_path)
+        _make_tiny_video(workspace / "v1.mp4", frames=8)
+        client = TestClient(create_app(workspace=str(workspace)))
+        resp = client.get("/api/videos/v1/meta")
+        assert resp.status_code == 200
+        meta = resp.json()
+        assert meta["frame_count"] == 8
+        assert meta["fps"] == pytest.approx(5.0)
+        assert meta["duration_sec"] == pytest.approx(1.6)
+        assert meta["width"] == 64
+        assert meta["height"] == 48
+
+    def test_meta_invalid_video_404(self, tmp_path: Path) -> None:
+        workspace = _make_workspace(tmp_path)  # v1.mp4 is an empty file
+        client = TestClient(create_app(workspace=str(workspace)))
+        assert client.get("/api/videos/v1/meta").status_code == 404
+
+    def test_meta_traversal_404(self, tmp_path: Path) -> None:
+        workspace = _make_workspace(tmp_path)
+        client = TestClient(create_app(workspace=str(workspace)))
+        assert client.get("/api/videos/a..b/meta").status_code == 404
+        assert client.get("/api/workspace/meta", params={"path": "../v1.mp4"}).status_code == 404
+        assert client.get("/api/workspace/frame", params={"path": "../v1.mp4", "index": 0}).status_code == 404
+
+    def test_meta_without_workspace_400(self) -> None:
+        client = TestClient(create_app())
+        assert client.get("/api/videos/v1/meta").status_code == 400
+        assert client.get("/api/workspace/meta", params={"path": "v1.mp4"}).status_code == 400
+        assert client.get("/api/workspace/frame", params={"path": "v1.mp4", "index": 0}).status_code == 400
+
+    def test_workspace_meta_non_video_404(self, tmp_path: Path) -> None:
+        workspace = _make_workspace(tmp_path)
+        client = TestClient(create_app(workspace=str(workspace)))
+        assert client.get("/api/workspace/meta", params={"path": "notes.txt"}).status_code == 404
+        assert client.get("/api/workspace/frame", params={"path": "notes.txt", "index": 0}).status_code == 404
+
+    def test_workspace_meta_and_frame_real_video(self, tmp_path: Path) -> None:
+        workspace = _make_workspace(tmp_path)
+        sub = workspace / "sub"
+        sub.mkdir()
+        _make_tiny_video(sub / "nested.mp4", frames=8)
+        client = TestClient(create_app(workspace=str(workspace)))
+
+        resp = client.get("/api/workspace/meta", params={"path": "sub/nested.mp4"})
+        assert resp.status_code == 200
+        assert resp.json()["frame_count"] == 8
+
+        resp = client.get("/api/workspace/frame", params={"path": "sub/nested.mp4", "index": 0})
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "image/jpeg"
+        assert resp.content[:2] == b"\xff\xd8"  # JPEG SOI
+
+        # 越界帧 404
+        resp = client.get("/api/workspace/frame", params={"path": "sub/nested.mp4", "index": 99})
+        assert resp.status_code == 404
+
+
 # ---------------------------------------------------------------------------
 # CLI: web subcommand
 # ---------------------------------------------------------------------------
@@ -849,6 +1207,95 @@ class TestVideoStream:
         assert resp.status_code == 206
         assert resp.headers["content-type"] == "video/mp4"
         assert len(resp.content) == 100
+
+
+# ---------------------------------------------------------------------------
+# Workspace-relative streaming (/api/workspace/stream)
+# ---------------------------------------------------------------------------
+
+
+def _make_stream_workspace(tmp_path: Path) -> Path:
+    """Workspace with a nested (dummy-content) video plus a plain file."""
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "nested.mp4").write_bytes(b"\x00" * 2048)
+    (sub / "notes.txt").write_text("not a video", encoding="utf-8")
+    return tmp_path
+
+
+class TestWorkspaceStream:
+    def test_stream_full_200(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "traffic_analyzer.web.video_stream.probe_video",
+            lambda path: ("mov,mp4,m4a,3gp,3g2,mj2", "h264"),
+        )
+        workspace = _make_stream_workspace(tmp_path)
+        client = TestClient(create_app(workspace=str(workspace)))
+        resp = client.get("/api/workspace/stream", params={"path": "sub/nested.mp4"})
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "video/mp4"
+        assert resp.headers["accept-ranges"] == "bytes"
+        assert len(resp.content) == 2048
+
+    def test_stream_range_206(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "traffic_analyzer.web.video_stream.probe_video",
+            lambda path: ("mov,mp4,m4a,3gp,3g2,mj2", "h264"),
+        )
+        workspace = _make_stream_workspace(tmp_path)
+        client = TestClient(create_app(workspace=str(workspace)))
+        resp = client.get(
+            "/api/workspace/stream",
+            params={"path": "sub/nested.mp4"},
+            headers={"Range": "bytes=0-99"},
+        )
+        assert resp.status_code == 206
+        assert resp.headers["content-range"] == "bytes 0-99/2048"
+        assert len(resp.content) == 100
+
+    def test_stream_path_traversal_404(self, tmp_path: Path) -> None:
+        workspace = _make_stream_workspace(tmp_path)
+        client = TestClient(create_app(workspace=str(workspace)))
+        assert client.get(
+            "/api/workspace/stream", params={"path": "../../etc/passwd"}
+        ).status_code == 404
+        assert client.get(
+            "/api/workspace/stream", params={"path": "sub/../../outside.mp4"}
+        ).status_code == 404
+
+    def test_stream_symlink_escape_404(self, tmp_path: Path) -> None:
+        outside = tmp_path.parent / "outside_stream_test"
+        outside.mkdir(exist_ok=True)
+        try:
+            (outside / "secret.mp4").write_bytes(b"\x00" * 8)
+            workspace = _make_stream_workspace(tmp_path)
+            (workspace / "sub" / "link.mp4").symlink_to(outside / "secret.mp4")
+            client = TestClient(create_app(workspace=str(workspace)))
+            assert client.get(
+                "/api/workspace/stream", params={"path": "sub/link.mp4"}
+            ).status_code == 404
+        finally:
+            shutil.rmtree(outside, ignore_errors=True)
+
+    def test_stream_non_video_404(self, tmp_path: Path) -> None:
+        workspace = _make_stream_workspace(tmp_path)
+        client = TestClient(create_app(workspace=str(workspace)))
+        assert client.get(
+            "/api/workspace/stream", params={"path": "sub/notes.txt"}
+        ).status_code == 404
+
+    def test_stream_missing_file_404(self, tmp_path: Path) -> None:
+        workspace = _make_stream_workspace(tmp_path)
+        client = TestClient(create_app(workspace=str(workspace)))
+        assert client.get(
+            "/api/workspace/stream", params={"path": "sub/ghost.mp4"}
+        ).status_code == 404
+
+    def test_stream_without_workspace_400(self) -> None:
+        client = TestClient(create_app())
+        assert client.get(
+            "/api/workspace/stream", params={"path": "sub/nested.mp4"}
+        ).status_code == 400
 
 
 # ---------------------------------------------------------------------------

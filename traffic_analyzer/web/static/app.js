@@ -42,18 +42,22 @@ const STEP_LABELS = { 1: '预处理', 2: '专家分析', 3: '裁决', 4: 'SFT �
 
 const state = {
   workspace: null,          // {path} | {path:null}
-  videos: [],               // [{name, stem, size, mtime, has_results}]
-  jobs: [],                 // [{id, kind, stem?, status, progress, log_tail, returncode?}]
+  videos: [],               // [{name, stem, rel, size, mtime, has_results}](全工作区递归)
+  jobs: [],                 // [{id, kind, stem?, rel?, status, progress, log_tail, returncode?}]
   prevJobStatus: {},        // id -> status(用于完成转移检测)
-  checked: new Set(),       // 勾选的视频 stem
-  currentStem: null,
+  checked: new Set(),       // 勾选的视频 rel 路径
+  currentStem: null,        // 当前视频 stem(结果按 stem 读取,契约不变)
+  currentRel: null,         // 当前视频 rel(媒体按 rel 定位;顶层时 rel == name)
   results: null,            // 当前视频的 {report_md, sft_label, evidence}
   evidenceDraft: null,      // 编辑中的 evidence 深拷贝
   evidenceDirty: false,
   evTabIdx: 0,
   evalData: null,           // /api/evaluate/latest 返回
-  batchIds: [],             // 最近一次批量推理的 job id
+  eventConfig: null,        // /api/config/events 缓存([{event_id, name_zh, is_active}])
+  sftDraft: null,           // SFT 编辑草稿 {texts, checks, unmatched, env}
+  sftSavedSig: '',          // 已保存草稿的签名(用于 dirty 判断)
   cleanups: [],             // 主区重渲染前的清理函数
+  tree: { loaded: false, root: [], children: {}, expanded: new Set() }, // 侧栏文件树
 };
 
 /* ------------------------------------------------------------ API 层 */
@@ -86,6 +90,24 @@ function frameUrl(stem, index) {
   return '/api/videos/' + encodeURIComponent(stem) + '/frame?index=' + index;
 }
 
+// 当前视频的媒体来源:顶层视频用 {stem}(走 /api/videos/... 端点),
+// 嵌套视频用 {stem, rel}(走 /api/workspace/... 端点;stem 仍用于结果图片)
+function videoSource(v) {
+  return v.rel && v.rel.indexOf('/') >= 0 ? { stem: v.stem, rel: v.rel } : { stem: v.stem };
+}
+
+function metaUrl(source) {
+  if (source.rel != null) return '/api/workspace/meta?path=' + encodeURIComponent(source.rel);
+  return '/api/videos/' + encodeURIComponent(source.stem) + '/meta';
+}
+
+function sourceFrameUrl(source, index) {
+  if (source.rel != null) {
+    return '/api/workspace/frame?path=' + encodeURIComponent(source.rel) + '&index=' + index;
+  }
+  return frameUrl(source.stem, index);
+}
+
 function imageUrl(stem, name) {
   if (MOCK) return mockImageUrl(stem, name);
   // name 形如 "images/xxx.jpg",取文件名部分
@@ -99,9 +121,9 @@ function imageUrl(stem, name) {
 const mockDb = {
   workspace: { path: '/mock/workspace' },
   videos: [
-    { name: '01-02_Event_101_1756000000000_1.mp4', stem: '01-02_Event_101_1756000000000_1', size: 8388608, mtime: 1756000100, has_results: true },
-    { name: '03_Event_102_1756000001000_1.mp4', stem: '03_Event_102_1756000001000_1', size: 12582912, mtime: 1756000200, has_results: false },
-    { name: '05-07_Event_129_1756000002000_1.mp4', stem: '05-07_Event_129_1756000002000_1', size: 6291456, mtime: 1756000300, has_results: false },
+    { name: '01-02_Event_101_1756000000000_1.mp4', stem: '01-02_Event_101_1756000000000_1', rel: '01-02_Event_101_1756000000000_1.mp4', size: 8388608, mtime: 1756000100, has_results: true },
+    { name: '03_Event_102_1756000001000_1.mp4', stem: '03_Event_102_1756000001000_1', rel: '03_Event_102_1756000001000_1.mp4', size: 12582912, mtime: 1756000200, has_results: false },
+    { name: '05-07_Event_129_1756000002000_1.mp4', stem: '05-07_Event_129_1756000002000_1', rel: '05-07_Event_129_1756000002000_1.mp4', size: 6291456, mtime: 1756000300, has_results: false },
   ],
   jobs: [],
   nextJobId: 1,
@@ -127,6 +149,31 @@ const mockFsTree = {
   '/mock/workspace': ['analysis'],
   '/mock/workspace/analysis': [],
 };
+
+// 侧栏文件树的模拟数据(?mock=1);根目录的顶层视频由 mockDb.videos 动态生成,
+// 以便模拟推理完成后 has_results 同步变化
+const mockWsDirs = {
+  'clips': [
+    { name: 'nested_clip.mp4', rel: 'clips/nested_clip.mp4', type: 'file', is_video: true, size: 1048576, mtime: 1756000500, has_results: false },
+    { name: 'readme.txt', rel: 'clips/readme.txt', type: 'file', is_video: false, size: 512, mtime: 1756000600 },
+  ],
+  'analysis': [],
+};
+
+function mockTreeEntries(rel) {
+  if (rel === '') {
+    return [
+      { name: 'analysis', rel: 'analysis', type: 'dir' },
+      { name: 'clips', rel: 'clips', type: 'dir' },
+    ].concat(mockDb.videos.map(v => ({
+      name: v.name, rel: v.name, type: 'file', is_video: true, stem: v.stem,
+      size: v.size, mtime: v.mtime, has_results: v.has_results,
+    }))).concat([
+      { name: '说明.md', rel: '说明.md', type: 'file', is_video: false, size: 2048, mtime: 1756000400 },
+    ]);
+  }
+  return mockWsDirs[rel];
+}
 
 const EVENT_NAMES_10 = ['违法停车', '应急车道占用', '交通事故', '高速公路行人出现', '摩托车出现',
   '拥堵', '道路施工', '车辆逆行/倒车', '抛洒物', '实线变道'];
@@ -158,10 +205,19 @@ function mockEvidence(stem) {
   };
 }
 
+// 与 traffic_analyzer/config/event_categories.yaml 一致(0-7 激活,8/9 未激活)
+const MOCK_EVENT_CONFIG = EVENT_NAMES_10.map((name, i) => ({
+  event_id: i, name_zh: name, is_active: i < 8,
+}));
+
 function mockSft(stem) {
   return {
     chunk: 'chunk #1', idx: 1, action: [2],
-    description: '<think>\n【违法停车】未发现违法停车。画面中无相关迹象。\n【应急车道占用】应急车道区域:画面最右侧白色实线以外为应急车道,无导流区;占用应急车道车辆类型:一辆白色小车;位置:去向一侧应急车道内静止。\n【交通事故】未发现交通事故。画面中无相关迹象。\n</think>\n<answer>\n最终结论:本视频块检出以下事件。\nclass2: 应急车道占用\n天气:晴天\n时间:白天\n场景:高速公路双向主路场景,车流量中等。\n</answer>',
+    description: '<think>\n违法停车：未发现违法停车。画面中无相关迹象。\n\n'
+      + '应急车道占用：应急车道区域为画面最右侧白色实线以外;一辆白色小车静止于去向一侧应急车道内。\n\n'
+      + '交通事故：未发现交通事故。画面中无相关迹象。\n</think>\n'
+      + '<answer>\n天气：晴天\n时间：白天\n场景：高速公路双向主路场景,车流量中等。\n'
+      + '最终结论：本视频块检出以下事件。\nclass2: 应急车道占用\n</answer>',
     start_timestamp: 0.0, end_timestamp: 15.0, chunk_name: stem + '.mp4',
   };
 }
@@ -303,14 +359,32 @@ async function mockApi(path, opts) {
       dirs: names.map(n => ({ name: n, path: (p === '/' ? '' : p) + '/' + n })),
     };
   }
-  if (path === '/api/workspace/videos') return mockDb.workspace.path ? mockDb.videos : [];
+  if (path === '/api/workspace/videos') {
+    // 递归列表:顶层视频 + clips/ 下的嵌套视频(rel 作为唯一键)
+    return mockDb.workspace.path ? mockDb.videos.concat([
+      { name: 'nested_clip.mp4', stem: 'nested_clip', rel: 'clips/nested_clip.mp4', size: 1048576, mtime: 1756000500, has_results: false },
+    ]) : [];
+  }
+
+  const treeMatch = path.match(/^\/api\/workspace\/tree(?:\?(.*))?$/);
+  if (treeMatch && method === 'GET') {
+    if (!mockDb.workspace.path) throw new ApiError(400, 'No workspace selected');
+    const rel = new URLSearchParams(treeMatch[1] || '').get('path') || '';
+    const entries = mockTreeEntries(rel);
+    if (!entries) throw new ApiError(404, 'Unknown tree path');
+    return { path: rel, entries: entries };
+  }
 
   if (path === '/api/infer' && method === 'POST') {
-    const stems = Array.isArray(body.stems) ? body.stems : [];
-    if (!stems.length) throw new ApiError(400, 'stems 为空');
-    const ids = stems.map(stem => {
+    // mock 树是扁平的:rel == name;同时兼容旧的 {stems}
+    const rels = Array.isArray(body.rels) ? body.rels
+      : (Array.isArray(body.stems) ? body.stems.map(s => s + '.mp4') : []);
+    if (!rels.length) throw new ApiError(400, 'rels 为空');
+    const ids = rels.map(rel => {
+      const v = mockDb.videos.find(v => v.rel === rel);
       const job = {
-        id: mockDb.nextJobId++, kind: 'infer', stem: stem, status: 'queued',
+        id: mockDb.nextJobId++, kind: 'infer', stem: v ? v.stem : rel.replace(/\.[^.]+$/, ''),
+        rel: rel, status: 'queued',
         progress: { step_label: '排队中', step_index: 0, total_steps: 5, fraction: 0 },
         log_tail: '',
       };
@@ -358,33 +432,33 @@ async function mockApi(path, opts) {
     return { ok: true };
   }
 
+  if (path === '/api/config/events' && method === 'GET') return MOCK_EVENT_CONFIG;
+
+  m = path.match(/^\/api\/results\/([^/]+)\/sft$/);
+  if (m && method === 'PUT') {
+    const stem = decodeURIComponent(m[1]);
+    const v = mockDb.videos.find(v => v.stem === stem);
+    if (!v || !v.has_results) throw new ApiError(404, 'SFT 文件不存在');
+    const r = mockResults(stem);
+    const old = r.sft_label;
+    // 与后端一致:仅 description / action 可变,action 必须是合法编号
+    const ALLOWED = [1, 2, 3, 4, 5, 6, 7, 8, 10, 11];
+    if (!body || !Array.isArray(body.action) || !body.action.every(a => ALLOWED.includes(a))) {
+      throw new ApiError(422, 'action 含非法编号');
+    }
+    ['chunk', 'idx', 'start_timestamp', 'end_timestamp', 'chunk_name'].forEach(k => {
+      if (JSON.stringify(body[k]) !== JSON.stringify(old[k])) throw new ApiError(422, k + ' 不可修改');
+    });
+    r.sft_label = body;
+    return body;
+  }
+
   throw new ApiError(404, 'mock: 未实现 ' + method + ' ' + path);
 }
 
 /* ================================================================
-   像素进度条
+   任务步骤文案
    ================================================================ */
-const PBAR_BLOCKS = 24;
-
-function pbarHtml(fraction, running) {
-  if (fraction == null) {
-    // 不定进度:滑动亮块
-    let blocks = '';
-    for (let i = 0; i < PBAR_BLOCKS; i++) {
-      blocks += '<i class="' + (running ? 'slide" style="animation-delay:' + (i * 45) + 'ms' : '') + '"></i>';
-    }
-    return '<div class="pbar indeterminate">' + blocks + '</div>';
-  }
-  const on = Math.round(Math.max(0, Math.min(1, fraction)) * PBAR_BLOCKS);
-  let blocks = '';
-  for (let i = 0; i < PBAR_BLOCKS; i++) {
-    let cls = i < on ? 'on' : '';
-    if (running && fraction > 0 && fraction < 1 && i === on) cls = 'on pulse';
-    blocks += '<i' + (cls ? ' class="' + cls + '"' : '') + '></i>';
-  }
-  return '<div class="pbar">' + blocks + '</div>';
-}
-
 function jobStepText(job) {
   const p = job.progress || {};
   if (job.status === 'queued') return '排队中';
@@ -395,39 +469,6 @@ function jobStepText(job) {
   const idx = p.step_index || 0;
   if (!idx) return esc(p.step_label || '启动中');
   return esc(p.step_label || STEP_LABELS[idx] || '') + ' ' + idx + '/' + total;
-}
-
-function renderProgressDock() {
-  const dock = $('#progress-dock');
-  const active = state.jobs.filter(j => j.status === 'running' || j.status === 'queued');
-  const batchJobs = state.batchIds.length
-    ? state.jobs.filter(j => state.batchIds.includes(j.id)) : [];
-  const batchActive = batchJobs.some(j => j.status === 'running' || j.status === 'queued');
-
-  if (!active.length && !batchJobs.length) { dock.hidden = true; dock.innerHTML = ''; return; }
-  dock.hidden = false;
-  let html = '';
-
-  if (batchJobs.length) {
-    const done = batchJobs.filter(j => j.status === 'done' || j.status === 'failed').length;
-    const frac = batchJobs.length ? done / batchJobs.length : 0;
-    html += '<div class="prow"><span class="prow-label">批量推理</span>'
-      + pbarHtml(frac, batchActive)
-      + '<span class="prow-count">' + done + '/' + batchJobs.length + '</span></div>';
-  }
-
-  active.forEach(job => {
-    if (job.status === 'queued' && job.kind === 'infer' && batchJobs.includes(job)) return; // 批量行已覆盖排队
-    const p = job.progress || {};
-    const label = job.kind === 'evaluate'
-      ? '精度评估'
-      : '<span class="stem">' + esc(job.stem || '') + '</span>';
-    html += '<div class="prow"><span class="prow-label">' + label + ' · ' + jobStepText(job) + '</span>'
-      + pbarHtml(p.fraction, job.status === 'running')
-      + '</div>';
-  });
-
-  dock.innerHTML = html;
 }
 
 /* ================================================================
@@ -451,32 +492,85 @@ function videoStatus(v) {
 }
 
 let sidebarSnapshot = '';
+// 递归渲染一层树节点;depth 控制缩进(每级 14px)
+function treeRowsHtml(entries, depth) {
+  let html = '';
+  entries.forEach(e => {
+    const pad = 'style="padding-left:' + (8 + depth * 14) + 'px"';
+    if (e.type === 'dir') {
+      const open = state.tree.expanded.has(e.rel);
+      html += '<div class="tree-row tree-dir" data-dir="' + esc(e.rel) + '" ' + pad + '>'
+        + '<span class="tree-caret">' + (open ? '▾' : '▸') + '</span>'
+        + '<span class="tree-ico">📁</span>'
+        + '<span class="tree-name" title="' + esc(e.rel) + '">' + esc(e.name) + '</span></div>';
+      if (open) {
+        const kids = state.tree.children[e.rel];
+        const childPad = 'style="padding-left:' + (8 + (depth + 1) * 14) + 'px"';
+        if (kids && kids.length) html += treeRowsHtml(kids, depth + 1);
+        else if (kids) html += '<div class="tree-empty" ' + childPad + '>空目录</div>';
+        else html += '<div class="tree-empty" ' + childPad + '>加载中…</div>';
+      }
+    } else if (e.is_video) {
+      // 视频(任意深度):勾选键为 rel,徽标/点击与顶层一致,均进入分析视图
+      const rel = e.rel;
+      const v = state.videos.find(v => v.rel === rel) || {
+        stem: e.stem || e.name.replace(/\.[^.]+$/, ''), rel: rel, has_results: !!e.has_results,
+      };
+      const st = videoStatus(v);
+      // 运行中:视频名右侧渲染旋转 spinner 替代文字徽标;排队/完成/失败保持徽标
+      const statusHtml = st.cls === 'st-running'
+        ? '<span class="spinner" title="推理中"></span>'
+        : '<span class="badge ' + st.cls + '">' + st.text + '</span>';
+      html += '<div class="video-item' + (state.currentRel === rel ? ' active' : '')
+        + '" data-rel="' + esc(rel) + '" ' + pad + '>'
+        + '<input type="checkbox" data-check="' + esc(rel) + '"' + (state.checked.has(rel) ? ' checked' : '') + '>'
+        + '<span class="tree-ico">🎬</span>'
+        + '<div class="video-meta"><div class="video-name" title="' + esc(rel) + '">' + esc(e.name) + '</div>'
+        + '<div class="video-sub">' + fmtBytes(e.size) + '</div></div>'
+        + statusHtml
+        + '</div>';
+    } else {
+      // 非视频文件:仅展示,不可勾选/选中
+      html += '<div class="tree-row tree-file" ' + pad + ' title="' + esc(e.rel) + '">'
+        + '<span class="tree-caret"></span>'
+        + '<span class="tree-ico">📄</span>'
+        + '<span class="tree-name">' + esc(e.name) + '</span></div>';
+    }
+  });
+  return html;
+}
+
 function renderSidebar() {
   const list = $('#video-list');
   if (!state.workspace || !state.workspace.path) {
-    list.innerHTML = '<div class="side-empty">设置工作区后列出视频</div>';
+    sidebarSnapshot = '';
+    list.innerHTML = '<div class="side-empty">设置工作区后列出文件</div>';
     return;
   }
-  if (!state.videos.length) {
-    list.innerHTML = '<div class="side-empty">工作区内没有视频文件</div>';
+  if (!state.tree.loaded) {
+    sidebarSnapshot = '';
+    list.innerHTML = '<div class="side-empty">加载中…</div>';
     return;
   }
-  // 快照对比,避免每次轮询重建 DOM(防止打断勾选)
-  const snap = JSON.stringify(state.videos.map(v => [v.stem, v.has_results, videoStatus(v).text,
-    state.checked.has(v.stem), state.currentStem === v.stem]));
+  // 快照对比,避免每次轮询重建 DOM(防止打断勾选/展开)
+  const snap = JSON.stringify([
+    state.tree.root, state.tree.children, Array.from(state.tree.expanded),
+    state.videos.map(v => [v.rel, v.has_results, videoStatus(v).text,
+      state.checked.has(v.rel), state.currentRel === v.rel]),
+  ]);
   if (snap === sidebarSnapshot) return;
   sidebarSnapshot = snap;
 
-  list.innerHTML = state.videos.map(v => {
-    const st = videoStatus(v);
-    return '<div class="video-item' + (state.currentStem === v.stem ? ' active' : '') + '" data-stem="' + esc(v.stem) + '">'
-      + '<input type="checkbox" data-check="' + esc(v.stem) + '"' + (state.checked.has(v.stem) ? ' checked' : '') + '>'
-      + '<div class="video-meta"><div class="video-name" title="' + esc(v.name) + '">' + esc(v.name) + '</div>'
-      + '<div class="video-sub">' + fmtBytes(v.size) + '</div></div>'
-      + '<span class="badge ' + st.cls + '">' + st.text + '</span>'
-      + '</div>';
-  }).join('');
+  if (!state.tree.root.length) {
+    list.innerHTML = '<div class="side-empty">工作区目录为空</div>';
+    $('#check-all').checked = false;
+    return;
+  }
+  list.innerHTML = treeRowsHtml(state.tree.root, 0);
 
+  $$('#video-list .tree-dir').forEach(row => {
+    row.addEventListener('click', () => toggleDir(row.dataset.dir));
+  });
   $$('#video-list input[data-check]').forEach(cb => {
     cb.addEventListener('click', e => e.stopPropagation());
     cb.addEventListener('change', () => {
@@ -486,9 +580,30 @@ function renderSidebar() {
     });
   });
   $$('#video-list .video-item').forEach(item => {
-    item.addEventListener('click', () => selectVideo(item.dataset.stem));
+    item.addEventListener('click', () => selectVideo(item.dataset.rel));
   });
-  $('#check-all').checked = state.videos.length > 0 && state.videos.every(v => state.checked.has(v.stem));
+  $('#check-all').checked = state.videos.length > 0 && state.videos.every(v => state.checked.has(v.rel));
+}
+
+// 展开/收起目录;首次展开时懒加载子级并缓存,再次展开直接用缓存
+async function toggleDir(rel) {
+  if (state.tree.expanded.has(rel)) {
+    state.tree.expanded.delete(rel);
+    sidebarSnapshot = ''; renderSidebar();
+    return;
+  }
+  state.tree.expanded.add(rel);
+  sidebarSnapshot = ''; renderSidebar(); // 先展示「加载中…」占位
+  if (!state.tree.children[rel]) {
+    try {
+      const data = await api('/api/workspace/tree?path=' + encodeURIComponent(rel));
+      state.tree.children[rel] = data.entries || [];
+    } catch (e) {
+      state.tree.expanded.delete(rel);
+      toast('读取目录失败(' + e.status + '):' + e.message, 'err');
+    }
+    sidebarSnapshot = ''; renderSidebar();
+  }
 }
 
 function syncButtons() {
@@ -534,10 +649,11 @@ function skeletons() {
     + '</div>';
 }
 
-async function selectVideo(stem) {
-  const v = state.videos.find(v => v.stem === stem);
+async function selectVideo(rel) {
+  const v = state.videos.find(v => v.rel === rel);
   if (!v) return;
-  state.currentStem = stem;
+  state.currentStem = v.stem;
+  state.currentRel = v.rel;
   state.evTabIdx = 0;
   state.results = null;
   state.evidenceDraft = null;
@@ -546,19 +662,20 @@ async function selectVideo(stem) {
   runCleanups();
   $('#main').innerHTML = skeletons();
   try {
-    state.results = await api('/api/results/' + encodeURIComponent(stem));
+    state.results = await api('/api/results/' + encodeURIComponent(v.stem));
     if (state.results.evidence) state.evidenceDraft = JSON.parse(JSON.stringify(state.results.evidence));
   } catch (e) {
     $('#main').innerHTML = '<div class="cards"><div class="card"><div class="card-body empty-note">加载结果失败:' + esc(e.message) + '</div></div></div>';
     return;
   }
-  if (state.currentStem !== stem) return; // 期间切换了视频
+  if (state.currentRel !== rel) return; // 期间切换了视频
   renderResults();
 }
 
 function renderResults() {
   runCleanups();
   const stem = state.currentStem;
+  const source = videoSource({ stem: state.currentStem, rel: state.currentRel });
   const r = state.results || {};
   const hasResults = !!(r.sft_label || r.report_md || r.evidence);
   const main = $('#main');
@@ -595,27 +712,29 @@ function renderResults() {
   html += '<div id="eval-card-slot"></div></div>';
   main.innerHTML = html;
 
-  mountPreview(stem, r.evidence && r.evidence.video);
+  mountPreview(source, r.evidence && r.evidence.video);
   if (hasResults) {
     renderSftBody(r.sft_label);
     renderReportBody(r.report_md, stem);
-    renderEvidenceCard(stem);
+    renderEvidenceCard(stem, source);
   }
   renderEvalCard();
 }
 
 /* ------------------------------------------------------------ 视频预览卡 */
-function streamUrl(stem, ss) {
+function streamUrl(source, ss) {
   if (MOCK) return null; // mock 模式无真实视频流,直接走逐帧预览
-  let url = '/api/videos/' + encodeURIComponent(stem) + '/stream';
-  if (ss != null && ss > 0) url += '?ss=' + ss.toFixed(2);
+  let url = source.rel != null
+    ? '/api/workspace/stream?path=' + encodeURIComponent(source.rel)
+    : '/api/videos/' + encodeURIComponent(source.stem) + '/stream';
+  if (ss != null && ss > 0) url += (url.indexOf('?') >= 0 ? '&' : '?') + 'ss=' + ss.toFixed(2);
   return url;
 }
 
-function mountPreview(stem, videoInfo) {
+function mountPreview(source, videoInfo) {
   const body = $('#preview-body');
   if (!body) return;
-  const url = streamUrl(stem);
+  const url = streamUrl(source);
   body.innerHTML =
     '<div class="pv-wrap" id="pv-wrap">'
     + '<video id="pv-video" controls preload="metadata" playsinline></video></div>'
@@ -623,7 +742,8 @@ function mountPreview(stem, videoInfo) {
 
   const showStepper = hint => {
     $('#pv-wrap').hidden = true;
-    mountFrameStepper($('#pv-stepper'), stem, videoInfo, hint);
+    mountFrameStepper($('#pv-stepper'), source, hint,
+      () => mountPreview(source, videoInfo), videoInfo);
   };
 
   if (!url) { showStepper('模拟模式下无真实视频流,以下为逐帧预览。'); return; }
@@ -637,44 +757,294 @@ function mountPreview(stem, videoInfo) {
     if (video.seekable && video.seekable.length > 0) return;
     const t = video.currentTime;
     if (!(t > 0)) return;
-    video.src = streamUrl(stem, t);
+    video.src = streamUrl(source, t);
     video.play().catch(() => { /* 用户未交互时忽略自动播放限制 */ });
   });
   video.src = url;
 }
 
-function mountFrameStepper(mount, stem, videoInfo, hint) {
-  const total = videoInfo && videoInfo.duration_sec && videoInfo.fps
-    ? Math.max(1, Math.round(videoInfo.duration_sec * videoInfo.fps))
-    : 300; // 无元数据时的默认帧数上限
+// 逐帧预览:先取真实帧数元数据,失败则显示错误态(不出现滑块/黑框)
+function mountFrameStepper(mount, source, hint, onRetry, videoInfo) {
   mount.hidden = false;
+  if (MOCK) {
+    // mock 模式无元数据接口:沿用 evidence 估算帧数的画布帧
+    const total = videoInfo && videoInfo.duration_sec && videoInfo.fps
+      ? Math.max(1, Math.round(videoInfo.duration_sec * videoInfo.fps)) : 300;
+    buildStepper(mount, source, total, hint, onRetry);
+    return;
+  }
+  mount.innerHTML = '<div class="pv-hint"><span>' + esc(hint) + '</span></div>'
+    + '<div class="empty-note">读取视频信息…</div>';
+  api(metaUrl(source)).then(meta => {
+    if (!mount.isConnected) return; // 期间切换了视图
+    buildStepper(mount, source, meta.frame_count, hint, onRetry);
+  }).catch(() => {
+    if (!mount.isConnected) return;
+    mount.innerHTML =
+      '<div class="pv-hint"><span>无法读取该视频的帧(文件损坏或编码无法识别)</span>'
+      + '<button class="btn btn-ghost btn-sm" id="pv-retry">重试播放</button></div>';
+    $('#pv-retry', mount).addEventListener('click', onRetry);
+  });
+}
+
+function buildStepper(mount, source, total, hint, onRetry) {
   mount.innerHTML =
     '<div class="pv-hint"><span>' + esc(hint) + '</span>'
     + '<button class="btn btn-ghost btn-sm" id="pv-retry">重试播放</button></div>'
-    + '<div class="pv-stage"><img id="pv-img" alt="帧预览"></div>'
+    + '<div class="pv-stage"><img id="pv-img" alt="帧预览">'
+    + '<span class="pv-frame-err" id="pv-frame-err" hidden>帧读取失败</span></div>'
     + '<div class="pv-slider-row">'
     + '<input type="range" id="pv-slider" min="0" max="' + (total - 1) + '" value="0" step="1">'
     + '<span class="pv-idx" id="pv-idx">0 / ' + (total - 1) + '</span></div>';
 
   const img = $('#pv-img', mount);
+  const frameErr = $('#pv-frame-err', mount);
   const slider = $('#pv-slider', mount);
   const idxLabel = $('#pv-idx', mount);
-  img.src = frameUrl(stem, 0);
+  img.src = sourceFrameUrl(source, 0);
   slider.addEventListener('input', () => {
     const idx = +slider.value;
     idxLabel.textContent = idx + ' / ' + slider.max;
-    img.src = frameUrl(stem, idx);
+    img.src = sourceFrameUrl(source, idx);
   });
-  img.addEventListener('error', () => {
-    // 帧索引超出实际范围:收紧滑块上限
-    const idx = +slider.value;
-    if (idx > 0) { slider.max = String(idx - 1); slider.value = String(idx - 1); slider.dispatchEvent(new Event('input')); }
-  });
-  $('#pv-retry', mount).addEventListener('click', () => mountPreview(stem, videoInfo));
+  // 单帧读取失败:仅显示占位提示,不改动滑块范围
+  img.addEventListener('load', () => { img.hidden = false; frameErr.hidden = true; });
+  img.addEventListener('error', () => { img.hidden = true; frameErr.hidden = false; });
+  $('#pv-retry', mount).addEventListener('click', onRetry);
 }
 
 /* ------------------------------------------------------------ SFT 卡 */
-function renderSftBody(sft) {
+// event_id → 标注文档 v4.5 的 action 编号(action 9 = 正常占位,跳过)
+const EVENT_ID_TO_ACTION = { 0: 1, 1: 2, 2: 3, 3: 4, 4: 5, 5: 6, 6: 7, 7: 8, 8: 10, 9: 11 };
+
+// 解析 description:think 按空行分段,匹配「事件名：」前缀;answer 提取天气/时间/场景键值
+function parseSftDescription(desc, events) {
+  const sections = {};   // event_id -> 段落正文(去掉「事件名：」前缀)
+  const unmatched = [];  // 匹配不到任何事件名的段落(原样保留,保存时回写)
+  const env = { '天气': '', '时间': '', '场景': '' };  // 天气/时间/场景键值(答案区可编辑)
+  const thinkM = String(desc || '').match(/<think>([\s\S]*?)<\/think>/);
+  if (thinkM) {
+    thinkM[1].trim().split(/\n\s*\n/).forEach(para => {
+      const p = para.trim();
+      if (!p) return;
+      const m = p.match(/^([^：\n]{1,30})：/);
+      const ev = m ? events.find(e => e.name_zh === m[1]) : null;
+      if (ev && ev.is_active && sections[ev.event_id] === undefined) {
+        sections[ev.event_id] = p.slice(m[0].length).trim();
+      } else if (ev) {
+        // 未激活事件的模型原文不展示、保存时丢弃;重复段落同样丢弃
+      } else {
+        unmatched.push(p);
+      }
+    });
+  }
+  const answerM = String(desc || '').match(/<answer>([\s\S]*?)<\/answer>/);
+  if (answerM) {
+    answerM[1].split('\n').forEach(line => {
+      const m = line.trim().match(/^(天气|时间|场景)\s*[:：]\s*(.*)$/);
+      if (m) env[m[1]] = m[2];
+    });
+  }
+  return { sections: sections, unmatched: unmatched, env: env };
+}
+
+// 天气/时间/场景按固定顺序重建为 answer 行;空值回退「未知」(与 core/sft_label_rewrite.py 口径一致)
+function sftEnvLines() {
+  const env = (state.sftDraft && state.sftDraft.env) || {};
+  return ['天气', '时间', '场景'].map(k => {
+    const v = String(env[k] || '').trim();
+    return k + '：' + (v || '未知');
+  });
+}
+
+// 由当前「检出」勾选生成结论行(保存与只读预览共用同一口径)
+function sftConclusionLines() {
+  const d = state.sftDraft;
+  const events = state.eventConfig || [];
+  const checked = events.filter(ev => d.checks[ev.event_id]);
+  if (!checked.length) return ['最终结论：本视频块未检出任何事件,交通状况正常。'];
+  const lines = ['最终结论：本视频块检出以下事件。'];
+  checked.forEach(ev => {
+    lines.push('class' + EVENT_ID_TO_ACTION[ev.event_id] + ': ' + ev.name_zh);
+  });
+  return lines;
+}
+
+// 由当前草稿重建 description 与 action(结论区按「检出」勾选重建)
+function buildSftRevision() {
+  const d = state.sftDraft;
+  const events = state.eventConfig || [];
+  const sections = [];
+  events.forEach(ev => {
+    const t = String(d.texts[ev.event_id] || '').trim();
+    if (t) sections.push(ev.name_zh + '：' + t);
+  });
+  const think = sections.concat(d.unmatched).join('\n\n');
+  const checked = events.filter(ev => d.checks[ev.event_id]);
+  const answerLines = sftEnvLines().concat(sftConclusionLines());
+  return {
+    description: '<think>\n' + think + '\n</think>\n<answer>\n' + answerLines.join('\n') + '\n</answer>',
+    action: checked.map(ev => EVENT_ID_TO_ACTION[ev.event_id]),
+  };
+}
+
+function sftSignature() {
+  return JSON.stringify(buildSftRevision());
+}
+
+// 从 sft 样本初始化编辑草稿(检出初值 = action 反映射;未激活事件留空不勾)
+function initSftDraft(sft) {
+  const events = state.eventConfig || [];
+  const parsed = parseSftDescription(sft.description, events);
+  const actions = Array.isArray(sft.action) ? sft.action : [];
+  const texts = {}, checks = {};
+  events.forEach(ev => {
+    if (ev.is_active) {
+      texts[ev.event_id] = parsed.sections[ev.event_id] || '';
+      checks[ev.event_id] = actions.indexOf(EVENT_ID_TO_ACTION[ev.event_id]) >= 0;
+    } else {
+      texts[ev.event_id] = '';
+      checks[ev.event_id] = false;
+    }
+  });
+  state.sftDraft = {
+    texts: texts, checks: checks,
+    unmatched: parsed.unmatched, env: parsed.env,
+  };
+  state.sftSavedSig = sftSignature();
+}
+
+// textarea 自适应高度:随内容增长,超过上限后出现滚动条
+const SFT_TEXTAREA_MAX_H = 300;
+function autoGrow(ta) {
+  ta.style.height = 'auto';
+  const border = ta.offsetHeight - ta.clientHeight; // border-box 下高度需含边框
+  const need = ta.scrollHeight + border;
+  const capped = need > SFT_TEXTAREA_MAX_H;
+  ta.style.height = (capped ? SFT_TEXTAREA_MAX_H : need) + 'px';
+  ta.style.overflowY = capped ? 'auto' : 'hidden';
+}
+
+function sftEditorHtml() {
+  const d = state.sftDraft;
+  let html = '<div class="sft-section-title">事件思考(按事件编辑;「检出」勾选在保存时联动 action 与结论)</div>';
+  (state.eventConfig || []).forEach(ev => {
+    html += '<div class="sft-ev' + (ev.is_active ? '' : ' inactive') + '">'
+      + '<div class="sft-ev-head">'
+      + '<span class="sft-ev-name">' + esc(ev.name_zh) + '</span>'
+      + (ev.is_active ? '' : '<span class="sft-ev-tag">未激活</span>')
+      + '<label class="sft-ev-check"><input type="checkbox" data-ev-check="' + ev.event_id + '"'
+      + (d.checks[ev.event_id] ? ' checked' : '') + '>检出</label>'
+      + '</div>'
+      + '<textarea class="sft-ev-text" data-ev-text="' + ev.event_id + '" rows="2"'
+      + (ev.is_active ? '' : ' placeholder="未激活事件类别,可人工修改"')
+      + '>' + esc(d.texts[ev.event_id] || '') + '</textarea>'
+      + '</div>';
+  });
+  if (d.unmatched.length) {
+    html += '<div class="sft-section-title">未归类原文(只读,保存时原样附加到思考末尾)</div>'
+      + '<textarea class="sft-ev-text sft-unmatched" readonly rows="2">'
+      + esc(d.unmatched.join('\n\n')) + '</textarea>';
+  }
+  // 天气/时间用单行输入框,场景用自适应文本框;原始答案缺行时也显示空编辑框供人工补全
+  const envRows = ['天气', '时间', '场景'].map(k => {
+    const label = '<span class="answer-key">' + esc(k) + '</span>';
+    if (k === '场景') {
+      return '<div class="answer-row">' + label
+        + '<textarea class="sft-ev-text answer-env-text" data-env="' + esc(k) + '" rows="2">'
+        + esc(d.env[k] || '') + '</textarea></div>';
+    }
+    return '<div class="answer-row">' + label
+      + '<input class="answer-input" data-env="' + esc(k) + '" value="' + esc(d.env[k] || '') + '"></div>';
+  }).join('');
+  html += '<div class="sft-section-title">答案(ANSWER)</div><div class="answer-block">'
+    + envRows
+    + '</div>'
+    + '<div id="sft-conclusion-preview" class="answer-block sft-conclusion"></div>'
+    + '<div class="sft-actions">'
+    + '<span class="dirty-flag" id="sft-dirty-flag" hidden>● 未保存</span>'
+    + '<button class="btn btn-ghost btn-sm" id="btn-sft-reset" disabled>重置</button>'
+    + '<button class="btn btn-primary btn-sm" id="btn-sft-save" disabled>保存</button>'
+    + '</div>';
+  return html;
+}
+
+// 刷新只读的最终结论预览(与 buildSftRevision 同一数据来源,随勾选实时联动)
+function refreshSftConclusion() {
+  const el = $('#sft-conclusion-preview');
+  if (!el) return;
+  el.innerHTML = sftConclusionLines().map(line => {
+    const m = line.match(/^(class\d+):\s*(.*)$/);
+    if (m) {
+      return '<div class="answer-row"><span class="answer-key answer-class">' + esc(m[1]) + '</span>'
+        + '<span class="answer-val">' + esc(m[2]) + '</span></div>';
+    }
+    const m2 = line.match(/^最终结论：([\s\S]*)$/);
+    return '<div class="answer-row"><span class="answer-key">最终结论</span>'
+      + '<span class="answer-val">' + esc(m2 ? m2[1] : line) + '</span></div>';
+  }).join('');
+}
+
+function updateSftDirty() {
+  const dirty = sftSignature() !== state.sftSavedSig;
+  const f = $('#sft-dirty-flag'); if (f) f.hidden = !dirty;
+  const s = $('#btn-sft-save'); if (s) s.disabled = !dirty;
+  const r = $('#btn-sft-reset'); if (r) r.disabled = !dirty;
+}
+
+function bindSftEditor(body) {
+  // 所有 textarea 挂载时先按内容自适应一次(含只读的未归类原文框)
+  $$('textarea', body).forEach(autoGrow);
+  $$('textarea[data-ev-text]', body).forEach(ta => {
+    ta.addEventListener('input', () => {
+      state.sftDraft.texts[+ta.dataset.evText] = ta.value;
+      autoGrow(ta);
+      updateSftDirty();
+    });
+  });
+  $$('input[data-ev-check]', body).forEach(cb => {
+    cb.addEventListener('change', () => {
+      state.sftDraft.checks[+cb.dataset.evCheck] = cb.checked;
+      refreshSftConclusion();
+      updateSftDirty();
+    });
+  });
+  $$('[data-env]', body).forEach(el => {
+    el.addEventListener('input', () => {
+      state.sftDraft.env[el.dataset.env] = el.value;
+      if (el.tagName === 'TEXTAREA') autoGrow(el);
+      updateSftDirty();
+    });
+  });
+  refreshSftConclusion();
+  $('#btn-sft-save', body).addEventListener('click', saveSft);
+  $('#btn-sft-reset', body).addEventListener('click', () => {
+    renderSftBody(state.results.sft_label);
+    toast('已重置为磁盘版本');
+  });
+}
+
+async function saveSft() {
+  const stem = state.currentStem;
+  if (!stem || !state.results || !state.results.sft_label) return;
+  const btn = $('#btn-sft-save');
+  if (btn) btn.disabled = true;
+  // 只改 description / action,其余字段原样提交(后端会校验)
+  const payload = Object.assign({}, state.results.sft_label, buildSftRevision());
+  try {
+    const saved = await api('/api/results/' + encodeURIComponent(stem) + '/sft', {
+      method: 'PUT', body: payload,
+    });
+    state.results.sft_label = saved || payload;
+    toast('已保存', 'ok');
+    renderSftBody(state.results.sft_label); // 以保存后的内容重建草稿
+  } catch (e) {
+    if (btn) btn.disabled = false;
+    toast('保存失败(' + e.status + '):' + e.message, 'err');
+  }
+}
+
+async function renderSftBody(sft) {
   const body = $('#sft-body');
   if (!body) return;
   if (!sft) { body.innerHTML = '<div class="empty-note">无 SFT 标注</div>'; return; }
@@ -686,51 +1056,21 @@ function renderSftBody(sft) {
     + '<span>' + esc(sft.chunk_name || '') + '</span>'
     + '</div>';
 
-  const desc = String(sft.description || '');
-  const thinkM = desc.match(/<think>([\s\S]*?)<\/think>/);
-  const answerM = desc.match(/<answer>([\s\S]*?)<\/answer>/);
-
-  let thinkHtml = '';
-  if (thinkM) {
-    // 按空行分段;段内换行保留。【事件名】加粗高亮。
-    const paras = thinkM[1].trim().split(/\n\s*\n/).map(p =>
-      p.split('\n').map(line =>
-        esc(line).replace(/【([^】]+)】/g, '<span class="ev-name">【$1】</span>')
-      ).join('<br>')
-    );
-    thinkHtml = '<div class="sft-section-title">思考过程(THINK)</div><div class="think-block"><p>'
-      + paras.join('</p><p>') + '</p></div>';
-  }
-
-  let answerHtml = '';
-  if (answerM) {
-    const rows = answerM[1].trim().split('\n').filter(l => l.trim()).map(line => {
-      const t = line.trim();
-      let m = t.match(/^(天气|时间|场景|最终结论)\s*[:：]\s*(.*)$/);
-      if (m) {
-        return '<div class="answer-row' + (m[1] === '最终结论' ? ' conclusion' : '') + '">'
-          + '<span class="answer-key">' + esc(m[1]) + '</span>'
-          + '<span class="answer-val">' + esc(m[2]) + '</span></div>';
+  if (!state.eventConfig) {
+    body.innerHTML = meta + '<div class="empty-note">加载事件配置…</div>';
+    try {
+      state.eventConfig = await api('/api/config/events');
+    } catch (e) {
+      if (body.isConnected) {
+        body.innerHTML = meta + '<div class="empty-note">事件配置加载失败:' + esc(e.message) + '</div>';
       }
-      m = t.match(/^(class\d+)\s*[:：]\s*(.+)$/);
-      if (m) {
-        return '<div class="answer-row answer-class">'
-          + '<span class="answer-key">' + esc(m[1]) + '</span>'
-          + '<span class="answer-val cls-name">' + esc(m[2]) + '</span></div>';
-      }
-      return '<div class="answer-row"><span class="answer-val">' + esc(t) + '</span></div>';
-    });
-    answerHtml = '<div class="sft-section-title">答案(ANSWER)</div><div class="answer-block">'
-      + rows.join('') + '</div>';
+      return;
+    }
   }
-
-  const actions = Array.isArray(sft.action) ? sft.action : [];
-  const actionHtml = '<div class="sft-section-title">ACTION</div><div class="chips">'
-    + (actions.length ? actions.map(a => '<span class="chip">' + esc(a) + '</span>').join('')
-      : '<span class="empty-note">空</span>')
-    + '</div>';
-
-  body.innerHTML = meta + thinkHtml + answerHtml + actionHtml;
+  if (!body.isConnected) return; // 期间切换了视图
+  initSftDraft(sft);
+  body.innerHTML = meta + sftEditorHtml();
+  bindSftEditor(body);
 }
 
 /* ------------------------------------------------------------ 报告卡 */
@@ -831,7 +1171,7 @@ function clearDirty() {
   const r = $('#btn-ev-reset'); if (r) r.disabled = true;
 }
 
-function renderEvidenceCard(stem) {
+function renderEvidenceCard(stem, source) {
   const tabs = $('#ev-tabs');
   const body = $('#ev-body');
   if (!tabs || !body) return;
@@ -850,7 +1190,7 @@ function renderEvidenceCard(stem) {
   ).join('');
   $$('#ev-tabs .ev-tab').forEach(btn => btn.addEventListener('click', () => {
     state.evTabIdx = +btn.dataset.tab;
-    renderEvidenceCard(stem);
+    renderEvidenceCard(stem, source);
   }));
 
   const saveBtn = $('#btn-ev-save');
@@ -858,7 +1198,7 @@ function renderEvidenceCard(stem) {
   if (saveBtn) saveBtn.onclick = saveEvidence;
   if (resetBtn) resetBtn.onclick = resetEvidence;
 
-  mountEvidencePane(body, stem, draft.events[state.evTabIdx], draft.video || {});
+  mountEvidencePane(body, stem, source, draft.events[state.evTabIdx], draft.video || {});
 }
 
 async function saveEvidence() {
@@ -889,7 +1229,7 @@ async function resetEvidence() {
       state.evidenceDraft = JSON.parse(JSON.stringify(r.evidence));
     }
     clearDirty();
-    renderEvidenceCard(stem);
+    renderEvidenceCard(stem, videoSource({ stem: state.currentStem, rel: state.currentRel }));
     toast('已重置为磁盘版本');
   } catch (e) {
     toast('重置失败:' + e.message, 'err');
@@ -902,7 +1242,7 @@ const COLOR_CHEVRON = '#3E7CB1';
 const COLOR_BOX = '#7A9B76';
 const HIT_R = 8;
 
-function mountEvidencePane(mount, stem, ev, videoInfo) {
+function mountEvidencePane(mount, stem, source, ev, videoInfo) {
   mount.innerHTML = '';
   const pane = document.createElement('div');
   pane.className = 'ev-pane';
@@ -1212,7 +1552,7 @@ function mountEvidencePane(mount, stem, ev, videoInfo) {
     frameIdx = Math.max(0, Math.min(maxFrame || idx, idx));
     const input = $('.ev-frame-input', toolbar);
     if (input) input.value = frameIdx;
-    img.src = frameUrl(stem, frameIdx);
+    img.src = sourceFrameUrl(source, frameIdx);
   }
 
   $('[data-a="prev"]', toolbar).addEventListener('click', () => setFrame(frameIdx - 1));
@@ -1222,7 +1562,7 @@ function mountEvidencePane(mount, stem, ev, videoInfo) {
   const onResize = () => fit();
   window.addEventListener('resize', onResize);
   img.addEventListener('load', fit);
-  img.src = frameUrl(stem, frameIdx);
+  img.src = sourceFrameUrl(source, frameIdx);
 
   state.cleanups.push(() => {
     window.removeEventListener('mouseup', onUp);
@@ -1243,7 +1583,7 @@ function renderEvalCard() {
     + '<span class="spacer"></span>'
     + '<button class="btn btn-primary btn-sm" id="btn-eval-run"'
     + (running || !state.workspace || !state.workspace.path ? ' disabled' : '') + '>'
-    + (running ? '评估中…' : '运行评估') + '</button></div>'
+    + (running ? '<span class="spinner spinner-inverse"></span>评估中…' : '运行评估') + '</button></div>'
     + '<div class="card-body" id="eval-body"></div></div>';
   slot.innerHTML = inner;
 
@@ -1252,9 +1592,8 @@ function renderEvalCard() {
 
   const body = $('#eval-body');
   if (running) {
-    const p = evalJob.progress || {};
-    body.innerHTML = '<div class="prow"><span class="prow-label">' + jobStepText(evalJob) + '</span>'
-      + pbarHtml(p.fraction, true) + '</div>'
+    body.innerHTML = '<div class="eval-running"><span class="spinner"></span><span>'
+      + jobStepText(evalJob) + '</span></div>'
       + (evalJob.log_tail ? '<pre class="md" style="margin-top:10px"><code>' + esc(evalJob.log_tail) + '</code></pre>' : '');
     return;
   }
@@ -1334,9 +1673,10 @@ async function applyWorkspace(ws) {
   state.workspace = ws;
   $('#ws-path').textContent = ws.path;
   state.currentStem = null;
+  state.currentRel = null;
   state.checked.clear();
   state.evalData = null;
-  await Promise.all([loadVideos(), loadEvalLatest()]);
+  await Promise.all([loadTree(), loadEvalLatest()]);
   renderWelcome();
   renderSidebar();
   syncButtons();
@@ -1347,12 +1687,53 @@ async function applyWorkspace(ws) {
    ================================================================ */
 const dirModal = { open: false, cwd: null, parent: null, dirs: [], selected: null, loading: false };
 
+/* ---- 最近使用的工作区(localStorage 持久化,最新在前,去重,最多 8 条) ---- */
+const RECENT_WS_KEY = 'ta_recent_workspaces';
+const RECENT_WS_MAX = 8;
+
+function loadRecentWorkspaces() {
+  try {
+    const arr = JSON.parse(localStorage.getItem(RECENT_WS_KEY) || '[]');
+    return Array.isArray(arr) ? arr.filter(p => typeof p === 'string') : [];
+  } catch (e) { return []; }
+}
+
+function pushRecentWorkspace(path) {
+  const arr = loadRecentWorkspaces().filter(p => p !== path);
+  arr.unshift(path);
+  try { localStorage.setItem(RECENT_WS_KEY, JSON.stringify(arr.slice(0, RECENT_WS_MAX))); } catch (e) { /* 存储不可用时静默忽略 */ }
+}
+
+// 渲染「最近使用」下拉:当前工作区 + 历史路径 + 主目录(始终非空)
+function renderDirRecent() {
+  const sel = $('#dir-recent-select');
+  const cur = state.workspace && state.workspace.path;
+  let html = '<option value="">快速跳转到…</option>';
+  if (cur) html += '<option value="__current__">当前工作区 (' + esc(cur) + ')</option>';
+  loadRecentWorkspaces().forEach(p => {
+    html += '<option value="' + esc(p) + '">' + esc(p) + '</option>';
+  });
+  html += '<option value="__home__">主目录</option>';
+  sel.innerHTML = html;
+  sel.value = '';
+}
+
+// 下拉选中某项:跳转目录(不自动确认),随后复位到占位项,避免误显示当前目录
+function onDirRecentChange(e) {
+  const v = e.target.value;
+  e.target.value = '';
+  if (v === '__home__') navDir(null);
+  else if (v === '__current__' && state.workspace) navDir(state.workspace.path);
+  else if (v) navDir(v);
+}
+
 // 点击「选择工作区…」:打开页内目录导航弹窗
 function browseWorkspace() {
   dirModal.open = true;
   $('#dir-modal').hidden = false;
   $('#dir-input').hidden = true;
   $('#dir-crumbs').hidden = false;
+  renderDirRecent();
   $('.dir-dialog').focus();
   const start = state.workspace && state.workspace.path ? state.workspace.path : null;
   navDir(start); // 无 path 时后端回退到当前工作区或用户主目录
@@ -1465,6 +1846,7 @@ async function confirmDir() {
   btn.disabled = true;
   try {
     const ws = await api('/api/workspace', { method: 'POST', body: { path: path } });
+    pushRecentWorkspace(path); // 确认成功后记入「最近使用」
     await applyWorkspace(ws);
     closeDirModal();
     toast('已选择工作区:' + ws.path);
@@ -1480,29 +1862,50 @@ function dirModalKeys(e) {
   if (!dirModal.open) return;
   if (e.key === 'Escape') { closeDirModal(); return; }
   if (e.key !== 'Tab') return;
-  const els = $$('#dir-modal button, #dir-modal input').filter(el => !el.hidden && !el.disabled);
+  const els = $$('#dir-modal button, #dir-modal input, #dir-modal select').filter(el => !el.hidden && !el.disabled);
   if (!els.length) return;
   const first = els[0], last = els[els.length - 1];
   if (e.shiftKey && document.activeElement === first) { last.focus(); e.preventDefault(); }
   else if (!e.shiftKey && document.activeElement === last) { first.focus(); e.preventDefault(); }
 }
 
-async function loadVideos() {
+// 加载工作区文件树;preserve 时保留已展开目录(轮询刷新用)
+// state.videos 来自递归的 /api/workspace/videos(任意深度,含 stem+rel)
+async function loadTree(preserve) {
+  const prevExpanded = preserve ? Array.from(state.tree.expanded) : [];
+  state.tree.loaded = false;
+  state.tree.children = {};
+  state.tree.expanded = new Set(prevExpanded);
   try {
-    state.videos = await api('/api/workspace/videos');
+    const data = await api('/api/workspace/tree');
+    state.tree.root = data.entries || [];
+  } catch (e) {
+    state.tree.root = [];
+  }
+  try {
+    state.videos = await api('/api/workspace/videos') || [];
   } catch (e) {
     state.videos = [];
   }
+  // 已展开目录重新拉取子级(可能新增/删除了文件)
+  await Promise.all(prevExpanded.map(async rel => {
+    try {
+      const data = await api('/api/workspace/tree?path=' + encodeURIComponent(rel));
+      state.tree.children[rel] = data.entries || [];
+    } catch (e) {
+      state.tree.expanded.delete(rel);
+    }
+  }));
+  state.tree.loaded = true;
   renderSidebar();
 }
 
 async function startInfer() {
-  const stems = state.videos.filter(v => state.checked.has(v.stem)).map(v => v.stem);
-  if (!stems.length) return;
+  const rels = state.videos.filter(v => state.checked.has(v.rel)).map(v => v.rel);
+  if (!rels.length) return;
   try {
-    const r = await api('/api/infer', { method: 'POST', body: { stems: stems } });
-    state.batchIds = r.job_ids || [];
-    toast('已提交 ' + stems.length + ' 个推理任务');
+    await api('/api/infer', { method: 'POST', body: { rels: rels } });
+    toast('已提交 ' + rels.length + ' 个推理任务');
     pollJobs();
   } catch (e) {
     toast('推理提交失败(' + e.status + '):' + e.message, 'err');
@@ -1523,7 +1926,7 @@ async function pollJobs() {
     state.jobs = jobs;
     const next = {};
     let needVideos = false;
-    let reloadStem = null;
+    let reloadRel = null;
     jobs.forEach(j => {
       next[j.id] = j.status;
       const was = prev[j.id];
@@ -1533,11 +1936,14 @@ async function pollJobs() {
         if (j.kind === 'evaluate' && j.status === 'failed') {
           toast('评估失败(rc=' + j.returncode + ')', 'err'); renderEvalCard();
         }
-        if (j.kind === 'infer' && j.status === 'done' && j.stem === state.currentStem) {
-          reloadStem = j.stem; // 刷新列表后再重载当前视频结果
+        if (j.kind === 'infer' && j.status === 'done') {
+          toast('推理完成:' + (j.rel || j.stem || ''), 'ok');
+        }
+        if (j.kind === 'infer' && j.status === 'done' && (j.rel || j.stem) === state.currentRel) {
+          reloadRel = j.rel || j.stem; // 刷新列表后再重载当前视频结果
         }
         if (j.kind === 'infer' && j.status === 'failed') {
-          toast('推理失败:' + (j.stem || '') + ' (rc=' + j.returncode + ')', 'err');
+          toast('推理失败:' + (j.rel || j.stem || '') + ' (rc=' + j.returncode + ')', 'err');
         }
       }
       if (j.kind === 'evaluate' && (j.status === 'running' || j.status === 'queued')) {
@@ -1545,16 +1951,66 @@ async function pollJobs() {
       }
     });
     state.prevJobStatus = next;
-    renderProgressDock();
     renderSidebar();
     syncButtons();
-    if (needVideos) await loadVideos();
-    if (reloadStem && reloadStem === state.currentStem) selectVideo(reloadStem);
+    if (needVideos) await loadTree(true);
+    if (reloadRel && reloadRel === state.currentRel) selectVideo(reloadRel);
   } catch (e) {
     // 后端未启动等场景:静默,下个周期重试
   } finally {
     polling = false;
   }
+}
+
+/* ================================================================
+   侧栏拖动分隔条
+   ================================================================ */
+const SIDEBAR_WIDTH_KEY = 'ta_sidebar_width';
+const SIDEBAR_DEFAULT_WIDTH = 264;
+const SIDEBAR_MIN_WIDTH = 180;
+const SIDEBAR_MAX_WIDTH = 560;
+
+function applySidebarWidth(px) {
+  const w = Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, Math.round(px)));
+  const sidebar = $('#sidebar');
+  sidebar.style.width = w + 'px';
+  sidebar.style.flex = '0 0 ' + w + 'px';
+  return w;
+}
+
+function initSplitter() {
+  const splitter = $('#splitter');
+  // 恢复上次保存的宽度
+  const saved = parseInt(localStorage.getItem(SIDEBAR_WIDTH_KEY), 10);
+  if (!isNaN(saved)) applySidebarWidth(saved);
+
+  let startX = 0, startWidth = 0;
+
+  function onMove(e) {
+    applySidebarWidth(startWidth + e.clientX - startX);
+  }
+  function onUp() {
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+    splitter.classList.remove('dragging');
+    document.body.classList.remove('splitter-dragging');
+    localStorage.setItem(SIDEBAR_WIDTH_KEY, String(parseInt($('#sidebar').style.width, 10)));
+  }
+
+  splitter.addEventListener('mousedown', e => {
+    startX = e.clientX;
+    startWidth = $('#sidebar').getBoundingClientRect().width;
+    splitter.classList.add('dragging');
+    document.body.classList.add('splitter-dragging'); // 拖拽中禁止选中文字
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+    e.preventDefault();
+  });
+
+  splitter.addEventListener('dblclick', () => {
+    applySidebarWidth(SIDEBAR_DEFAULT_WIDTH); // 双击复位默认宽度
+    localStorage.setItem(SIDEBAR_WIDTH_KEY, String(SIDEBAR_DEFAULT_WIDTH));
+  });
 }
 
 /* ================================================================
@@ -1568,6 +2024,7 @@ function initToolbar() {
   $('#dir-cancel').addEventListener('click', closeDirModal);
   $('#dir-confirm').addEventListener('click', confirmDir);
   $('#dir-edit').addEventListener('click', showDirInput);
+  $('#dir-recent-select').addEventListener('change', onDirRecentChange);
   $('#dir-modal').addEventListener('mousedown', e => {
     if (e.target === e.currentTarget) closeDirModal(); // 点击遮罩关闭
   });
@@ -1585,12 +2042,15 @@ function initToolbar() {
   });
   document.addEventListener('keydown', dirModalKeys);
 
+  // 侧栏分隔条
+  initSplitter();
+
   $('#btn-infer').addEventListener('click', startInfer);
   $('#btn-evaluate').addEventListener('click', runEvaluate);
 
   $('#check-all').addEventListener('change', e => {
     state.checked.clear();
-    if (e.target.checked) state.videos.forEach(v => state.checked.add(v.stem));
+    if (e.target.checked) state.videos.forEach(v => state.checked.add(v.rel));
     sidebarSnapshot = '';
     renderSidebar();
     syncButtons();
@@ -1605,7 +2065,7 @@ async function init() {
     state.workspace = await api('/api/workspace');
     if (state.workspace && state.workspace.path) {
       $('#ws-path').textContent = state.workspace.path;
-      await Promise.all([loadVideos(), loadEvalLatest(), pollJobs()]);
+      await Promise.all([loadTree(), loadEvalLatest(), pollJobs()]);
     }
   } catch (e) {
     // 后端未就绪:保持初始界面
@@ -1617,3 +2077,4 @@ async function init() {
 }
 
 init();
+

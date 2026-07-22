@@ -43,12 +43,16 @@ _STEP_MARKERS = (
 )
 
 
-def build_infer_command(workspace: Path, video_name: str, stem: str) -> List[str]:
-    """Command analyzing one video, writing results into analysis/<stem>/."""
+def build_infer_command(workspace: Path, video_rel: str, stem: str) -> List[str]:
+    """Command analyzing one video, writing results into analysis/<stem>/.
+
+    ``video_rel`` is the workspace-relative video path (``name`` for
+    top-level videos); the results contract stays flat.
+    """
     out_dir = workspace_mod.analysis_dir(workspace, stem)
     return [
         sys.executable, "-m", "traffic_analyzer", "analyze",
-        "--video", str(workspace / video_name),
+        "--video", str(workspace / video_rel),
         "--format", "markdown",
         "--output", str(out_dir / "report.md"),
         "--sft-label",
@@ -76,6 +80,7 @@ class Job:
     kind: str  # "infer" | "evaluate"
     argv: List[str]
     stem: Optional[str] = None
+    rel: Optional[str] = None  # workspace-relative video path (infer jobs)
     cwd: Path = REPO_ROOT
     status: str = "queued"  # queued | running | done | failed
     step_label: str = "排队中"
@@ -89,6 +94,7 @@ class Job:
             "id": self.id,
             "kind": self.kind,
             "stem": self.stem,
+            "rel": self.rel,
             "status": self.status,
             "progress": {
                 "step_label": self.step_label,
@@ -119,12 +125,15 @@ class JobManager:
         kind: str,
         argv: List[str],
         stem: Optional[str] = None,
+        rel: Optional[str] = None,
         cwd: Path = REPO_ROOT,
     ) -> int:
         with self._lock:
             job_id = self._next_id
             self._next_id += 1
-            self._jobs[job_id] = Job(id=job_id, kind=kind, argv=list(argv), stem=stem, cwd=Path(cwd))
+            self._jobs[job_id] = Job(
+                id=job_id, kind=kind, argv=list(argv), stem=stem, rel=rel, cwd=Path(cwd)
+            )
         self._queue.put(self._jobs[job_id])
         return job_id
 
@@ -186,26 +195,47 @@ class JobManager:
 
 
 class InferRequest(BaseModel):
-    stems: List[str]
+    stems: Optional[List[str]] = None  # legacy: top-level video stems
+    rels: Optional[List[str]] = None   # workspace-relative video paths (any depth)
 
 
 @router.post("/api/infer")
 def post_infer(body: InferRequest, request: Request) -> Dict[str, Any]:
     workspace = workspace_mod.require_workspace(request)
     # Validate everything before queueing anything.
-    videos = []
-    for stem in body.stems:
+    rels: List[str] = list(body.rels or [])
+    for stem in body.stems or []:  # legacy stems map to top-level rels
         workspace_mod.validate_stem(stem)
         video = workspace_mod.find_video(workspace, stem)
         if video is None:
             raise HTTPException(status_code=404, detail=f"Video not found for stem: {stem}")
-        videos.append((stem, video))
+        rels.append(video.name)
+
+    videos: List[tuple] = []
+    seen_stems: Dict[str, str] = {}
+    for rel in rels:
+        video = workspace_mod.resolve_workspace_file(workspace, rel)
+        if video.suffix.lower() not in workspace_mod.VIDEO_EXTENSIONS:
+            raise HTTPException(status_code=404, detail=f"Not a video file: {rel}")
+        stem = video.stem
+        if stem in seen_stems:
+            # Results land in the flat analysis/<stem>/ — two rels sharing a
+            # stem would overwrite each other, so reject the whole request.
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Stem 冲突:{stem} — {seen_stems[stem]} 与 {rel} "
+                    "会写入同一个 analysis 目录,请重命名其中一个视频"
+                ),
+            )
+        seen_stems[stem] = rel
+        videos.append((stem, rel))
 
     job_ids: List[int] = []
-    for stem, video in videos:
+    for stem, rel in videos:
         workspace_mod.analysis_dir(workspace, stem).mkdir(parents=True, exist_ok=True)
-        argv = build_infer_command(workspace, video.name, stem)
-        job_ids.append(request.app.state.jobs.submit("infer", argv, stem=stem))
+        argv = build_infer_command(workspace, rel, stem)
+        job_ids.append(request.app.state.jobs.submit("infer", argv, stem=stem, rel=rel))
     return {"job_ids": job_ids}
 
 
