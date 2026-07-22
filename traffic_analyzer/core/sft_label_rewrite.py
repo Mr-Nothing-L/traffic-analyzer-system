@@ -91,10 +91,11 @@ def build_description(
 ) -> str:
     """Assemble the ``<think>/<answer>`` description for one SFT sample.
 
-    The format is fully code-assembled: ``<think>`` iterates event_id 0..9 in
-    fixed order (``事件名：`` + the rewrite model's thinking), ``<answer>``
-    carries weather / time-of-day / scene first and ends with the conclusion
-    (``classN: 事件名`` lines consistent with the ``action`` list).
+    The format is fully code-assembled: ``<think>`` iterates the active
+    categories in event_id order (``事件名：`` + the rewrite model's
+    thinking), ``<answer>`` carries weather / time-of-day / scene first and
+    ends with the conclusion (``classN: 事件名`` lines consistent with the
+    ``action`` list).
     """
     thoughts_by_id: Dict[int, Mapping[str, Any]] = {}
     raw_thoughts = resp_data.get("event_thoughts")
@@ -108,7 +109,11 @@ def build_description(
     name_by_id = {c.event_id: c.name_zh for c in categories}
 
     think_lines: List[str] = []
+    # 仅遍历激活类别(与 pipeline_steps 的 active_categories 口径一致):
+    # 未激活事件不生成 think 段,SFT 样本与 md 报告保持相同事件集合。
     for cat in sorted(categories, key=lambda c: c.event_id):
+        if not cat.is_active:
+            continue
         thought = thoughts_by_id.get(cat.event_id, {})
         thinking = str(thought.get("thinking") or "").strip()
         if not thinking:
@@ -229,6 +234,8 @@ def _build_verdicts_json(
     """Serialize adjudicated verdicts (privileged hints) for the prompt."""
     verdicts: List[Dict[str, Any]] = []
     for cat in sorted(categories, key=lambda c: c.event_id):
+        if not cat.is_active:
+            continue  # 未激活类别不进入 prompt
         er = event_results.get(cat.event_id)
         verdicts.append(
             {
@@ -259,6 +266,7 @@ def _build_event_definitions_json(categories: Sequence[EventCategory]) -> str:
             "definition": cat.definition,
         }
         for cat in sorted(categories, key=lambda c: c.event_id)
+        if cat.is_active
     ]
     return json.dumps(definitions, ensure_ascii=False, indent=2)
 

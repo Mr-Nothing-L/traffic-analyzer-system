@@ -292,6 +292,19 @@ class TestBuildDescription:
         # Missing thinking for an undetected event falls back to 未发现。
         assert desc.count("未发现。") == 10
 
+    def test_inactive_category_produces_no_think_section(self) -> None:
+        """is_active=false 的类别不在 <think> 中生成段落(其余类别不受影响)。"""
+        categories = _make_categories()
+        categories[8] = categories[8].model_copy(update={"is_active": False})
+        desc = build_description(
+            _make_resp_data(), _make_event_results(), categories
+        )
+
+        think = desc.split("</think>", 1)[0]
+        assert f"{_NAME_ZH[8]}：" not in think
+        assert f"{_NAME_ZH[7]}：" in think
+        assert f"{_NAME_ZH[9]}：" in think
+
 
 # ---------------------------------------------------------------------------
 # build_sample tests
@@ -451,13 +464,17 @@ class TestSftLabelRewriteStep:
         assert call["images"]  # raw frames selected, non-empty
         assert call["response_schema"] is not None
         context_vars = call["context_vars"]
+        active_count = sum(
+            1 for c in config_manager.get_event_categories() if c.is_active
+        )
         verdicts = json.loads(context_vars["verdicts_json"])
-        assert len(verdicts) == 10
+        assert len(verdicts) == active_count  # 未激活类别不进入 prompt
+        assert all(v["event_id"] not in (8, 9) for v in verdicts)
         assert verdicts[1]["detected"] is True
         assert verdicts[1]["instances"][0]["start_time_sec"] == 1.0
         assert verdicts[0]["detected"] is False
         definitions = json.loads(context_vars["event_definitions_json"])
-        assert len(definitions) == 10
+        assert len(definitions) == active_count
 
     def test_quarantine_writes_to_subdirectory(
         self, config_manager: ConfigManager, tmp_path: Path
