@@ -7,6 +7,9 @@ import json
 import logging
 import os
 import sys
+import threading
+import time
+import webbrowser
 from pathlib import Path
 from typing import List, Optional, Sequence
 
@@ -153,6 +156,47 @@ def cmd_validate_config(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_web(args: argparse.Namespace) -> int:
+    """Launch the web UI server (uvicorn + FastAPI backend)."""
+    _setup_logging(args.log_level)
+    logger = logging.getLogger(__name__)
+
+    try:
+        import uvicorn
+    except ImportError:
+        logger.error("The web UI requires extra dependencies: pip install fastapi uvicorn")
+        return 1
+
+    if args.workspace is not None:
+        workspace = _resolve_path(args.workspace)
+        if not Path(workspace).is_dir():
+            logger.error("Workspace directory not found: %s", workspace)
+            return 1
+        # Factory mode cannot forward arguments — pass via environment.
+        os.environ["TRAFFIC_ANALYZER_WEB_WORKSPACE"] = workspace
+        logger.info("Workspace preset to %s", workspace)
+
+    url = f"http://{args.host}:{args.port}"
+
+    def _open_browser() -> None:
+        time.sleep(1.0)
+        try:
+            webbrowser.open(url)
+        except Exception as exc:
+            logger.warning("Could not open browser: %s", exc)
+
+    threading.Thread(target=_open_browser, daemon=True).start()
+
+    logger.info("Starting web UI at %s", url)
+    uvicorn.run(
+        "traffic_analyzer.web.app:create_app",
+        factory=True,
+        host=args.host,
+        port=args.port,
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the top-level argument parser."""
     parser = argparse.ArgumentParser(
@@ -233,6 +277,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to the configuration directory (default: ./traffic_analyzer/config).",
     )
     validate_parser.set_defaults(func=cmd_validate_config)
+
+    # --- web ---
+    web_parser = subparsers.add_parser(
+        "web",
+        help="Launch the web UI server.",
+    )
+    web_parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Bind host (default: 127.0.0.1).",
+    )
+    web_parser.add_argument(
+        "--port",
+        type=int,
+        default=8600,
+        help="Bind port (default: 8600).",
+    )
+    web_parser.add_argument(
+        "--workspace", "-w",
+        default=None,
+        help="Optional workspace directory to preselect.",
+    )
+    web_parser.set_defaults(func=cmd_web)
 
     return parser
 

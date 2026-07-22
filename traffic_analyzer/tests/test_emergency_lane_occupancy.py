@@ -519,7 +519,7 @@ class TestExpertAgentIntegration:
             assert "summary" in occupancy
 
             # Evidence files should exist on disk.
-            base_dir = Path(context.output_dir) / "tmp_img" / "test_video_event_1_occupancy"
+            base_dir = Path(context.output_dir) / "tmp_img" / "test_video" / "test_video_event_1_occupancy"
             assert (base_dir / "02_masks_overlay.jpg").exists()
             assert (base_dir / "03_vehicles_red_boxes.jpg").exists()
             assert (base_dir / "04_zoom_grid.jpg").exists()

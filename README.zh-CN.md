@@ -6,7 +6,7 @@
 
 架构概要：视频预处理后，系统为每个激活事件并行运行一个独立的 **ExpertAgent**（单事件 VLM 检测，部分事件带远距离 ROI 证据增强），每个候选结果再经一次可选的**反思一致性检查**；随后由一次**裁决（Adjudication）VLM 调用**按业务规则对所有候选做跨事件裁决，最终生成报告与二进制编码。
 
-> 当前版本：v4.0.0（见 `traffic_analyzer/__init__.py`）。唯一有执行路径的检测模式是 `expert_agent`；工具层框架保留但注册表为空。
+> 当前版本：v5.0.0（见 `traffic_analyzer/__init__.py`）。唯一有执行路径的检测模式是 `expert_agent`；工具层框架保留但注册表为空。
 
 ---
 
@@ -109,6 +109,22 @@ python3 -m traffic_analyzer analyze \
 
 在裁决之后追加一个 rewrite 步骤：额外一次 VLM 调用**只看原始抽帧 + 裁决结论**（裁决作为特权提示），为每个视频写出 **1 个 SFT 训练样本 JSON** 到 `--sft-output-dir`（默认 `output/sft_labels`）。主报告不受影响；该模式每个视频**多 1 次 VLM 调用**。阳性事件在原始帧中无法锚定的样本会被隔离到 `quarantine/` 子目录，见下文「SFT 样本 JSON」。
 
+#### 可选：Web UI（`traffic_analyzer web`）
+
+```bash
+python3 -m traffic_analyzer web            # 默认 http://127.0.0.1:8600
+python3 -m traffic_analyzer web --host 0.0.0.0 --port 9000 --workspace ./workspace
+```
+
+界面（FastAPI 后端 + SPA 前端，代码在 `traffic_analyzer/web/`）功能：
+
+- **工作区选择** — 视频与分析结果统一存放在一个工作目录下；
+- **单视频/批量推理** — 后台任务队列执行，实时展示任务进度；
+- **逐视频结果卡片** — SFT 样本详情、Markdown 报告与可视化证据编辑器（多边形/矩形顶点级编辑，保存回 `<stem>_evidence.json`）；
+- **批量准确率评估** — `scripts/batch_evaluate.py` 已并入界面，展示逐事件 precision/recall/F1。
+
+Web 推理任务以子进程运行同一条 `analyze` 流水线并开启 `--sft-label`，因此每个任务同时导出 `<stem>_evidence.json`，见下文「工作区结果目录」。
+
 ### 5. Python API
 
 ```python
@@ -181,7 +197,7 @@ HTML 报告为单文件交互式页面：左侧统计与逐视频结果表（可
 
 ```
 traffic_analyzer/
-├── cli.py                          # CLI 入口（analyze / validate-config 子命令）
+├── cli.py                          # CLI 入口（analyze / validate-config / web 子命令）
 ├── __main__.py                     # 支持 python3 -m traffic_analyzer
 ├── __init__.py                     # 版本号 __version__
 ├── config/
@@ -207,7 +223,8 @@ traffic_analyzer/
 │   ├── report_generator.py         # 报告组装 + 二进制编码生成
 │   ├── report_markdown_renderer.py # Markdown 报告渲染
 │   ├── report_far_enhancement_renderer.py  # 增强流程证据（合成图、ROI 表格）渲染
-│   └── report_text_utils.py        # 报告文本清洗工具
+│   ├── report_text_utils.py        # 报告文本清洗工具
+│   └── evidence_exporter.py        # <stem>_evidence.json 可视化证据导出（schema_version 1）
 ├── models/                         # Pydantic 数据模型
 │   ├── schemas.py                  # 兼容层，统一再导出全部模型
 │   ├── enums.py                    # DetectionMode、ConfidenceLevel 枚举
@@ -239,6 +256,7 @@ traffic_analyzer/
 │   ├── construction_evidence_gallery.py  # 施工事件多 ROI 证据画廊
 │   ├── annotation_spec_loader.py   # annotation_spec.yaml 加载并转 Prompt 文本
 │   └── tool_call_logger.py         # Tool-Call 风格日志（TRAFFIC_ANALYZER_TOOL_LOG_LEVEL 控制）
+├── web/                            # FastAPI 后端 + SPA 前端（web/static/）
 └── tests/                          # pytest 测试套件（含 tools/ 子目录）
 
 scripts/
@@ -279,7 +297,7 @@ Dockerfile / docker-compose.yml           # 可选 CPU 开发容器（另附 Doc
 - **event_id=3（行人）/ 4（摩托车）**：逐帧 ROI 检测（归一化 bbox + 0–1 连续置信度 + 遮挡标志）→ 按置信度/面积/宽高比/遮挡/相邻帧运动分数排序取 top-K → 生成双图合成（单帧放大 + 相邻帧运动对比）→ 最终分类器。分类器为负但 ROI 证据充分时可安全回退为阳性。
 - **event_id=1（应急车道占用）**：先用 `emergency_lane_calibration` 标定应急车道/导流区，再用 `emergency_lane_vehicle_roi` 检测车辆 ROI，生成车道叠加图、车辆红框图与放大网格等证据，最后由 `emergency_lane_occupancy_detection` 分类器判定。
 - **event_id=6（道路施工）**：从中间帧提取多类施工证据区域（锥桶/人员/工程车/隔离栏/标志牌，含 `on_ground` 标志），拼成多 ROI 画廊后送最终分类器；ROI 证据满足施工作业区定义时可经施工专用回退提升为阳性。
-- 增强流程生成的证据图保存在 `<报告输出目录>/tmp_img/`（未指定 `--output` 时为 `./output/tmp_img/`），Markdown 报告以相对路径引用。
+- 增强流程生成的证据图按视频保存在 `<报告输出目录>/tmp_img/<video_stem>/`（未指定 `--output` 时为 `./output/tmp_img/<video_stem>/`），Markdown 报告以相对路径引用。
 
 ---
 
@@ -410,6 +428,17 @@ Markdown 报告主要章节：视频信息 → 事件类别分析（检测总览
   - `<think>` — 按 event_id 0–9 固定顺序逐类思考：未检出的事件写"未发现" + 一句理由；检出的事件必须覆盖标注文档 v4.5 规定的必要描述元素（位置/车道类别、来向/去向、车辆或目标类型、视觉描述等）。
   - `<answer>` — 最终结论（`classN: 事件名` 列表，与 `action` 一致）+ 天气（晴天/雨天/雾天/雪天/阴天）+ 时间（白天/夜间/晨昏）+ 基本交通场景描述（是否有匝道/导流区/收费口，隧道/高速场景，是否有来向/去向车道，车流量大/中/小；不含事件描述）。
 - **隔离（quarantine）**：若任一裁决为阳性的事件在原始帧中无法锚定（`ungrounded_event_ids`），样本改写至 `<sft-output-dir>/quarantine/<视频名>.json`——这类样本会教模型幻觉，不作为训练样本。
+
+### 工作区结果目录（Web UI）
+
+Web UI 的推理任务将每个视频的结果存放在 `<workspace>/analysis/<video_stem>/` 下：
+
+- `report.md` — Markdown 报告
+- `<video_stem>.json` — `Report` 模型的完整序列化
+- `<video_stem>_evidence.json` — 可编辑的可视化证据文件（schema_version 1）：标定多边形、证据区域与证据画廊图像，坐标为归一化 [0,1]；界面中的证据编辑器将顶点修改保存回该文件
+- `images/` — 证据 JSON 引用的图像
+
+批量评估输出写入 `<workspace>/analysis/evaluation/latest.json`。
 
 ---
 

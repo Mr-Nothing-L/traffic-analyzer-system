@@ -5,5 +5,5 @@ A configuration-driven, extensible framework for analyzing traffic events
 in surveillance videos using Large Vision-Language Models.
 """
 
-__version__ = "4.0.0"
+__version__ = "5.0.0"
 __author__ = "Traffic Analyzer Team"

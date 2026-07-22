@@ -1,5 +1,59 @@
 # 更新日志
 
+## [v5.0.0] 2026-07-22 — Web UI 可视化工作台、证据导出与 tmp_img 目录调整
+
+### 核心变更
+
+#### 1. 新增 Web UI 可视化工作台
+- **FastAPI 后端 + SPA 前端**：`traffic_analyzer/web/`（REST API、串行任务队列、工作区管理）+ `traffic_analyzer/web/static/`（单页应用）
+- **工作区选择**：视频与分析结果统一存放在一个工作目录下，可用 `--workspace` 预选或在界面中选择
+- **单视频 / 批量推理**：后台任务队列执行（子进程串行），前端实时展示任务进度
+- **逐视频结果卡片**：SFT 样本详情、Markdown 报告、可视化证据编辑器
+- **可视化证据编辑器**：多边形与矩形标注的顶点级编辑，保存回 `<stem>_evidence.json`
+- **批量准确率评估并入 UI**：基于 `scripts/batch_evaluate.py`，展示逐事件 precision / recall / F1，结果写入 `<workspace>/analysis/evaluation/latest.json`
+
+#### 2. 新增 `web` CLI 子命令
+- `python3 -m traffic_analyzer web [--host 127.0.0.1] [--port 8600] [--workspace DIR]` 启动 Web 服务（uvicorn，自动打开浏览器）
+- Web 推理任务以子进程运行 `analyze --sft-label`，与 CLI 走同一分析流水线
+
+#### 3. 可视化证据导出（evidence.json）
+- 新增 `traffic_analyzer/core/evidence_exporter.py`
+- `--sft-label` 开启时为每个视频导出 `<stem>_evidence.json`（schema_version 1）
+- 内容：标定多边形（calibration polygons）、证据区域（evidence_regions）、证据画廊图像（gallery images），坐标归一化到 [0,1]；引用图像复制到同级 `images/` 目录，导出结果自包含
+- fail-open：数据缺失时记录 WARNING 并写出可用部分，不阻断分析
+
+#### 4. tmp_img 产物按视频分目录
+- 增强流程证据图等中间产物由扁平的 `output/tmp_img/` 改为按视频组织：`output/tmp_img/<video_stem>/`
+
+#### 5. Web 工作区结果目录约定
+- 每个视频结果：`<workspace>/analysis/<video_stem>/{report.md, <video_stem>.json, <video_stem>_evidence.json, images/}`
+- 批量评估输出：`<workspace>/analysis/evaluation/latest.json`
+
+#### 6. batch_evaluate 报告发现修复
+- `scripts/batch_evaluate.py` 报告发现支持 Web 工作区布局（`<report_dir>/<stem>/report.md` 子目录），并按视频 stem 去重，避免顶层与子目录报告重复计数
+
+#### 7. 新增依赖
+- `requirements.txt` 新增 `fastapi>=0.110.0,<1.0.0`、`uvicorn>=0.29.0,<1.0.0`（Web 服务）
+
+### 关键文件变更
+
+| 文件 | 变更 |
+|---|---|
+| `traffic_analyzer/web/app.py` | 新增：FastAPI 应用工厂（`create_app()`，uvicorn factory 模式） |
+| `traffic_analyzer/web/jobs.py` | 新增：串行子进程任务队列（推理/评估），逐行解析进度 |
+| `traffic_analyzer/web/workspace.py` | 新增：工作区状态与视频发现 |
+| `traffic_analyzer/web/evidence_api.py` | 新增：结果读取与证据编辑端点 |
+| `traffic_analyzer/web/evaluate.py` | 新增：准确率评估端点（调用 `scripts/batch_evaluate.py`） |
+| `traffic_analyzer/web/frames.py` | 新增：按需视频帧提取（LRU 缓存） |
+| `traffic_analyzer/web/static/` | 新增：SPA 前端（`index.html` / `app.js` / `style.css`） |
+| `traffic_analyzer/cli.py` | 新增 `web` 子命令（`--host` / `--port` / `--workspace`） |
+| `traffic_analyzer/core/evidence_exporter.py` | 新增：`<stem>_evidence.json` 导出（schema_version 1，归一化坐标） |
+| `traffic_analyzer/orchestrator/analysis_orchestrator.py`、`traffic_analyzer/models/context.py` | tmp_img 产物路径改为 `<output_dir>/tmp_img/<video_stem>/` |
+| `scripts/batch_evaluate.py` | 报告发现支持工作区子目录布局（`*/report.md`）并按 stem 去重 |
+| `requirements.txt` | 新增 fastapi / uvicorn |
+
+---
+
 ## [v4.0.0] 2026-06-16 — 专家 Agent 重构、多 Provider 故障转移与事件激活扩展
 
 ### 核心变更

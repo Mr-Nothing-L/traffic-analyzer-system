@@ -410,11 +410,11 @@ def test_far_enhancement_saves_assets_next_to_report(make_agent, analysis_contex
 
         assert candidate.detected is True
         raw = candidate.raw_vlm_response
-        assert raw["composite_image_path"] == "tmp_img/test_video_event_4_frame_0_composite.jpg"
-        assert raw["motion_composite_image_path"] == "tmp_img/test_video_event_4_frame_0_motion_1.jpg"
+        assert raw["composite_image_path"] == "tmp_img/test_video/test_video_event_4_frame_0_composite.jpg"
+        assert raw["motion_composite_image_path"] == "tmp_img/test_video/test_video_event_4_frame_0_motion_1.jpg"
 
-        composite_file = report_dir / "tmp_img" / "test_video_event_4_frame_0_composite.jpg"
-        motion_file = report_dir / "tmp_img" / "test_video_event_4_frame_0_motion_1.jpg"
+        composite_file = report_dir / "tmp_img" / "test_video" / "test_video_event_4_frame_0_composite.jpg"
+        motion_file = report_dir / "tmp_img" / "test_video" / "test_video_event_4_frame_0_motion_1.jpg"
         assert composite_file.exists()
         assert motion_file.exists()
 
@@ -904,8 +904,8 @@ def test_motion_score_computed_without_caching_diff_image(make_agent) -> None:
             candidate = agent.detect(context)
 
         assert candidate.detected is True
-        written = list(Path(tmpdir).glob("*"))
-        assert len(written) == 2
+        written = list(Path(tmpdir).rglob("*"))
+        assert len([p for p in written if p.is_file()]) == 2
         assert all("diff" not in p.name.lower() for p in written)
 
 
@@ -1401,8 +1401,8 @@ def test_construction_gallery_saves_assets_next_to_report(
         candidate = agent.detect(analysis_context)
 
         assert candidate.detected is True
-        assert candidate.raw_vlm_response["gallery_image_path"] == "tmp_img/test_video_event_6_frame_1_gallery.jpg"
-        gallery_file = report_dir / "tmp_img" / "test_video_event_6_frame_1_gallery.jpg"
+        assert candidate.raw_vlm_response["gallery_image_path"] == "tmp_img/test_video/test_video_event_6_frame_1_gallery.jpg"
+        gallery_file = report_dir / "tmp_img" / "test_video" / "test_video_event_6_frame_1_gallery.jpg"
         assert gallery_file.exists()
 
         final_calls = [c for c in engine.calls if c["template_id"] == "road_construction_detection"]

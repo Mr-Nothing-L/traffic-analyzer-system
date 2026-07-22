@@ -15,9 +15,11 @@ from __future__ import annotations
 import logging
 import os
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from traffic_analyzer.core.config_manager import ConfigManager
+from traffic_analyzer.core.evidence_exporter import export_evidence
 from traffic_analyzer.core.pipeline_steps import (
     AdjudicationStep,
     ExpertAgentLayer,
@@ -132,8 +134,8 @@ class AnalysisOrchestrator:
             scene_understanding: Optional pre-computed scene understanding.
             output_dir: Optional directory where the report will be written.
                 When provided, far-enhancement composite images are saved
-                under ``<output_dir>/tmp_img`` and referenced with relative
-                paths in the markdown report.
+                under ``<output_dir>/tmp_img/<video_stem>`` and referenced
+                with relative paths in the markdown report.
 
         Returns:
             Complete analysis report.
@@ -288,6 +290,24 @@ class AnalysisOrchestrator:
                     exc_info=True,
                 )
             step_times["sft_label_rewrite"] = time.perf_counter() - t0
+
+            # Evidence export (auxiliary): editable per-video evidence.json
+            # for the web UI, written next to the SFT samples.
+            sft_output_dir = getattr(context.config, "sft_label_output_dir", None)
+            if sft_output_dir:
+                try:
+                    evidence_path = export_evidence(context, Path(sft_output_dir))
+                    if evidence_path is not None:
+                        logger.info("  Evidence exported to: %s", evidence_path)
+                except FatalAPIError:
+                    raise
+                except Exception as exc:
+                    logger.error(
+                        "[orchestrator:analyze] EVIDENCE_EXPORT_ERROR | video=%s | %s",
+                        video_path,
+                        exc,
+                        exc_info=True,
+                    )
 
         # Step 4: Report generation
         logger.info("[4/4] Generating report...")

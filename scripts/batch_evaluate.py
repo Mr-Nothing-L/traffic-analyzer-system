@@ -1383,18 +1383,29 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             p for p in report_dir.iterdir()
             if p.is_file() and p.suffix.lower() in (".md", ".json")
         )
-        total_report_count += len(report_paths)
-        if not report_paths:
+        # Web workspace layout: per-video reports at <report_dir>/<stem>/report.md;
+        # the video stem is the parent directory name in this case.
+        report_entries: List[Tuple[Path, str]] = [(p, p.stem) for p in report_paths]
+        report_entries += [
+            (p, p.parent.name) for p in sorted(report_dir.glob("*/report.md"))
+        ]
+        # Deduplicate by video stem (a video reported both top-level and in a
+        # subdirectory must not be counted twice).
+        seen_stems: Set[str] = set()
+        unique_entries: List[Tuple[Path, str]] = []
+        for path, stem in report_entries:
+            if stem in seen_stems:
+                continue
+            seen_stems.add(stem)
+            unique_entries.append((path, stem))
+        total_report_count += len(unique_entries)
+        if not unique_entries:
             logger.warning("No report files (.md or .json) found in %s", report_dir)
             continue
 
-        logger.info("Found %d report(s) in %s", len(report_paths), report_dir)
+        logger.info("Found %d report(s) in %s", len(unique_entries), report_dir)
 
-        for report_path in report_paths:
-            # Determine corresponding video name
-            # Report stem may be same as video stem (e.g., video.mp4 -> video.md)
-            report_stem = report_path.stem
-
+        for report_path, report_stem in unique_entries:
             # Try to find matching video
             video_path: Optional[Path] = None
             for ext in (".mp4", ".avi", ".mov", ".mkv", ".wmv"):

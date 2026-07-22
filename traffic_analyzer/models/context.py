@@ -36,7 +36,8 @@ class AnalysisContext(BaseModel):
         default=None,
         description="Directory where the final report will be written. "
                     "Used to place auxiliary assets (e.g. far-enhancement "
-                    "composites) next to the report so markdown references resolve.",
+                    "composites) under <output_dir>/tmp_img/<video_stem> next "
+                    "to the report so markdown references resolve.",
     )
 
     def set_local(self, key: str, value: Any) -> None:

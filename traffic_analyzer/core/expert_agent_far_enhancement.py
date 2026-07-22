@@ -52,6 +52,8 @@ logger = logging.getLogger(__name__)
 
 # Directory where far-distance object composite images are saved.
 # Kept relative to the project root so it works across local dev, CI and Docker.
+# Artifacts are grouped into a per-video subdirectory named after the video
+# stem (see ``_detect_with_far_enhancement``).
 _FAR_ENHANCEMENT_OUTPUT_DIR = Path("./output/tmp_img")
 
 # Default far-enhancement parameters.  Most are overridden per-template via
@@ -1799,14 +1801,15 @@ class FarEnhancementDetector:
         # When the orchestrator knows where the report will be written, place
         # composites next to the report and reference them with a relative path
         # so markdown viewers can resolve the image. Otherwise fall back to the
-        # project-root default for backward compatibility.
+        # project-root default for backward compatibility. Artifacts are always
+        # grouped into a per-video subdirectory named after the video stem.
         report_output_dir = getattr(context, "output_dir", None)
         if report_output_dir:
-            output_dir = Path(report_output_dir) / "tmp_img"
-            image_ref_prefix = "tmp_img"
+            output_dir = Path(report_output_dir) / "tmp_img" / video_stem
+            image_ref_prefix = f"tmp_img/{video_stem}"
         else:
-            output_dir = default_output_dir
-            image_ref_prefix = str(default_output_dir)
+            output_dir = default_output_dir / video_stem
+            image_ref_prefix = str(default_output_dir / video_stem)
         try:
             output_dir.mkdir(parents=True, exist_ok=True)
         except Exception as exc:

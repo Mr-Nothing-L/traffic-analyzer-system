@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>高速交通事件分析台</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header id="toolbar">
+    <div class="tb-row">
+      <div class="tb-brand">
+        <span class="tb-logo">▦</span>
+        <span class="tb-title">高速交通事件分析台</span>
+        <span id="mock-badge" class="mock-badge" hidden>MOCK</span>
+      </div>
+      <div class="tb-workspace">
+        <button id="btn-workspace" class="btn btn-ghost" title="选择工作区目录">
+          <span class="ws-icon">⌂</span>
+          <span id="ws-path" class="ws-path">未设置工作区</span>
+        </button>
+        <div id="ws-panel" class="ws-panel" hidden>
+          <label class="ws-panel-label" for="ws-input">工作区路径（含视频文件的目录）</label>
+          <div class="ws-panel-row">
+            <input id="ws-input" type="text" placeholder="/path/to/workspace" spellcheck="false">
+            <button id="ws-ok" class="btn btn-primary btn-sm">确定</button>
+            <button id="ws-cancel" class="btn btn-ghost btn-sm">取消</button>
+          </div>
+          <div id="ws-error" class="ws-error" hidden></div>
+        </div>
+      </div>
+      <div class="tb-spacer"></div>
+      <button id="btn-infer" class="btn btn-primary" disabled>开始推理</button>
+      <button id="btn-evaluate" class="btn btn-ghost" disabled>精度评估</button>
+    </div>
+    <div id="progress-dock" class="progress-dock" hidden></div>
+  </header>
+
+  <div id="layout">
+    <aside id="sidebar">
+      <div class="side-head">
+        <span class="side-title">工作区视频</span>
+        <label class="side-all" title="全选/取消全选">
+          <input type="checkbox" id="check-all">
+        </label>
+      </div>
+      <div id="video-list" class="video-list">
+        <div class="side-empty">设置工作区后列出视频</div>
+      </div>
+    </aside>
+    <main id="main"></main>
+  </div>
+
+  <div id="toast-root" aria-live="polite"></div>
+  <script src="app.js"></script>
+</body>
+</html>

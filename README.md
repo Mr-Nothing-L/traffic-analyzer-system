@@ -7,8 +7,9 @@ video. Input: a video clip. Output: a **10-bit binary event code** plus a struct
 analysis report (JSON or Markdown). Event definitions, prompts, adjudication rules,
 and thresholds are all YAML-driven — adding or tuning an event needs no code changes.
 
-**Current version: 4.0.0** — parallel ExpertAgent layer + single-call adjudication, with
-far-distance ROI evidence enhancement and a reflection consistency check per candidate.
+**Current version: 5.0.0** — adds a web UI (FastAPI backend + SPA frontend) with
+workspace management, queued single/batch inference, per-video result cards with a
+visual-evidence editor, and in-UI batch accuracy evaluation.
 
 ## Overview
 
@@ -113,6 +114,27 @@ The main report is unaffected; the mode costs **+1 VLM call per video**. Samples
 positive events cannot be grounded in the raw frames are quarantined — see
 [SFT sample JSON](#sft-sample-json---sft-label).
 
+#### Optional: Web UI (`traffic_analyzer web`)
+
+```bash
+python3 -m traffic_analyzer web            # defaults: http://127.0.0.1:8600
+python3 -m traffic_analyzer web --host 0.0.0.0 --port 9000 --workspace ./workspace
+```
+
+The UI (FastAPI backend + SPA in `traffic_analyzer/web/`) provides:
+
+- **Workspace selection** — videos and analysis results live under one workspace folder.
+- **Single/batch inference** — a background job queue with per-job progress.
+- **Per-video result cards** — SFT sample detail, the Markdown report, and a
+  visual-evidence editor (polygon & box vertex edits saved back to
+  `<stem>_evidence.json`).
+- **Batch accuracy evaluation** — `scripts/batch_evaluate.py` merged into the UI,
+  with per-event precision/recall/F1.
+
+Inference jobs run the same `analyze` pipeline with `--sft-label` enabled, so each
+job also exports `<stem>_evidence.json` — see
+[Workspace results layout](#workspace-results-layout-web-ui).
+
 ### Exit codes
 
 | Code | Meaning |
@@ -135,9 +157,9 @@ print(report.binary_encoding.encoding_string)   # e.g. 1_0_1_0_0_0_0_0_0_0
 
 ```
 traffic_analyzer/
-├── cli.py                              # argparse CLI: analyze / validate-config, exit codes
+├── cli.py                              # argparse CLI: analyze / validate-config / web, exit codes
 ├── __main__.py                         # enables `python -m traffic_analyzer`
-├── __init__.py                         # __version__ = "4.0.0"
+├── __init__.py                         # __version__ = "5.0.0"
 ├── config/
 │   ├── event_categories.yaml           # Event definitions + adjudication_rules
 │   ├── annotation_spec.yaml            # Business annotation spec injected into adjudication
@@ -161,7 +183,8 @@ traffic_analyzer/
 │   ├── report_generator.py             # Report assembly + binary encoding
 │   ├── report_markdown_renderer.py     # Markdown report rendering (Chinese UI)
 │   ├── report_far_enhancement_renderer.py  # Far-enhancement evidence sections
-│   └── report_text_utils.py            # Report text formatting helpers
+│   ├── report_text_utils.py            # Report text formatting helpers
+│   └── evidence_exporter.py            # <stem>_evidence.json export (schema_version 1)
 ├── models/
 │   ├── config.py                       # SystemConfig, LLMProviderConfig, SamplingConfig
 │   ├── event.py                        # EventCategory, EventCandidate, EventResult, AuditEntry
@@ -193,6 +216,7 @@ traffic_analyzer/
 │   ├── image_drawing.py                # Image annotation helpers
 │   ├── annotation_spec_loader.py       # annotation_spec.yaml → prompt text
 │   └── tool_call_logger.py             # tool_call trace logging
+├── web/                                # FastAPI backend + SPA frontend (web/static/)
 └── tests/                              # pytest suite (unit + pipeline-level, VLM mocked)
     ├── test_*.py                       # 16 test modules (CLI, config, engine, experts, reports)
     └── tools/test_tool_router.py       # Tool router tests
@@ -258,8 +282,8 @@ Dockerfile{,.gpu,.cuda}, docker-compose{,.gpu}.yml  # Dev containers (CPU / GPU)
    - The **binary encoding** is produced here: width = number of configured categories
      (10), bit *i* = 1 iff event *i* was adjudicated as detected.
    - Output: the `Report` model as JSON (default) or Markdown. With `--output`,
-     far-enhancement composites are saved under `<output_dir>/tmp_img` and referenced
-     from the Markdown report.
+     far-enhancement composites are saved under `<output_dir>/tmp_img/<video_stem>/`
+     and referenced from the Markdown report.
 
 ## Configuration
 
@@ -438,6 +462,19 @@ With `--sft-label` enabled, one training sample per video is written to
   `<sft-output-dir>/quarantine/<video_stem>.json` instead — such samples would teach
   the student to hallucinate.
 
+### Workspace results layout (web UI)
+
+Web UI inference jobs store per-video results under `<workspace>/analysis/<video_stem>/`:
+
+- `report.md` — the Markdown report
+- `<video_stem>.json` — the serialized `Report` model
+- `<video_stem>_evidence.json` — the editable visual-evidence file (schema_version 1):
+  calibration polygons, evidence regions, and gallery images with normalized [0,1]
+  coordinates; the UI's evidence editor saves vertex edits back to this file
+- `images/` — the evidence images referenced by the JSON
+
+Batch evaluation output is written to `<workspace>/analysis/evaluation/latest.json`.
+
 ## Testing
 
 ```bash
@@ -496,4 +533,4 @@ on fatal API errors, and treats exit code 2 as "rejected, no report expected".
   promotion/veto rules, and prefilter thresholds can misjudge borderline cases.
 - **Markdown reports are rendered in Chinese**, regardless of CLI language.
 - Archived snapshots: tags `v1.1.0`, `v1.5.0-legacy` (branch `legacy/v1.5`),
-  `v2.0.0-multi-agent`. All current development is on `main` (v4.0.0).
+  `v2.0.0-multi-agent`. All current development is on `main` (v5.0.0).
