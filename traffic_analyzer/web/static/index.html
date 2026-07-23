@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>高速交通事件分析台</title>
   <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="usability.css">
 </head>
 <body>
   <header id="toolbar">
@@ -33,6 +34,15 @@
         <label class="side-all" title="全选/取消全选">
           <input type="checkbox" id="check-all">
         </label>
+      </div>
+      <div class="side-filter">
+        <input id="side-filter-input" type="text" spellcheck="false" placeholder="过滤视频…">
+        <select id="side-sort-select" title="排序方式">
+          <option value="name">名称</option>
+          <option value="mtime">修改时间</option>
+          <option value="size">大小</option>
+          <option value="status">状态</option>
+        </select>
       </div>
       <div id="video-list" class="video-list">
         <div class="side-empty">设置工作区后列出视频</div>
@@ -67,6 +77,6 @@
   </div>
 
   <div id="toast-root" aria-live="polite"></div>
-  <script src="app.js"></script>
+  <script type="module" src="js/main.js"></script>
 </body>
 </html>

@@ -1508,7 +1508,7 @@ class TestStaticCacheHeaders:
 
     def test_index_and_assets_send_no_cache(self) -> None:
         client = TestClient(create_app())
-        for path in ("/", "/app.js", "/style.css"):
+        for path in ("/", "/js/main.js", "/style.css"):
             resp = client.get(path)
             assert resp.status_code == 200, path
             assert resp.headers.get("cache-control") == "no-cache", path

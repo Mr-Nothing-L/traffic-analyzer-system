@@ -69,10 +69,10 @@ def create_app(workspace: Optional[str] = None) -> FastAPI:
 
     @app.middleware("http")
     async def _no_cache_static(request, call_next):
-        # The SPA must always revalidate: a stale cached app.js/index.html
+        # The SPA must always revalidate: a stale cached js/main.js/index.html
         # breaks the UI after upgrades (heuristic caching otherwise applies).
         response = await call_next(request)
-        if request.url.path in ("/", "/index.html", "/app.js", "/style.css"):
+        if request.url.path in ("/", "/index.html", "/js/main.js", "/style.css"):
             response.headers["Cache-Control"] = "no-cache"
         return response
 
