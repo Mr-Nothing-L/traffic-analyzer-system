@@ -110,9 +110,9 @@ function sourceFrameUrl(source, index) {
 
 function imageUrl(stem, name) {
   if (MOCK) return mockImageUrl(stem, name);
-  // name 形如 "images/xxx.jpg",取文件名部分
-  const base = String(name).split('/').pop();
-  return '/api/results/' + encodeURIComponent(stem) + '/images/' + encodeURIComponent(base);
+  // name 为相对 analysis/<stem>/ 的路径(report.md 的 "tmp_img/.../x.jpg" 或
+  // evidence.json 的 "images/x.jpg"),按原路径请求,不再降级为 basename。
+  return '/api/results/' + encodeURIComponent(stem) + '/file?path=' + encodeURIComponent(name);
 }
 
 /* ================================================================

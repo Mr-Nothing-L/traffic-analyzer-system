@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import yaml
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, field_validator
 
@@ -221,10 +221,33 @@ def get_result_image(stem: str, name: str, request: Request) -> FileResponse:
     workspace_mod.validate_stem(stem)
     if not name or name in (".", "..") or "/" in name or "\\" in name or ".." in name:
         raise HTTPException(status_code=404, detail="Image not found")
+    # 仅服务 images/ 下的文件;tmp_img 等子树一律走 /file?path= 精确路径,
+    # 不做 basename 回退搜索,避免索引到工作区里的历史残留文件。
     images_dir = (workspace_mod.analysis_dir(workspace, stem) / "images").resolve()
     candidate = (images_dir / name).resolve()
     if candidate.parent != images_dir or not candidate.is_file():
         raise HTTPException(status_code=404, detail="Image not found")
+    return FileResponse(candidate)
+
+
+@router.get("/api/results/{stem}/file")
+def get_result_file(stem: str, request: Request, path: str = Query(...)) -> FileResponse:
+    """Serve any file under ``analysis/<stem>/`` by its relative path.
+
+    report.md references enhancement images with paths relative to its own
+    directory (e.g. ``tmp_img/<stem>/.../02_masks_overlay.jpg``); evidence.json
+    references ``images/<name>.jpg``. Both are served here with the path
+    strictly confined to the analysis directory.
+    """
+    workspace = workspace_mod.require_workspace(request)
+    workspace_mod.validate_stem(stem)
+    parts = Path(path).parts
+    if not path or path.startswith("/") or "\\" in path or ".." in parts:
+        raise HTTPException(status_code=404, detail="File not found")
+    analysis_dir = workspace_mod.analysis_dir(workspace, stem).resolve()
+    candidate = (analysis_dir / path).resolve()
+    if analysis_dir not in candidate.parents or not candidate.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(candidate)
 
 
