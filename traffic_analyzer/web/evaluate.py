@@ -48,4 +48,7 @@ def get_evaluate_latest(request: Request) -> Dict[str, Any]:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
-        raise HTTPException(status_code=500, detail="Corrupted evaluation result")
+        raise HTTPException(
+            status_code=404,
+            detail="Evaluation result unreadable (previous run died mid-write)",
+        )

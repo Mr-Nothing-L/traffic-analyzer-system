@@ -13,6 +13,8 @@ fall back to frame-stepping.
 from __future__ import annotations
 
 import json
+import os
+import select
 import shutil
 import subprocess
 import threading
@@ -48,6 +50,10 @@ _MEDIA_TYPES = {
 
 _probe_cache: Dict[Tuple[str, float], Tuple[Optional[str], Optional[str]]] = {}
 _cache_lock = threading.Lock()
+
+_CHUNK = 64 * 1024
+_TICK = 0.5  # select tick; the generator suspends at yield between ticks
+_PROBE_TIMEOUT = 5.0  # first-chunk probe before answering 200
 
 
 def is_browser_native(codec: Optional[str], suffix: str) -> bool:
@@ -85,7 +91,7 @@ def probe_video(path: Path) -> Tuple[Optional[str], Optional[str]]:
 def _transcode_response(video: Path, ss: Optional[float]) -> StreamingResponse:
     if _FFMPEG is None:
         raise HTTPException(status_code=501, detail="ffmpeg not found on server")
-    argv = [_FFMPEG, "-v", "error", "-i", str(video)]
+    argv = [_FFMPEG, "-nostdin", "-v", "error", "-i", str(video)]
     if ss:
         argv += ["-ss", f"{ss:.3f}"]
     argv += [
@@ -100,18 +106,61 @@ def _transcode_response(video: Path, ss: Optional[float]) -> StreamingResponse:
     except OSError as exc:
         raise HTTPException(status_code=501, detail=f"ffmpeg failed to start: {exc}")
 
+    # Non-blocking pipe + select tick: the generator spends most of its time
+    # suspended at a ``yield``, so when the client disconnects starlette can
+    # actually close it and the ``finally`` below kills ffmpeg. With a blocking
+    # ``read`` the close never lands and ffmpeg transcodes to EOF (zombie).
+    assert proc.stdout is not None
+    fd = proc.stdout.fileno()
+    os.set_blocking(fd, False)
+
+    def _read_chunk(timeout: float) -> bytes:
+        """Wait up to ``timeout``s for pipe data; b"" on timeout or EOF."""
+        ready, _, _ = select.select([fd], [], [], timeout)
+        if not ready:
+            return b""
+        try:
+            return os.read(fd, _CHUNK)
+        except BlockingIOError:
+            return b""
+
+    # First-chunk probe: if ffmpeg dies before producing anything (corrupt
+    # input, unsupported codec), answer 501 so the frontend can fall back
+    # instead of getting a 200 with an empty body.
+    first = b""
+    ready, _, _ = select.select([fd], [], [], _PROBE_TIMEOUT)
+    if ready:
+        first = _read_chunk(0)
+        if not first:
+            returncode = proc.wait()
+            if returncode != 0:
+                if proc.poll() is None:
+                    proc.kill()
+                proc.wait()
+                raise HTTPException(
+                    status_code=501,
+                    detail=f"ffmpeg produced no output (exit {returncode})",
+                )
+
     def generate() -> Iterator[bytes]:
         try:
-            assert proc.stdout is not None
+            if first:
+                yield first
             while True:
-                chunk = proc.stdout.read(64 * 1024)
+                chunk = _read_chunk(_TICK)
                 if not chunk:
-                    break
+                    if proc.poll() is not None:
+                        break  # EOF with the process gone
+                    continue
                 yield chunk
         finally:
             # Client disconnected or stream ended: never leave ffmpeg running.
             if proc.poll() is None:
-                proc.kill()
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
             proc.wait()
 
     return StreamingResponse(generate(), media_type="video/mp4")

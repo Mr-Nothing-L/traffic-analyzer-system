@@ -88,6 +88,7 @@ class Job:
     fraction: Optional[float] = None
     returncode: Optional[int] = None
     log_tail: Deque[str] = field(default_factory=lambda: deque(maxlen=_LOG_TAIL_LINES))
+    proc: Optional[subprocess.Popen] = None  # live child while running
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -156,6 +157,8 @@ class JobManager:
 
     def _run(self, job: Job) -> None:
         with self._lock:
+            if job.status != "queued":
+                return  # cancelled / shut down while still in the queue
             job.status = "running"
             job.step_label = "评估中" if job.kind == "evaluate" else "推理中"
         try:
@@ -167,6 +170,9 @@ class JobManager:
                 text=True,
                 errors="replace",
                 bufsize=1,
+                # Own session: the child's fate is controlled by us (shutdown /
+                # cancel), not by the terminal's process group.
+                start_new_session=True,
             )
         except OSError as exc:
             with self._lock:
@@ -175,6 +181,8 @@ class JobManager:
                 job.log_tail.append(f"failed to start: {exc}")
             return
 
+        with self._lock:
+            job.proc = proc
         assert proc.stdout is not None
         for line in proc.stdout:
             line = line.rstrip("\n")
@@ -192,6 +200,68 @@ class JobManager:
             job.status = "done" if returncode == 0 else "failed"
             if returncode == 0:
                 job.fraction = 1.0
+
+    def shutdown(self) -> None:
+        """Stop all queued/running jobs (server shutdown; safe to call twice).
+
+        Queued jobs are failed without being started (the worker skips them
+        when it later dequeues them); running children get SIGTERM, then
+        SIGKILL after ~3s.
+        """
+        with self._lock:
+            jobs = list(self._jobs.values())
+            for job in jobs:
+                if job.status == "queued":
+                    job.status = "failed"
+                    job.log_tail.append("server shutdown")
+        for job in jobs:
+            proc = job.proc
+            if job.status == "running" and proc is not None and proc.poll() is None:
+                with self._lock:
+                    job.log_tail.append("server shutdown")
+                _terminate_proc(proc)
+                with self._lock:
+                    if job.status == "running":
+                        job.returncode = proc.returncode
+                        job.status = "failed"
+
+    def cancel(self, job_id: int) -> Job:
+        """Cancel a queued or running job.
+
+        Raises KeyError for an unknown id, ValueError if the job already
+        reached a terminal state.
+        """
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                raise KeyError(job_id)
+            if job.status in ("done", "failed"):
+                raise ValueError(job.status)
+            if job.status == "queued":
+                job.status = "failed"
+                job.log_tail.append("cancelled by user")
+                return job
+        proc = job.proc
+        if proc is not None and proc.poll() is None:
+            _terminate_proc(proc)
+        with self._lock:
+            if job.status == "running":
+                job.returncode = proc.returncode if proc is not None else job.returncode
+                job.status = "failed"
+            job.log_tail.append("cancelled by user")
+        return job
+
+
+def _terminate_proc(proc: subprocess.Popen, timeout: float = 3.0) -> None:
+    """SIGTERM, wait up to ``timeout``, then SIGKILL."""
+    if proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=timeout)
 
 
 class InferRequest(BaseModel):
@@ -242,3 +312,14 @@ def post_infer(body: InferRequest, request: Request) -> Dict[str, Any]:
 @router.get("/api/jobs")
 def get_jobs(request: Request) -> List[Dict[str, Any]]:
     return request.app.state.jobs.list_jobs()
+
+
+@router.post("/api/jobs/{job_id}/cancel")
+def post_cancel_job(job_id: int, request: Request) -> Dict[str, Any]:
+    try:
+        job = request.app.state.jobs.cancel(job_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Unknown job id: {job_id}")
+    except ValueError:
+        raise HTTPException(status_code=409, detail="Job already finished")
+    return job.to_dict()

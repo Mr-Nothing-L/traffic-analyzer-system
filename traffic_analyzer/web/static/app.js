@@ -77,7 +77,13 @@ async function api(path, opts) {
   }
   if (!res.ok) {
     let detail = res.statusText;
-    try { const j = await res.json(); detail = j.detail || JSON.stringify(j); } catch (e) { /* ignore */ }
+    try {
+      const j = await res.json();
+      // FastAPI 422 的 detail 是 [{loc, msg, ...}] 数组,拼成「字段路径: 消息」
+      detail = Array.isArray(j.detail)
+        ? j.detail.map(d => (Array.isArray(d.loc) ? d.loc.join('.') : String(d.loc || '')) + ': ' + d.msg).join('; ')
+        : (j.detail || JSON.stringify(j));
+    } catch (e) { /* ignore */ }
     throw new ApiError(res.status, detail);
   }
   if (res.status === 204) return null;
@@ -662,13 +668,15 @@ async function selectVideo(rel) {
   runCleanups();
   $('#main').innerHTML = skeletons();
   try {
-    state.results = await api('/api/results/' + encodeURIComponent(v.stem));
-    if (state.results.evidence) state.evidenceDraft = JSON.parse(JSON.stringify(state.results.evidence));
+    const results = await api('/api/results/' + encodeURIComponent(v.stem));
+    if (state.currentRel !== rel) return; // 期间切换了视频,过期响应不得写入共享状态
+    state.results = results;
+    if (results.evidence) state.evidenceDraft = JSON.parse(JSON.stringify(results.evidence));
   } catch (e) {
+    if (state.currentRel !== rel) return; // 过期请求的失败不覆盖当前视图
     $('#main').innerHTML = '<div class="cards"><div class="card"><div class="card-body empty-note">加载结果失败:' + esc(e.message) + '</div></div></div>';
     return;
   }
-  if (state.currentRel !== rel) return; // 期间切换了视频
   renderResults();
 }
 
@@ -751,14 +759,6 @@ function mountPreview(source, videoInfo) {
   const video = $('#pv-video');
   video.addEventListener('error', () => {
     showStepper('浏览器无法直接播放该视频(编码不受支持或转码服务不可用),已切换为逐帧预览。');
-  });
-  // 转码流不可 seek:拖动进度条时改用 ?ss= 重新起播
-  video.addEventListener('seeking', () => {
-    if (video.seekable && video.seekable.length > 0) return;
-    const t = video.currentTime;
-    if (!(t > 0)) return;
-    video.src = streamUrl(source, t);
-    video.play().catch(() => { /* 用户未交互时忽略自动播放限制 */ });
   });
   video.src = url;
 }
@@ -1031,13 +1031,19 @@ async function saveSft() {
   if (btn) btn.disabled = true;
   // 只改 description / action,其余字段原样提交(后端会校验)
   const payload = Object.assign({}, state.results.sft_label, buildSftRevision());
+  const inFlightSig = sftSignature(); // 在途 payload 的签名,用于识别保存期间的继续编辑
   try {
     const saved = await api('/api/results/' + encodeURIComponent(stem) + '/sft', {
       method: 'PUT', body: payload,
     });
+    if (state.currentStem !== stem) return; // 期间切换了视频
     state.results.sft_label = saved || payload;
     toast('已保存', 'ok');
-    renderSftBody(state.results.sft_label); // 以保存后的内容重建草稿
+    if (sftSignature() === inFlightSig) {
+      renderSftBody(state.results.sft_label); // 保存期间无新编辑:以保存后的内容重建草稿
+    } else {
+      updateSftDirty(); // 保存期间用户继续编辑:保留草稿,仅重算 dirty
+    }
   } catch (e) {
     if (btn) btn.disabled = false;
     toast('保存失败(' + e.status + '):' + e.message, 'err');
@@ -1172,6 +1178,7 @@ function clearDirty() {
 }
 
 function renderEvidenceCard(stem, source) {
+  runCleanups(); // 重挂面板前释放上一个证据面板的 window 监听(mouseup/resize)
   const tabs = $('#ev-tabs');
   const body = $('#ev-body');
   if (!tabs || !body) return;
@@ -1210,6 +1217,7 @@ async function saveEvidence() {
     await api('/api/results/' + encodeURIComponent(stem) + '/evidence', {
       method: 'PUT', body: state.evidenceDraft,
     });
+    if (state.currentStem !== stem) return; // 期间切换了视频
     state.results.evidence = JSON.parse(JSON.stringify(state.evidenceDraft));
     clearDirty();
     toast('证据已保存', 'ok');
@@ -1224,6 +1232,7 @@ async function resetEvidence() {
   if (!stem) return;
   try {
     const r = await api('/api/results/' + encodeURIComponent(stem));
+    if (state.currentStem !== stem) return; // 期间切换了视频
     if (r && r.evidence) {
       state.results.evidence = r.evidence;
       state.evidenceDraft = JSON.parse(JSON.stringify(r.evidence));
@@ -1562,9 +1571,13 @@ function mountEvidencePane(mount, stem, source, ev, videoInfo) {
   const onResize = () => fit();
   window.addEventListener('resize', onResize);
   img.addEventListener('load', fit);
+  // 分隔条拖动等容器尺寸变化不触发 window resize,用 ResizeObserver 兜底
+  const ro = new ResizeObserver(() => fit());
+  ro.observe(stage);
   img.src = sourceFrameUrl(source, frameIdx);
 
   state.cleanups.push(() => {
+    ro.disconnect();
     window.removeEventListener('mouseup', onUp);
     window.removeEventListener('resize', onResize);
   });
@@ -1916,6 +1929,13 @@ async function startInfer() {
 /* ================================================================
    轮询
    ================================================================ */
+// 当前视图是否存在未保存的 SFT / 证据编辑
+function hasUnsavedEdits() {
+  if (state.evidenceDirty) return true;
+  if (state.sftDraft && sftSignature() !== state.sftSavedSig) return true;
+  return false;
+}
+
 let polling = false;
 async function pollJobs() {
   if (polling) return;
@@ -1954,7 +1974,14 @@ async function pollJobs() {
     renderSidebar();
     syncButtons();
     if (needVideos) await loadTree(true);
-    if (reloadRel && reloadRel === state.currentRel) selectVideo(reloadRel);
+    if (reloadRel && reloadRel === state.currentRel) {
+      if (hasUnsavedEdits()) {
+        // 有未保存编辑时不自动重载,避免丢弃草稿;该 toast 每个任务只在状态翻转时触发一次
+        toast('「' + reloadRel + '」已重新分析完成,但当前有未保存的修改;请先保存或手动重新加载', 'err');
+      } else {
+        selectVideo(reloadRel);
+      }
+    }
   } catch (e) {
     // 后端未启动等场景:静默,下个周期重试
   } finally {

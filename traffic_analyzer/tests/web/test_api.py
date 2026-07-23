@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import io
+import asyncio
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -15,6 +16,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import yaml
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from traffic_analyzer.cli import build_parser, main
@@ -874,6 +876,150 @@ class TestJobs:
 
 
 # ---------------------------------------------------------------------------
+# Jobs: process lifecycle (shutdown / cancel)
+# ---------------------------------------------------------------------------
+
+_SLEEP_CMD = [sys.executable, "-c", "import time; time.sleep(300)"]
+
+
+def _wait_running(job: Any, timeout: float = 15.0) -> Any:
+    """Wait until the job has a live child process; return the proc."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if job.status == "running" and job.proc is not None and job.proc.poll() is None:
+            return job.proc
+        time.sleep(0.05)
+    raise AssertionError(f"job {job.id} did not start a live child in {timeout}s")
+
+
+class TestJobLifecycle:
+    def _sleep_app(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
+        workspace = _make_workspace(tmp_path)
+        monkeypatch.setattr(
+            "traffic_analyzer.web.jobs.build_infer_command",
+            lambda ws, name, stem: list(_SLEEP_CMD),
+        )
+        return create_app(workspace=str(workspace))
+
+    def test_shutdown_kills_running_child(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Lifespan shutdown (Ctrl+C) kills the running analyze child."""
+        app = self._sleep_app(tmp_path, monkeypatch)
+        with TestClient(app) as client:
+            job_id = client.post("/api/infer", json={"stems": ["v1"]}).json()["job_ids"][0]
+            job = app.state.jobs._jobs[job_id]
+            proc = _wait_running(job)
+            # start_new_session: the child is its own session leader.
+            assert os.getsid(proc.pid) == proc.pid
+        # Exiting the TestClient ran the lifespan shutdown.
+        deadline = time.time() + 5
+        while proc.poll() is None and time.time() < deadline:
+            time.sleep(0.05)
+        assert proc.poll() is not None
+        assert job.status == "failed"
+        assert any("server shutdown" in line for line in job.log_tail)
+
+    def test_shutdown_fails_queued_jobs_without_starting(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Queued jobs at shutdown are failed and their command never runs."""
+        marker = tmp_path / "job2_started.txt"
+        workspace = _make_workspace(tmp_path)
+        monkeypatch.setattr(
+            "traffic_analyzer.web.jobs.build_infer_command",
+            lambda ws, name, stem: (
+                list(_SLEEP_CMD)
+                if stem == "v1"
+                else [sys.executable, "-c", f"open(r'{marker}', 'w').write('x')"]
+            ),
+        )
+        app = create_app(workspace=str(workspace))
+        with TestClient(app) as client:
+            ids = client.post("/api/infer", json={"stems": ["v1", "v2"]}).json()["job_ids"]
+            job1 = app.state.jobs._jobs[ids[0]]
+            job2 = app.state.jobs._jobs[ids[1]]
+            _wait_running(job1)  # serial queue: v2 stays queued behind v1
+            assert job2.status == "queued"
+        assert job2.status == "failed"
+        assert job2.proc is None
+        assert any("server shutdown" in line for line in job2.log_tail)
+        assert not marker.exists()
+
+    def test_cancel_running_job(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        app = self._sleep_app(tmp_path, monkeypatch)
+        client = TestClient(app)
+        job_id = client.post("/api/infer", json={"stems": ["v1"]}).json()["job_ids"][0]
+        job = app.state.jobs._jobs[job_id]
+        proc = _wait_running(job)
+
+        resp = client.post(f"/api/jobs/{job_id}/cancel")
+        assert resp.status_code == 200
+        deadline = time.time() + 5
+        while proc.poll() is None and time.time() < deadline:
+            time.sleep(0.05)
+        assert proc.poll() is not None
+        assert job.status == "failed"
+        assert job.returncode is not None
+        assert any("cancelled by user" in line for line in job.log_tail)
+
+        # Second cancel: job is already terminal.
+        assert client.post(f"/api/jobs/{job_id}/cancel").status_code == 409
+
+    def test_cancel_unknown_id_404(self, tmp_path: Path) -> None:
+        client = TestClient(create_app(workspace=str(_make_workspace(tmp_path))))
+        assert client.post("/api/jobs/999/cancel").status_code == 404
+
+    def test_cancel_queued_job_never_starts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        marker = tmp_path / "job2_started.txt"
+        workspace = _make_workspace(tmp_path)
+        monkeypatch.setattr(
+            "traffic_analyzer.web.jobs.build_infer_command",
+            lambda ws, name, stem: (
+                list(_SLEEP_CMD)
+                if stem == "v1"
+                else [sys.executable, "-c", f"open(r'{marker}', 'w').write('x')"]
+            ),
+        )
+        app = create_app(workspace=str(workspace))
+        client = TestClient(app)
+        ids = client.post("/api/infer", json={"stems": ["v1", "v2"]}).json()["job_ids"]
+        job1 = app.state.jobs._jobs[ids[0]]
+        job2 = app.state.jobs._jobs[ids[1]]
+        _wait_running(job1)
+        assert job2.status == "queued"
+
+        resp = client.post(f"/api/jobs/{ids[1]}/cancel")
+        assert resp.status_code == 200
+        assert job2.status == "failed"
+        assert job2.proc is None
+        assert any("cancelled by user" in line for line in job2.log_tail)
+
+        # Clean up job1; the worker must then skip the cancelled job2.
+        client.post(f"/api/jobs/{ids[0]}/cancel")
+        deadline = time.time() + 5
+        while job1.proc.poll() is None and time.time() < deadline:
+            time.sleep(0.05)
+        time.sleep(0.5)  # give the worker a chance to (not) start job2
+        assert not marker.exists()
+
+    def test_cancel_terminal_job_409(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        workspace = _make_workspace(tmp_path)
+        monkeypatch.setattr(
+            "traffic_analyzer.web.jobs.build_infer_command",
+            lambda ws, name, stem: [sys.executable, "-c", "pass"],
+        )
+        client = TestClient(create_app(workspace=str(workspace)))
+        job_id = client.post("/api/infer", json={"stems": ["v1"]}).json()["job_ids"][0]
+        assert _wait_for_job(client, job_id)["status"] == "done"
+        assert client.post(f"/api/jobs/{job_id}/cancel").status_code == 409
+
+
+# ---------------------------------------------------------------------------
 # Evaluation
 # ---------------------------------------------------------------------------
 
@@ -1202,13 +1348,20 @@ class TestVideoStream:
         captured: Dict[str, Any] = {}
 
         class _FakeProc:
-            stdout = io.BytesIO(b"")
+            def __init__(self) -> None:
+                # Real pipe at EOF — the transcode path needs a fileno.
+                read_fd, write_fd = os.pipe()
+                os.close(write_fd)
+                self.stdout = os.fdopen(read_fd, "rb")
 
             def poll(self) -> int:
                 return 0
 
             def wait(self) -> int:
                 return 0
+
+            def terminate(self) -> None:
+                pass
 
             def kill(self) -> None:
                 pass
@@ -1365,3 +1518,368 @@ class TestStaticCacheHeaders:
         resp = client.get("/api/jobs")
         assert resp.status_code == 200
         assert "cache-control" not in resp.headers
+
+
+# ---------------------------------------------------------------------------
+# F3: atomic JSON writes + PUT hardening
+# ---------------------------------------------------------------------------
+
+
+class TestAtomicWriteJson:
+    def test_replaces_original_and_removes_tmp(self, tmp_path: Path) -> None:
+        from traffic_analyzer.web.evidence_api import _atomic_write_json
+
+        target = tmp_path / "x.json"
+        target.write_text('{"old": 1}', encoding="utf-8")
+        _atomic_write_json(target, {"new": 2})
+        assert json.loads(target.read_text(encoding="utf-8")) == {"new": 2}
+        assert not (tmp_path / "x.json.tmp").exists()
+
+    def test_put_leaves_no_tmp_file(self, tmp_path: Path) -> None:
+        workspace = _make_workspace(tmp_path)
+        _make_results(workspace, "v1")
+        client = TestClient(create_app(workspace=str(workspace)))
+        resp = client.put("/api/results/v1/evidence", json=_evidence_payload())
+        assert resp.status_code == 200
+        assert list((workspace / "analysis" / "v1").glob("*.tmp")) == []
+
+
+class TestBatchEvaluateAtomicWrite:
+    def test_atomic_write_text(self, tmp_path: Path) -> None:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "batch_evaluate",
+            Path(__file__).resolve().parents[3] / "scripts" / "batch_evaluate.py",
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        target = tmp_path / "latest.json"
+        module._atomic_write_text(target, '{"a": 1}')
+        assert target.read_text(encoding="utf-8") == '{"a": 1}'
+        assert not (tmp_path / "latest.json.tmp").exists()
+        module._atomic_write_text(target, '{"a": 2}')
+        assert json.loads(target.read_text(encoding="utf-8")) == {"a": 2}
+
+
+class TestBatchEvaluateNestedVideo:
+    def test_nested_video_matched_by_rglob(self, tmp_path: Path) -> None:
+        """视频在子目录时(rglob 回退)也能被评估,不再报 No matching video。"""
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "batch_evaluate",
+            Path(__file__).resolve().parents[3] / "scripts" / "batch_evaluate.py",
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        ws = tmp_path / "ws"
+        (ws / "sub").mkdir(parents=True)
+        (ws / "sub" / "01_Event_129_1_1.mp4").write_bytes(b"\x00" * 64)
+        out_dir = ws / "analysis" / "01_Event_129_1_1"
+        out_dir.mkdir(parents=True)
+        (out_dir / "report.md").write_text(
+            "# 报告\n\n二进制编码: `1_0_0_0_0_0_0_0_0_0`\n", encoding="utf-8"
+        )
+        output = tmp_path / "latest.json"
+        rc = module.main(
+            [
+                "--video-dir", str(ws),
+                "--report-dir", str(ws / "analysis"),
+                "--gt-mode", "filename",
+                "--output", str(output),
+            ]
+        )
+        assert rc == 0
+        text = output.read_text(encoding="utf-8")
+        assert "01_Event_129_1_1" in text
+
+
+class TestPutGuards:
+    def _client(self, tmp_path: Path) -> TestClient:
+        workspace = _make_workspace(tmp_path)
+        _make_results(workspace, "v1")
+        (workspace / "analysis" / "v1" / "v1.json").write_text(
+            json.dumps(_sft_payload(), ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        return TestClient(create_app(workspace=str(workspace)))
+
+    def test_put_evidence_non_dict_disk_422(self, tmp_path: Path) -> None:
+        client = self._client(tmp_path)
+        (tmp_path / "analysis" / "v1" / "v1_evidence.json").write_text(
+            "[1, 2, 3]", encoding="utf-8"
+        )
+        resp = client.put("/api/results/v1/evidence", json=_evidence_payload())
+        assert resp.status_code == 422  # not a 500 AttributeError
+
+    def test_put_rejected_while_infer_active(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = self._client(tmp_path)
+        state = {"status": "running"}
+
+        def _fake_list_jobs(self: Any) -> List[Dict[str, Any]]:
+            return [
+                {
+                    "id": 1,
+                    "kind": "infer",
+                    "stem": "v1",
+                    "rel": "v1.mp4",
+                    "status": state["status"],
+                    "progress": {},
+                    "log_tail": [],
+                    "returncode": None,
+                }
+            ]
+
+        monkeypatch.setattr(
+            "traffic_analyzer.web.jobs.JobManager.list_jobs", _fake_list_jobs
+        )
+
+        resp = client.put("/api/results/v1/evidence", json=_evidence_payload())
+        assert resp.status_code == 409
+        assert "v1" in resp.json()["detail"]
+        assert client.put("/api/results/v1/sft", json=_sft_payload()).status_code == 409
+
+        # Once the job finishes, both PUTs go through again.
+        state["status"] = "done"
+        assert client.put("/api/results/v1/evidence", json=_evidence_payload()).status_code == 200
+        assert client.put("/api/results/v1/sft", json=_sft_payload()).status_code == 200
+
+    def test_put_other_stem_unaffected_by_infer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = self._client(tmp_path)
+
+        def _fake_list_jobs(self: Any) -> List[Dict[str, Any]]:
+            return [
+                {
+                    "id": 1,
+                    "kind": "infer",
+                    "stem": "v2",
+                    "rel": "v2.avi",
+                    "status": "running",
+                    "progress": {},
+                    "log_tail": [],
+                    "returncode": None,
+                }
+            ]
+
+        monkeypatch.setattr(
+            "traffic_analyzer.web.jobs.JobManager.list_jobs", _fake_list_jobs
+        )
+        resp = client.put("/api/results/v1/evidence", json=_evidence_payload())
+        assert resp.status_code == 200
+
+
+class TestConfigEventsFailures:
+    def test_missing_yaml_500(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "traffic_analyzer.web.evidence_api._EVENT_CATEGORIES_YAML",
+            tmp_path / "nope.yaml",
+        )
+        client = TestClient(create_app())
+        resp = client.get("/api/config/events")
+        assert resp.status_code == 500
+        assert "event categories" in resp.json()["detail"]
+
+    def test_corrupt_yaml_500(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        bad = tmp_path / "bad.yaml"
+        bad.write_text("event_categories: [unclosed", encoding="utf-8")
+        monkeypatch.setattr(
+            "traffic_analyzer.web.evidence_api._EVENT_CATEGORIES_YAML", bad
+        )
+        client = TestClient(create_app())
+        resp = client.get("/api/config/events")
+        assert resp.status_code == 500
+        assert "event categories" in resp.json()["detail"]
+
+    def test_entries_without_ids_skipped(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cfg = tmp_path / "partial.yaml"
+        cfg.write_text(
+            yaml.safe_dump(
+                {
+                    "event_categories": [
+                        {"event_id": 1, "name_zh": "违法停车"},
+                        {"name_zh": "缺 id"},
+                        {"event_id": 2},
+                    ]
+                },
+                allow_unicode=True,
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            "traffic_analyzer.web.evidence_api._EVENT_CATEGORIES_YAML", cfg
+        )
+        client = TestClient(create_app())
+        resp = client.get("/api/config/events")
+        assert resp.status_code == 200
+        assert resp.json() == [
+            {"event_id": 1, "name_zh": "违法停车", "is_active": True}
+        ]
+
+    def test_empty_yaml_500(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cfg = tmp_path / "empty.yaml"
+        cfg.write_text("event_categories: []\n", encoding="utf-8")
+        monkeypatch.setattr(
+            "traffic_analyzer.web.evidence_api._EVENT_CATEGORIES_YAML", cfg
+        )
+        client = TestClient(create_app())
+        assert client.get("/api/config/events").status_code == 500
+
+
+class TestEvaluateLatestCorrupt:
+    def test_corrupt_latest_404(self, tmp_path: Path) -> None:
+        workspace = _make_workspace(tmp_path)
+        latest = workspace / "analysis" / "evaluation" / "latest.json"
+        latest.parent.mkdir(parents=True)
+        latest.write_text('{"truncated": ', encoding="utf-8")
+        client = TestClient(create_app(workspace=str(workspace)))
+        resp = client.get("/api/evaluate/latest")
+        assert resp.status_code == 404  # not a 500
+        assert "mid-write" in resp.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# F2: frame cache keyed by mtime
+# ---------------------------------------------------------------------------
+
+
+class TestFrameCacheMtime:
+    def test_replaced_video_not_served_stale(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install_fake_cv2(monkeypatch)
+        workspace = _make_workspace(tmp_path)
+        client = TestClient(create_app(workspace=str(workspace)))
+
+        resp = client.get("/api/videos/v1/frame", params={"index": 3})
+        assert resp.status_code == 200
+        assert _FakeCapture.instances == 1
+
+        # Same path, new content with a bumped mtime: stale entry must miss.
+        video = workspace / "v1.mp4"
+        video.write_bytes(b"replaced")
+        future = time.time() + 10
+        os.utime(video, (future, future))
+
+        resp = client.get("/api/videos/v1/frame", params={"index": 3})
+        assert resp.status_code == 200
+        assert _FakeCapture.instances == 2
+
+        # Unchanged mtime keeps hitting the cache.
+        client.get("/api/videos/v1/frame", params={"index": 3})
+        assert _FakeCapture.instances == 2
+
+
+# ---------------------------------------------------------------------------
+# F1: ffmpeg zombie on client disconnect + first-chunk probe
+# ---------------------------------------------------------------------------
+
+_MP4TEST_MPEG4 = (
+    Path(__file__).resolve().parents[3] / "MP4TEST" / "02_ch1_20260401_142812_2.mp4"
+)
+requires_mp4test = pytest.mark.skipif(
+    not _MP4TEST_MPEG4.is_file(), reason="MP4TEST clip not available"
+)
+
+
+def _one_chunk_then_disconnect(resp: Any) -> bytes:
+    """Read one chunk from the (async) body iterator, then close it.
+
+    Mirrors the production path: starlette wraps the sync generator with
+    ``iterate_in_threadpool``; on client disconnect the async generator is
+    closed, which drops the last reference to the suspended sync generator
+    and runs its ``finally`` (killing ffmpeg).
+    """
+
+    async def _drive() -> bytes:
+        agen = resp.body_iterator
+        chunk = await agen.__anext__()
+        await agen.aclose()
+        return chunk
+
+    return asyncio.run(_drive())
+
+
+class TestTranscodeRobustness:
+    @requires_ffmpeg
+    def test_garbage_input_probe_501(self, tmp_path: Path) -> None:
+        from traffic_analyzer.web.video_stream import _transcode_response
+
+        garbage = tmp_path / "garbage.mp4"
+        garbage.write_bytes(b"not a real video" * 100)
+        with pytest.raises(HTTPException) as exc_info:
+            _transcode_response(garbage, None)
+        assert exc_info.value.status_code == 501
+        # The dead ffmpeg was reaped, nothing left behind.
+        assert (
+            subprocess.run(["pgrep", "-x", "ffmpeg"], capture_output=True).returncode
+            != 0
+        )
+
+    @requires_ffmpeg
+    @requires_mp4test
+    def test_client_disconnect_kills_ffmpeg(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from traffic_analyzer.web import video_stream
+
+        procs: List[Any] = []
+        real_popen = subprocess.Popen
+
+        def _spy_popen(argv: List[str], **kwargs: Any) -> Any:
+            proc = real_popen(argv, **kwargs)
+            procs.append(proc)
+            return proc
+
+        monkeypatch.setattr(
+            "traffic_analyzer.web.video_stream.subprocess.Popen", _spy_popen
+        )
+        resp = video_stream._transcode_response(_MP4TEST_MPEG4, None)
+        assert len(procs) == 1
+        proc = procs[0]
+
+        assert _one_chunk_then_disconnect(resp)  # first-chunk probe delivered data
+
+        deadline = time.time() + 2.0
+        while proc.poll() is None and time.time() < deadline:
+            time.sleep(0.05)
+        assert proc.poll() is not None
+        assert (
+            subprocess.run(["pgrep", "-x", "ffmpeg"], capture_output=True).returncode
+            != 0
+        )
+
+    @requires_ffmpeg
+    @requires_mp4test
+    def test_nostdin_in_ffmpeg_argv(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from traffic_analyzer.web import video_stream
+
+        captured: Dict[str, Any] = {}
+        real_popen = subprocess.Popen
+
+        def _spy_popen(argv: List[str], **kwargs: Any) -> Any:
+            captured["argv"] = argv
+            return real_popen(argv, **kwargs)
+
+        monkeypatch.setattr(
+            "traffic_analyzer.web.video_stream.subprocess.Popen", _spy_popen
+        )
+        resp = video_stream._transcode_response(_MP4TEST_MPEG4, None)
+        _one_chunk_then_disconnect(resp)
+        assert "-nostdin" in captured["argv"]

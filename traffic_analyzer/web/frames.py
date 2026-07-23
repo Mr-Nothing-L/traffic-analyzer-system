@@ -15,11 +15,13 @@ from traffic_analyzer.web import workspace as workspace_mod
 router = APIRouter()
 
 _CACHE_SIZE = 128
-_cache: "OrderedDict[Tuple[str, int], bytes]" = OrderedDict()
+# Key: (path, frame_index, mtime) — mtime included so a replaced video file
+# never serves stale frames (same convention as video_stream's probe cache).
+_cache: "OrderedDict[Tuple[str, int, float], bytes]" = OrderedDict()
 _cache_lock = threading.Lock()
 
 
-def _cached(key: Tuple[str, int]) -> Optional[bytes]:
+def _cached(key: Tuple[str, int, float]) -> Optional[bytes]:
     with _cache_lock:
         data = _cache.get(key)
         if data is not None:
@@ -27,7 +29,7 @@ def _cached(key: Tuple[str, int]) -> Optional[bytes]:
         return data
 
 
-def _store(key: Tuple[str, int], data: bytes) -> None:
+def _store(key: Tuple[str, int, float], data: bytes) -> None:
     with _cache_lock:
         _cache[key] = data
         _cache.move_to_end(key)
@@ -37,7 +39,7 @@ def _store(key: Tuple[str, int], data: bytes) -> None:
 
 def read_frame_jpeg(video_path: Path, index: int) -> Optional[bytes]:
     """Return the JPEG-encoded frame at ``index``, or None when out of range."""
-    key = (str(video_path), index)
+    key = (str(video_path), index, video_path.stat().st_mtime)
     cached = _cached(key)
     if cached is not None:
         return cached

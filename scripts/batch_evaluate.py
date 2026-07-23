@@ -1234,6 +1234,17 @@ def format_html_report(
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write via a same-dir ``.tmp`` file + ``os.replace``.
+
+    A crash mid-write then only loses the tmp file; ``latest.json`` served by
+    the web UI can never be left truncated.
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -1406,13 +1417,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         logger.info("Found %d report(s) in %s", len(unique_entries), report_dir)
 
         for report_path, report_stem in unique_entries:
-            # Try to find matching video
+            # Try to find matching video (top level first, then recursive for
+            # workspaces whose videos live in subdirectories).
             video_path: Optional[Path] = None
             for ext in (".mp4", ".avi", ".mov", ".mkv", ".wmv"):
                 candidate = video_dir / (report_stem + ext)
                 if candidate.exists():
                     video_path = candidate
                     break
+            if video_path is None:
+                for ext in (".mp4", ".avi", ".mov", ".mkv", ".wmv"):
+                    matches = sorted(video_dir.rglob(report_stem + ext))
+                    if matches:
+                        video_path = matches[0]
+                        break
 
             # Also try stripping common suffixes from report name
             if video_path is None:
@@ -1557,18 +1575,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if suffix == ".md":
         # For markdown output, include per-video extra data (paths, names, correctness)
         md_result = {**result, "per_video": per_video_extra}
-        output_path.write_text(format_markdown_table(md_result), encoding="utf-8")
+        _atomic_write_text(output_path, format_markdown_table(md_result))
     elif suffix == ".html":
         # For HTML output, build interactive report with inline embedded data
         html_result = {**result, "per_video": per_video_extra}
         html_content = format_html_report(
             html_result, video_paths_map, video_abs_paths_map, report_paths_map, report_contents_map
         )
-        output_path.write_text(html_content, encoding="utf-8")
+        _atomic_write_text(output_path, html_content)
     else:
-        output_path.write_text(
+        _atomic_write_text(
+            output_path,
             json.dumps(result, indent=2, ensure_ascii=False),
-            encoding="utf-8",
         )
     logger.info("Evaluation result written to %s", output_path)
 

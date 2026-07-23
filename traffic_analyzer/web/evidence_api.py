@@ -17,6 +17,9 @@ Any other difference versus the on-disk version is rejected with 422.
 from __future__ import annotations
 
 import json
+import os
+import threading
+from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -162,6 +165,47 @@ def _read_json(path: Path) -> Optional[Any]:
         return None
 
 
+def _atomic_write_json(path: Path, payload: Any) -> None:
+    """Write JSON via a same-dir ``.tmp`` file + ``os.replace``.
+
+    A mid-write crash can then only lose the tmp file, never truncate the
+    real one (which GETs would otherwise silently show as "无标注").
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    os.replace(tmp, path)
+
+
+# Per-stem locks closing the concurrent read-compare-write PUT window.
+_put_locks: "defaultdict[str, threading.Lock]" = defaultdict(threading.Lock)
+
+
+def _reject_active_infer(request: Request, stem: str) -> None:
+    """409 when a queued/running infer job targets ``stem``.
+
+    The job would overwrite the very files the PUT is editing (PUT-vs-infer
+    race), so the edit must wait until the job finishes.
+    """
+    jobs = getattr(request.app.state, "jobs", None)
+    if jobs is None:
+        return
+    for job in jobs.list_jobs():
+        if (
+            job.get("kind") == "infer"
+            and job.get("stem") == stem
+            and job.get("status") in ("queued", "running")
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Inference job #{job.get('id')} for '{stem}' is "
+                    f"{job.get('status')}; retry after it finishes"
+                ),
+            )
+
+
 _MASK = "__editable__"
 
 
@@ -255,33 +299,41 @@ def get_result_file(stem: str, request: Request, path: str = Query(...)) -> File
 def put_evidence(stem: str, body: Evidence, request: Request) -> Dict[str, Any]:
     workspace = workspace_mod.require_workspace(request)
     workspace_mod.validate_stem(stem)
+    _reject_active_infer(request, stem)
     evidence_path = workspace_mod.analysis_dir(workspace, stem) / f"{stem}_evidence.json"
-    disk = _read_json(evidence_path)
-    if disk is None:
-        raise HTTPException(status_code=404, detail="Evidence file not found")
+    with _put_locks[stem]:
+        disk = _read_json(evidence_path)
+        if disk is None:
+            raise HTTPException(status_code=404, detail="Evidence file not found")
 
-    new_payload = body.model_dump()
-    if _strip_editable(disk) != _strip_editable(new_payload):
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "Only calibration.emergency_polygon_rel, "
-                "calibration.chevron_polygon_rel and "
-                "evidence_regions[*].box_rel/.label may be modified"
-            ),
-        )
+        new_payload = body.model_dump()
+        if not isinstance(disk, dict) or _strip_editable(disk) != _strip_editable(
+            new_payload
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Only calibration.emergency_polygon_rel, "
+                    "calibration.chevron_polygon_rel and "
+                    "evidence_regions[*].box_rel/.label may be modified"
+                ),
+            )
 
-    evidence_path.write_text(
-        json.dumps(new_payload, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+        _atomic_write_json(evidence_path, new_payload)
     return new_payload
 
 
 @router.get("/api/config/events")
 def get_config_events() -> List[Dict[str, Any]]:
     """事件类别配置(供 SFT 编辑器按事件分框),按 event_id 排序。"""
-    data = yaml.safe_load(_EVENT_CATEGORIES_YAML.read_text(encoding="utf-8")) or {}
+    try:
+        data = (
+            yaml.safe_load(_EVENT_CATEGORIES_YAML.read_text(encoding="utf-8")) or {}
+        )
+    except (OSError, yaml.YAMLError) as exc:
+        raise HTTPException(
+            status_code=500, detail=f"Failed to load event categories config: {exc}"
+        )
     events = [
         {
             "event_id": int(cat["event_id"]),
@@ -289,8 +341,13 @@ def get_config_events() -> List[Dict[str, Any]]:
             "is_active": bool(cat.get("is_active", True)),
         }
         for cat in data.get("event_categories") or []
+        if "event_id" in cat and "name_zh" in cat
     ]
     events.sort(key=lambda e: e["event_id"])
+    if not events:
+        raise HTTPException(
+            status_code=500, detail="Event categories config has no valid entries"
+        )
     return events
 
 
@@ -298,22 +355,21 @@ def get_config_events() -> List[Dict[str, Any]]:
 def put_sft(stem: str, body: SftSample, request: Request) -> Dict[str, Any]:
     workspace = workspace_mod.require_workspace(request)
     workspace_mod.validate_stem(stem)
+    _reject_active_infer(request, stem)
     sft_path = workspace_mod.analysis_dir(workspace, stem) / f"{stem}.json"
-    disk = _read_json(sft_path)
-    if disk is None:
-        raise HTTPException(status_code=404, detail="SFT file not found")
+    with _put_locks[stem]:
+        disk = _read_json(sft_path)
+        if disk is None:
+            raise HTTPException(status_code=404, detail="SFT file not found")
 
-    new_payload = body.model_dump()
-    if not isinstance(disk, dict) or _strip_sft_editable(disk) != _strip_sft_editable(
-        new_payload
-    ):
-        raise HTTPException(
-            status_code=422,
-            detail="Only description and action may be modified",
-        )
+        new_payload = body.model_dump()
+        if not isinstance(disk, dict) or _strip_sft_editable(disk) != _strip_sft_editable(
+            new_payload
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="Only description and action may be modified",
+            )
 
-    sft_path.write_text(
-        json.dumps(new_payload, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+        _atomic_write_json(sft_path, new_payload)
     return new_payload

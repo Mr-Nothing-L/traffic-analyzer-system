@@ -8,8 +8,10 @@ forward arguments).
 
 from __future__ import annotations
 
+import atexit
 import logging
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -33,9 +35,21 @@ WORKSPACE_ENV_VAR = "TRAFFIC_ANALYZER_WEB_WORKSPACE"
 
 
 def create_app(workspace: Optional[str] = None) -> FastAPI:
-    app = FastAPI(title="Traffic Analyzer Web UI")
+    job_manager = jobs.JobManager()
+
+    @asynccontextmanager
+    async def _lifespan(app: FastAPI):
+        yield
+        # Uvicorn runs this on SIGINT/SIGTERM (Ctrl+C): stop every queued or
+        # running analyze child so no orphan keeps writing analysis/<stem>/.
+        job_manager.shutdown()
+
+    app = FastAPI(title="Traffic Analyzer Web UI", lifespan=_lifespan)
     app.state.workspace = workspace_mod.WorkspaceState()
-    app.state.jobs = jobs.JobManager()
+    app.state.jobs = job_manager
+    # Fallback for exit paths that skip the lifespan (best-effort; SIGKILL
+    # cannot be covered).
+    atexit.register(job_manager.shutdown)
 
     preset = workspace or os.environ.get(WORKSPACE_ENV_VAR)
     if preset:
