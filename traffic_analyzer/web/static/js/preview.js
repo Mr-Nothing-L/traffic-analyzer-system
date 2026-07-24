@@ -74,10 +74,15 @@ function renderResults() {
   const hasResults = !!(r.sft_label || r.report_md || r.evidence);
   const main = $('#main');
   let html =
-    '<div class="cards">'
+    '<div class="split-col">'
+    + '<div class="pane-top" id="pane-top">'
     + '<div class="card" id="card-preview"><div class="card-head"><span class="card-title">视频预览</span>'
     + '<span class="card-sub">' + esc(stem) + '</span></div>'
-    + '<div class="card-body" id="preview-body"></div></div>';
+    + '<div class="card-body" id="preview-body"></div></div>'
+    + '</div>'
+    + '<div class="hsplit" id="hsplit" title="拖动调整预览高度,双击复位"><span></span></div>'
+    + '<div class="pane-bottom" id="pane-bottom">'
+    + '<div class="cards">';
 
   if (hasResults) {
     html +=
@@ -103,7 +108,7 @@ function renderResults() {
     html += '<div class="card"><div class="card-body empty-note">' + esc(note) + '</div></div>';
   }
 
-  html += '<div id="eval-card-slot"></div></div>';
+  html += '<div id="eval-card-slot"></div></div></div></div>';
   main.innerHTML = html;
 
   mountPreview(source, r.evidence && r.evidence.video);
@@ -113,6 +118,62 @@ function renderResults() {
     renderEvidenceCard(stem, source);
   }
   renderEvalCard();
+  initHSplit();
+}
+
+/* ------------------------------------------------------------ 上下分隔条(预览常驻) */
+const HSPLIT_KEY = 'ta_preview_split';
+const HSPLIT_DEFAULT = 0.46;
+const HSPLIT_MIN_PX = 150;
+const HSPLIT_MAX_RATIO = 0.8;
+
+function applyPaneTopRatio(ratio) {
+  const paneTop = $('#pane-top');
+  if (paneTop) paneTop.style.height = (ratio * 100).toFixed(2) + '%';
+}
+
+function initHSplit() {
+  const hsplit = $('#hsplit');
+  const paneTop = $('#pane-top');
+  if (!hsplit || !paneTop) return;
+  const main = $('#main');
+
+  // renderResults 每次重建 innerHTML,需重新应用持久化比例(存比例而非像素,窗口缩放按比例重算)
+  const saved = parseFloat(localStorage.getItem(HSPLIT_KEY));
+  applyPaneTopRatio(!isNaN(saved) && saved > 0 && saved <= 1 ? saved : HSPLIT_DEFAULT);
+
+  let startY = 0, startHeight = 0;
+
+  function onMove(e) {
+    const mainH = main.getBoundingClientRect().height;
+    const h = Math.max(HSPLIT_MIN_PX, Math.min(mainH * HSPLIT_MAX_RATIO, startHeight + e.clientY - startY));
+    paneTop.style.height = Math.round(h) + 'px';
+  }
+  function onUp() {
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+    hsplit.classList.remove('dragging');
+    document.body.classList.remove('hsplit-dragging');
+    const mainH = main.getBoundingClientRect().height;
+    if (mainH > 0) {
+      localStorage.setItem(HSPLIT_KEY, String(paneTop.getBoundingClientRect().height / mainH));
+    }
+  }
+
+  hsplit.addEventListener('mousedown', e => {
+    startY = e.clientY;
+    startHeight = paneTop.getBoundingClientRect().height;
+    hsplit.classList.add('dragging');
+    document.body.classList.add('hsplit-dragging'); // 拖拽中禁止选中文字
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+    e.preventDefault();
+  });
+
+  hsplit.addEventListener('dblclick', () => {
+    applyPaneTopRatio(HSPLIT_DEFAULT); // 双击复位默认比例
+    localStorage.setItem(HSPLIT_KEY, String(HSPLIT_DEFAULT));
+  });
 }
 
 /* ------------------------------------------------------------ 视频预览卡 */
