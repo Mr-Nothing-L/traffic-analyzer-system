@@ -25,6 +25,23 @@
 
 * { box-sizing: border-box; }
 
+/* ---------- 全局滚动条(贴合浅色主题) ---------- */
+* {
+  scrollbar-width: thin; /* Firefox */
+  scrollbar-color: #C9C0AF transparent;
+}
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-corner { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background-color: #C9C0AF;
+  border-radius: 6px;
+  border: 3px solid transparent; /* 透明边制造内缩 padding 效果 */
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover { background-color: #ACA18C; }
+::-webkit-scrollbar-thumb:active { background-color: #948A76; }
+
 /* The `hidden` attribute must always win over component display rules
    (e.g. .dir-backdrop{display:flex} would otherwise override the UA's
    [hidden]{display:none}, leaving "hidden" overlays visible and
@@ -384,9 +401,25 @@ body {
   border-right: 1px solid var(--border);
   margin-right: -1px; /* 与侧栏边框重合,避免双线 */
   transition: background 0.12s ease;
+  position: relative;
+}
+/* 竖向双线握把,与结果页 .hsplit 的横向双线呼应 */
+#splitter::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 1px;
+  height: 56px;
+  border-left: 2px solid #C4B9A4;
+  border-right: 2px solid #C4B9A4;
+  transition: border-color 0.12s ease;
 }
 #splitter:hover,
 #splitter.dragging { background: var(--accent-soft, rgba(184, 118, 58, 0.25)); }
+#splitter:hover::after,
+#splitter.dragging::after { border-color: var(--accent); }
 body.splitter-dragging { cursor: col-resize; user-select: none; }
 
 .side-head {
@@ -635,21 +668,31 @@ body.splitter-dragging { cursor: col-resize; user-select: none; }
 }
 .split-col #pv-stepper { flex: 1; min-height: 0; overflow-y: auto; }
 .hsplit {
-  flex: 0 0 8px;
+  flex: 0 0 12px;
   cursor: row-resize;
   display: flex;
   align-items: center;
   justify-content: center;
-}
-.hsplit span {
-  width: 48px;
-  height: 3px;
-  border-radius: 2px;
-  background: var(--border);
+  /* 常驻细分隔线,让分栏边界在静止时也可辨识 */
+  background: linear-gradient(var(--border), var(--border)) center / 100% 1px no-repeat;
   transition: background 0.12s ease;
 }
+/* 双线握把,与侧栏 #splitter 的竖向双线呼应 */
+.hsplit span {
+  width: 56px;
+  height: 6px;
+  border-top: 2px solid #C4B9A4;
+  border-bottom: 2px solid #C4B9A4;
+  transition: border-color 0.12s ease;
+}
+.hsplit:hover,
+.hsplit.dragging {
+  background:
+    linear-gradient(var(--accent), var(--accent)) center / 100% 1px no-repeat,
+    var(--accent-soft);
+}
 .hsplit:hover span,
-.hsplit.dragging span { background: var(--accent); }
+.hsplit.dragging span { border-color: var(--accent); }
 body.hsplit-dragging { cursor: row-resize; user-select: none; }
 .pane-bottom {
   flex: 1;
