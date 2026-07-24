@@ -811,6 +811,36 @@ body.hsplit-dragging { cursor: row-resize; user-select: none; }
 }
 .sft-ev.inactive .sft-ev-text { background: transparent; }
 
+/* 事件文本富文本框(contenteditable):外观与 textarea 一致,换行保留 */
+.sft-richtext {
+  white-space: pre-wrap;
+  word-break: break-word;
+  min-height: 56px; /* 约等于 textarea rows=2 */
+  cursor: text;
+  resize: none; /* div 在 overflow 非 visible 时会出现拖柄,高度由 autoGrow 管理 */
+}
+.sft-richtext:empty::before {
+  content: attr(data-placeholder);
+  color: var(--text2);
+  opacity: 0.7;
+}
+/* 属性提及 token:与 chips 同色系,描边胶囊标注,可点击编辑其内部文字 */
+.sft-tok {
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  padding: 0 3px;
+  background: var(--accent-soft);
+}
+/* chip 变更后刚更新组的 token 短暂脉冲(0.2s),prefers-reduced-motion 时关闭 */
+.sft-tok.sft-tok-pulse { animation: sft-tok-pulse 0.2s ease; }
+@keyframes sft-tok-pulse {
+  0% { box-shadow: 0 0 0 0 var(--accent); }
+  100% { box-shadow: 0 0 0 6px transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sft-tok.sft-tok-pulse { animation: none; }
+}
+
 /* 结构化选项 chips(封闭枚举,只读选项集;无增删入口) */
 .sft-attrs { display: flex; flex-direction: column; gap: 10px; margin-bottom: 8px; }
 .sft-attr-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }

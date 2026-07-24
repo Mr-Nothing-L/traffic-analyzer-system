@@ -7,9 +7,9 @@ import { api } from './api.js';
 
 // ---------------------------------------------------------------------------
 // 结构化选项(chips):封闭枚举,只读选项集,三层联动
-//   chips(选中态) → 骨架句(skeleton 按模板重算,空值从句省略) → 文本框
-//   (骨架前缀替换,找不到则前置插入;细节文本始终保留;文本框可自由编辑,
-//   chips 不从手动编辑回写)
+//   chips(选中态) → 文本同步(别名全词替换,见 applyChipChange) → 文本框
+//   文本框为 contenteditable 富文本:命中任一选项别名的片段渲染为 token 标注,
+//   可自由编辑(纯文本),blur/chip 变更时重新分词;chips 不从手动编辑回写
 // ---------------------------------------------------------------------------
 
 // 骨架模板:字符串为固定文字;{slot, pre, post} 为该属性有值时输出的从句(空值整句省略)
@@ -31,7 +31,7 @@ const SFT_ATTR_ALIASES = {
   '小型车': ['小车', '轿车', '私家车'],
   '大客车': ['客车', '大巴'],
   '货车': ['卡车'],
-  '工程车': ['施工车', '清障车', '救援车'],
+  '工程车': ['工程作业车', '工程车辆', '施工车', '清障车', '救援车'],
   '施工人员': ['工人'],
   '滞留驾乘人员': ['驾乘人员', '滞留人员'],
   '摩托车': ['摩托'],
@@ -52,6 +52,69 @@ const SFT_ATTR_ALIASES = {
 // 事件的结构化属性组(event_options.yaml,经 /api/config/events 下发);旧版后端无该字段时回退空
 function evOptions(ev) {
   return Array.isArray(ev.options) ? ev.options : [];
+}
+
+// --- chip→文本同步:旧值别名全词替换 -----------------------------------------
+// 车道类型/范围的选项词(行车道/应急车道/导流区/路肩、单车道/多车道)与道路通用
+// 词汇高度重叠,场景描述里常出现非属性含义的同一写法(如"护栏外应急车道边缘"),
+// 全局替换会误伤正文 → 这些组不做替换,仅在骨架前置场景下同步(见 applyChipChange)。
+const SFT_REPLACE_SKIP_GROUPS = { lane_type: 1, scope: 1 };
+
+// 选项值的全部书写形态(自身 + 别名),按长度降序:最长优先匹配,
+// 避免短别名吃掉长别名(如 客车 匹配进 大客车、小车 匹配进 小型车)
+function aliasesOf(value) {
+  return [value].concat(SFT_ATTR_ALIASES[value] || []).sort((a, b) => b.length - a.length);
+}
+
+function escRe(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function aliasRe(value) {
+  return new RegExp(aliasesOf(value).map(escRe).join('|'), 'g');
+}
+
+// 文本中是否出现该选项值的任一书写形态
+function mentionsValue(text, value) {
+  return aliasesOf(value).some(a => text.indexOf(a) >= 0);
+}
+
+// 把旧值的全部书写形态一次性替换为新值(单趟扫描,替换结果不会被二次命中)
+function replaceAliases(text, oldVal, newVal) {
+  return text.replace(aliasRe(oldVal), newVal);
+}
+
+// --- token 标注:事件文本中命中任一选项别名的片段渲染为带组标记的 span --------
+// 该事件所有组的「别名 → 组」索引,按别名长度降序;同位置先列出的组优先
+function tokenIndex(ev) {
+  const list = [];
+  evOptions(ev).forEach(g => {
+    g.options.forEach(opt => {
+      aliasesOf(opt).forEach(a => list.push({ alias: a, group: g.key }));
+    });
+  });
+  return list.sort((x, y) => y.alias.length - x.alias.length);
+}
+
+// 纯文本 → 带 token 标注的 HTML(逐字符贪心,最长别名优先)
+function tokenHtml(ev, text) {
+  const idx = tokenIndex(ev);
+  const t = String(text || '');
+  let html = '', i = 0;
+  while (i < t.length) {
+    let hit = null;
+    for (let k = 0; k < idx.length; k++) {
+      if (t.startsWith(idx[k].alias, i)) { hit = idx[k]; break; }
+    }
+    if (hit) {
+      html += '<span class="sft-tok" data-attr="' + esc(hit.group) + '">' + esc(hit.alias) + '</span>';
+      i += hit.alias.length;
+    } else {
+      html += esc(t[i]);
+      i += 1;
+    }
+  }
+  return html;
 }
 
 // 骨架句:按模板把已选属性拼成一句,空值从句整体省略
@@ -130,35 +193,49 @@ function refreshWarnDots(body) {
   });
 }
 
-// chip 变更 → 重算骨架 → 骨架前缀在文本中则替换,否则前置插入(细节保留);同步文本框/dirty
+// chip 变更 → 文本同步(优先级从高到低):
+//   1) 已前置的骨架前缀就地更新(保证骨架只前置一次,不堆叠);
+//   2) 单选换值且旧值出现在文本中 → 旧值的全部别名形态全词替换为新值
+//      (观察/分析/结论一致;车道类型/范围等 skip 组除外,见 SFT_REPLACE_SKIP_GROUPS);
+//   3) 旧值完全未出现(或新选/新增多选) → 前置插入骨架句,仅一次;
+//   取消选中/移除多选不删词:旧值在文本中则保留原文,不在才补骨架。
 function applyChipChange(body, ev, group, value) {
   const d = state.sftDraft;
   const id = ev.event_id;
   const attrs = d.attrs[id] || (d.attrs[id] = {});
+  const oldVal = group.multi ? '' : (attrs[group.key] || '');
+  let added = null; // 多选组本次新增的选项(移除时为 null)
   if (group.multi) {
     const cur = Array.isArray(attrs[group.key]) ? attrs[group.key] : [];
-    const next = cur.indexOf(value) >= 0 ? cur.filter(o => o !== value) : cur.concat(value);
+    const on = cur.indexOf(value) >= 0;
+    const next = on ? cur.filter(o => o !== value) : cur.concat(value);
+    if (!on) added = value;
     attrs[group.key] = group.options.filter(o => next.indexOf(o) >= 0); // 保持 options 定义顺序
   } else {
     attrs[group.key] = attrs[group.key] === value ? '' : value;
   }
+  const newVal = group.multi ? '' : (attrs[group.key] || '');
   const oldSk = d.skeletons[id] || '';
   const newSk = skeleton(ev, attrs);
   d.skeletons[id] = newSk;
   let text = String(d.texts[id] || '');
   if (oldSk && text.indexOf(oldSk) === 0) {
     text = newSk + text.slice(oldSk.length);
-  } else if (newSk && newSk !== oldSk) {
-    text = text ? newSk + ';' + text : newSk;
+  } else if (oldVal && newVal && !SFT_REPLACE_SKIP_GROUPS[group.key] && mentionsValue(text, oldVal)) {
+    text = replaceAliases(text, oldVal, newVal);
+  } else if (newSk && newSk !== oldSk && !(group.multi && !added)) {
+    const probe = group.multi ? added : oldVal;
+    if (!probe || !mentionsValue(text, probe)) {
+      text = text ? newSk + ';' + text : newSk;
+    }
   }
   d.texts[id] = text;
-  const ta = $('textarea[data-ev-text="' + id + '"]', body);
-  if (ta) {
-    ta.value = text;
-    autoGrow(ta);
-    ta.classList.remove('sft-fade'); // 重新触发动画
-    void ta.offsetWidth;
-    ta.classList.add('sft-fade');
+  const el = $('[data-ev-text="' + id + '"]', body);
+  if (el) {
+    renderTokens(el, ev, group.key, text);
+    el.classList.remove('sft-fade'); // 重新触发动画
+    void el.offsetWidth;
+    el.classList.add('sft-fade');
   }
   const cur = attrs[group.key];
   $$('[data-ev-chip="' + id + '"][data-attr="' + group.key + '"]', body).forEach(c => {
@@ -287,7 +364,7 @@ function initSftDraft(sft) {
   state.sftSavedSig = sftSignature();
 }
 
-// textarea 自适应高度:随内容增长,超过上限后出现滚动条
+// 文本框自适应高度:随内容增长,超过上限后出现滚动条(textarea 与富文本框通用)
 const SFT_TEXTAREA_MAX_H = 300;
 function autoGrow(ta) {
   ta.style.height = 'auto';
@@ -296,6 +373,17 @@ function autoGrow(ta) {
   const capped = need > SFT_TEXTAREA_MAX_H;
   ta.style.height = (capped ? SFT_TEXTAREA_MAX_H : need) + 'px';
   ta.style.overflowY = capped ? 'auto' : 'hidden';
+}
+
+// 按纯文本重建 token 标注;仅在外部重渲染时调用(初次渲染/blur/chip 变更),
+// 输入过程中不触碰 DOM,光标不重置。text 缺省取元素当前 innerText;
+// pulseGroup 非空时给该组 token 加短暂高亮脉冲
+function renderTokens(el, ev, pulseGroup, text) {
+  el.innerHTML = tokenHtml(ev, text !== undefined ? text : el.innerText);
+  autoGrow(el);
+  if (pulseGroup) {
+    $$('.sft-tok[data-attr="' + pulseGroup + '"]', el).forEach(s => s.classList.add('sft-tok-pulse'));
+  }
 }
 
 function sftEditorHtml() {
@@ -326,9 +414,10 @@ function sftEditorHtml() {
       + (d.checks[ev.event_id] ? ' checked' : '') + '>检出</label>'
       + '</div>'
       + chipsHtml
-      + '<textarea class="sft-ev-text" data-ev-text="' + ev.event_id + '" rows="2"'
-      + (ev.is_active ? '' : ' placeholder="未激活事件类别,可人工修改"')
-      + '>' + esc(d.texts[ev.event_id] || '') + '</textarea>'
+      + '<div class="sft-ev-text sft-richtext" data-ev-text="' + ev.event_id + '"'
+      + ' contenteditable="true" spellcheck="false"'
+      + (ev.is_active ? '' : ' data-placeholder="未激活事件类别,可人工修改"')
+      + '>' + tokenHtml(ev, d.texts[ev.event_id] || '') + '</div>'
       + '</div>';
   });
   if (d.unmatched.length) {
@@ -383,13 +472,30 @@ function updateSftDirty() {
 }
 
 function bindSftEditor(body) {
-  // 所有 textarea 挂载时先按内容自适应一次(含只读的未归类原文框)
-  $$('textarea', body).forEach(autoGrow);
-  $$('textarea[data-ev-text]', body).forEach(ta => {
-    ta.addEventListener('input', () => {
-      state.sftDraft.texts[+ta.dataset.evText] = ta.value;
-      autoGrow(ta);
+  // 所有文本框挂载时先按内容自适应一次(含富文本事件框与只读的未归类原文框)
+  $$('textarea, .sft-richtext', body).forEach(autoGrow);
+  // 事件文本为 contenteditable:输入只回写草稿纯文本(innerText),不重分词、不动光标;
+  // 粘贴净化为纯文本;Enter 与 textarea 一致插入换行;blur 时按纯文本重新分词
+  $$('.sft-richtext[data-ev-text]', body).forEach(el => {
+    const ev = (state.eventConfig || []).find(e => e.event_id === +el.dataset.evText);
+    el.addEventListener('input', () => {
+      state.sftDraft.texts[+el.dataset.evText] = el.innerText;
+      autoGrow(el);
       updateSftDirty();
+    });
+    el.addEventListener('paste', e => {
+      e.preventDefault();
+      const t = (e.clipboardData || window.clipboardData).getData('text/plain');
+      document.execCommand('insertText', false, t);
+    });
+    el.addEventListener('keydown', e => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        document.execCommand('insertText', false, '\n');
+      }
+    });
+    el.addEventListener('blur', () => {
+      if (ev) renderTokens(el, ev);
     });
   });
   $$('input[data-ev-check]', body).forEach(cb => {
