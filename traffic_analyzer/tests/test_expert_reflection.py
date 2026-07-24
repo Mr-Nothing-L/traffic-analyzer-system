@@ -4,6 +4,11 @@ Covers:
 - :func:`traffic_analyzer.utils.event_detection.reflect_expert_candidate`.
 - :class:`traffic_analyzer.core.expert_agent.ExpertAgent` wiring when reflection
   is enabled or disabled.
+
+[文件说明]
+作用:测试专家反思/一致性检查层 reflect_expert_candidate 及 ExpertAgent 在反思开关启停下的接线行为。
+上游:pytest 自动发现并执行本文件测试。
+下游:traffic_analyzer/utils/event_detection.py、traffic_analyzer/core/expert_agent.py(被测模块)。
 """
 
 from __future__ import annotations
@@ -102,7 +107,7 @@ class _MockTemplate:
         self.user_prompt = "user"
 
 
-def _make_category(event_id: int = 1) -> EventCategory:
+def _make_category(event_id: int = 2) -> EventCategory:
     return EventCategory(
         event_id=event_id,
         event_code="B",
@@ -119,7 +124,7 @@ def _make_candidate(
     instances: Optional[List[EventInstance]] = None,
 ) -> EventCandidate:
     return EventCandidate(
-        event_id=1,
+        event_id=2,
         event_name="应急车道占用",
         detected=detected,
         summary=summary,
@@ -143,7 +148,7 @@ class TestReflectExpertCandidate:
             summary="检测到白色SUV占用应急车道。",
             instances=[
                 EventInstance(
-                    event_id=1,
+                    event_id=2,
                     event_name="应急车道占用",
                     start_time_sec=1.0,
                     end_time_sec=2.0,
@@ -383,9 +388,9 @@ def config_manager() -> ConfigManager:
 
 @pytest.fixture
 def illegal_parking_category(config_manager: ConfigManager) -> EventCategory:
-    """Use event_id=0 because it does not enable far-distance enhancement."""
+    """Use event_id=1 because it does not enable far-distance enhancement."""
     categories = config_manager.get_event_categories()
-    return next(c for c in categories if c.event_id == 0)
+    return next(c for c in categories if c.event_id == 1)
 
 
 def _make_analysis_context(

@@ -1,11 +1,16 @@
 # =============================================================================
-# event_id 4 — 摩托车出现检测（含远距离 ROI 辅助模板）
+# event_id 5 — 摩托车出现检测（含远距离 ROI 辅助模板）
+# 作用:含 far_non_motor_roi_detection / non_motor_vehicle_detection 两个模板
+#      (摩托车检测模板 + 远距离摩托车批量 ROI 辅助模板,后者经 roi_template_id 引用)。
+# 影响:统一由 core/config_manager.py 的 _load_prompt_templates 按 prompts/*.yaml
+#      glob 加载;non_motor_vehicle_detection 由 core/expert_agent.py 调用,
+#      far_non_motor_roi_detection 由 core/expert_agent_far_enhancement.py 调用。
 # =============================================================================
 
 prompt_templates:
 
   # ---------------------------------------------------------------------------
-  # 5b. Far Motorcycle ROI Detection (helper for event_id=4)
+  # 5b. Far Motorcycle ROI Detection (helper for event_id=5)
   # ---------------------------------------------------------------------------
   - template_id: "far_non_motor_roi_detection"
     name: "远距离摩托车批量 ROI 检测"
@@ -56,11 +61,11 @@ prompt_templates:
     output_format_hint: "JSON"
 
   # ---------------------------------------------------------------------------
-  # 5c. Road Construction Multi-evidence ROI Detection (helper for event_id=6)
+  # 5c. Road Construction Multi-evidence ROI Detection (helper for event_id=7)
   # ---------------------------------------------------------------------------
 
   # ---------------------------------------------------------------------------
-  # 6. Motorcycle Detection (event_id=4)
+  # 6. Motorcycle Detection (event_id=5)
   # ---------------------------------------------------------------------------
   - template_id: "non_motor_vehicle_detection"
     name: "Motorcycle Detection"
@@ -137,5 +142,5 @@ prompt_templates:
       max_aspect_ratio: 1.2
 
   # ---------------------------------------------------------------------------
-  # 7. Heavy Congestion Detection (event_id=5)
+  # 7. Heavy Congestion Detection (event_id=6)
   # ---------------------------------------------------------------------------

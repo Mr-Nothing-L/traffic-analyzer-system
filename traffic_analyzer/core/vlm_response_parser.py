@@ -1,5 +1,15 @@
 """
 JSON response extraction, repair, and schema validation for VLM calls.
+
+[文件说明]
+作用:VLM 原始文本响应的 JSON 解析与校验。_extract_json_from_text 依次尝试
+  直接解析、```json 代码块提取、平衡花括号子串提取与多对象合并;
+  _repair_json 修复常见语法错误(缺逗号、尾逗号);_validate_schema_basic
+  按 JSON schema 检查 required 顶层键。
+上游:core/vlm_engine.py(call / call_with_tools / call_with_tool_results
+  解析并校验模型输出)。
+下游:core/vlm_exceptions.py(解析失败抛 ResponseParseError,
+  校验失败抛 SchemaValidationError)。
 """
 
 from __future__ import annotations

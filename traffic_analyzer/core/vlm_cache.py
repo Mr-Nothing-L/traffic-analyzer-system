@@ -3,6 +3,15 @@ Disk cache and cache-key helpers for the VLM inference engine.
 
 Provides a SQLite-backed persistent cache and deterministic cache-key
 generation for VLM requests.
+
+[文件说明]
+作用:VLM 响应的磁盘缓存层。DiskCache 基于 SQLite(WAL 模式、线程本地连接)
+  实现跨进程持久缓存,支持 provider/model 匹配命中与超容量 LRU 清理;
+  _compute_cache_key 对 prompt 文本与图像内容做 SHA-256 生成确定性缓存键。
+上游:core/vlm_engine.py(VLMInferenceEngine 在 call 中查/写磁盘缓存,
+  并用 _compute_cache_key 同时服务内存缓存)。
+下游:SQLite 数据库文件(磁盘缓存库,路径来自配置的 disk_cache_path);
+  models/schemas.py 的 LLMResponse(序列化/反序列化缓存内容)。
 """
 
 from __future__ import annotations

@@ -1,4 +1,14 @@
-"""ROI motion scoring and adjacent-frame comparison composites."""
+"""ROI motion scoring and adjacent-frame comparison composites.
+
+[文件说明]
+作用:``compute_roi_motion_score`` 在放大 ROI 内比较相邻帧灰度差,给出
+    mean_diff/超阈像素占比/综合运动分;``create_motion_comparison_composite``
+    生成同一 ROI 双帧对比拼图,辅助判定远距离目标是否在运动。
+上游:utils/far_non_motor_enhancer.py 再导出后服务于
+    core/expert_agent_far_enhancement.py(非机动目标运动判定)。
+下游:utils/roi_composite.py、utils/bbox_geometry.py、utils/image_drawing.py;
+    PIL/OpenCV/numpy。
+"""
 
 from __future__ import annotations
 

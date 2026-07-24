@@ -2,6 +2,14 @@
 
 The evaluation runs as a serial job; its JSON output lands at
 ``<workspace>/analysis/evaluation/latest.json`` and is served verbatim.
+
+[文件说明]
+作用:精度评估接口。POST /api/evaluate 将 scripts/batch_evaluate.py 作为串行任务提交
+(命令由 jobs.build_evaluate_command 构造),结果写入
+<workspace>/analysis/evaluation/latest.json;GET /api/evaluate/latest 原样返回该 JSON。
+上游:web/app.py(挂载路由);web/static 前端(评估页)。
+下游:web/jobs.py(任务提交与命令构造)、web/workspace.py(结果存在性检查)、
+scripts/batch_evaluate.py。
 """
 
 from __future__ import annotations

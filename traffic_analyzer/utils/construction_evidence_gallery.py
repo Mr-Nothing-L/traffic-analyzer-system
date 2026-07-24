@@ -1,4 +1,14 @@
-"""Multi-ROI construction evidence gallery."""
+"""Multi-ROI construction evidence gallery.
+
+[文件说明]
+作用:``create_multi_roi_gallery`` 生成施工证据多 ROI 画廊图:上半为标注了
+    彩色证据框(锥桶/工人/车辆/护栏/标志)的原图,下半为各 ROI 放大裁剪的
+    动态网格(1/2/3/4 布局),供 VLM 细查施工证据。
+上游:utils/far_non_motor_enhancer.py 再导出后服务于
+    core/expert_agent_far_enhancement.py;``_compute_grid_layout`` 亦被
+    utils/emergency_lane_occupancy.py 的放大网格复用。
+下游:utils/bbox_geometry.py、utils/image_drawing.py;PIL/numpy。
+"""
 
 from __future__ import annotations
 

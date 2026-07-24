@@ -2,6 +2,18 @@
 Provider-specific payload builders and API callers for VLM inference.
 
 Supports Anthropic, OpenAI, Google GenAI, and Aliyun (OpenAI-compatible).
+
+[文件说明]
+作用:各 VLM provider 的请求构造与调用封装。_encode_image_to_base64 将图像
+  统一编码为 base64 data URI;_build_*_payload 按 Anthropic / OpenAI /
+  Google GenAI / 阿里云(OpenAI 兼容)各自的格式组装消息与参数(支持文本
+  标签与图像交错);_call_* 系列发起请求并统一返回
+  (text, prompt_tokens, completion_tokens, total_tokens),
+  其中 _call_anthropic_with_tools 额外返回 tool_use 块。
+上游:core/vlm_engine.py(_execute_once / call_with_tools 调用本模块的
+  payload 构造与 caller 函数)。
+下游:各 provider 的 HTTP API 端点(经 anthropic / openai / google.generativeai
+  SDK 访问,API key 与 base_url 来自环境变量配置);PIL(图像处理)。
 """
 
 from __future__ import annotations

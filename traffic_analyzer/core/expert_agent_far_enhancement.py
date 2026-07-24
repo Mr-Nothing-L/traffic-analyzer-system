@@ -3,6 +3,21 @@
 This module was split out of :mod:`traffic_analyzer.core.expert_agent`.
 It contains the ROI-driven far-distance enhancement flow and the car-semantic
 veto helpers used by that flow.  No new functionality was added.
+
+[文件说明]
+作用:远距离目标增强检测器(FarEnhancementDetector),从 expert_agent.py
+拆出。对开启 far_object_enhancement 的事件模板执行 ROI 驱动的增强流程
+(逐帧 ROI 检测、运动对比、候选打分、最终分类器),并含汽车语义否决
+(car veto)、施工证据组合判断与降级回填逻辑;同时定义专家响应与各 ROI
+检测的 JSON schema。增强合成图写入 output/tmp_img。
+上游:core/expert_agent.py(ExpertAgent 通过 _far_detector 属性委托调用);
+另被 core/expert_agent_tools.py 复用 _EXPERT_RESPONSE_SCHEMA。
+下游:core/vlm_engine.py 的 VLMInferenceEngine.call;core/config_manager.py
+加载各事件模板的 far_object_enhancement 配置、ROI 模板及
+emergency_lane_calibration / emergency_lane_vehicle_roi 等辅助模板;
+utils/emergency_lane_occupancy.py(应急车道掩膜/缩放网格/区域重叠);
+utils/far_non_motor_enhancer.py(ROI 合成图、运动分数);utils/
+event_detection.py 的 parse_expert_response 等解析工具。
 """
 
 from __future__ import annotations
@@ -108,7 +123,7 @@ _ROI_DETECTION_SCHEMA: Dict[str, Any] = {
     },
 }
 
-# JSON schema for the emergency lane / chevron polygon calibration used by event_id=1.
+# JSON schema for the emergency lane / chevron polygon calibration used by event_id=2.
 _EMERGENCY_LANE_CALIBRATION_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "required": ["emergency_polygon_rel", "chevron_polygon_rel"],
@@ -173,7 +188,7 @@ _EMERGENCY_LANE_VEHICLE_ROI_SCHEMA: Dict[str, Any] = {
     },
 }
 
-# JSON schema for the multi-evidence ROI detection used by event_id=6.
+# JSON schema for the multi-evidence ROI detection used by event_id=7.
 _MULTI_ROI_DETECTION_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "required": ["evidence_regions"],
@@ -324,7 +339,7 @@ class FarEnhancementDetector:
     def _is_explicitly_car_reasoning_for_non_motor(self, reason: str) -> bool:
         """判断 reason 是否明确说红框内目标是汽车/四轮车（非机动车事件专用）。
 
-        对 event_id=4 做更精细的语义判断：
+        对 event_id=5 做更精细的语义判断：
         - 若出现否定/对比/替代语境（“而非汽车”“被轿车取代”），返回 False；
         - 若明确断言“红框内是汽车/轿车/...”，返回 True；
         - 若出现非机动车/摩托车强锚定词且无明确汽车断言，返回 False。
@@ -349,9 +364,9 @@ class FarEnhancementDetector:
         return False
     def _select_car_veto_check(self, event_id: int):
         """Return the appropriate car-semantic veto function for an event."""
-        if event_id == 3:
-            return self._is_explicitly_car_reasoning_for_pedestrian
         if event_id == 4:
+            return self._is_explicitly_car_reasoning_for_pedestrian
+        if event_id == 5:
             return self._is_explicitly_car_reasoning_for_non_motor
         return self._is_explicitly_car_reasoning
     def _build_minimal_final_classifier_template(
@@ -359,7 +374,7 @@ class FarEnhancementDetector:
         template: PromptTemplate,
     ) -> PromptTemplate:
         """Build a concise retry prompt when the first classifier response is unparseable."""
-        if self.category.event_id == 4:
+        if self.category.event_id == 5:
             example_json = (
                 '{\n'
                 '  "detected": <true|false>,\n'
@@ -501,9 +516,9 @@ class FarEnhancementDetector:
         """Run the final far-distance classifier on a candidate's composites.
 
         The expected response format depends on the event category:
-        - event_id=3 (pedestrian) uses the full expert response schema with
+        - event_id=4 (pedestrian) uses the full expert response schema with
           ``detected`` / ``instances`` / ``summary``.
-        - event_id=4 (non-motor vehicle) and other categories use the minimal
+        - event_id=5 (non-motor vehicle) and other categories use the minimal
           ``{detected, reason}`` classifier schema.
 
         The classifier is now expected to emit a structured veto field
@@ -516,7 +531,7 @@ class FarEnhancementDetector:
         # Pedestrian final classifier returns a full expert response so that
         # the adjudication layer receives the same structured instances as
         # other expert agents.
-        if self.category.event_id == 3:
+        if self.category.event_id == 4:
             response_schema = _EXPERT_RESPONSE_SCHEMA
         else:
             response_schema = _FAR_ENHANCEMENT_RESPONSE_SCHEMA
@@ -610,7 +625,7 @@ class FarEnhancementDetector:
         # ------------------------------------------------------------------
         # Pedestrian branch: keep instances/summary from the classifier.
         # ------------------------------------------------------------------
-        if self.category.event_id == 3:
+        if self.category.event_id == 4:
             final_summary = str(parsed.get("summary", ""))
             frame_info["raw_final_reason"] = final_summary
             final_instances = parsed.get("instances") or []
@@ -751,7 +766,7 @@ class FarEnhancementDetector:
 
         # Pedestrians require a higher confidence bar before we override the
         # final classifier, because the ROI detector is intentionally permissive.
-        confidence_threshold = 0.7 if self.category.event_id == 3 else 0.5
+        confidence_threshold = 0.7 if self.category.event_id == 4 else 0.5
         confidence = self._parse_roi_confidence(frame_info.get("confidence", 0.0))
         if confidence < confidence_threshold:
             logger.info(
@@ -766,7 +781,7 @@ class FarEnhancementDetector:
         # For pedestrians, re-validate that the ROI itself passed the configured
         # size/aspect filters. These checks already happened during candidate
         # collection, but repeating them here makes the fallback self-contained.
-        if self.category.event_id == 3:
+        if self.category.event_id == 4:
             if not frame_info.get("area_px"):
                 logger.info(
                     "[expert_agent:_detect_with_far_enhancement] FALLBACK_REJECT_NO_AREA | event_id=%d frame=%d",
@@ -809,12 +824,12 @@ class FarEnhancementDetector:
                     negative_reason,
                 )
                 return None
-        # The "no structure" veto is specific to non-motor vehicles (event_id=4):
+        # The "no structure" veto is specific to non-motor vehicles (event_id=5):
         # it blocks fallback when the classifier says the box lacks identifiable
         # vehicle-structure evidence (wheels, handlebars, etc.). For pedestrians
         # the ROI detector already verified an upright human silhouette, so a
         # vague "cannot confirm" classifier reason should not block fallback.
-        if self.category.event_id == 4 and self._is_no_structure_reasoning(negative_reason):
+        if self.category.event_id == 5 and self._is_no_structure_reasoning(negative_reason):
             logger.info(
                 "[expert_agent:_detect_with_far_enhancement] FALLBACK_REJECT_NO_STRUCTURE | event_id=%d frame=%d negative_reason=%s",
                 self.category.event_id,
@@ -826,7 +841,7 @@ class FarEnhancementDetector:
         # Build a self-consistent summary. For pedestrians, anchor the summary
         # in the ROI detector's own reason so the report's "expert raw output"
         # matches the per-frame ROI evidence table.
-        if self.category.event_id == 3:
+        if self.category.event_id == 4:
             roi_reason = str(frame_info.get("reason", ""))
             fallback_reason = (
                 f"检测到高速公路行人。第{frame_info['global_index']}帧红色方框内"
@@ -845,7 +860,7 @@ class FarEnhancementDetector:
             fallback=True,
         )
         candidate.is_target_explicitly_four_wheel_vehicle = False
-        candidate.target_type = "行人" if self.category.event_id == 3 else "非机动车"
+        candidate.target_type = "行人" if self.category.event_id == 4 else "非机动车"
         return candidate
     def _has_construction_evidence(self, regions: List[Dict[str, Any]]) -> bool:
         """Check if ROI evidence regions satisfy the construction work-zone definition.
@@ -1126,7 +1141,7 @@ class FarEnhancementDetector:
         video_stem: str,
         far_cfg: Any,
     ) -> Optional[EventCandidate]:
-        """Far-distance enhancement branch for emergency lane occupancy (event_id=1).
+        """Far-distance enhancement branch for emergency lane occupancy (event_id=2).
 
         1. Select the middle frame.
         2. Run the ``emergency_lane_calibration`` template to obtain the
@@ -1708,7 +1723,7 @@ class FarEnhancementDetector:
         # output consistent with the evidence table and gallery image.
         # ------------------------------------------------------------------
         if (
-            self.category.event_id == 6
+            self.category.event_id == 7
             and not candidate.detected
             and self._has_construction_evidence(valid_regions)
         ):
@@ -1827,12 +1842,12 @@ class FarEnhancementDetector:
         frame_analysis_log: List[Dict[str, Any]] = []
 
         # ------------------------------------------------------------------
-        # Emergency lane occupancy branch (event_id=1).
+        # Emergency lane occupancy branch (event_id=2).
         # Uses a single middle frame and polygon/ROI-based evidence generation.
         # Must be checked before the generic "middle" gallery branch so that
-        # event_id=6 keeps using the construction gallery path.
+        # event_id=7 keeps using the construction gallery path.
         # ------------------------------------------------------------------
-        if self.category.event_id == 1:
+        if self.category.event_id == 2:
             return self._detect_emergency_lane_occupancy(
                 context=context,
                 images=images,
@@ -1846,7 +1861,7 @@ class FarEnhancementDetector:
             )
 
         # ------------------------------------------------------------------
-        # Multi-ROI gallery branch (e.g. event_id=6 road construction).
+        # Multi-ROI gallery branch (e.g. event_id=7 road construction).
         # Uses a single middle frame and a gallery of evidence ROIs.
         # ------------------------------------------------------------------
         if far_cfg.frame_selection == "middle":
@@ -2098,17 +2113,17 @@ class FarEnhancementDetector:
             )
 
         # ------------------------------------------------------------------
-        # Confidence gate for pedestrians (event_id=3) and non-motor vehicles
-        # (event_id=4): only ROIs with confidence >= 0.6 enter the final
+        # Confidence gate for pedestrians (event_id=4) and non-motor vehicles
+        # (event_id=5): only ROIs with confidence >= 0.6 enter the final
         # classifier. This reduces false positives from distant, low-confidence
         # enhancements. When the gate drops every candidate, keep the best ROI
         # as evidence so the report shows what was analysed and rejected.
         # ------------------------------------------------------------------
-        if self.category.event_id in (3, 4):
+        if self.category.event_id in (4, 5):
             total_candidates = len(candidates)
             gated_candidates = [c for c in candidates if c.get("confidence", 0.0) >= 0.6]
             if not gated_candidates:
-                entity = "高速公路行人" if self.category.event_id == 3 else "非机动车"
+                entity = "高速公路行人" if self.category.event_id == 4 else "非机动车"
                 logger.info(
                     "[expert_agent:_detect_with_far_enhancement] LOW_CONFIDENCE_FILTER | "
                     "event_id=%d kept=0 total=%d",
@@ -2229,8 +2244,8 @@ class FarEnhancementDetector:
 
         # ------------------------------------------------------------------
         # Optional fallback on the highest-scored candidate.
-        # Fallback is used for far-distance object categories (event_id=3
-        # pedestrians and event_id=4 non-motor vehicles). When the final
+        # Fallback is used for far-distance object categories (event_id=4
+        # pedestrians and event_id=5 non-motor vehicles). When the final
         # classifier is over-conservative but the ROI detector produced a
         # high-confidence, unoccluded, well-shaped candidate, promote it to
         # detected=True so the expert raw output stays consistent with the
@@ -2255,7 +2270,7 @@ class FarEnhancementDetector:
                 },
             )
         best_candidate = top_candidates[0]
-        if "composite_path" in best_candidate and self.category.event_id in (3, 4):
+        if "composite_path" in best_candidate and self.category.event_id in (4, 5):
             fallback_candidate = self._accept_fallback(
                 best_candidate, frame_analysis_log
             )

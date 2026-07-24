@@ -8,6 +8,14 @@
 2. ToolRouter 解析并校验
 3. 匹配工具定义，执行 handler
 4. 封装为 ToolResponse 返回
+
+[文件说明]
+作用:工具路由层。``ToolRequest.from_json`` 解析模型输出的工具调用(支持纯
+    JSON、Markdown 代码块、<tool_call> XML 标签);``ToolRouter`` 完成注册、
+    参数校验与同步/异步/批量路由执行;``ToolResponse`` 封装结果(可序列化为
+    JSON 或供模型阅读的 Markdown)。
+上游:core/expert_agent_tools.py;tools/tool_registry.py(默认路由实例)。
+下游:.tool_schema 的 ToolDefinition/ToolRegistry;pydantic v2。
 """
 
 from __future__ import annotations

@@ -1,4 +1,10 @@
-"""Video metadata extraction helpers for the analysis orchestrator."""
+"""Video metadata extraction helpers for the analysis orchestrator.
+
+[文件说明]
+作用:extract_video_meta()——用 OpenCV 读取视频 fps/总帧数/分辨率并计算时长,组装 VideoMetadata;失败时返回全零元数据并记录日志。
+上游:orchestrator/analysis_orchestrator.py(analyze() 直接调用及 _extract_video_meta() 委托);tests/test_orchestrator.py。
+下游:cv2(OpenCV)、models/schemas.py(VideoMetadata)。
+"""
 
 from __future__ import annotations
 

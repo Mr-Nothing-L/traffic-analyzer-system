@@ -3,6 +3,11 @@ Unit tests for the VideoPreprocessor module.
 
 Uses synthetic OpenCV-generated videos to avoid external dependencies
 on real video files.
+
+[文件说明]
+作用:测试 VideoPreprocessor 视频预处理,使用 OpenCV 合成视频覆盖元数据读取、关键帧采样与异常处理。
+上游:pytest 自动发现并执行本文件测试。
+下游:traffic_analyzer/core/video_preprocessor.py(被测模块)。
 """
 
 from __future__ import annotations

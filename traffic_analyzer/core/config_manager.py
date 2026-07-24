@@ -3,6 +3,15 @@ ConfigManager module for the traffic analyzer framework.
 
 Loads, validates, and hot-reloads YAML configuration files and .env settings,
 exposing them as strongly typed Pydantic models.
+
+[文件说明]
+作用:配置管理中心(ConfigManager),负责加载、校验与热重载 YAML 配置和 .env 设置,
+     统一以 Pydantic 模型向外提供 SystemConfig、事件类别、prompt 模板、
+     跨事件推理规则与裁决规则。
+上游:cli.py、orchestrator/analysis_orchestrator.py、core/pipeline_steps.py、
+     core/expert_agent.py、core/expert_agent_far_enhancement.py 等所有需要配置的模块。
+下游:config/event_categories.yaml、config/annotation_spec.yaml、config/prompts/*.yaml
+     及 config/.env(仅读取环境变量,不写敏感值)。
 """
 
 from __future__ import annotations
@@ -181,6 +190,7 @@ class ConfigManager:
         su_min_frames = os.getenv("SCENE_UNDERSTANDING_MIN_FRAMES")
         vlm_max_frames = os.getenv("VLM_MAX_FRAMES")
         expert_enable_reflection = os.getenv("EXPERT_ENABLE_REFLECTION")
+        grounding_check_enable = os.getenv("GROUNDING_CHECK_ENABLE")
         system_kwargs: Dict[str, Any] = {}
         if su_min_frames is not None:
             try:
@@ -199,6 +209,8 @@ class ConfigManager:
                 system_kwargs["vlm_max_frames"] = 10
         if expert_enable_reflection is not None:
             system_kwargs["expert_enable_reflection"] = expert_enable_reflection.lower() in ("1", "true", "yes", "on")
+        if grounding_check_enable is not None:
+            system_kwargs["grounding_check_enable"] = grounding_check_enable.lower() in ("1", "true", "yes", "on")
 
         # --- SystemConfig build ---
         try:
@@ -526,13 +538,17 @@ class ConfigManager:
                             f"but prompt template '{cat.prompt_template_id}' not found."
                         )
 
-        # 7. Event IDs must be continuous from 0; a gap silently shrinks the
+        # 7. Event IDs are the global annotation-doc v4.5 action numbers and
+        # must be continuous from 1; id 9 is the reserved "normal" placeholder
+        # and is intentionally skipped. Any other gap silently shrinks the
         # binary encoding width and drops higher events from the encoding.
         # Inactive categories still occupy a bit, so all categories count.
         sorted_ids = sorted(self._event_categories.keys())
-        if sorted_ids != list(range(len(sorted_ids))):
+        expected_ids = [i for i in range(1, sorted_ids[-1] + 1) if i != 9] if sorted_ids else []
+        if sorted_ids != expected_ids:
             errors.append(
-                f"event_categories.yaml event_ids must be continuous from 0, got {sorted_ids}."
+                f"event_categories.yaml event_ids must be continuous from 1 "
+                f"(9 reserved as the normal placeholder), got {sorted_ids}."
             )
 
         # 8. Only expert_agent has an execution path; an active category using

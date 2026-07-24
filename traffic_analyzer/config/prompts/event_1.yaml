@@ -1,11 +1,17 @@
 # =============================================================================
-# event_id 1 — 应急车道占用检测（含远距离 ROI 辅助模板）
+# event_id 2 — 应急车道占用检测（含远距离 ROI 辅助模板）
+# 作用:含 emergency_lane_calibration / emergency_lane_vehicle_roi /
+#      emergency_lane_occupancy_detection 三个模板(检测模板 + 应急车道标定与
+#      车辆 ROI 辅助模板,后者经 roi_template_id 引用)。
+# 影响:统一由 core/config_manager.py 的 _load_prompt_templates 按 prompts/*.yaml
+#      glob 加载;emergency_lane_occupancy_detection 由 core/expert_agent.py 调用,
+#      两个 ROI 辅助模板由 core/expert_agent_far_enhancement.py 调用。
 # =============================================================================
 
 prompt_templates:
 
   # ---------------------------------------------------------------------------
-  # 3a. Emergency Lane Calibration (helper for event_id=1)
+  # 3a. Emergency Lane Calibration (helper for event_id=2)
   # ---------------------------------------------------------------------------
   - template_id: "emergency_lane_calibration"
     name: "应急车道/导流区标定"
@@ -67,7 +73,7 @@ prompt_templates:
     output_format_hint: "JSON"
 
   # ---------------------------------------------------------------------------
-  # 3b. Emergency Lane Vehicle ROI Detection (helper for event_id=1)
+  # 3b. Emergency Lane Vehicle ROI Detection (helper for event_id=2)
   # ---------------------------------------------------------------------------
   - template_id: "emergency_lane_vehicle_roi"
     name: "应急车道占用车辆 ROI 检测"
@@ -127,7 +133,7 @@ prompt_templates:
     output_format_hint: "JSON"
 
   # ---------------------------------------------------------------------------
-  # 3. Emergency Lane Occupancy Detection (event_id=1)
+  # 3. Emergency Lane Occupancy Detection (event_id=2)
   # ---------------------------------------------------------------------------
   - template_id: "emergency_lane_occupancy_detection"
     name: "应急车道占用检测"

@@ -4,6 +4,17 @@ Inference and evaluation run as child processes, one at a time, on a single
 worker thread. The child's stdout and stderr are merged and read line by
 line to update the job's progress (from the analyzer's ``[x/4]`` step
 markers) and to keep a rolling log tail (~30 lines).
+
+[文件说明]
+作用:单工作线程串行子进程任务队列(JobManager)。build_infer_command 构造
+``python -m traffic_analyzer analyze`` 命令(带 --sft-label),build_evaluate_command 构造
+scripts/batch_evaluate.py 评估命令;解析子进程输出的 [x/4] 步骤标记更新进度,
+提供 /api/infer、/api/jobs、/api/jobs/{id}/cancel 接口;shutdown/cancel 先 SIGTERM 后
+SIGKILL,避免遗留子进程。
+上游:web/app.py(挂载路由,lifespan/atexit 时调用 shutdown);web/evaluate.py(复用
+build_evaluate_command);web/evidence_api.py(检查同 stem 的在跑 infer 任务)。
+下游:traffic_analyzer CLI(python -m traffic_analyzer analyze)、scripts/batch_evaluate.py、
+web/workspace.py 的 analysis/<stem>/ 路径契约。
 """
 
 from __future__ import annotations

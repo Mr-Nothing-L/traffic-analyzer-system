@@ -6,6 +6,11 @@ Covers:
 - JSON serialization round-trip
 - Markdown output structure
 - Binary encoding construction
+
+[文件说明]
+作用:测试 ReportGenerator 报告生成正确性、JSON 序列化往返、Markdown 输出结构及二进制编码构造。
+上游:pytest 自动发现并执行本文件测试。
+下游:traffic_analyzer/core/report_generator.py(被测模块)。
 """
 
 from __future__ import annotations
@@ -67,12 +72,12 @@ def scene_info() -> SceneInfo:
 def event_results() -> List[EventResult]:
     return [
         EventResult(
-            event_id=0,
+            event_id=1,
             event_name="车辆逆行",
             detected=True,
             instances=[
                 EventInstance(
-                    event_id=0,
+                    event_id=1,
                     event_name="车辆逆行",
                     vehicle_id="V_12",
                     road_id=1,
@@ -89,7 +94,7 @@ def event_results() -> List[EventResult]:
             analysis_process=["提取关键帧", "VLM 识别逆行", "轨迹验证"],
         ),
         EventResult(
-            event_id=1,
+            event_id=2,
             event_name="占用应急车道",
             detected=False,
             instances=[],
@@ -97,12 +102,12 @@ def event_results() -> List[EventResult]:
             analysis_process=["提取关键帧", "VLM 识别应急车道"],
         ),
         EventResult(
-            event_id=2,
+            event_id=3,
             event_name="超速行驶",
             detected=True,
             instances=[
                 EventInstance(
-                    event_id=2,
+                    event_id=3,
                     event_name="超速行驶",
                     vehicle_id="V_07",
                     road_id=0,
@@ -115,7 +120,7 @@ def event_results() -> List[EventResult]:
                     disposal_suggestion="记录超速车辆信息，移交违章处理系统。",
                 ),
                 EventInstance(
-                    event_id=2,
+                    event_id=3,
                     event_name="超速行驶",
                     vehicle_id="V_09",
                     road_id=0,
@@ -150,14 +155,14 @@ def generator() -> ReportGenerator:
 
 @pytest.fixture
 def far_enhancement_result() -> EventResult:
-    """A detected event_id=4 result for far-enhancement rendering tests."""
+    """A detected event_id=5 result for far-enhancement rendering tests."""
     return EventResult(
-        event_id=4,
+        event_id=5,
         event_name="摩托车出现",
         detected=True,
         instances=[
             EventInstance(
-                event_id=4,
+                event_id=5,
                 event_name="摩托车出现",
                 description="distant motorcycle",
             )
@@ -167,9 +172,9 @@ def far_enhancement_result() -> EventResult:
 
 @pytest.fixture
 def far_enhancement_candidate() -> Dict[str, Any]:
-    """Base expert candidate for event_id=4 with composite and motion paths."""
+    """Base expert candidate for event_id=5 with composite and motion paths."""
     return {
-        "event_id": 4,
+        "event_id": 5,
         "event_name": "摩托车出现",
         "detected": True,
         "summary": "detected",
@@ -182,14 +187,14 @@ def far_enhancement_candidate() -> Dict[str, Any]:
 
 @pytest.fixture
 def pedestrian_enhancement_result() -> EventResult:
-    """A detected event_id=3 result for far-enhancement rendering tests."""
+    """A detected event_id=4 result for far-enhancement rendering tests."""
     return EventResult(
-        event_id=3,
+        event_id=4,
         event_name="高速公路行人出现",
         detected=True,
         instances=[
             EventInstance(
-                event_id=3,
+                event_id=4,
                 event_name="高速公路行人出现",
                 description="distant pedestrian",
             )
@@ -199,9 +204,9 @@ def pedestrian_enhancement_result() -> EventResult:
 
 @pytest.fixture
 def pedestrian_enhancement_candidate() -> Dict[str, Any]:
-    """Base expert candidate for event_id=3 with composite and motion paths."""
+    """Base expert candidate for event_id=4 with composite and motion paths."""
     return {
-        "event_id": 3,
+        "event_id": 4,
         "event_name": "高速公路行人出现",
         "detected": True,
         "summary": "detected",
@@ -266,9 +271,9 @@ class TestGenerate:
         usage_stats: Dict[str, Any],
     ) -> None:
         unsorted = [
-            EventResult(event_id=3, event_name="C", detected=False),
-            EventResult(event_id=0, event_name="A", detected=True),
-            EventResult(event_id=1, event_name="B", detected=False),
+            EventResult(event_id=4, event_name="C", detected=False),
+            EventResult(event_id=1, event_name="A", detected=True),
+            EventResult(event_id=2, event_name="B", detected=False),
         ]
         report = generator.generate(
             event_results=unsorted,
@@ -276,7 +281,7 @@ class TestGenerate:
             video_meta=video_meta,
             usage_stats=usage_stats,
         )
-        assert [r.event_id for r in report.event_results] == [0, 1, 3]
+        assert [r.event_id for r in report.event_results] == [1, 2, 4]
 
     def test_empty_events(
         self,
@@ -305,18 +310,18 @@ class TestGenerate:
     ) -> None:
         """When total_categories is supplied, encoding width must match it exactly."""
         results = [
-            EventResult(event_id=2, event_name="Event 2", detected=True),
-            EventResult(event_id=4, event_name="Event 4", detected=False),
+            EventResult(event_id=3, event_name="Event 3", detected=True),
+            EventResult(event_id=5, event_name="Event 5", detected=False),
         ]
         report = generator.generate(
             event_results=results,
             scene_info=scene_info,
             video_meta=video_meta,
             usage_stats=usage_stats,
-            total_categories=10,
+            total_categories=11,
         )
-        assert report.binary_encoding.encoding_string == "0_0_1_0_0_0_0_0_0_0"
-        assert report.binary_encoding.detected_events == [2]
+        assert report.binary_encoding.encoding_string == "0_0_1_0_0_0_0_0_0_0_0"
+        assert report.binary_encoding.detected_events == [3]
         assert report.binary_encoding.event_count == 1
 
     def test_generate_error_fallback_uses_valid_encoding(
@@ -339,7 +344,7 @@ class TestGenerate:
             video_meta=video_meta,
             usage_stats=usage_stats,
         )
-        assert report.binary_encoding.encoding_string == "_".join(["_"] * 10)
+        assert report.binary_encoding.encoding_string == "_".join(["_"] * 11)
         assert report.binary_encoding.event_count == 0
         assert report.binary_encoding.detected_events == []
         assert "报告生成失败" in report.final_classification
@@ -389,9 +394,9 @@ class TestToMarkdown:
 
         assert "# 交通事件分析报告" in md
         assert "## 视频信息" in md
-        assert "## 事件类别分析" in md
-        assert "## 最终分类" in md
-        assert "## 处置建议" in md
+        assert "## 最终分析" in md
+        assert "## 分析统计" in md
+        assert "## 附录：详细分析过程" in md
 
     def test_video_info_content(
         self,
@@ -505,12 +510,12 @@ class TestToMarkdown:
     ) -> None:
         """Reasoning-chain cells must render without degrading the whole report."""
         report = generator.generate(
-            event_results=[EventResult(event_id=0, event_name="A", detected=False)],
+            event_results=[EventResult(event_id=1, event_name="A", detected=False)],
             scene_info=scene_info,
             video_meta=video_meta,
             usage_stats=usage_stats,
             reasoning_chain=[
-                {"event_id": 0, "event_name": "", "decision": "", "thought_process": "", "basis": ""},
+                {"event_id": 1, "event_name": "", "decision": "", "thought_process": "", "basis": ""},
             ],
         )
         md = generator.to_markdown(report)
@@ -524,34 +529,34 @@ class TestToBinaryEncoding:
         self, generator: ReportGenerator
     ) -> None:
         results = [
-            EventResult(event_id=0, event_name="A", detected=True),
-            EventResult(event_id=1, event_name="B", detected=False),
-            EventResult(event_id=2, event_name="C", detected=True),
+            EventResult(event_id=1, event_name="A", detected=True),
+            EventResult(event_id=2, event_name="B", detected=False),
+            EventResult(event_id=3, event_name="C", detected=True),
         ]
         be = generator.to_binary_encoding(results, total_categories=3)
         assert be.encoding_string == "1_0_1"
-        assert be.detected_events == [0, 2]
+        assert be.detected_events == [1, 3]
         assert be.event_count == 2
 
     def test_larger_total_categories(
         self, generator: ReportGenerator
     ) -> None:
         results = [
-            EventResult(event_id=0, event_name="A", detected=True),
+            EventResult(event_id=1, event_name="A", detected=True),
         ]
         be = generator.to_binary_encoding(results, total_categories=5)
         assert be.encoding_string == "1_0_0_0_0"
-        assert be.detected_events == [0]
+        assert be.detected_events == [1]
 
     def test_infer_total_categories(
         self, generator: ReportGenerator
     ) -> None:
         results = [
-            EventResult(event_id=0, event_name="A", detected=False),
+            EventResult(event_id=1, event_name="A", detected=False),
             EventResult(event_id=4, event_name="E", detected=True),
         ]
         be = generator.to_binary_encoding(results, total_categories=0)
-        assert be.encoding_string == "0_0_0_0_1"
+        assert be.encoding_string == "0_0_0_1"
         assert be.detected_events == [4]
 
     def test_empty_results(
@@ -566,19 +571,19 @@ class TestToBinaryEncoding:
         self, generator: ReportGenerator
     ) -> None:
         results = [
-            EventResult(event_id=0, event_name="A", detected=True),
-            EventResult(event_id=1, event_name="B", detected=True),
+            EventResult(event_id=1, event_name="A", detected=True),
+            EventResult(event_id=2, event_name="B", detected=True),
         ]
         be = generator.to_binary_encoding(results, total_categories=2)
         assert be.encoding_string == "1_1"
-        assert be.detected_events == [0, 1]
+        assert be.detected_events == [1, 2]
 
     def test_none_detected(
         self, generator: ReportGenerator
     ) -> None:
         results = [
-            EventResult(event_id=0, event_name="A", detected=False),
-            EventResult(event_id=1, event_name="B", detected=False),
+            EventResult(event_id=1, event_name="A", detected=False),
+            EventResult(event_id=2, event_name="B", detected=False),
         ]
         be = generator.to_binary_encoding(results, total_categories=2)
         assert be.encoding_string == "0_0"
@@ -587,7 +592,7 @@ class TestToBinaryEncoding:
     def test_returns_binary_encoding_model(
         self, generator: ReportGenerator
     ) -> None:
-        results = [EventResult(event_id=0, event_name="A", detected=True)]
+        results = [EventResult(event_id=1, event_name="A", detected=True)]
         be = generator.to_binary_encoding(results, total_categories=1)
         assert isinstance(be, BinaryEncoding)
 
@@ -596,7 +601,7 @@ class TestToBinaryEncoding:
     ) -> None:
         """The except-branch placeholder must satisfy the BinaryEncoding validator."""
         be = generator.to_binary_encoding([object()], total_categories=3)
-        assert be.encoding_string == "_".join(["_"] * 10)
+        assert be.encoding_string == "_".join(["_"] * 11)
         assert be.event_count == 0
         assert be.detected_events == []
 
@@ -611,12 +616,12 @@ class TestDisposalRecommendations:
     ) -> None:
         results = [
             EventResult(
-                event_id=0,
+                event_id=1,
                 event_name="违法停车",
                 detected=True,
                 instances=[
                     EventInstance(
-                        event_id=0,
+                        event_id=1,
                         event_name="违法停车",
                         disposal_suggestion="",
                     )
@@ -639,7 +644,7 @@ class TestDisposalRecommendations:
         usage_stats: Dict[str, Any],
     ) -> None:
         results = [
-            EventResult(event_id=0, event_name="A", detected=False),
+            EventResult(event_id=1, event_name="A", detected=False),
         ]
         report = generator.generate(
             event_results=results,
@@ -662,7 +667,7 @@ class TestFarEnhancementEvidence:
         ],
         ids=["composite_only", "composite_and_motion"],
     )
-    def test_composite_images_embedded_for_event_id_4(
+    def test_composite_images_embedded_for_event_id_5(
         self,
         generator: ReportGenerator,
         scene_info: SceneInfo,
@@ -711,7 +716,7 @@ class TestFarEnhancementEvidence:
         """No composite section should appear when the candidate lacks the path."""
         results = [
             EventResult(
-                event_id=4,
+                event_id=5,
                 event_name="摩托车出现",
                 detected=False,
             ),
@@ -721,14 +726,14 @@ class TestFarEnhancementEvidence:
             scene_info=scene_info,
             video_meta=video_meta,
             usage_stats=usage_stats,
-            expert_candidates=[{"event_id": 4, "detected": False}],
+            expert_candidates=[{"event_id": 5, "detected": False}],
         )
         md = generator.to_markdown(report)
 
         assert "远距离非机动车增强证据" not in md
         assert "composite" not in md.lower()
 
-    def test_frame_analysis_log_rendered_for_event_id_4(
+    def test_frame_analysis_log_rendered_for_event_id_5(
         self,
         generator: ReportGenerator,
         scene_info: SceneInfo,
@@ -739,7 +744,7 @@ class TestFarEnhancementEvidence:
         """Markdown should render a per-frame ROI analysis table when the log exists."""
         expert_candidates = [
             {
-                "event_id": 4,
+                "event_id": 5,
                 "event_name": "摩托车出现",
                 "detected": True,
                 "summary": "detected",
@@ -797,7 +802,7 @@ class TestFarEnhancementEvidence:
         """No per-frame ROI section should appear and rendering should not error when the log is absent."""
         expert_candidates = [
             {
-                "event_id": 4,
+                "event_id": 5,
                 "event_name": "摩托车出现",
                 "detected": True,
                 "summary": "detected",
@@ -818,7 +823,7 @@ class TestFarEnhancementEvidence:
         assert "#### 逐帧 ROI 分析" not in md
         assert "摩托车出现" in md
 
-    def test_composite_images_embedded_for_event_id_3(
+    def test_composite_images_embedded_for_event_id_4(
         self,
         generator: ReportGenerator,
         scene_info: SceneInfo,
@@ -842,7 +847,7 @@ class TestFarEnhancementEvidence:
         assert "![远距离行人增强](/tmp/test_video_event_3_frame_2_composite.jpg)" in md
         assert "**运动反射验证合成图**: `/tmp/test_video_event_3_frame_2_motion_3.jpg`" in md
 
-    def test_frame_analysis_log_rendered_for_event_id_3(
+    def test_frame_analysis_log_rendered_for_event_id_4(
         self,
         generator: ReportGenerator,
         scene_info: SceneInfo,
@@ -853,7 +858,7 @@ class TestFarEnhancementEvidence:
         """Markdown should render a per-frame ROI analysis table for pedestrians."""
         expert_candidates = [
             {
-                "event_id": 3,
+                "event_id": 4,
                 "event_name": "高速公路行人出现",
                 "detected": True,
                 "summary": "detected",
@@ -908,12 +913,12 @@ class TestFarEnhancementEvidence:
     ) -> None:
         """Markdown should render the construction gallery image and evidence table."""
         construction_result = EventResult(
-            event_id=6,
+            event_id=7,
             event_name="道路施工",
             detected=True,
             instances=[
                 EventInstance(
-                    event_id=6,
+                    event_id=7,
                     event_name="道路施工",
                     description="construction zone",
                 )
@@ -921,7 +926,7 @@ class TestFarEnhancementEvidence:
         )
         expert_candidates = [
             {
-                "event_id": 6,
+                "event_id": 7,
                 "event_name": "道路施工",
                 "detected": True,
                 "summary": "detected",

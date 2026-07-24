@@ -1,11 +1,15 @@
 # =============================================================================
-# event_id 9 — 实线变道检测（当前 is_active=false）
+# event_id 11 — 实线变道检测（当前 is_active=false）
+# 作用:含 template_id=lane_change_solid_detection 的实线变道事件检测模板。
+# 影响:统一由 core/config_manager.py 的 _load_prompt_templates 按 prompts/*.yaml
+#      glob 加载;lane_change_solid_detection 由 core/expert_agent.py 按事件类别的
+#      prompt_template_id 调用执行检测(该事件当前 is_active=false,默认不参与检测)。
 # =============================================================================
 
 prompt_templates:
 
   # ---------------------------------------------------------------------------
-  # 11. Lane Change on Solid Line Detection (event_id=9, is_active=false)
+  # 11. Lane Change on Solid Line Detection (event_id=11, is_active=false)
   # ---------------------------------------------------------------------------
   - template_id: "lane_change_solid_detection"
     name: "实线变道检测"

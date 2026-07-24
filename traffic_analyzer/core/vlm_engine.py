@@ -5,6 +5,20 @@ Provides a unified interface for calling vision-language models across
 multiple providers (Anthropic, OpenAI, Google, Aliyun) with prompt
 templating, JSON response parsing, schema validation, retry logic,
 and usage tracking.
+
+[文件说明]
+作用:VLM 统一推理引擎入口。VLMInferenceEngine 封装 prompt 渲染(Jinja2)、
+  内存/磁盘两级缓存、per-provider 重试与 sticky failover、tool 调用
+  (call_with_tools / call_with_tool_results)及 token 用量统计;
+  并重导出各子模块内部函数供测试与旧导入兼容。
+上游:orchestrator/analysis_orchestrator.py(构造 VLMInferenceEngine 并注入各步骤)、
+  core/pipeline_steps.py、core/expert_agent.py、core/expert_agent_far_enhancement.py、
+  core/expert_agent_tools.py、core/sft_label_rewrite.py、core/grounding_verification.py。
+下游:core/vlm_provider_clients.py(构造并发起各 provider API 请求,API key 与
+  base_url 来自环境变量配置)、core/vlm_cache.py(磁盘缓存与 cache key 计算)、
+  core/vlm_response_parser.py(JSON 提取/修复/校验)、core/vlm_error_classifier.py
+  (错误分类决定重试/failover/致命退出)、core/vlm_exceptions.py(异常体系)、
+  models/schemas.py(LLMProviderConfig/LLMResponse/PromptTemplate 等数据结构)。
 """
 
 from __future__ import annotations

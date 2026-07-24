@@ -9,6 +9,15 @@ Usage:
         --video-dir /path/to/videos \
         --output-dir /path/to/reports \
         --format markdown
+
+[文件说明]
+作用:批量推理脚本。对目录下所有视频(非递归)以子进程逐个调用
+``python -m traffic_analyzer analyze``,支持 --workers 并行、断点续跑(已有输出则跳过,
+--force 强制重跑)、每视频独立日志;stderr 出现配额/鉴权类致命 API 错误时终止后续视频,
+子进程退出码 2(预过滤拒识)计为 rejected 不算失败。
+上游:命令行手动运行(无包内调用方)。
+下游:traffic_analyzer/cli.py 的 analyze 子命令、config/ 配置目录、环境变量
+LLM_API_KEY/KIMI_API_KEY(--api-key 可覆盖)。
 """
 
 from __future__ import annotations

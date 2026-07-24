@@ -3,8 +3,7 @@ import { $, $$, esc, toast, flashSaveBtn } from './util.js';
 import { state } from './state.js';
 import { api } from './api.js';
 
-// event_id → 标注文档 v4.5 的 action 编号(action 9 = 正常占位,跳过)
-const EVENT_ID_TO_ACTION = { 0: 1, 1: 2, 2: 3, 3: 4, 4: 5, 5: 6, 6: 7, 7: 8, 8: 10, 9: 11 };
+// event_id 全局采用标注文档 v4.5 的 action 编号(9 = 正常占位),action / classN 直接等于 event_id
 
 // 解析 description:think 按空行分段,匹配「事件名：」前缀;answer 提取天气/时间/场景键值
 function parseSftDescription(desc, events) {
@@ -54,7 +53,7 @@ function sftConclusionLines() {
   if (!checked.length) return ['最终结论：本视频块未检出任何事件,交通状况正常。'];
   const lines = ['最终结论：本视频块检出以下事件。'];
   checked.forEach(ev => {
-    lines.push('class' + EVENT_ID_TO_ACTION[ev.event_id] + ': ' + ev.name_zh);
+    lines.push('class' + ev.event_id + ': ' + ev.name_zh);
   });
   return lines;
 }
@@ -73,7 +72,7 @@ function buildSftRevision() {
   const answerLines = sftEnvLines().concat(sftConclusionLines());
   return {
     description: '<think>\n' + think + '\n</think>\n<answer>\n' + answerLines.join('\n') + '\n</answer>',
-    action: checked.map(ev => EVENT_ID_TO_ACTION[ev.event_id]),
+    action: checked.map(ev => ev.event_id),
   };
 }
 
@@ -90,7 +89,7 @@ function initSftDraft(sft) {
   events.forEach(ev => {
     if (ev.is_active) {
       texts[ev.event_id] = parsed.sections[ev.event_id] || '';
-      checks[ev.event_id] = actions.indexOf(EVENT_ID_TO_ACTION[ev.event_id]) >= 0;
+      checks[ev.event_id] = actions.indexOf(ev.event_id) >= 0;
     } else {
       texts[ev.event_id] = '';
       checks[ev.event_id] = false;

@@ -1,4 +1,10 @@
-"""Unit tests for far_non_motor_enhancer utilities."""
+"""Unit tests for far_non_motor_enhancer utilities.
+
+[文件说明]
+作用:测试远距非机动车增强工具函数,覆盖 bbox 面积/宽高比/放大计算、运动评分与多 ROI 合成图生成。
+上游:pytest 自动发现并执行本文件测试。
+下游:traffic_analyzer/utils/far_non_motor_enhancer.py(被测模块)。
+"""
 
 from __future__ import annotations
 

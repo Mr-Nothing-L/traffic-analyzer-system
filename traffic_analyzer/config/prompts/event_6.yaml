@@ -1,11 +1,16 @@
 # =============================================================================
-# event_id 6 — 道路施工检测（含多证据 ROI 辅助模板）
+# event_id 7 — 道路施工检测（含多证据 ROI 辅助模板）
+# 作用:含 road_construction_roi_detection / road_construction_detection 两个模板
+#      (施工检测模板 + 多证据 ROI 辅助模板,后者经 roi_template_id 引用)。
+# 影响:统一由 core/config_manager.py 的 _load_prompt_templates 按 prompts/*.yaml
+#      glob 加载;road_construction_detection 由 core/expert_agent.py 调用,
+#      road_construction_roi_detection 由 core/expert_agent_far_enhancement.py 调用。
 # =============================================================================
 
 prompt_templates:
 
   # ---------------------------------------------------------------------------
-  # 5c. Road Construction Multi-evidence ROI Detection (helper for event_id=6)
+  # 5c. Road Construction Multi-evidence ROI Detection (helper for event_id=7)
   # ---------------------------------------------------------------------------
   - template_id: "road_construction_roi_detection"
     name: "道路施工多证据 ROI 检测"
@@ -49,11 +54,11 @@ prompt_templates:
     output_format_hint: "JSON"
 
   # ---------------------------------------------------------------------------
-  # 6. Non-motor / Two-wheel Vehicle Detection (event_id=4)
+  # 6. Non-motor / Two-wheel Vehicle Detection (event_id=5)
   # ---------------------------------------------------------------------------
 
   # ---------------------------------------------------------------------------
-  # 8. Road Construction Detection (event_id=6)
+  # 8. Road Construction Detection (event_id=7)
   # ---------------------------------------------------------------------------
   - template_id: "road_construction_detection"
     name: "道路施工检测"
@@ -135,5 +140,5 @@ prompt_templates:
       frame_selection: "middle"
 
   # ---------------------------------------------------------------------------
-  # 9. Direct Reversing Detection (event_id=7, expert_agent)
+  # 9. Direct Reversing Detection (event_id=8, expert_agent)
   # ---------------------------------------------------------------------------

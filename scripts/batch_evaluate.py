@@ -31,6 +31,17 @@ Usage:
         --single-class \
         --config-dir ./traffic_analyzer/config \
         --output evaluation_report.html
+
+[文件说明]
+作用:批量评估脚本。按报告 stem 匹配视频,GT 来自文件名前缀的 v4.5 编号
+(--gt-mode filename,9=正常占位自动跳过)或 JSON/CSV 标注文件;预测从报告 md 的
+二进制编码(或逐事件"是否检测到"行)/ json 报告提取;计算逐事件及宏/微平均 P/R/F1,
+--single-class/--normal 时按 config 的 is_active 过滤;按输出后缀生成 HTML(内嵌 base64
+报告与图片)/ Markdown / JSON。
+上游:命令行手动运行;web/jobs.py 的 build_evaluate_command(web 端 /api/evaluate 任务);
+traffic_analyzer/tests/web/test_api.py。
+下游:config/event_categories.yaml(--single-class/--normal 读取 is_active);被评估的
+report.md/json 由 traffic_analyzer 分析管线产出。
 """
 
 from __future__ import annotations
@@ -53,31 +64,22 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 # ---------------------------------------------------------------------------
 # Event metadata (aligned with event_categories.yaml)
 # ---------------------------------------------------------------------------
+# event_id 全局采用标注文档 v4.5 的 action 编号；9 = 正常占位，不对应任何事件。
 EVENT_NAMES: Dict[int, str] = {
-    0: "违法停车",
-    1: "应急车道占用",
-    2: "交通事故",
-    3: "高速公路行人出现",
-    4: "摩托车出现",
-    5: "严重拥堵",
-    6: "道路施工",
-    7: "车辆逆行/倒车",
-    8: "抛洒物",
-    9: "实线变道",
+    1: "违法停车",
+    2: "应急车道占用",
+    3: "交通事故",
+    4: "高速公路行人出现",
+    5: "摩托车出现",
+    6: "严重拥堵",
+    7: "道路施工",
+    8: "车辆逆行/倒车",
+    10: "抛洒物",
+    11: "实线变道",
 }
 
-NUM_EVENTS = 10
-
-# Action ID (filename prefix number) -> event_id mapping
-# Based on annotation document v4.5:
-#   1=违法停车->0, 2=应急车道占用->1, 3=交通事故->2, 4=行人出现->3,
-#   5=摩托车出现->4, 6=严重拥堵->5, 7=道路施工->6, 8=车辆逆行/倒车->7,
-#   9=Normal (skip), 10=抛洒物->8, 11=实线变道->9
-ACTION_TO_EVENT_ID = {
-    1: 0, 2: 1, 3: 2, 4: 3, 5: 4,
-    6: 5, 7: 6, 8: 7,
-    10: 8, 11: 9,
-}
+# 位宽：event_id 取值范围 1..11（含占位 9），数组按 0..11 开 12 格。
+NUM_EVENTS = 12
 
 
 # ---------------------------------------------------------------------------
@@ -100,13 +102,14 @@ def extract_gt_from_filename(filename: str) -> Set[int]:
     """Extract ground-truth event IDs from a video filename.
 
     Default pattern: numbers before ``_Event_`` are action IDs from the
-    annotation document (v4.5).  They map to event_ids via ACTION_TO_EVENT_ID.
+    annotation document (v4.5), which are used directly as global event_ids.
     Examples:
-        ``01-02-07-11_Event_65536_...``  -> {0, 1, 6, 9}
-        ``02-04-07-08-10_Event_...``     -> {1, 3, 6, 7, 8}
-        ``06_Event_...``                  -> {5}
+        ``01-02-07-11_Event_65536_...``  -> {1, 2, 7, 11}
+        ``02-04-07-08-10_Event_...``     -> {2, 4, 7, 8, 10}
+        ``06_Event_...``                  -> {6}
 
-    Action ID ``9`` (Normal) and any unknown number are silently skipped.
+    Action ID ``9`` (Normal) and any number not in ``EVENT_NAMES`` are
+    silently skipped.
 
     Supports two filename patterns:
         ``01-02-08_Event_xxx_...``  -> standard format
@@ -129,9 +132,8 @@ def extract_gt_from_filename(filename: str) -> Set[int]:
         if not part.isdigit():
             continue
         num = int(part)
-        event_id = ACTION_TO_EVENT_ID.get(num)
-        if event_id is not None:
-            event_ids.add(event_id)
+        if num in EVENT_NAMES:
+            event_ids.add(num)
     return event_ids
 
 
@@ -140,12 +142,12 @@ def load_annotations_json(path: Path) -> Dict[str, Set[int]]:
 
     Expected format (either flat or nested):
         {
-            "video_name.mp4": [0, 2, 7],
+            "video_name.mp4": [1, 3, 8],
             ...
         }
     or
         {
-            "video_name.mp4": {"events": [0, 2, 7]},
+            "video_name.mp4": {"events": [1, 3, 8]},
             ...
         }
     """
@@ -153,10 +155,10 @@ def load_annotations_json(path: Path) -> Dict[str, Set[int]]:
     result: Dict[str, Set[int]] = {}
     for key, value in data.items():
         if isinstance(value, list):
-            result[key] = {int(e) for e in value if isinstance(e, int) and 0 <= e < NUM_EVENTS}
+            result[key] = {int(e) for e in value if isinstance(e, int) and e in EVENT_NAMES}
         elif isinstance(value, dict):
             events = value.get("events", value.get("event_ids", value.get("labels", [])))
-            result[key] = {int(e) for e in events if isinstance(e, int) and 0 <= e < NUM_EVENTS}
+            result[key] = {int(e) for e in events if isinstance(e, int) and e in EVENT_NAMES}
         else:
             result[key] = set()
     return result
@@ -182,7 +184,7 @@ def load_annotations_csv(path: Path) -> Dict[str, Set[int]]:
                 part = part.strip()
                 if part.isdigit():
                     eid = int(part)
-                    if 0 <= eid < NUM_EVENTS:
+                    if eid in EVENT_NAMES:
                         event_ids.add(eid)
             result[video_name] = event_ids
     return result
@@ -206,7 +208,9 @@ def extract_pred_from_markdown(text: str) -> Set[int]:
     """Extract predicted event IDs from a Markdown report.
 
     Looks for:
-    1. Binary encoding: ``**二进制编码**: `{0_0_0_0_0_0_1_0_0}` ``
+    1. Binary encoding: ``**二进制编码**: `{0_0_0_0_0_0_1_0_0_0_0}` ``
+       (bit position i corresponds to event_id i, 1-based; bit 9 is the
+       always-0 "normal" placeholder)
     2. Per-event detection lines: ``- **是否检测到**: 是`` / ``否``
     """
     detected: Set[int] = set()
@@ -216,7 +220,7 @@ def extract_pred_from_markdown(text: str) -> Set[int]:
     if enc_match:
         encoding = enc_match.group(1)
         bits = encoding.split("_")
-        for eid, bit in enumerate(bits):
+        for eid, bit in enumerate(bits, start=1):
             if bit == "1":
                 detected.add(eid)
         return detected
@@ -231,7 +235,7 @@ def extract_pred_from_markdown(text: str) -> Set[int]:
     for m in event_sections:
         eid = int(m.group(1))
         detected_flag = m.group(2).strip() == "是"
-        if detected_flag and 0 <= eid < NUM_EVENTS:
+        if detected_flag and 1 <= eid < NUM_EVENTS:
             detected.add(eid)
 
     return detected
@@ -247,14 +251,14 @@ def extract_pred_from_json(text: str) -> Set[int]:
     # Try binary_encoding first
     be = data.get("binary_encoding", {})
     if be and "detected_events" in be:
-        return {int(e) for e in be["detected_events"] if 0 <= int(e) < NUM_EVENTS}
+        return {int(e) for e in be["detected_events"] if 1 <= int(e) < NUM_EVENTS}
 
     # Fallback: scan event_results
     detected: Set[int] = set()
     for result in data.get("event_results", []):
         if result.get("detected", False):
             eid = result.get("event_id")
-            if eid is not None and 0 <= eid < NUM_EVENTS:
+            if eid is not None and 1 <= eid < NUM_EVENTS:
                 detected.add(eid)
     return detected
 
@@ -346,7 +350,7 @@ def compute_metrics(
             # Only evaluate events in the mask
             events_to_eval = mask
         else:
-            events_to_eval = set(range(NUM_EVENTS))
+            events_to_eval = set(EVENT_NAMES)
 
         if not events_to_eval:
             skipped += 1
@@ -368,7 +372,7 @@ def compute_metrics(
             # TN is implicit (not counted)
 
     per_event: Dict[str, Any] = {}
-    for eid in range(NUM_EVENTS):
+    for eid in sorted(EVENT_NAMES):
         precision = tp[eid] / (tp[eid] + fp[eid]) if (tp[eid] + fp[eid]) > 0 else 0.0
         recall = tp[eid] / (tp[eid] + fn[eid]) if (tp[eid] + fn[eid]) > 0 else 0.0
         f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
@@ -531,7 +535,7 @@ def format_markdown_table(result: Dict[str, Any]) -> str:
 
     per_event = result["per_event"]
     overall = result["overall"]
-    evaluated_event_ids = overall.get("evaluated_event_ids", list(range(NUM_EVENTS)))
+    evaluated_event_ids = overall.get("evaluated_event_ids", list(sorted(EVENT_NAMES)))
     for eid in evaluated_event_ids:
         info = per_event[str(eid)]
         display_id = "-" if eid == "normal" else str(eid)
@@ -626,7 +630,7 @@ def format_html_report(
     overall = result["overall"]
     per_video = result.get("per_video", [])
     num_evaluated_events = overall.get("macro_evaluated_events", overall.get("evaluated_events", NUM_EVENTS))
-    evaluated_event_ids = overall.get("evaluated_event_ids", list(range(NUM_EVENTS)))
+    evaluated_event_ids = overall.get("evaluated_event_ids", list(sorted(EVENT_NAMES)))
 
     # Summary table rows
     summary_rows = []

@@ -11,6 +11,15 @@ occupancy reports:
 * ``zoom/V{id}_{label}_zoom4x.jpg`` – individual zoomed crops.
 
 All drawing uses PIL / OpenCV and works without ``shapely``.
+
+[文件说明]
+作用:应急车道/导流区占用检测的可视化证据与结构化结果生成:掩膜叠加图、
+    车辆红框标注图、ROI 放大网格与单车放大图(中文标签经 CJK 字体渲染),
+    以及 bbox 与区域多边形的 overlap 计算 ``compute_roi_zone_overlap``
+    和 summary.json 内容构建 ``build_occupancy_summary``。
+上游:core/expert_agent_far_enhancement.py 的 ``_detect_emergency_lane_occupancy``。
+下游:utils/bbox_geometry.py、utils/construction_evidence_gallery.py、
+    utils/image_drawing.py;PIL/OpenCV;系统 CJK 字体(含 fc-list 回退探测)。
 """
 
 from __future__ import annotations

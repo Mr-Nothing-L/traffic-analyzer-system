@@ -3,6 +3,12 @@
 Functions in this module are intentionally low-level and stateless.
 They operate on raw markdown / JSON strings produced by expert agents
 and return sanitized text suitable for inclusion in the final report.
+
+[文件说明]
+作用:报告文本清洗工具集(_clean_expert_description 等),剔除专家输出中的代码块与
+     JSON 片段,规整 Markdown 表格与标题层级,产出可并入最终报告的纯文本。
+上游:core/report_markdown_renderer.py(渲染专家原始分析时调用)。
+下游:仅依赖 re/logging 标准库,处理专家 agent 产出的原始 markdown/JSON 字符串。
 """
 
 from __future__ import annotations

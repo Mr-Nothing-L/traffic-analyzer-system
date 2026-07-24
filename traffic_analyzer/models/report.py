@@ -1,5 +1,10 @@
 """
 Report and binary-encoding models for the traffic analyzer framework.
+
+[文件说明]
+作用:定义最终报告模型 Report(含 event_results、binary_encoding、adjudication_reasoning、audit_log、rejected/reject_reason 等)与二进制编码模型 BinaryEncoding。
+上游:models/schemas.py、models/context.py 引用;由 core/report_generator.py 生成、core/report_markdown_renderer.py 渲染、orchestrator/analysis_orchestrator.py 与 reject_report_factory.py 返回。
+下游:同包 event/scene/video 模块;pydantic。
 """
 
 from __future__ import annotations

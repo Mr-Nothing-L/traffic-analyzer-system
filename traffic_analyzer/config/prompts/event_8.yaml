@@ -1,11 +1,15 @@
 # =============================================================================
-# event_id 8 — 抛洒物检测
+# event_id 10 — 抛洒物检测
+# 作用:含 template_id=thrown_object_detection 的抛洒物事件检测模板。
+# 影响:统一由 core/config_manager.py 的 _load_prompt_templates 按 prompts/*.yaml
+#      glob 加载;thrown_object_detection 由 core/expert_agent.py 按事件类别的
+#      prompt_template_id 调用执行检测。
 # =============================================================================
 
 prompt_templates:
 
   # ---------------------------------------------------------------------------
-  # 10. Thrown Object Detection (event_id=8)
+  # 10. Thrown Object Detection (event_id=10)
   # ---------------------------------------------------------------------------
   - template_id: "thrown_object_detection"
     name: "抛洒物检测"
@@ -70,5 +74,5 @@ prompt_templates:
     output_format_hint: "JSON"
 
   # ---------------------------------------------------------------------------
-  # 11. Lane Change on Solid Line Detection (event_id=9, is_active=false)
+  # 11. Lane Change on Solid Line Detection (event_id=11, is_active=false)
   # ---------------------------------------------------------------------------

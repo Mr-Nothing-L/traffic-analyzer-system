@@ -8,6 +8,20 @@ call itself sees only the raw coarse keyframes and must ground its reasoning
 solely in what the raw frames show. Samples whose positive events cannot be
 grounded in the raw frames are written to a ``quarantine/`` subdirectory —
 they would otherwise teach the student model to hallucinate.
+
+[文件说明]
+作用:可选的裁决后 SFT 标签改写步骤(SftLabelRewriteStep,--sft-label 模式
+启用)。以裁决结论为特权提示,让 VLM 仅基于原始粗关键帧重写出一条 SFT
+训练样本(build_sample/build_description 组装 <think>/<answer> 格式),
+写入 config 的 sft_label_output_dir;阳性事件无法在原始帧中锚定的样本
+写入 quarantine/ 子目录。
+上游:traffic_analyzer/orchestrator/analysis_orchestrator.py 的 [3.5/4]
+SFT label rewrite 步骤;另被 core/grounding_verification.py 复用
+_build_event_definitions_json。
+下游:core/vlm_engine.py 的 VLMInferenceEngine.call;config/prompts/
+sft_rewrite.yaml(template_id=sft_label_rewrite,经
+ConfigManager.get_prompt_template 加载);utils/event_detection.py 的
+select_event_images;core/pipeline_steps.py 的 PipelineStep 基类。
 """
 
 from __future__ import annotations
@@ -29,19 +43,8 @@ from traffic_analyzer.utils.event_detection import select_event_images
 
 logger = logging.getLogger(__name__)
 
-# event_id → 标注文档 v4.5 的 action 编号（action 9 = 正常占位，跳过）。
-EVENT_ID_TO_ACTION: Dict[int, int] = {
-    0: 1,
-    1: 2,
-    2: 3,
-    3: 4,
-    4: 5,
-    5: 6,
-    6: 7,
-    7: 8,
-    8: 10,
-    9: 11,
-}
+# event_id 全局采用标注文档 v4.5 的 action 编号（9 = 正常占位，不对应任何事件），
+# 因此 SFT 样本的 action / classN 直接等于 event_id，无需映射。
 
 # JSON schema for the rewrite VLM response (forces valid JSON output).
 _SFT_REWRITE_RESPONSE_SCHEMA: Dict[str, Any] = {
@@ -137,10 +140,7 @@ def build_description(
     if detected_ids:
         answer_lines.append("最终结论：本视频块检出以下事件。")
         for eid in detected_ids:
-            action_id = EVENT_ID_TO_ACTION.get(eid)
-            if action_id is None:
-                continue
-            answer_lines.append(f"class{action_id}: {name_by_id.get(eid, f'event_{eid}')}")
+            answer_lines.append(f"class{eid}: {name_by_id.get(eid, f'event_{eid}')}")
     else:
         answer_lines.append("最终结论：本视频块未检出任何事件，交通状况正常。")
 
@@ -160,11 +160,8 @@ def build_sample(
     video_meta: Optional[VideoMetadata],
 ) -> Dict[str, Any]:
     """Build one SFT sample dict (keys exactly per the sft_label contract)."""
-    action = [
-        EVENT_ID_TO_ACTION[eid]
-        for eid in _detected_event_ids(event_results)
-        if eid in EVENT_ID_TO_ACTION
-    ]
+    # action 即排序后的 detected event_id（全局编号，无需映射）。
+    action = _detected_event_ids(event_results)
 
     end_timestamp = 0.0
     chunk_name = ""

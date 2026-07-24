@@ -1,11 +1,15 @@
 # =============================================================================
-# event_id 5 — 严重拥堵检测
+# event_id 6 — 严重拥堵检测
+# 作用:含 template_id=heavy_congestion_detection 的严重拥堵事件检测模板。
+# 影响:统一由 core/config_manager.py 的 _load_prompt_templates 按 prompts/*.yaml
+#      glob 加载;heavy_congestion_detection 由 core/expert_agent.py 按事件类别的
+#      prompt_template_id 调用执行检测。
 # =============================================================================
 
 prompt_templates:
 
   # ---------------------------------------------------------------------------
-  # 7. Congestion Detection (event_id=5)
+  # 7. Congestion Detection (event_id=6)
   # ---------------------------------------------------------------------------
   - template_id: "heavy_congestion_detection"
     name: "拥堵检测"
@@ -65,5 +69,5 @@ prompt_templates:
     output_format_hint: "JSON"
 
   # ---------------------------------------------------------------------------
-  # 8. Road Construction Detection (event_id=6)
+  # 8. Road Construction Detection (event_id=7)
   # ---------------------------------------------------------------------------

@@ -1,5 +1,15 @@
 """
 Error classification helpers for VLM API calls.
+
+[文件说明]
+作用:VLM API 调用错误分类。_is_retryable_error 判断瞬态错误(限流/超时/
+  连接/5xx)是否值得重试;is_failover_trigger 判断账户级问题(配额/欠费/
+  鉴权/限流/5xx)是否应切换到下一 provider;_is_fatal_api_error 判断
+  API 不可用(配额耗尽、鉴权失败、402 等)是否应立即中止批处理。
+上游:core/vlm_engine.py(_execute_with_retry 与 call 中决定重试、failover
+  或抛出 FatalAPIError)。
+下游:anthropic/openai/httpx SDK 的异常类型,以及 google.api_core 异常
+  (可选依赖,未安装则跳过);core/vlm_exceptions.py 的本框架异常。
 """
 
 from __future__ import annotations

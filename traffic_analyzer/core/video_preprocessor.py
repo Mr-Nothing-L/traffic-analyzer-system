@@ -6,6 +6,13 @@ Extracts keyframes from video using a two-pass sampling strategy:
 2. Motion analysis to detect high-motion or stationary-vehicle regions.
 3. Precision sampling at higher FPS for detected motion segments.
 4. Quality scoring and deduplication.
+
+[文件说明]
+作用:视频预处理器(VideoPreprocessor),两段式抽帧(粗采样+运动分析+精细采样)、
+     质量评分与去重、缩略图网格生成,为 VLM 检测准备关键帧序列。
+上游:orchestrator/analysis_orchestrator.py(分析流程 step 1 视频预处理)。
+下游:cv2(OpenCV)读取视频与抽帧,numpy/PIL 处理图像;采样参数来自
+     models/schemas.py 的 SamplingConfig(由 ConfigManager 注入)。
 """
 
 from __future__ import annotations

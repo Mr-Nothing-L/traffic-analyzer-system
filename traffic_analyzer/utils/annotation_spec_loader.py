@@ -2,6 +2,13 @@
 
 The annotation spec (converted from XLSX) drives the adjudication prompt.
 Editing the YAML is easier than editing the xlsx document.
+
+[文件说明]
+作用:`AnnotationSpecLoader` 加载 annotation_spec.yaml(由 XLSX 标注规范转换而来),
+    通过 ``to_prompt_text()`` 生成"全局标注原则 + 事件定义与边界条件"文本块,
+    并可按 event_id 查询单个事件的描述与边界条件。
+上游:core/pipeline_steps.py 的裁决(adjudication)步骤,加载后将文本注入裁决 prompt。
+下游:config/annotation_spec.yaml(经 PyYAML 读取);不调用任何外部端点。
 """
 
 from __future__ import annotations

@@ -3,7 +3,7 @@
 # Traffic Analyzer
 
 VLM (vision-language model) based traffic event detection for highway surveillance
-video. Input: a video clip. Output: a **10-bit binary event code** plus a structured
+video. Input: a video clip. Output: an **11-bit binary event code** plus a structured
 analysis report (JSON or Markdown). Event definitions, prompts, adjudication rules,
 and thresholds are all YAML-driven — adding or tuning an event needs no code changes.
 
@@ -13,19 +13,24 @@ visual-evidence editor, and in-UI batch accuracy evaluation.
 
 ## Overview
 
-Each video runs through a four-step pipeline:
+Each video runs through a five-step pipeline:
 
 1. **Video preprocessing** — metadata extraction, optional quality prefilter (may
    reject), then fixed-FPS frame extraction. Zero usable frames also rejects.
-2. **Expert Agent layer** — one `ExpertAgent` per active event category, run in parallel
-   (`ThreadPoolExecutor`); each reports only facts ("see it, report it"). Events with
-   far-object enhancement use a multi-stage ROI pipeline; every candidate passes an
-   optional reflection check.
+2. **Expert Agent layer** — one `ExpertAgent` per active event category (8 active
+   events), run in parallel (`ThreadPoolExecutor`); each reports only facts ("see it,
+   report it"). Events with far-object enhancement use a multi-stage ROI pipeline;
+   every candidate passes an optional reflection check.
 3. **Adjudication** — a single VLM call rules on all candidates with business rules and
    the annotation spec, producing final per-event results plus an audit log (with a
    retry loop for missing results).
-4. **Report generation** — per-event results, binary encoding, audit log, token usage,
-   rendered as JSON or Markdown.
+4. **Grounding verification** (new) — one VLM call re-examines each adjudicated
+   positive against the raw frames and tries to anchor its key visual elements.
+   Positives that cannot be anchored are overturned as hallucinations and the analysis
+   is recorded. On by default (`GROUNDING_CHECK_ENABLE`); fail-open.
+5. **Report generation** — per-event results, binary encoding, audit log, token usage,
+   rendered as JSON or Markdown. With `--sft-label`, an optional SFT label rewrite
+   step runs after grounding verification and exports one training sample per video.
 
 ## Key Features
 
@@ -37,11 +42,16 @@ Each video runs through a four-step pipeline:
   specialist prompt per event; agents run in parallel and return structured
   `EventCandidate` objects (detected flag, summary, time-bounded instances).
 - **Far-object enhancement** — events with `far_object_enhancement.enabled: true` in
-  their prompt template (currently events **1, 3, 4, 6**) use a multi-stage ROI
+  their prompt template (currently events **2, 4, 5, 7**) use a multi-stage ROI
   pipeline: ROI detection → evidence compositing → final classifier.
 - **Reflection consistency check** — each candidate is re-checked by a text-only VLM
   pass (`expert_response_reflection` template) that corrects `detected` when it
   contradicts the summary/instances. Fail-open; on by default.
+- **Grounding verification** — a post-adjudication step (new) re-examines each positive
+  verdict against the raw coarse frames only (no enhancement artifacts); positives whose
+  key elements cannot be anchored are overturned (`detected=False`,
+  `grounding_overturned=True`) and the analysis is recorded. Fail-open; on by default
+  (`GROUNDING_CHECK_ENABLE`).
 - **Multi-provider VLM with retry/failover** — Anthropic, Google, Aliyun; per-provider
   retry with backoff; sticky failover on rate-limit/auth/quota/5xx errors; total
   exhaustion aborts loudly (`FatalAPIError`) instead of emitting all-zero reports.
@@ -107,11 +117,13 @@ python3 -m traffic_analyzer analyze \
   --sft-output-dir ./output/sft_labels   # optional; this is the default
 ```
 
-Appends a rewrite step after adjudication: one extra VLM call sees **only the raw
-sampled frames plus the adjudicated verdicts** (privileged hints) and writes **one SFT
-training-sample JSON per video** into `--sft-output-dir` (default `output/sft_labels`).
-The main report is unaffected; the mode costs **+1 VLM call per video**. Samples whose
-positive events cannot be grounded in the raw frames are quarantined — see
+Appends a rewrite step after adjudication and grounding verification: one extra VLM
+call sees **only the raw sampled frames plus the adjudicated verdicts** (privileged
+hints) and writes **one SFT training-sample JSON per video** into `--sft-output-dir`
+(default `output/sft_labels`). The sample's `action` is the detected events'
+`event_id`s directly (annotation-doc v4.5 numbering, no mapping). The main report is
+unaffected; the mode costs **+1 VLM call per video**. Samples whose positive events
+cannot be grounded in the raw frames are quarantined — see
 [SFT sample JSON](#sft-sample-json---sft-label).
 
 #### Optional: Web UI (`traffic_analyzer web`)
@@ -150,7 +162,7 @@ from traffic_analyzer.orchestrator.analysis_orchestrator import AnalysisOrchestr
 
 orch = AnalysisOrchestrator.from_config_dir('traffic_analyzer/config')
 report = orch.analyze('path/to/video.mp4')
-print(report.binary_encoding.encoding_string)   # e.g. 1_0_1_0_0_0_0_0_0_0
+print(report.binary_encoding.encoding_string)   # e.g. 1_0_1_0_0_0_0_0_0_0_0
 ```
 
 ## Code Structure
@@ -164,15 +176,19 @@ traffic_analyzer/
 │   ├── event_categories.yaml           # Event definitions + adjudication_rules
 │   ├── annotation_spec.yaml            # Business annotation spec injected into adjudication
 │   ├── .env.example                    # Template for LLM provider / inference settings
-│   └── prompts/                        # 18 prompt templates in 11 YAML files
+│   └── prompts/                        # 24 prompt templates in 13 YAML files
 │       ├── common.yaml                 # scene_understanding / reflection / adjudication templates
-│       └── event_0.yaml … event_9.yaml # Per-event expert prompts + ROI templates
+│       ├── event_0.yaml … event_9.yaml # Per-event expert prompts + ROI templates
+│       ├── grounding_verification.yaml # Post-adjudication raw-frame anchoring template
+│       └── sft_rewrite.yaml            # SFT label rewrite template (--sft-label)
 ├── core/
 │   ├── config_manager.py               # Config loading (.env + YAML), validation, version selection
 │   ├── pipeline_steps.py               # PipelineStep base, ExpertAgentLayer, AdjudicationStep
 │   ├── expert_agent.py                 # ExpertAgent: single-event detection flow
-│   ├── expert_agent_far_enhancement.py # Far-distance ROI enhancement pipelines (events 1/3/4/6)
+│   ├── expert_agent_far_enhancement.py # Far-distance ROI enhancement pipelines (events 2/4/5/7)
 │   ├── expert_agent_tools.py           # ToolCallExecutor (unused while registry is empty)
+│   ├── grounding_verification.py       # Post-adjudication raw-frame anchoring check (overturns hallucinated positives)
+│   ├── sft_label_rewrite.py            # Optional SFT training-sample rewrite step (--sft-label)
 │   ├── video_preprocessor.py           # Metadata, prefilter, fixed-FPS sampling + dedup
 │   ├── vlm_engine.py                   # VLMInferenceEngine: retry, failover, cache, usage stats
 │   ├── vlm_provider_clients.py         # Provider-specific payload builders + API calls
@@ -196,7 +212,7 @@ traffic_analyzer/
 │   ├── enums.py                        # DetectionMode, ConfidenceLevel
 │   └── schemas.py                      # Re-exports all model modules
 ├── orchestrator/
-│   ├── analysis_orchestrator.py        # Main 4-step pipeline wiring (analyze())
+│   ├── analysis_orchestrator.py        # Main pipeline wiring (analyze(): preprocess → experts → adjudication → grounding → report)
 │   ├── video_meta_extractor.py         # Lightweight video metadata extraction
 │   ├── reject_report_factory.py        # Reject report construction
 │   ├── candidate_fallback.py           # Candidate → EventResult fallback conversion
@@ -207,18 +223,18 @@ traffic_analyzer/
 │   └── tool_registry.py                # Default router factory (registers zero tools)
 ├── utils/
 │   ├── event_detection.py              # Image selection, response parsing, reflection check
-│   ├── emergency_lane_occupancy.py     # Event-1 evidence images (masks, boxes, zoom grids)
+│   ├── emergency_lane_occupancy.py     # Event-2 evidence images (masks, boxes, zoom grids)
 │   ├── far_non_motor_enhancer.py       # Non-motor vehicle enhancement helpers
 │   ├── roi_composite.py                # ROI composite image generation
 │   ├── roi_motion.py                   # Adjacent-frame ROI motion analysis
-│   ├── construction_evidence_gallery.py# Event-6 multi-ROI evidence gallery
+│   ├── construction_evidence_gallery.py# Event-7 multi-ROI evidence gallery
 │   ├── bbox_geometry.py                # Bounding-box geometry helpers
 │   ├── image_drawing.py                # Image annotation helpers
 │   ├── annotation_spec_loader.py       # annotation_spec.yaml → prompt text
 │   └── tool_call_logger.py             # tool_call trace logging
 ├── web/                                # FastAPI backend + SPA frontend (web/static/)
 └── tests/                              # pytest suite (unit + pipeline-level, VLM mocked)
-    ├── test_*.py                       # 16 test modules (CLI, config, engine, experts, reports)
+    ├── test_*.py                       # 19 test modules (CLI, config, engine, experts, reports)
     └── tools/test_tool_router.py       # Tool router tests
 
 scripts/
@@ -254,13 +270,13 @@ Dockerfile{,.gpu,.cuda}, docker-compose{,.gpu}.yml  # Dev containers (CPU / GPU)
    - There is no scene-understanding step: the `scene_understanding` template is
      injected into every expert prompt as prior knowledge, and a pre-computed
      `SceneInfo` can be supplied externally via `--scene-understanding`.
-   - **Far-object enhancement** for templates that enable it (events 1, 3, 4, 6):
-     - Event 1 (Emergency Lane Occupancy): lane calibration ROI + vehicle boxes +
+   - **Far-object enhancement** for templates that enable it (events 2, 4, 5, 7):
+     - Event 2 (Emergency Lane Occupancy): lane calibration ROI + vehicle boxes +
        zoom-grid evidence (`utils/emergency_lane_occupancy.py`).
-     - Events 3/4 (Person / Motorcycle): per-frame ROI detection → top-K scoring →
+     - Events 4/5 (Person / Motorcycle): per-frame ROI detection → top-K scoring →
        dual composite (single-frame zoom + adjacent-frame motion) → final classifier,
        with evidence-based promotion/veto rules.
-     - Event 6 (Road Construction): multi-ROI gallery (cone/worker/vehicle/barrier/sign)
+     - Event 7 (Road Construction): multi-ROI gallery (cone/worker/vehicle/barrier/sign)
        from the middle frame → gallery classifier + work-zone fallback.
      - If an enabled enhancement flow fails to produce evidence, the candidate is
        negative — raw frames are intentionally **not** fed to enhancement prompts.
@@ -278,12 +294,29 @@ Dockerfile{,.gpu,.cuda}, docker-compose{,.gpu}.yml  # Dev containers (CPU / GPU)
    - Instance handling: negative rulings drop instances; the ruling layer cannot invent
      instances — it may only edit description/reasoning when the instance count matches.
    - On total adjudication failure, a fallback returns the raw candidates unfiltered.
-5. **Report generation** (`core/report_generator.py` + renderers):
-   - The **binary encoding** is produced here: width = number of configured categories
-     (10), bit *i* = 1 iff event *i* was adjudicated as detected.
+5. **Grounding verification** (`core/grounding_verification.py: GroundingVerificationStep`,
+   new, optional — `GROUNDING_CHECK_ENABLE`, default `true`):
+   - One VLM call sees the positive verdicts plus the **raw coarse frames only** (the
+     student view — no enhancement artifacts) and decides, per positive event, whether
+     its key visual elements can be anchored (`config/prompts/grounding_verification.yaml`).
+   - Positives that cannot be anchored are treated as hallucinations and overturned
+     in place: `detected=False`, instances cleared, `grounding_overturned=True`, the
+     VLM's analysis recorded in `grounding_note` and the summary prefixed with
+     "[裁决检出，锚定核验推翻]". Grounded positives keep the analysis as a note.
+   - Fail-open: disabled flag, no positives, missing frames/template, VLM or parse
+     errors all skip the step without touching results (`FatalAPIError` still aborts);
+     positives missing from the response are treated as grounded.
+6. **Report generation** (`core/report_generator.py` + renderers):
+   - The **binary encoding** is produced here: width = max configured `event_id` (11),
+     bit *i* = 1 iff the event with `event_id == i` was adjudicated as detected (after
+     grounding verification); bit 9 is the reserved "normal" placeholder, always 0.
    - Output: the `Report` model as JSON (default) or Markdown. With `--output`,
      far-enhancement composites are saved under `<output_dir>/tmp_img/<video_stem>/`
      and referenced from the Markdown report.
+
+With `--sft-label`, an optional **SFT label rewrite** step
+(`core/sft_label_rewrite.py`) runs between grounding verification and report
+generation — see [SFT sample JSON](#sft-sample-json---sft-label).
 
 ## Configuration
 
@@ -298,9 +331,11 @@ Lane Occupancy).
 
 ### `config/prompts/*.yaml`
 
-18 prompt templates across 11 files (`common.yaml` + `event_0..9.yaml`): per-event
+24 prompt templates across 13 files (`common.yaml` + `event_0..9.yaml` +
+`grounding_verification.yaml` + `sft_rewrite.yaml`): per-event
 expert prompts, ROI templates for enhancement, `scene_understanding`,
-`expert_response_reflection`, and `adjudication`. Multiple versions of a template are
+`expert_response_reflection`, `adjudication`, `grounding_verification`, and the SFT
+rewrite template. Multiple versions of a template are
 supported; selection: env pin → A/B traffic split → latest version.
 
 ### `config/annotation_spec.yaml`
@@ -327,6 +362,7 @@ Single provider (legacy style) or indexed multi-provider list (takes precedence 
 | `TRAFFIC_ANALYZER_DISK_CACHE_MAX_ENTRIES` | `2000` | Disk cache capacity (LRU by last access) |
 | `VLM_MAX_FRAMES` | `10` | Max frames per VLM call |
 | `EXPERT_ENABLE_REFLECTION` | `true` | Reflection consistency check on/off |
+| `GROUNDING_CHECK_ENABLE` | `true` | Post-adjudication raw-frame anchoring check on/off |
 | `SFT_LABEL_ENABLE` | `false` | SFT label rewrite step after adjudication (CLI: `--sft-label`) |
 | `SFT_LABEL_OUTPUT_DIR` | `output/sft_labels` | Output directory for SFT sample JSON (CLI: `--sft-output-dir`) |
 | `SAMPLING_FPS` | `1.0` | Coarse/precision sampling rate |
@@ -340,7 +376,9 @@ Single provider (legacy style) or indexed multi-provider list (takes precedence 
   `rule_id` (both fail-fast at load).
 - `annotation_spec.yaml` event IDs exactly match `event_categories.yaml`.
 - Every expert category references an existing `prompt_template_id`.
-- Event IDs are continuous from 0 (inactive categories included — they still occupy a bit).
+- Event IDs are the global annotation-doc v4.5 action numbers, continuous from 1
+  (inactive categories included — they still occupy a bit); id 9 is the reserved
+  "normal" placeholder and is intentionally skipped.
 - Active categories must use `expert_agent` mode — the other `DetectionMode` enum values
   (`direct_vlm`, `logic_chain`, `scene_tag`) have no execution path and are rejected.
 - Active categories declaring tools are rejected (the tool registry is empty).
@@ -379,39 +417,43 @@ Caching (`core/vlm_cache.py` + engine integration):
 
 ### Binary encoding
 
-`{bit_0_bit_1_..._bit_9}` — bit *i* corresponds to `event_id` *i*; width = number of
-configured categories (10). Inactive categories keep their bit and always report 0.
-Example: `{1_0_1_0_0_0_0_0_0_0}` = events 0 and 2 detected.
+`{bit_1_bit_2_..._bit_11}` — bit *i* corresponds to `event_id` *i*; `event_id`s are
+the global annotation-doc v4.5 action numbers, and the width = max configured
+`event_id` (11). Bit 9 is the reserved "normal" placeholder (no category, always 0).
+Inactive categories keep their bit and always report 0.
+Example: `{1_0_1_0_0_0_0_0_0_0_0}` = events 1 and 3 detected.
 
-| Bit | Event | Code | Active |
+| Bit (= `event_id`) | Event | Code | Active |
 |---|---|---|---|
-| 0 | Illegal Parking (违法停车) | A | ✓ |
-| 1 | Emergency Lane Occupancy (应急车道占用) | B | ✓ |
-| 2 | Traffic Accident (交通事故) | C | ✓ |
-| 3 | Person Presence in Highway (行人出现) | D | ✓ |
-| 4 | Motorcycle Presence (摩托车出现) | E | ✓ |
-| 5 | Heavy Congestion (拥堵) | F | ✓ |
-| 6 | Road Construction (道路施工) | G | ✓ |
-| 7 | Vehicle Reversing (车辆逆行/倒车) | H | ✓ |
-| 8 | Thrown Objects (抛洒物) | J | ✗ (bit reserved, always 0) |
-| 9 | Lane Change over Solid Line (实线变道) | K | ✗ (bit reserved, always 0) |
+| 1 | Illegal Parking (违法停车) | A | ✓ |
+| 2 | Emergency Lane Occupancy (应急车道占用) | B | ✓ |
+| 3 | Traffic Accident (交通事故) | C | ✓ |
+| 4 | Person Presence in Highway (行人出现) | D | ✓ |
+| 5 | Motorcycle Presence (摩托车出现) | E | ✓ |
+| 6 | Heavy Congestion (拥堵) | F | ✓ |
+| 7 | Road Construction (道路施工) | G | ✓ |
+| 8 | Vehicle Reversing (车辆逆行/倒车) | H | ✓ |
+| 9 | — (正常占位, "normal" placeholder) | — | reserved, always 0 |
+| 10 | Thrown Objects (抛洒物) | J | ✗ (bit reserved, always 0) |
+| 11 | Lane Change over Solid Line (实线变道) | K | ✗ (bit reserved, always 0) |
 
 ### Report
 
 The `Report` model (`models/report.py`) contains: `video_info`, `scene_summary`,
 `overall_traffic_description`, per-event `event_results` (detected flag, summary,
-time-bounded instances with evidence frames), raw `expert_candidates`, `binary_encoding`,
+time-bounded instances with evidence frames, grounding-verification outcome
+`grounding_overturned` / `grounding_note`), raw `expert_candidates`, `binary_encoding`,
 `final_classification`, `disposal_recommendations`, `adjudication_reasoning` + per-event
 `reasoning_chain`, `audit_log` (exclusions with reason and `rule_id`), `llm_usage_stats`,
 `analysis_duration_sec`, and `rejected` / `reject_reason`.
 
-The Markdown rendering (Chinese UI) sections: 视频信息 → 事件类别分析 (per-event expert
-output, enhancement evidence, adjudicated result, instances) → 最终分类 → 裁决详情 →
-处置建议 → 分析统计.
+The Markdown rendering (Chinese UI) sections: 视频信息 → 最终分析 (逐类别分析 per-category
+thoughts + 最终结论 as `classN: 事件名` lines, plus binary encoding and 处置建议) →
+分析统计 → 附录：详细分析过程 (专家原始分析、视觉证据、裁决详情等全部细节后移).
 
-**Reject reports**: `rejected=true`, empty event results, encoding `0_0_0_0_0_0_0_0_0_0`,
-`final_classification` = "视频被筛除/无法分析，未进行事件检测。". The CLI writes **no
-output file** for rejected videos and exits with code 2.
+**Reject reports**: `rejected=true`, empty event results, encoding
+`0_0_0_0_0_0_0_0_0_0_0`, `final_classification` = "视频被筛除/无法分析，未进行事件检测。".
+The CLI writes **no output file** for rejected videos and exits with code 2.
 
 ### SFT sample JSON (`--sft-label`)
 
@@ -430,25 +472,14 @@ With `--sft-label` enabled, one training sample per video is written to
 }
 ```
 
-- `action` holds the annotation-doc action numbers of the detected events (empty list =
-  normal sample). Mapping from `event_id` (action 9 is a "normal" placeholder in the
-  annotation doc v4.5 and is intentionally skipped):
-
-| event_id | Event | action |
-|---|---|---|
-| 0 | Illegal Parking (违法停车) | 1 |
-| 1 | Emergency Lane Occupancy (应急车道占用) | 2 |
-| 2 | Traffic Accident (交通事故) | 3 |
-| 3 | Person Presence in Highway (行人出现) | 4 |
-| 4 | Motorcycle Presence (摩托车出现) | 5 |
-| 5 | Heavy Congestion (拥堵) | 6 |
-| 6 | Road Construction (道路施工) | 7 |
-| 7 | Vehicle Reversing (车辆逆行/倒车) | 8 |
-| 8 | Thrown Objects (抛洒物) | 10 |
-| 9 | Lane Change over Solid Line (实线变道) | 11 |
-
+- `action` holds the detected events' `event_id`s directly (empty list = normal
+  sample): `event_id` globally uses the annotation-doc v4.5 action numbers (1–8, 10,
+  11), so the SFT `action` / `classN` equals `event_id` with no mapping. Action 9 is
+  the "normal" placeholder in the annotation doc v4.5 — it maps to no event category
+  and never appears in `action`.
 - `description` is assembled in code from the rewrite VLM response:
-  - `<think>` — one thinking entry per event category (event_id 0–9, fixed order).
+  - `<think>` — one thinking entry per active event category, in `event_id` order
+    (1–8 with the shipped config; inactive categories get no entry).
     Undetected events state "未发现" plus a one-sentence reason; detected events must
     cover the required description elements of the annotation spec v4.5 (location /
     lane type, incoming/outgoing direction, vehicle or object type, visual
@@ -481,10 +512,10 @@ Batch evaluation output is written to `<workspace>/analysis/evaluation/latest.js
 python3 -m pytest traffic_analyzer/tests -q
 ```
 
-The suite (currently 407 passed, 1 skipped — the skip is expected when the installed
-anthropic SDK lacks `OverloadedError`) mocks all VLM calls and covers: config loading
+The suite (currently 599 passed) mocks all VLM calls and covers: config loading
 and validation, CLI and exit codes, video preprocessing, the expert layer, far-enhancement
-pipelines, reflection, adjudication, report generation, providers, retry/failover, caches.
+pipelines, reflection, adjudication, grounding verification, SFT label rewrite, report
+generation, providers, retry/failover, caches.
 
 Batch workflow helpers:
 
@@ -519,6 +550,10 @@ on fatal API errors, and treats exit code 2 as "rejected, no report expected".
   rejects active categories that declare tools.
 - **Reflection is fail-open** — if the reflection call fails or returns unparseable
   output, the original candidate is kept; disable with `EXPERT_ENABLE_REFLECTION=false`.
+- **Grounding verification is fail-open** — if the step is skipped or its VLM call
+  fails/returns unparseable output, adjudicated positives are kept unchanged; a
+  positive missing from the response is treated as grounded. Disable with
+  `GROUNDING_CHECK_ENABLE=false`.
 - **`batch_infer.py --cv-tracks-dir` is currently broken**: it passes a `--cv-tracks`
   flag the CLI's `analyze` command does not accept; CV-track cross-validation is not
   wired into the CLI.

@@ -3,6 +3,13 @@
 Renders composite images, motion-reflection composites, per-frame ROI tables,
 and construction-specific evidence tables produced by the far-enhancement
 expert agents.
+
+[文件说明]
+作用:远距离目标增强证据渲染器(_render_far_enhancement),按事件类别渲染增强合成图、
+     运动反射验证图、逐帧 ROI 表与施工证据区域表等 Markdown 片段。
+上游:core/report_markdown_renderer.py(附录渲染专家证据时调用)。
+下游:读取专家候选 raw_vlm_response 中的图像路径与 far_enhancement 结构化数据,
+     不依赖其他项目模块。
 """
 
 from __future__ import annotations
@@ -21,16 +28,16 @@ def _render_far_enhancement(
     if not candidate:
         return []
 
-    if event_id == 4:
+    if event_id == 5:
         title = "远距离非机动车增强证据"
         composite_alt = "远距离非机动车增强"
-    elif event_id == 3:
+    elif event_id == 4:
         title = "远距离行人增强证据"
         composite_alt = "远距离行人增强"
-    elif event_id == 6:
+    elif event_id == 7:
         title = "施工证据合成图"
         composite_alt = "施工证据合成图"
-    elif event_id == 1:
+    elif event_id == 2:
         title = "应急车道占用增强证据"
         composite_alt = "应急车道占用增强证据"
     else:
@@ -44,7 +51,7 @@ def _render_far_enhancement(
     gallery_path = raw_vlm_response.get("gallery_image_path")
     has_header = False
 
-    if gallery_path and event_id == 6:
+    if gallery_path and event_id == 7:
         lines.append(f"#### {title}")
         lines.append(f"**施工证据合成图**: `{gallery_path}`")
         lines.append("")
@@ -72,7 +79,7 @@ def _render_far_enhancement(
     far_enhancement = raw_vlm_response.get("far_enhancement", {}) or {}
 
     # Construction evidence region table.
-    if event_id == 6 and far_enhancement.get("evidence_regions"):
+    if event_id == 7 and far_enhancement.get("evidence_regions"):
         lines.append("#### 证据区域表")
         lines.append("")
         lines.append("| tag | bbox | confidence | 面积(px) | 宽高比 | 说明 |")
@@ -91,7 +98,7 @@ def _render_far_enhancement(
         lines.append("")
 
     frame_analysis_log = far_enhancement.get("frame_analysis_log")
-    if frame_analysis_log and event_id != 6:
+    if frame_analysis_log and event_id != 7:
         lines.append("#### 逐帧 ROI 分析")
         lines.append("")
         lines.append("| 帧号 | 是否有候选 | bbox | 面积(px) | 宽高比 | 置信度 | 运动分数 | 原因 |")
@@ -123,7 +130,7 @@ def _render_far_enhancement(
         lines.append("")
 
     # Emergency lane occupancy enhancement evidence.
-    if event_id == 1:
+    if event_id == 2:
         occupancy = raw_vlm_response.get("occupancy_detection") or {}
         mask_overlay = raw_vlm_response.get("mask_overlay_image_path")
         vehicle_boxes = raw_vlm_response.get("vehicle_boxes_image_path")

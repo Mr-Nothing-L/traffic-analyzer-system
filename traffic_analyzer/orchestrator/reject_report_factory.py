@@ -1,4 +1,10 @@
-"""Factory for building rejection reports from the prefilter step."""
+"""Factory for building rejection reports from the prefilter step.
+
+[文件说明]
+作用:工厂函数 generate_reject_report()——为预处理预筛拒绝(或视频无法解码)的视频生成标记 rejected=True、含拒绝原因与全宽二进制编码的 Report。
+上游:orchestrator/analysis_orchestrator.py(预筛拒绝/无可用帧分支);tests/test_orchestrator.py。
+下游:core/report_generator.py(ReportGenerator.generate)、models/schemas.py(Report、VideoMetadata)。
+"""
 
 from __future__ import annotations
 
@@ -27,7 +33,7 @@ def generate_reject_report(
         reject_reason: Human-readable reason for rejection.
         checks: Optional prefilter check details for debugging.
         usage_stats: Optional LLM usage statistics.
-        total_categories: Total configured event categories, used to give the
+        total_categories: Max configured event_id, used to give the
             binary encoding its full bit width (no detection was performed).
 
     Returns:

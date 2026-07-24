@@ -1,5 +1,10 @@
 """
 Video and keyframe models for the traffic analyzer framework.
+
+[文件说明]
+作用:定义视频元数据 VideoMetadata(时长/帧率/分辨率等,冻结模型)、Keyframe 与 KeyframeSequence(粗采样+精细采样关键帧序列)、PrefilterResult(预处理预筛结果)。
+上游:models/schemas.py、models/context.py、models/report.py 引用;由 core/video_preprocessor.py 与 orchestrator/video_meta_extractor.py 产出,被 orchestrator/analysis_orchestrator.py、core/report_generator.py 消费。
+下游:pydantic。
 """
 
 from __future__ import annotations

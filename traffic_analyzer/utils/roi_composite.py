@@ -1,4 +1,13 @@
-"""Single-ROI enhancement composite."""
+"""Single-ROI enhancement composite.
+
+[文件说明]
+作用:``create_composite`` 生成单 ROI 增强拼图:左图为标注了放大框与中心十字的
+    原图,右图为放大后的 ROI 裁剪,用于让 VLM 看清远距离小目标。
+上游:utils/far_non_motor_enhancer.py 再导出后服务于
+    core/expert_agent_far_enhancement.py;裁剪/缩放/拼装内部函数亦被
+    utils/roi_motion.py 复用。
+下游:utils/bbox_geometry.py、utils/image_drawing.py;PIL/numpy。
+"""
 
 from __future__ import annotations
 

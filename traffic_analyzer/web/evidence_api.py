@@ -12,6 +12,16 @@ only allows edits to the user-editable coordinate/label fields:
 
 The SFT PUT endpoint only allows ``description`` / ``action`` edits.
 Any other difference versus the on-disk version is rejected with 422.
+
+[文件说明]
+作用:结果读取与证据/SFT 编辑接口。GET 读取 <workspace>/analysis/<stem>/ 下的
+report.md、<stem>.json(SFT 样本)、<stem>_evidence.json 及图片;evidence PUT 仅允许修改
+标定多边形与证据框/标签,SFT PUT 仅允许 description/action,其余字段与磁盘版本比对
+不一致即 422;写入采用 tmp+os.replace 原子写并按 stem 加锁,同 stem 有在跑 infer 任务
+时返回 409。
+上游:web/app.py(挂载路由);web/static 前端(结果查看与标注编辑)。
+下游:web/workspace.py(路径与 stem 校验)、web/jobs.py(在跑任务检查)、
+config/event_categories.yaml(/api/config/events 供 SFT 编辑器按事件分框)。
 """
 
 from __future__ import annotations

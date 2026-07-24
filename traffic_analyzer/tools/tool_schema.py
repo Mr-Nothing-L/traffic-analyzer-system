@@ -5,6 +5,14 @@
 供模型理解可用工具，供路由层校验和执行。
 
 所有类使用 Pydantic v2 BaseModel 保证类型安全和序列化。
+
+[文件说明]
+作用:工具定义层。``ToolParameter``/``ToolConstraint`` 描述参数与约束(范围、
+    长度、正则、枚举、元素类型),``ToolDefinition`` 是工具的权威元数据(可导出
+    OpenAI Function Calling、Anthropic 格式与 Markdown),``ToolRegistry`` 维护
+    定义到 handler 的映射,``validate_arguments`` 供路由层做入参校验。
+上游:tools/tool_router.py;core/expert_agent_tools.py(经 tool_registry)。
+下游:pydantic v2;无外部端点。
 """
 
 from __future__ import annotations

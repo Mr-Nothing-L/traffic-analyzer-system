@@ -1,5 +1,10 @@
 """
 Unit tests for vlm_response_parser.py.
+
+[文件说明]
+作用:测试 VLM 响应解析,覆盖直接 JSON、围栏代码块及平衡花括号子串提取等解析路径。
+上游:pytest 自动发现并执行本文件测试。
+下游:traffic_analyzer/core/vlm_response_parser.py(被测模块)。
 """
 
 from __future__ import annotations

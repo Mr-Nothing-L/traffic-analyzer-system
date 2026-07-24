@@ -2,9 +2,9 @@
 
 # 交通事件分析系统
 
-基于多模态视觉语言模型（VLM）的高速公路监控视频事件检测框架。输入一段视频，输出一份 Markdown / JSON 分析报告和一个 **N 位二进制事件编码**（当前配置 10 位，bit i ↔ event_id i）。事件定义、Prompt 模板、裁决规则、标注规范全部通过 YAML 配置驱动，新增事件无需修改代码。
+基于多模态视觉语言模型（VLM）的高速公路监控视频事件检测框架。输入一段视频，输出一份 Markdown / JSON 分析报告和一个 **N 位二进制事件编码**（当前配置 11 位，bit i ↔ event_id i，bit 9 为保留的"正常"占位、恒为 0）。事件定义、Prompt 模板、裁决规则、标注规范全部通过 YAML 配置驱动，新增事件无需修改代码。
 
-架构概要：视频预处理后，系统为每个激活事件并行运行一个独立的 **ExpertAgent**（单事件 VLM 检测，部分事件带远距离 ROI 证据增强），每个候选结果再经一次可选的**反思一致性检查**；随后由一次**裁决（Adjudication）VLM 调用**按业务规则对所有候选做跨事件裁决，最终生成报告与二进制编码。
+架构概要：视频预处理后，系统为每个激活事件（当前 8 个）并行运行一个独立的 **ExpertAgent**（单事件 VLM 检测，部分事件带远距离 ROI 证据增强），每个候选结果再经一次可选的**反思一致性检查**；随后由一次**裁决（Adjudication）VLM 调用**按业务规则对所有候选做跨事件裁决；裁决为阳性的事件再经一次**锚定核验**（仅以原始帧核验能否锚定关键视觉元素，无法锚定的阳性视为幻觉就地推翻，`GROUNDING_CHECK_ENABLE` 默认开）；`--sft-label` 时在核验之后追加 SFT 改写。最终生成报告与二进制编码。
 
 > 当前版本：v5.0.0（见 `traffic_analyzer/__init__.py`）。唯一有执行路径的检测模式是 `expert_agent`；工具层框架保留但注册表为空。
 
@@ -14,8 +14,9 @@
 
 - **YAML 驱动的事件体系** — 事件定义、Prompt 模板、裁决规则、标注规范均在 `traffic_analyzer/config/` 下配置；`validate-config` 子命令提供加载期与交叉引用双重校验。
 - **专家代理检测（ExpertAgent）** — 每个激活事件一次专用 VLM 调用，只做事实识别（看到就报），不做排除判断；所有专家通过 `ThreadPoolExecutor` 并行执行。
-- **远距离 ROI 证据增强** — 在 Prompt 模板中开启 `far_object_enhancement.enabled: true` 的事件（当前 event_id 1/3/4/6）走 ROI 两阶段流程：先定位候选区域并合成放大/对比证据图，再由最终分类器判定。
+- **远距离 ROI 证据增强** — 在 Prompt 模板中开启 `far_object_enhancement.enabled: true` 的事件（当前 event_id 2/4/5/7）走 ROI 两阶段流程：先定位候选区域并合成放大/对比证据图，再由最终分类器判定。
 - **反思一致性检查（Reflection）** — 每个专家候选默认再经一次纯文本 VLM 核查（`expert_response_reflection` 模板），纠正 `detected` 与 summary/instances 相互矛盾的结果；失败时保留原候选（fail-open），可用 `EXPERT_ENABLE_REFLECTION=false` 关闭。
+- **锚定核验（Grounding Verification，新增）** — 裁决之后的可选步骤：一次 VLM 调用只看原始粗采样帧（学生视角，不含任何增强产物），逐一核验裁决阳性事件的关键视觉元素能否锚定；无法锚定的阳性视为幻觉并就地推翻（`detected=False`、`grounding_overturned=True`），核验分析记入 `grounding_note`。失败时保留原结果（fail-open），可用 `GROUNDING_CHECK_ENABLE=false` 关闭。
 - **多提供者 VLM 引擎** — 支持 anthropic / google / aliyun；每提供者独立重试 + 指数退避，限流/配额/鉴权/5xx 类错误自动故障转移到下一个提供者；所有提供者耗尽时抛出 `FatalAPIError`，分析明确中止而不是输出全零报告。
 - **两层响应缓存** — 内存 LRU + SQLite 磁盘缓存（跨进程共享），按 prompt+图像内容寻址，并按 provider+model 过滤；损坏行自动清除自愈。
 - **劣质视频拒绝路径** — 预过滤器（可选）与"零可用帧"检查会生成 reject report，CLI 以退出码 2 结束且不保存报告文件。
@@ -87,7 +88,7 @@ python3 -m traffic_analyzer analyze \
 | `--min-frames, -m` | VLM 最大输入帧数（同时设置 `SCENE_UNDERSTANDING_MIN_FRAMES` 与 `VLM_MAX_FRAMES`） | 10（由 `VLM_MAX_FRAMES` 决定） |
 | `--config-dir, -d` | 配置目录 | `./traffic_analyzer/config` |
 | `--scene-understanding, -s` | 外部场景理解 JSON（可选，跳过内置推断） | - |
-| `--sft-label` | 启用 SFT label 模式（裁决后追加 rewrite，每视频产出 1 个训练样本 JSON） | 关闭 |
+| `--sft-label` | 启用 SFT label 模式（裁决与锚定核验后追加 rewrite，每视频产出 1 个训练样本 JSON） | 关闭 |
 | `--sft-output-dir` | SFT 样本输出目录 | `output/sft_labels` |
 
 退出码：
@@ -107,7 +108,7 @@ python3 -m traffic_analyzer analyze \
   --sft-output-dir ./output/sft_labels   # 可选；此即默认值
 ```
 
-在裁决之后追加一个 rewrite 步骤：额外一次 VLM 调用**只看原始抽帧 + 裁决结论**（裁决作为特权提示），为每个视频写出 **1 个 SFT 训练样本 JSON** 到 `--sft-output-dir`（默认 `output/sft_labels`）。主报告不受影响；该模式每个视频**多 1 次 VLM 调用**。阳性事件在原始帧中无法锚定的样本会被隔离到 `quarantine/` 子目录，见下文「SFT 样本 JSON」。
+在裁决与锚定核验之后追加一个 rewrite 步骤：额外一次 VLM 调用**只看原始抽帧 + 裁决结论**（裁决作为特权提示），为每个视频写出 **1 个 SFT 训练样本 JSON** 到 `--sft-output-dir`（默认 `output/sft_labels`）；样本的 `action` 直接取检出事件的 event_id（即标注文档 v4.5 编号，无需映射）。主报告不受影响；该模式每个视频**多 1 次 VLM 调用**。阳性事件在原始帧中无法锚定的样本会被隔离到 `quarantine/` 子目录，见下文「SFT 样本 JSON」。
 
 #### 可选：Web UI（`traffic_analyzer web`）
 
@@ -132,7 +133,7 @@ from traffic_analyzer.orchestrator.analysis_orchestrator import AnalysisOrchestr
 
 orch = AnalysisOrchestrator.from_config_dir('traffic_analyzer/config')
 report = orch.analyze('path/to/video.mp4')
-print(report.binary_encoding.encoding_string)  # 如 "1_0_1_0_0_0_0_0_0_0"
+print(report.binary_encoding.encoding_string)  # 如 "1_0_1_0_0_0_0_0_0_0_0"
 print(report.event_results)
 ```
 
@@ -206,7 +207,9 @@ traffic_analyzer/
 │   ├── .env.example                # LLM/推理/缓存/prefilter 配置示例
 │   └── prompts/                    # VLM Prompt 模板（Jinja2）
 │       ├── common.yaml             # scene_understanding 先验 / expert_response_reflection / adjudication
-│       └── event_0.yaml … event_9.yaml  # 每事件检测模板；1/3/4/6 另含 ROI 模板与 far_object_enhancement 配置
+│       ├── event_0.yaml … event_9.yaml  # 每事件检测模板；event_1/3/4/6.yaml（对应事件 2/4/5/7）另含 ROI 模板与 far_object_enhancement 配置
+│       ├── grounding_verification.yaml  # 裁决后锚定核验模板（原始帧学生视角）
+│       └── sft_rewrite.yaml        # SFT label 改写模板（--sft-label）
 ├── core/
 │   ├── config_manager.py           # YAML/.env 加载、交叉校验、热重载（ConfigManager）
 │   ├── video_preprocessor.py       # 视频元信息、prefilter、固定 FPS 抽帧（质量过滤+去重）
@@ -214,6 +217,8 @@ traffic_analyzer/
 │   ├── expert_agent.py             # 单事件检测代理（兼容层，串联选图/模板/增强/反思）
 │   ├── expert_agent_far_enhancement.py  # 远距离 ROI 证据增强流程（含应急车道专用流程、车辆语义否决）
 │   ├── expert_agent_tools.py       # 工具调用执行辅助（遗留路径，当前无注册工具）
+│   ├── grounding_verification.py   # 裁决后锚定核验（原始帧核验阳性事件，不可锚定者就地推翻）
+│   ├── sft_label_rewrite.py        # 可选 SFT 训练样本改写步骤（--sft-label）
 │   ├── vlm_engine.py               # VLM 统一调用：模板渲染、重试、故障转移、缓存、用量统计
 │   ├── vlm_provider_clients.py     # 各提供者 payload 构造与 API 调用（anthropic/google/aliyun，aliyun 走 OpenAI 兼容协议）
 │   ├── vlm_error_classifier.py     # 错误分类：可重试 / 触发故障转移 / 致命错误
@@ -236,7 +241,7 @@ traffic_analyzer/
 │   ├── config.py                   # SystemConfig、LLMProviderConfig、SamplingConfig（含 env 默认值）
 │   └── context.py                  # AnalysisContext（流水线共享上下文）
 ├── orchestrator/
-│   ├── analysis_orchestrator.py    # 主编排器：元信息 → 预处理 → 专家层 → 裁决 → 报告
+│   ├── analysis_orchestrator.py    # 主编排器：元信息 → 预处理 → 专家层 → 裁决 → 锚定核验 → 报告
 │   ├── video_meta_extractor.py     # 视频元信息提取
 │   ├── reject_report_factory.py    # 拒绝报告（reject report）生成
 │   ├── candidate_fallback.py       # 裁决失败时候选 → EventResult 回退
@@ -286,17 +291,22 @@ Dockerfile / docker-compose.yml           # 可选 CPU 开发容器（另附 Doc
 3. **ExpertAgentLayer**（`core/pipeline_steps.py`）：对全部 `is_active=true` 事件用 `ThreadPoolExecutor` 并行运行 ExpertAgent。单个 ExpertAgent 的流程（`core/expert_agent.py`）：
    - 从粗采样帧中均匀抽取至多 `VLM_MAX_FRAMES` 帧；
    - 加载该事件的 Prompt 模板，并把 `scene_understanding` 模板中的场景先验规则（方向判定、应急车道识别等）注入 system prompt；
-   - 若模板开启 `far_object_enhancement`（当前 event_id 1/3/4/6），走 ROI 增强流程（见下）；否则直接一次 VLM 调用并解析为 `EventCandidate`；
+   - 若模板开启 `far_object_enhancement`（当前 event_id 2/4/5/7），走 ROI 增强流程（见下）；否则直接一次 VLM 调用并解析为 `EventCandidate`；
    - 若启用反思（默认开），用 `expert_response_reflection` 模板对候选做一次纯文本一致性核查，纠正自相矛盾的结果；核查本身失败则保留原候选（fail-open）；
    - 单个专家出错降级为 `detected=False` 候选；`FatalAPIError`（所有提供者耗尽/配额/鉴权）则中止整个分析。
 4. **AdjudicationStep**（`core/pipeline_steps.py`）：一次 VLM 调用（`adjudication` 模板，带 JSON schema 约束），输入全部候选 + 关键帧 + 裁决规则 + 标注规范，输出最终 `event_results`、`reasoning_chain` 与 `audit_log`。若返回的事件集合不完整，最多重试 5 轮：候选异常的事件单独重跑对应专家，其余情况在提示中列出缺失事件后重新裁决；5 轮后仍缺失的事件直接从专家候选回填。裁决步骤整体失败时回退为"候选原样转 EventResult"。
-5. **报告生成**（`core/report_generator.py`）：按 `event_results` 生成 **N 位二进制编码**（宽度 = 配置的事件总数，当前 10；未激活事件保留其 bit 但恒为 0）、最终分类文本与 Markdown/JSON 报告。
+5. **锚定核验（GroundingVerificationStep，新增，`core/grounding_verification.py`）**：可选步骤，`GROUNDING_CHECK_ENABLE` 默认开。一次 VLM 调用输入全部裁决阳性结论 + **仅原始粗采样帧**（学生视角，不含裁剪/放大/红框等增强产物），按 `grounding_verification` 模板逐一判定各阳性事件的关键视觉元素能否锚定：
+   - 无法锚定的阳性视为幻觉并就地推翻：`detected=False`、清空实例、`grounding_overturned=True`，VLM 分析记入 `grounding_note`，summary 加前缀"[裁决检出，锚定核验推翻]"；可锚定的阳性保留该分析作为备注；
+   - fail-open：开关关闭、无阳性事件、缺帧/缺模板、VLM 或解析失败均跳过且不改动结果（`FatalAPIError` 仍中止分析）；响应中缺失的阳性按可锚定处理。
+6. **报告生成**（`core/report_generator.py`）：按锚定核验后的 `event_results` 生成 **N 位二进制编码**（宽度 = 最大 event_id，当前 11；bit i ↔ event_id i，bit 9 为保留的"正常"占位、恒为 0；未激活事件保留其 bit 但恒为 0）、最终分类文本与 Markdown/JSON 报告。
+
+启用 `--sft-label` 时，可选的 **SFT label 改写**步骤（`core/sft_label_rewrite.py`）在锚定核验之后、报告生成之前运行，见下文「SFT 样本 JSON」。
 
 **远距离 ROI 增强流程**（`core/expert_agent_far_enhancement.py`，模板驱动）：
 
-- **event_id=3（行人）/ 4（摩托车）**：逐帧 ROI 检测（归一化 bbox + 0–1 连续置信度 + 遮挡标志）→ 按置信度/面积/宽高比/遮挡/相邻帧运动分数排序取 top-K → 生成双图合成（单帧放大 + 相邻帧运动对比）→ 最终分类器。分类器为负但 ROI 证据充分时可安全回退为阳性。
-- **event_id=1（应急车道占用）**：先用 `emergency_lane_calibration` 标定应急车道/导流区，再用 `emergency_lane_vehicle_roi` 检测车辆 ROI，生成车道叠加图、车辆红框图与放大网格等证据，最后由 `emergency_lane_occupancy_detection` 分类器判定。
-- **event_id=6（道路施工）**：从中间帧提取多类施工证据区域（锥桶/人员/工程车/隔离栏/标志牌，含 `on_ground` 标志），拼成多 ROI 画廊后送最终分类器；ROI 证据满足施工作业区定义时可经施工专用回退提升为阳性。
+- **event_id=4（行人）/ 5（摩托车）**：逐帧 ROI 检测（归一化 bbox + 0–1 连续置信度 + 遮挡标志）→ 按置信度/面积/宽高比/遮挡/相邻帧运动分数排序取 top-K → 生成双图合成（单帧放大 + 相邻帧运动对比）→ 最终分类器。分类器为负但 ROI 证据充分时可安全回退为阳性。
+- **event_id=2（应急车道占用）**：先用 `emergency_lane_calibration` 标定应急车道/导流区，再用 `emergency_lane_vehicle_roi` 检测车辆 ROI，生成车道叠加图、车辆红框图与放大网格等证据，最后由 `emergency_lane_occupancy_detection` 分类器判定。
+- **event_id=7（道路施工）**：从中间帧提取多类施工证据区域（锥桶/人员/工程车/隔离栏/标志牌，含 `on_ground` 标志），拼成多 ROI 画廊后送最终分类器；ROI 证据满足施工作业区定义时可经施工专用回退提升为阳性。
 - 增强流程生成的证据图按视频保存在 `<报告输出目录>/tmp_img/<video_stem>/`（未指定 `--output` 时为 `./output/tmp_img/<video_stem>/`），Markdown 报告以相对路径引用。
 
 ---
@@ -307,9 +317,11 @@ Dockerfile / docker-compose.yml           # 可选 CPU 开发容器（另附 Doc
 
 | 文件 | 内容 |
 |---|---|
-| `event_categories.yaml` | 10 个事件定义（`event_id` / `event_code` / `name_zh` / `definition` / `detection_mode` / `prompt_template_id` / `confidence_threshold` / `is_active`）+ `adjudication_rules`（当前仅 1 条：`emergency_parking_both`，应急车道静止车辆同时触发违停与占用双事件）。关闭事件请置 `is_active: false`（保留其编码位），不要整段注释。 |
+| `event_categories.yaml` | 10 个事件定义（`event_id` / `event_code` / `name_zh` / `definition` / `detection_mode` / `prompt_template_id` / `confidence_threshold` / `is_active`）+ `adjudication_rules`（当前仅 1 条：`emergency_parking_both`，应急车道静止车辆同时触发违停与占用双事件）。`event_id` 全局采用标注文档 v4.5 的 action 编号（1–8/10/11，9 为保留的"正常"占位、不对应任何事件）。关闭事件请置 `is_active: false`（保留其编码位），不要整段注释。 |
 | `prompts/common.yaml` | `scene_understanding`（场景先验规则，注入各专家 system prompt）、`expert_response_reflection`（反思模板）、`adjudication`（裁决模板）。 |
-| `prompts/event_0.yaml` … `event_9.yaml` | 每事件检测模板；event 1/3/4/6 另含 ROI 检测模板与 `far_object_enhancement` 配置（`enabled`、`roi_template_id`、`top_k` 等）。同一 `template_id` 可有多版本，支持 A/B `traffic_percentage` 分流。 |
+| `prompts/event_0.yaml` … `event_9.yaml` | 每事件检测模板；event_1/3/4/6.yaml（对应事件 2/4/5/7）另含 ROI 检测模板与 `far_object_enhancement` 配置（`enabled`、`roi_template_id`、`top_k` 等）。同一 `template_id` 可有多版本，支持 A/B `traffic_percentage` 分流。 |
+| `prompts/grounding_verification.yaml` | `grounding_verification`（锚定核验模板，裁决后、SFT 改写前）。 |
+| `prompts/sft_rewrite.yaml` | SFT label 改写模板（`--sft-label`）。 |
 | `annotation_spec.yaml` | 标注规范（源自根目录《交通事件数据标注说明文档_v4.5》），注入裁决 Prompt；其 event_id 集合必须与 `event_categories.yaml` 完全一致。 |
 | `.env`（由 `.env.example` 复制） | LLM 提供者、推理参数、缓存、prefilter 等。LLM 相关变量只从 `.env` 文件读取，忽略 shell 环境变量。 |
 
@@ -330,6 +342,7 @@ Dockerfile / docker-compose.yml           # 可选 CPU 开发容器（另附 Doc
 | `TRAFFIC_ANALYZER_DISK_CACHE_MAX_ENTRIES` | 磁盘缓存容量（超出按最久未访问淘汰） | 2000 |
 | `VLM_MAX_FRAMES` | 每次 VLM 调用的最大输入帧数 | 10 |
 | `EXPERT_ENABLE_REFLECTION` | 专家候选反思一致性检查 | true |
+| `GROUNDING_CHECK_ENABLE` | 裁决后锚定核验（原始帧核验阳性事件，不可锚定者推翻） | true |
 | `SFT_LABEL_ENABLE` | SFT label 模式（裁决后追加 rewrite；等价 CLI `--sft-label`） | false |
 | `SFT_LABEL_OUTPUT_DIR` | SFT 样本 JSON 输出目录（CLI `--sft-output-dir`） | `output/sft_labels` |
 | `SAMPLING_FPS` | 抽帧帧率 | 1.0 |
@@ -347,7 +360,7 @@ Dockerfile / docker-compose.yml           # 可选 CPU 开发容器（另附 Doc
 4. 裁决规则 priority 在 [0, 1000]；
 5. Prompt 模板 A/B 流量百分比合计有效；
 6. 激活事件不得声明 tools（工具注册表为空，声明了也不会生效）；
-7. event_id 必须从 0 连续（含未激活事件，保证编码位宽正确）；
+7. event_id 为标注文档 v4.5 的 action 编号，必须从 1 连续（含未激活事件，保证编码位宽正确）；9 是保留的"正常"占位，刻意跳过；
 8. 激活事件的 `detection_mode` 必须是 `expert_agent` —— 这是当前唯一有执行路径的模式。
 
 ---
@@ -370,24 +383,25 @@ Dockerfile / docker-compose.yml           # 可选 CPU 开发容器（另附 Doc
 
 ### 二进制事件编码
 
-编码宽度 = 配置的事件总数（当前 10），格式 `{bit_0_bit_1_..._bit_9}`，**bit i ↔ event_id i**。未激活事件保留其 bit 但恒为 0。示例：`1_0_1_0_0_0_0_0_0_0` 表示检出事件 0 与 2。
+编码宽度 = 最大 event_id（当前 11），格式 `{bit_1_bit_2_..._bit_11}`，**bit i ↔ event_id i**（event_id 即标注文档 v4.5 的 action 编号）。bit 9 为保留的"正常"占位（不对应任何事件，恒为 0）；未激活事件保留其 bit 但恒为 0。示例：`1_0_1_0_0_0_0_0_0_0_0` 表示检出事件 1 与 3。
 
-| bit | 编码 | 事件 | is_active | 远距离 ROI 增强 |
+| bit（= event_id） | 编码 | 事件 | is_active | 远距离 ROI 增强 |
 |---|---|---|---|---|
-| 0 | A | 违法停车 | ✓ | – |
-| 1 | B | 应急车道占用 | ✓ | ✓（车道标定 + 车辆 ROI） |
-| 2 | C | 交通事故 | ✓ | – |
-| 3 | D | 高速公路行人出现 | ✓ | ✓（逐帧 ROI + 双图合成） |
-| 4 | E | 摩托车出现 | ✓ | ✓（逐帧 ROI + 双图合成） |
-| 5 | F | 拥堵 | ✓ | – |
-| 6 | G | 道路施工 | ✓ | ✓（多 ROI 证据画廊） |
-| 7 | H | 车辆逆行/倒车 | ✓ | – |
-| 8 | J | 抛洒物 | ✗ | – |
-| 9 | K | 实线变道 | ✗ | – |
+| 1 | A | 违法停车 | ✓ | – |
+| 2 | B | 应急车道占用 | ✓ | ✓（车道标定 + 车辆 ROI） |
+| 3 | C | 交通事故 | ✓ | – |
+| 4 | D | 高速公路行人出现 | ✓ | ✓（逐帧 ROI + 双图合成） |
+| 5 | E | 摩托车出现 | ✓ | ✓（逐帧 ROI + 双图合成） |
+| 6 | F | 拥堵 | ✓ | – |
+| 7 | G | 道路施工 | ✓ | ✓（多 ROI 证据画廊） |
+| 8 | H | 车辆逆行/倒车 | ✓ | – |
+| 9 | – | —（"正常"占位） | 保留位，恒 0 | – |
+| 10 | J | 抛洒物 | ✗ | – |
+| 11 | K | 实线变道 | ✗ | – |
 
 ### 报告结构
 
-Markdown 报告主要章节：视频信息 → 事件类别分析（检测总览 + 逐事件详情，含专家原始输出、检测实例、增强证据图）→ 最终分类（含编码解读）→ 裁决详情（总体推理 / 逐事件推理链 / 审计日志）→ 处置建议 → 分析统计（token 用量、耗时等）。JSON 报告为同一 `Report` 模型的完整序列化。
+Markdown 报告主要章节（关键结论前置）：视频信息 → 最终分析（逐类别思考 + 最终结论 `classN: 事件名` 列表，附二进制编码与处置建议）→ 分析统计（token 用量、耗时等）→ 附录：详细分析过程（专家原始分析、视觉证据、检测总览、裁决详情等全部细节后移）。逐事件结果中含锚定核验结果字段（`grounding_overturned` / `grounding_note`）。JSON 报告为同一 `Report` 模型的完整序列化。
 
 ### 拒绝报告（reject report）
 
@@ -409,23 +423,9 @@ Markdown 报告主要章节：视频信息 → 事件类别分析（检测总览
 }
 ```
 
-- `action` 为检出事件在标注文档中的 action 编号（空数组 = 正常样本）。event_id → action 映射如下（action 9 在标注文档 v4.5 中是"正常"占位，刻意跳过）：
-
-| event_id | 事件 | action |
-|---|---|---|
-| 0 | 违法停车 | 1 |
-| 1 | 应急车道占用 | 2 |
-| 2 | 交通事故 | 3 |
-| 3 | 高速公路行人出现 | 4 |
-| 4 | 摩托车出现 | 5 |
-| 5 | 拥堵 | 6 |
-| 6 | 道路施工 | 7 |
-| 7 | 车辆逆行/倒车 | 8 |
-| 8 | 抛洒物 | 10 |
-| 9 | 实线变道 | 11 |
-
+- `action` 直接取检出事件的 event_id（空数组 = 正常样本）：event_id 全局采用标注文档 v4.5 的 action 编号（1–8、10、11），因此 SFT 样本的 `action` / `classN` 即 event_id，无需映射。action 9 在标注文档 v4.5 中是"正常"占位，不对应任何事件类别，不会出现在 `action` 中。
 - `description` 由代码按 rewrite VLM 的响应拼装：
-  - `<think>` — 按 event_id 0–9 固定顺序逐类思考：未检出的事件写"未发现" + 一句理由；检出的事件必须覆盖标注文档 v4.5 规定的必要描述元素（位置/车道类别、来向/去向、车辆或目标类型、视觉描述等）。
+  - `<think>` — 每个激活事件类别一条思考，按 event_id 顺序（当前配置 1–8；未激活事件不生成思考段）：未检出的事件写"未发现" + 一句理由；检出的事件必须覆盖标注文档 v4.5 规定的必要描述元素（位置/车道类别、来向/去向、车辆或目标类型、视觉描述等）。
   - `<answer>` — 最终结论（`classN: 事件名` 列表，与 `action` 一致）+ 天气（晴天/雨天/雾天/雪天/阴天）+ 时间（白天/夜间/晨昏）+ 基本交通场景描述（是否有匝道/导流区/收费口，隧道/高速场景，是否有来向/去向车道，车流量大/中/小；不含事件描述）。
 - **隔离（quarantine）**：若任一裁决为阳性的事件在原始帧中无法锚定（`ungrounded_event_ids`），样本改写至 `<sft-output-dir>/quarantine/<视频名>.json`——这类样本会教模型幻觉，不作为训练样本。
 
@@ -448,7 +448,7 @@ Web UI 的推理任务将每个视频的结果存放在 `<workspace>/analysis/<v
 python3 -m pytest traffic_analyzer/tests -q
 ```
 
-套件覆盖：配置加载与校验（`test_config_manager.py`）、CLI（`test_cli.py`）、编排器与拒绝路径（`test_orchestrator.py`）、抽帧与 prefilter（`test_video_preprocessor.py`）、专家增强流程（`test_expert_agent_far_enhancement.py`、`test_far_non_motor_enhancer.py`、`test_roi_motion.py`、`test_emergency_lane_occupancy.py`）、反思机制（`test_expert_reflection.py`）、VLM 引擎/缓存/故障转移/解析/提供者客户端（`test_vlm_*.py`）、报告生成（`test_report_generator.py`）与工具路由（`tools/test_tool_router.py`）。当前全部通过（个别用例在本机 anthropic SDK 缺少 `OverloadedError` 时按预期跳过）。
+套件覆盖：配置加载与校验（`test_config_manager.py`）、CLI（`test_cli.py`）、编排器与拒绝路径（`test_orchestrator.py`）、抽帧与 prefilter（`test_video_preprocessor.py`）、专家增强流程（`test_expert_agent_far_enhancement.py`、`test_far_non_motor_enhancer.py`、`test_roi_motion.py`、`test_emergency_lane_occupancy.py`）、反思机制（`test_expert_reflection.py`）、锚定核验（`test_grounding_verification.py`）、SFT label 改写（`test_sft_label_rewrite.py`）、VLM 引擎/缓存/故障转移/解析/提供者客户端（`test_vlm_*.py`）、报告生成（`test_report_generator.py`）与工具路由（`tools/test_tool_router.py`）。当前全部通过（599 passed）。
 
 ---
 
@@ -457,6 +457,7 @@ python3 -m pytest traffic_analyzer/tests -q
 - **仅 `expert_agent` 一种检测模式有执行路径**。`DetectionMode` 枚举中保留的 `direct_vlm` / `logic_chain` / `scene_tag` 没有任何代码执行它们；`validate-config` 会拒绝使用这些模式的激活事件。
 - **工具子系统是空壳**。`tools/` 下的 schema/router/registry 为预留基础设施，注册表不注册任何工具；激活事件声明 tools 会被 `validate-config` 拒绝。
 - **反思检查是 fail-open 的启发式机制**：反思调用失败或解析失败时保留原候选，可用 `EXPERT_ENABLE_REFLECTION=false` 整体关闭。
+- **锚定核验同样是 fail-open 的**：核验步骤被跳过、VLM 调用失败或输出不可解析时，裁决阳性结果原样保留；响应中缺失的阳性按可锚定处理。可用 `GROUNDING_CHECK_ENABLE=false` 整体关闭。
 - **裁决由 VLM 执行而非硬规则**：`adjudication_rules` 只是嵌入 Prompt 的业务指导，不保证逐字执行；候选回填、实例数对齐等是启发式兜底。
 - **prefilter 阈值是启发式的**（默认时长窗口 5–15 秒等），超长/超短视频需调整 `PREFILTER_*` 或关闭 prefilter。
 - **LLM 配置只认 `.env` 文件**：shell 里 `export` 的同名变量不会生效（`VLM_MAX_FRAMES`、`PREFILTER_*` 等非 LLM 变量仍走进程环境）。

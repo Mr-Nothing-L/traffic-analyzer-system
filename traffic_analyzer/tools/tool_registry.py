@@ -3,6 +3,13 @@
 
 将项目中已有的工具注册到 ToolRouter。
 提供默认的 router 实例供上层使用。
+
+[文件说明]
+作用:提供默认 ToolRouter 单例 ``get_default_router``(首次调用时注册内置工具,
+    当前注册表为空,注册点预留)、新建路由器的 ``create_router``,以及
+    "JSON 请求进、JSON 结果出"的快捷函数 ``execute_tool``。
+上游:core/expert_agent_tools.py(专家 Agent 工具调用执行)。
+下游:.tool_router 的 ToolRouter。
 """
 
 from __future__ import annotations

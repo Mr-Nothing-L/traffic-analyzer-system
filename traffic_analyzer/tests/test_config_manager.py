@@ -6,6 +6,11 @@ Covers:
 - Validation pass / fail scenarios
 - Hot reload semantics
 - Graceful error handling for missing files
+
+[文件说明]
+作用:测试 ConfigManager 的 YAML 加载、.env 覆盖、配置校验通过/失败、热重载及缺失文件容错。
+上游:pytest 自动发现并执行本文件测试。
+下游:traffic_analyzer/core/config_manager.py(被测模块)。
 """
 
 from __future__ import annotations
@@ -31,7 +36,7 @@ def temp_config_dir(tmp_path: Path) -> Path:
     event_categories = {
         "event_categories": [
             {
-                "event_id": 0,
+                "event_id": 1,
                 "event_code": "A",
                 "name": "Illegal Parking",
                 "name_zh": "违法停车",
@@ -42,7 +47,7 @@ def temp_config_dir(tmp_path: Path) -> Path:
                 "is_active": True,
             },
             {
-                "event_id": 1,
+                "event_id": 2,
                 "event_code": "B",
                 "name": "Emergency Lane Occupancy",
                 "name_zh": "应急车道占用",
@@ -77,13 +82,13 @@ def temp_config_dir(tmp_path: Path) -> Path:
             "version": "1.0",
             "events": [
                 {
-                    "event_id": 0,
+                    "event_id": 1,
                     "action_label": "机动车违停",
                     "description": "车辆在道路上静止。",
                     "boundary_conditions": ["只针对机动车"],
                 },
                 {
-                    "event_id": 1,
+                    "event_id": 2,
                     "action_label": "机动车占用应急车道",
                     "description": "车辆占用应急车道。",
                     "boundary_conditions": ["只针对机动车"],
@@ -128,7 +133,7 @@ class TestLoadAll:
         manager.load_all()
         cats = manager.get_event_categories()
         assert len(cats) == 2
-        assert cats[0].event_id == 0
+        assert cats[0].event_id == 1
         assert cats[0].detection_mode == DetectionMode.EXPERT_AGENT
 
     def test_active_event_categories_and_total(self, tmp_path: Path) -> None:
@@ -138,7 +143,7 @@ class TestLoadAll:
         event_categories = {
             "event_categories": [
                 {
-                    "event_id": 0,
+                    "event_id": 1,
                     "event_code": "A",
                     "name": "Active A",
                     "name_zh": "活跃A",
@@ -148,7 +153,7 @@ class TestLoadAll:
                     "is_active": True,
                 },
                 {
-                    "event_id": 1,
+                    "event_id": 2,
                     "event_code": "B",
                     "name": "Inactive B",
                     "name_zh": "未激活B",
@@ -158,7 +163,7 @@ class TestLoadAll:
                     "is_active": False,
                 },
                 {
-                    "event_id": 2,
+                    "event_id": 3,
                     "event_code": "C",
                     "name": "Active C",
                     "name_zh": "活跃C",
@@ -196,7 +201,7 @@ class TestLoadAll:
 
         assert len(all_cats) == 3
         assert len(active_cats) == 2
-        assert [cat.event_id for cat in active_cats] == [0, 2]
+        assert [cat.event_id for cat in active_cats] == [1, 3]
         assert mgr.get_total_event_categories() == 3
 
     def test_prompt_template_lookup(self, manager: ConfigManager) -> None:
@@ -493,7 +498,7 @@ class TestValidateConfig:
         cats = {
             "event_categories": [
                 {
-                    "event_id": 0,
+                    "event_id": 1,
                     "event_code": "A",
                     "name": "Bad Category",
                     "name_zh": "错误类别",
@@ -510,7 +515,7 @@ class TestValidateConfig:
                 "version": "1.0",
                 "events": [
                     {
-                        "event_id": 0,
+                        "event_id": 1,
                         "action_label": "Bad Category",
                         "description": "Desc",
                         "boundary_conditions": [],
@@ -536,7 +541,7 @@ class TestValidateConfig:
                 "version": "1.0",
                 "events": [
                     {
-                        "event_id": 0,
+                        "event_id": 1,
                         "action_label": "机动车违停",
                         "description": "desc",
                         "boundary_conditions": [],
@@ -574,7 +579,7 @@ class TestReload:
         cats = {
             "event_categories": [
                 {
-                    "event_id": 0,
+                    "event_id": 1,
                     "event_code": "A",
                     "name": "Illegal Parking",
                     "name_zh": "违法停车",
@@ -585,7 +590,7 @@ class TestReload:
                     "is_active": True,
                 },
                 {
-                    "event_id": 1,
+                    "event_id": 2,
                     "event_code": "B",
                     "name": "Emergency Lane Occupancy",
                     "name_zh": "应急车道占用",
@@ -596,7 +601,7 @@ class TestReload:
                     "is_active": True,
                 },
                 {
-                    "event_id": 2,
+                    "event_id": 3,
                     "event_code": "C",
                     "name": "Traffic Accident",
                     "name_zh": "交通事故",
@@ -702,7 +707,7 @@ class TestSplitPromptTemplates:
         cats = {
             "event_categories": [
                 {
-                    "event_id": 0,
+                    "event_id": 1,
                     "event_code": "A",
                     "name": "Illegal Parking",
                     "name_zh": "违法停车",
@@ -802,7 +807,7 @@ class TestEventIdIntegrity:
         cats = {
             "event_categories": [
                 {
-                    "event_id": 0,
+                    "event_id": 1,
                     "event_code": "A",
                     "name": "First",
                     "name_zh": "第一",
@@ -812,7 +817,7 @@ class TestEventIdIntegrity:
                     "is_active": True,
                 },
                 {
-                    "event_id": 0,
+                    "event_id": 1,
                     "event_code": "A2",
                     "name": "Second",
                     "name_zh": "第二",
@@ -828,7 +833,7 @@ class TestEventIdIntegrity:
         )
 
         mgr = ConfigManager(str(temp_config_dir))
-        with pytest.raises(ValueError, match="Duplicate event_id 0"):
+        with pytest.raises(ValueError, match="Duplicate event_id 1"):
             mgr.load_all()
 
     def test_duplicate_adjudication_rule_id_raises(self, temp_config_dir: Path) -> None:
@@ -836,7 +841,7 @@ class TestEventIdIntegrity:
         cats = {
             "event_categories": [
                 {
-                    "event_id": 0,
+                    "event_id": 1,
                     "event_code": "A",
                     "name": "Illegal Parking",
                     "name_zh": "违法停车",
@@ -886,7 +891,7 @@ class TestEventIdIntegrity:
         """Non-continuous event_ids must be reported (encoding bits would shift)."""
         categories = [
             {
-                "event_id": 0,
+                "event_id": 1,
                 "event_code": "A",
                 "name": "Cat Zero",
                 "name_zh": "事件零",
@@ -896,7 +901,7 @@ class TestEventIdIntegrity:
                 "is_active": True,
             },
             {
-                "event_id": 2,
+                "event_id": 3,
                 "event_code": "C",
                 "name": "Cat Two",
                 "name_zh": "事件二",
@@ -917,7 +922,7 @@ class TestEventIdIntegrity:
         """Active categories with detection_mode != expert_agent have no execution path."""
         categories = [
             {
-                "event_id": 0,
+                "event_id": 1,
                 "event_code": "A",
                 "name": "Direct Active",
                 "name_zh": "直接活跃",
@@ -926,7 +931,7 @@ class TestEventIdIntegrity:
                 "is_active": True,
             },
             {
-                "event_id": 1,
+                "event_id": 2,
                 "event_code": "B",
                 "name": "Direct Inactive",
                 "name_zh": "直接未激活",
@@ -943,13 +948,13 @@ class TestEventIdIntegrity:
         mode_errors = [e for e in errors if "detection_mode" in e]
         # Only the active category is rejected; the inactive one just holds its bit.
         assert len(mode_errors) == 1
-        assert "id=0" in mode_errors[0]
+        assert "id=1" in mode_errors[0]
 
     def test_active_category_declaring_tools_rejected(self, temp_config_dir: Path) -> None:
         """Declared tools have no effect while the tool registry is empty."""
         categories = [
             {
-                "event_id": 0,
+                "event_id": 1,
                 "event_code": "A",
                 "name": "Tool User",
                 "name_zh": "工具用户",

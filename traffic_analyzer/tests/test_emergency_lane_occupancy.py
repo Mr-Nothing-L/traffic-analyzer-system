@@ -3,8 +3,13 @@
 Covers:
 - Visualization utility functions in
   :mod:`traffic_analyzer.utils.emergency_lane_occupancy`.
-- Far-enhancement report rendering for event_id=1.
-- End-to-end ExpertAgent far-enhancement flow for event_id=1.
+- Far-enhancement report rendering for event_id=2.
+- End-to-end ExpertAgent far-enhancement flow for event_id=2.
+
+[文件说明]
+作用:测试应急车道占用检测相关工具函数、event_id=2 远距增强报告渲染及 ExpertAgent 端到端增强流程。
+上游:pytest 自动发现并执行本文件测试。
+下游:traffic_analyzer/utils/emergency_lane_occupancy.py、traffic_analyzer/core/report_far_enhancement_renderer.py、traffic_analyzer/core/expert_agent.py(被测模块)。
 """
 
 from __future__ import annotations
@@ -55,7 +60,7 @@ def config_manager() -> ConfigManager:
 @pytest.fixture
 def emergency_lane_category(config_manager: ConfigManager) -> Any:
     categories = config_manager.get_event_categories()
-    category = next(c for c in categories if c.event_id == 1)
+    category = next(c for c in categories if c.event_id == 2)
     assert category.prompt_template_id == "emergency_lane_occupancy_detection"
     return category
 
@@ -388,9 +393,9 @@ class TestVisualizationUtilities:
 
 class TestReportRendering:
     def test_render_emergency_lane_occupancy_markdown(self) -> None:
-        """Renderer should emit expected markdown lines for event_id=1 evidence."""
+        """Renderer should emit expected markdown lines for event_id=2 evidence."""
         candidate: Dict[str, Any] = {
-            "event_id": 1,
+            "event_id": 2,
             "event_name": "应急车道占用",
             "detected": True,
             "summary": "检测到应急车道占用",
@@ -418,7 +423,7 @@ class TestReportRendering:
             },
         }
 
-        lines = _render_far_enhancement(candidate, event_id=1)
+        lines = _render_far_enhancement(candidate, event_id=2)
         markdown = "\n".join(lines)
 
         assert "应急车道占用增强证据" in markdown
@@ -503,7 +508,7 @@ class TestExpertAgentIntegration:
                 candidate = agent.detect(context)
 
             assert candidate.detected is True
-            assert candidate.event_id == 1
+            assert candidate.event_id == 2
 
             raw = candidate.raw_vlm_response
             assert "mask_overlay_image_path" in raw
@@ -567,7 +572,7 @@ class TestExpertAgentIntegration:
                 candidate = agent.detect(context)
 
             assert candidate.detected is False
-            assert candidate.event_id == 1
+            assert candidate.event_id == 2
             assert "occupancy_detection" in candidate.raw_vlm_response
 
         # No vehicle ROI or final classifier call should be made when no zones are found.
@@ -617,7 +622,7 @@ class TestExpertAgentIntegration:
                 candidate = agent.detect(context)
 
             assert candidate.detected is False
-            assert candidate.event_id == 1
+            assert candidate.event_id == 2
             occupancy = candidate.raw_vlm_response["occupancy_detection"]
             assert occupancy["emergency_polygon_rel"] is not None
             assert occupancy["rois"] == []
@@ -643,7 +648,7 @@ class TestExpertAgentIntegration:
                 candidate = agent.detect(context)
 
         assert candidate.detected is False
-        assert candidate.event_id == 1
+        assert candidate.event_id == 2
         assert "增强检测失败" in candidate.summary
         final_calls = [
             c for c in engine.calls if c["template_id"] == "emergency_lane_occupancy_detection"
@@ -680,7 +685,7 @@ class TestExpertAgentIntegration:
                 candidate = agent.detect(context)
 
         assert candidate.detected is False
-        assert candidate.event_id == 1
+        assert candidate.event_id == 2
         assert "增强检测失败" in candidate.summary
         final_calls = [
             c for c in engine.calls if c["template_id"] == "emergency_lane_occupancy_detection"
@@ -699,7 +704,7 @@ class TestExpertAgentIntegration:
             candidate = agent.detect(context)
 
         assert candidate.detected is False
-        assert candidate.event_id == 1
+        assert candidate.event_id == 2
         assert "增强检测失败" in candidate.summary
 
         final_calls = [

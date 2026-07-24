@@ -11,6 +11,13 @@ exported workspace is self-contained.
 
 Fail-open by design: missing data is logged at WARNING and whatever is
 available is written; the function never raises.
+
+[文件说明]
+作用:证据导出器(export_evidence),为每个视频生成可编辑的 evidence.json 并拷贝
+     引用图像到 images/ 子目录,供 web UI 的 SFT 标注工作流使用;设计上永不抛异常。
+上游:orchestrator/analysis_orchestrator.py(sft_label 模式下,裁决完成后调用)。
+下游:读取 AnalysisContext 中专家候选的 raw_vlm_response(坐标与图像引用),
+     写出 evidence.json 及 images/ 图像文件;依赖 models/schemas.py 的 AnalysisContext。
 """
 
 from __future__ import annotations

@@ -1,4 +1,15 @@
-"""Command-line interface for the traffic analyzer framework."""
+"""Command-line interface for the traffic analyzer framework.
+
+[文件说明]
+作用:CLI 入口,提供 analyze / validate-config / web 三个子命令。analyze 将
+--min-frames、--sft-label(置 SFT_LABEL_ENABLE)、--sft-output-dir 等参数转为环境变量后,
+驱动 AnalysisOrchestrator 完成视频分析并输出 json/markdown 报告;validate-config 校验配置
+交叉引用;web 经 uvicorn 工厂模式启动 web/app.py 的 create_app。
+上游:traffic_analyzer/__main__.py(python -m traffic_analyzer);scripts/infer.sh、
+scripts/analyze.sh、scripts/batch_infer.py、web/jobs.py 的子进程命令。
+下游:core/config_manager.py、orchestrator/analysis_orchestrator.py、
+core/report_generator.py(markdown 输出)、web/app.py(web 子命令)、config/ 配置目录。
+"""
 
 from __future__ import annotations
 

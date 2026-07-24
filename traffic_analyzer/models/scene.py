@@ -1,5 +1,10 @@
 """
 Scene understanding models for the traffic analyzer framework.
+
+[文件说明]
+作用:定义场景理解模型 SceneInfo(道路/天气/车流密度及行人、非机动车、抛洒物存在标志)及其多步方向分析子模型(RoadInfo、DirectionAnalysis、VehicleMotion、HeadOrientation、ConsistencyCheck、PerspectiveCheck、DirectionConclusion、DirectionEvidence)。
+上游:models/schemas.py、models/context.py、models/report.py 引用;由 core/pipeline_steps.py 场景理解步骤填充,被 orchestrator/analysis_orchestrator.py、core/report_generator.py 消费。
+下游:pydantic。
 """
 
 from __future__ import annotations

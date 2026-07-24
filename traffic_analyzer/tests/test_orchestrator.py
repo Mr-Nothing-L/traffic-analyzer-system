@@ -1,4 +1,10 @@
-"""Integration tests for AnalysisOrchestrator (v2.0.0)."""
+"""Integration tests for AnalysisOrchestrator (v2.0.0).
+
+[文件说明]
+作用:集成测试 AnalysisOrchestrator 分析编排流程,覆盖流水线步骤串联、报告生成与拒绝报告路径。
+上游:pytest 自动发现并执行本文件测试。
+下游:traffic_analyzer/orchestrator/analysis_orchestrator.py、traffic_analyzer/orchestrator/reject_report_factory.py、traffic_analyzer/core/pipeline_steps.py、traffic_analyzer/core/report_generator.py(被测模块)。
+"""
 
 from __future__ import annotations
 
@@ -55,7 +61,7 @@ def mock_config_manager() -> MagicMock:
     manager.load_all.return_value = system_config
     manager.get_event_categories.return_value = [
         EventCategory(
-            event_id=0,
+            event_id=1,
             event_code="A",
             name="Test Event A",
             name_zh="测试事件A",
@@ -65,7 +71,7 @@ def mock_config_manager() -> MagicMock:
             is_active=True,
         ),
         EventCategory(
-            event_id=1,
+            event_id=2,
             event_code="B",
             name="Test Event B",
             name_zh="测试事件B",
@@ -75,7 +81,7 @@ def mock_config_manager() -> MagicMock:
             is_active=True,
         ),
         EventCategory(
-            event_id=2,
+            event_id=3,
             event_code="C",
             name="Inactive Event",
             name_zh="未激活事件",
@@ -140,7 +146,7 @@ def mock_report_generator() -> MagicMock:
             height=480,
         ),
         scene_summary=SceneInfo(road_count=2),
-        binary_encoding=BinaryEncoding(encoding_string="1_1", detected_events=[0, 1]),
+        binary_encoding=BinaryEncoding(encoding_string="1_1", detected_events=[1, 2]),
     )
     generator.generate.return_value = report
     return generator
@@ -153,12 +159,12 @@ def mock_expert_agent_layer() -> MagicMock:
         success=True,
         data=[
             EventCandidate(
-                event_id=0,
+                event_id=1,
                 event_name="Test Event A",
                 detected=True,
             ),
             EventCandidate(
-                event_id=1,
+                event_id=2,
                 event_name="Test Event B",
                 detected=False,
             ),
@@ -175,12 +181,12 @@ def mock_adjudication_step() -> MagicMock:
         data=AdjudicationResult(
             event_results=[
                 EventResult(
-                    event_id=0,
+                    event_id=1,
                     event_name="Test Event A",
                     detected=True,
                 ),
                 EventResult(
-                    event_id=1,
+                    event_id=2,
                     event_name="Test Event B",
                     detected=False,
                 ),
@@ -285,7 +291,7 @@ class TestAnalyze:
         orchestrator: AnalysisOrchestrator,
         temp_video: str,
     ) -> None:
-        """Orchestrator must pass configured total category count to ReportGenerator."""
+        """Orchestrator must pass the max configured event_id to ReportGenerator."""
         report = orchestrator.analyze(temp_video)
         assert isinstance(report, Report)
         call_kwargs = orchestrator.report_generator.generate.call_args.kwargs
@@ -502,7 +508,7 @@ def _make_adjudication_step(parsed_data: Dict[str, Any]) -> AdjudicationStep:
     config_manager = MagicMock()
     config_manager.get_active_event_categories.return_value = [
         EventCategory(
-            event_id=0,
+            event_id=1,
             event_code="A",
             name="Active A",
             name_zh="活跃A",
@@ -512,7 +518,7 @@ def _make_adjudication_step(parsed_data: Dict[str, Any]) -> AdjudicationStep:
             is_active=True,
         ),
         EventCategory(
-            event_id=1,
+            event_id=2,
             event_code="B",
             name="Active B",
             name_zh="活跃B",
@@ -543,18 +549,18 @@ def _make_adjudication_step(parsed_data: Dict[str, Any]) -> AdjudicationStep:
 
 
 def _make_adjudication_context() -> AnalysisContext:
-    """Context with normal (non-abnormal) candidates for events 0 and 1."""
+    """Context with normal (non-abnormal) candidates for events 1 and 2."""
     context = AnalysisContext()
-    context.event_candidates[0] = EventCandidate(
-        event_id=0,
+    context.event_candidates[1] = EventCandidate(
+        event_id=1,
         event_name="Active A",
         detected=True,
         summary="candidate zero summary",
-        instances=[EventInstance(event_id=0, event_name="Active A", description="inst")],
+        instances=[EventInstance(event_id=1, event_name="Active A", description="inst")],
         raw_vlm_text="raw text",
     )
-    context.event_candidates[1] = EventCandidate(
-        event_id=1,
+    context.event_candidates[2] = EventCandidate(
+        event_id=2,
         event_name="Active B",
         detected=False,
         summary="no",
@@ -569,7 +575,7 @@ class TestAdjudicationStep:
         config_manager = MagicMock()
         config_manager.get_active_event_categories.return_value = [
             EventCategory(
-                event_id=0,
+                event_id=1,
                 event_code="A",
                 name="Active A",
                 name_zh="活跃A",
@@ -579,7 +585,7 @@ class TestAdjudicationStep:
                 is_active=True,
             ),
             EventCategory(
-                event_id=1,
+                event_id=2,
                 event_code="B",
                 name="Active B",
                 name_zh="活跃B",
@@ -602,18 +608,18 @@ class TestAdjudicationStep:
         vlm_response.success = True
         vlm_response.parsed_data = {
             "event_results": [
-                {"event_id": 0, "event_name": "Active A", "detected": True, "summary": "yes"},
-                {"event_id": 1, "event_name": "Active B", "detected": False, "summary": "no"},
-                {"event_id": 2, "event_name": "Inactive C", "detected": True, "summary": "hallucinated"},
-                {"event_id": 10, "event_name": "Unknown", "detected": True, "summary": "hallucinated"},
+                {"event_id": 1, "event_name": "Active A", "detected": True, "summary": "yes"},
+                {"event_id": 2, "event_name": "Active B", "detected": False, "summary": "no"},
+                {"event_id": 3, "event_name": "Inactive C", "detected": True, "summary": "hallucinated"},
+                {"event_id": 99, "event_name": "Unknown", "detected": True, "summary": "hallucinated"},
             ],
             "audit_log": [
-                {"event_id": 0, "event_name": "Active A", "action": "included", "reason": "", "rule_id": None},
-                {"event_id": 2, "event_name": "Inactive C", "action": "excluded", "reason": "", "rule_id": None},
+                {"event_id": 1, "event_name": "Active A", "action": "included", "reason": "", "rule_id": None},
+                {"event_id": 3, "event_name": "Inactive C", "action": "excluded", "reason": "", "rule_id": None},
             ],
             "reasoning_chain": [
-                {"event_id": 0, "event_name": "Active A", "decision": "保留", "thought_process": "", "basis": ""},
-                {"event_id": 10, "event_name": "Unknown", "decision": "保留", "thought_process": "", "basis": ""},
+                {"event_id": 1, "event_name": "Active A", "decision": "保留", "thought_process": "", "basis": ""},
+                {"event_id": 99, "event_name": "Unknown", "decision": "保留", "thought_process": "", "basis": ""},
             ],
             "adjudication_reasoning": "test",
         }
@@ -624,11 +630,11 @@ class TestAdjudicationStep:
 
         step = AdjudicationStep(config_manager, vlm_engine)
         context = AnalysisContext()
-        context.event_candidates[0] = EventCandidate(
-            event_id=0, event_name="Active A", detected=True, summary="yes"
-        )
         context.event_candidates[1] = EventCandidate(
-            event_id=1, event_name="Active B", detected=False, summary="no"
+            event_id=1, event_name="Active A", detected=True, summary="yes"
+        )
+        context.event_candidates[2] = EventCandidate(
+            event_id=2, event_name="Active B", detected=False, summary="no"
         )
 
         result = step.execute(context)
@@ -636,26 +642,26 @@ class TestAdjudicationStep:
         assert result.data is not None
         adjudication_result = result.data
         result_ids = {r.event_id for r in adjudication_result.event_results}
-        assert result_ids == {0, 1}
-        assert all(r.event_id in {0, 1} for r in adjudication_result.audit_log)
-        assert all(rc["event_id"] in {0, 1} for rc in adjudication_result.reasoning_chain)
+        assert result_ids == {1, 2}
+        assert all(r.event_id in {1, 2} for r in adjudication_result.audit_log)
+        assert all(rc["event_id"] in {1, 2} for rc in adjudication_result.reasoning_chain)
 
-    def test_entries_without_event_id_do_not_shadow_event_zero(self) -> None:
+    def test_entries_without_event_id_do_not_shadow_event_one(self) -> None:
         """Malformed entries lacking event_id must be skipped, not adjudicated
-        as event 0 (which would also block backfill from the real candidate)."""
+        as event 1 (which would also block backfill from the real candidate)."""
         step = _make_adjudication_step(
             {
                 "event_results": [
                     {"event_name": "畸形条目", "detected": True, "summary": "missing event_id"},
-                    {"event_id": 1, "event_name": "Active B", "detected": False, "summary": "no"},
+                    {"event_id": 2, "event_name": "Active B", "detected": False, "summary": "no"},
                 ],
                 "audit_log": [
                     {"event_name": "畸形条目", "action": "included", "reason": ""},
-                    {"event_id": 1, "event_name": "Active B", "action": "included", "reason": "", "rule_id": None},
+                    {"event_id": 2, "event_name": "Active B", "action": "included", "reason": "", "rule_id": None},
                 ],
                 "reasoning_chain": [
                     {"event_name": "畸形条目", "decision": "保留", "thought_process": "x", "basis": "y"},
-                    {"event_id": 1, "event_name": "Active B", "decision": "排除", "thought_process": "t", "basis": "b"},
+                    {"event_id": 2, "event_name": "Active B", "decision": "排除", "thought_process": "t", "basis": "b"},
                 ],
                 "adjudication_reasoning": "test",
             }
@@ -666,27 +672,27 @@ class TestAdjudicationStep:
         assert result.success
         adjudication_result = result.data
         by_id = {r.event_id: r for r in adjudication_result.event_results}
-        assert set(by_id) == {0, 1}
-        # Event 0 must be backfilled from the real candidate, not the malformed entry.
-        assert by_id[0].detected
-        assert by_id[0].summary == "candidate zero summary"
+        assert set(by_id) == {1, 2}
+        # Event 1 must be backfilled from the real candidate, not the malformed entry.
+        assert by_id[1].detected
+        assert by_id[1].summary == "candidate zero summary"
         # Malformed audit/reasoning entries are dropped entirely.
         assert len(adjudication_result.audit_log) == 1
-        assert adjudication_result.audit_log[0].event_id == 1
+        assert adjudication_result.audit_log[0].event_id == 2
         assert len(adjudication_result.reasoning_chain) == 1
-        assert adjudication_result.reasoning_chain[0]["event_id"] == 1
+        assert adjudication_result.reasoning_chain[0]["event_id"] == 2
 
     def test_reasoning_chain_null_fields_coerced_to_strings(self) -> None:
         """Null fields in the VLM reasoning_chain must not poison the Markdown report."""
         step = _make_adjudication_step(
             {
                 "event_results": [
-                    {"event_id": 0, "event_name": "Active A", "detected": True, "summary": "yes"},
-                    {"event_id": 1, "event_name": "Active B", "detected": False, "summary": "no"},
+                    {"event_id": 1, "event_name": "Active A", "detected": True, "summary": "yes"},
+                    {"event_id": 2, "event_name": "Active B", "detected": False, "summary": "no"},
                 ],
                 "audit_log": [],
                 "reasoning_chain": [
-                    {"event_id": 0, "event_name": None, "decision": None, "thought_process": None, "basis": None},
+                    {"event_id": 1, "event_name": None, "decision": None, "thought_process": None, "basis": None},
                 ],
                 "adjudication_reasoning": "test",
             }
@@ -697,7 +703,7 @@ class TestAdjudicationStep:
         assert result.success
         chain = result.data.reasoning_chain
         assert len(chain) == 1
-        assert chain[0]["event_id"] == 0
+        assert chain[0]["event_id"] == 1
         for field in ("event_name", "decision", "thought_process", "basis"):
             assert chain[0][field] == ""
 
@@ -745,11 +751,11 @@ class TestRejectReportFactory:
             video_meta=video_meta,
             reject_reason="画面模糊",
             usage_stats={},
-            total_categories=10,
+            total_categories=11,
         )
         assert report.rejected
         assert report.reject_reason == "画面模糊"
-        assert report.binary_encoding.encoding_string == "0_0_0_0_0_0_0_0_0_0"
+        assert report.binary_encoding.encoding_string == "0_0_0_0_0_0_0_0_0_0_0"
         assert report.binary_encoding.event_count == 0
         assert report.binary_encoding.detected_events == []
         assert "未进行事件检测" in report.final_classification

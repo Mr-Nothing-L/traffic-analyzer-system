@@ -9,6 +9,13 @@ Levels:
 - macro:  top-level only (no nested step[i/N])
 - mid:    top-level + nested (default)
 - fine:   reserved for future VLM-call-level instrumentation
+
+[文件说明]
+作用:提供 ``tool_call``/``tool_call_nested`` 上下文管理器,为分析流水线关键
+    操作输出带缩进、参数与耗时的 INFO 日志行,不改变任何业务逻辑。
+上游:orchestrator/analysis_orchestrator.py。
+下游:无第三方依赖;输出级别由环境变量 TRAFFIC_ANALYZER_TOOL_LOG_LEVEL
+    (off/macro/mid/fine)控制,日志走 logger ``traffic_analyzer.tool_call``。
 """
 
 from __future__ import annotations

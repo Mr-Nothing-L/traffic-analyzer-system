@@ -1,5 +1,10 @@
 """
 Configuration models for the traffic analyzer framework.
+
+[文件说明]
+作用:定义系统配置模型 SamplingConfig(采样/预筛参数)、LLMProviderConfig(VLM 供应商参数)、SystemConfig(整体配置,含 expert_enable_reflection、grounding_check_enable 锚定核验开关、sft_label_enabled 等),字段默认值可读取对应环境变量。
+上游:models/schemas.py(再导出);间接被 core/config_manager.py 装配、被 orchestrator/analysis_orchestrator.py、core/grounding_verification.py、core/sft_label_rewrite.py 等读取。
+下游:pydantic;os 环境变量(SAMPLING_FPS、PREFILTER_*、GROUNDING_CHECK_ENABLE、SFT_LABEL_* 等,不读 .env 文件本身)。
 """
 
 from __future__ import annotations
@@ -62,6 +67,10 @@ class SystemConfig(BaseModel):
     )
     expert_enable_reflection: bool = Field(
         default_factory=lambda: os.getenv("EXPERT_ENABLE_REFLECTION", "true").lower()
+        in ("1", "true", "yes", "on")
+    )
+    grounding_check_enable: bool = Field(
+        default_factory=lambda: os.getenv("GROUNDING_CHECK_ENABLE", "true").lower()
         in ("1", "true", "yes", "on")
     )
     sft_label_enabled: bool = Field(

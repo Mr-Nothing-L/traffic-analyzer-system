@@ -10,6 +10,13 @@ has been split into focused submodules:
 * :mod:`traffic_analyzer.utils.construction_evidence_gallery` - multi-ROI gallery
 
 Existing callers can continue to import names directly from this module.
+
+[文件说明]
+作用:远距离非机动目标 ROI 增强工具的向后兼容再导出层,本身不含实现,
+    仅聚合并 re-export 拆分后的五个子模块中的公共名称(见 ``__all__``)。
+上游:core/expert_agent_far_enhancement.py(远距离小目标增强与运动判定流程)。
+下游:utils/bbox_geometry.py、utils/image_drawing.py、utils/roi_composite.py、
+    utils/roi_motion.py、utils/construction_evidence_gallery.py。
 """
 
 from __future__ import annotations

@@ -4,6 +4,12 @@
 replaces the old native OS folder dialog (zenity/tkinter) so workspace
 selection also works on headless or remote servers. Only *subdirectories*
 are returned — the picker never needs file names.
+
+[文件说明]
+作用:提供 GET /api/fs/list,为前端工作区选择弹窗列目录(仅子目录),替代原生系统
+文件对话框,使无头/远程服务器上也能选择工作区。
+上游:web/app.py(挂载路由);web/static 前端的目录选择弹窗。
+下游:读取 app.state.workspace(web/workspace.py 维护的状态),仅访问文件系统。
 """
 
 from __future__ import annotations

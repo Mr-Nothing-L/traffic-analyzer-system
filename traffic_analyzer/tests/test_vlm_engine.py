@@ -3,6 +3,11 @@ Unit tests for VLMInferenceEngine.
 
 Mocks all external SDK clients to test prompt rendering, JSON parsing,
 retry logic, schema validation, batch calls, and usage tracking.
+
+[文件说明]
+作用:测试 VLMInferenceEngine(mock 全部外部 SDK),覆盖 prompt 渲染、JSON 解析、重试、schema 校验、批量调用与用量统计。
+上游:pytest 自动发现并执行本文件测试。
+下游:traffic_analyzer/core/vlm_engine.py(被测模块)。
 """
 
 from __future__ import annotations

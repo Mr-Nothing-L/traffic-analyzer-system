@@ -2,6 +2,19 @@
 
 This module contains the presentation layer that turns a populated
 :class:`Report` model into a human-readable Markdown document.
+
+Structure (top-down, key conclusions first):
+1. 视频信息
+2. 最终分析（逐类别分析 + 最终结论，SFT label 风格的易读结论）
+3. 分析统计
+4. 附录：详细分析过程（专家原始分析、视觉证据、裁决详情等全部细节后移）
+
+[文件说明]
+作用:Markdown 渲染层(_render_markdown),把 Report 模型渲染为"视频信息→最终分析
+     (逐类别分析+最终结论)→分析统计→附录(详细分析过程)"结构的可读报告。
+上游:core/report_generator.py(ReportGenerator 导出 Markdown 时调用)。
+下游:core/report_far_enhancement_renderer.py(远距离增强证据渲染)、
+     core/report_text_utils.py(专家描述文本清洗)、models/schemas.py。
 """
 
 from __future__ import annotations
@@ -42,10 +55,63 @@ def _render_markdown(report: Report) -> str:
         lines.append(f"- **录制时间**: {vm.record_time.isoformat()}")
     lines.append("")
 
-    # ---- Scene Summary (kept for internal use, not rendered) ----------
+    # ---- Final Analysis (per-category thoughts + conclusion) ------------
+    lines.append("## 最终分析")
+    lines.append("")
+    lines.append("### 逐类别分析")
+    lines.append("")
+    if not report.event_results:
+        lines.append("_未检测到任何事件类别。_")
+        lines.append("")
+    else:
+        for result in report.event_results:
+            lines.extend(_render_event_thought(result))
+
+    lines.append("### 最终结论")
+    lines.append("")
+    detected_results = [r for r in report.event_results if r.detected]
+    if detected_results:
+        lines.append("本视频块检出以下事件：")
+        lines.append("")
+        for r in detected_results:
+            lines.append(f"class{r.event_id}: {r.event_name}")
+    else:
+        lines.append("本视频块未检出任何事件，交通状况正常。")
+    lines.append("")
+    lines.append(f"**二进制编码**: `{{{report.binary_encoding.encoding_string}}}`")
+    lines.append("")
+    lines.append("**处置建议**")
+    lines.append("")
+    if report.disposal_recommendations:
+        for idx, rec in enumerate(report.disposal_recommendations, start=1):
+            lines.append(f"{idx}. {rec}")
+    else:
+        lines.append("_暂无处置建议。_")
+    lines.append("")
+
+    # ---- Analysis Stats ------------------------------------------------
+    lines.append("## 分析统计")
+    lines.append("")
+    lines.append(f"- **分析耗时**: {report.analysis_duration_sec:.2f} s")
+    usage = report.llm_usage_stats
+    if usage:
+        lines.append(f"- **VLM 提供商**: {usage.get('provider', 'unknown')}")
+        lines.append(f"- **模型**: {usage.get('model', 'unknown')}")
+        lines.append(f"- **调用次数**: {usage.get('total_calls', 0)}")
+        lines.append(f"- **Prompt Tokens**: {usage.get('total_prompt_tokens', 0)}")
+        lines.append(f"- **Completion Tokens**: {usage.get('total_completion_tokens', 0)}")
+        lines.append(f"- **总 Tokens**: {usage.get('total_tokens', 0)}")
+        if usage.get('failed_calls', 0):
+            lines.append(f"- **失败调用**: {usage.get('failed_calls', 0)}")
+    lines.append("")
+
+    # ---- Appendix: full analysis process --------------------------------
+    lines.append("## 附录：详细分析过程")
+    lines.append("")
+
     sc = report.scene_summary
 
-    # ---- Direction Analysis (6-step detailed) ------------------------
+    # Direction Analysis (6-step detailed)
     if sc.direction_analysis:
         da = sc.direction_analysis
         lines.append("### 车流方向分析（六步逻辑链）")
@@ -115,7 +181,7 @@ def _render_markdown(report: Report) -> str:
                 lines.append(f"  - 依据摘要: {conc.evidence_summary}")
             lines.append("")
 
-    # ---- Road Details (summary) --------------------------------------
+    # Road Details (summary)
     if sc.roads:
         lines.append("### 道路详情")
         for road in sc.roads:
@@ -134,21 +200,20 @@ def _render_markdown(report: Report) -> str:
                     lines.append(ev_str)
             lines.append("")
 
-    # ---- Event Summary Table -------------------------------------------
-    lines.append("## 事件类别分析")
-    lines.append("")
-
-    if not report.event_results:
-        lines.append("_未检测到任何事件类别。_")
-        lines.append("")
-    else:
+    # Event details (summary table + full detail per event)
+    if report.event_results:
         # Summary table for all events
         lines.append("### 事件检测总览")
         lines.append("")
         lines.append("| 事件ID | 事件名称 | 检测结果 | 描述 |")
         lines.append("|--------|----------|----------|------|")
         for result in report.event_results:
-            detected_str = "**是**" if result.detected else "否"
+            if result.grounding_overturned:
+                detected_str = "检出→核验推翻"
+            elif result.detected:
+                detected_str = "**是**"
+            else:
+                detected_str = "否"
             desc = result.summary or (result.instances[0].description if result.instances else "—")
             # Truncate long descriptions for the summary table
             if len(desc) > 40:
@@ -161,12 +226,11 @@ def _render_markdown(report: Report) -> str:
         for result in report.event_results:
             lines.extend(_render_event_result(result, report.expert_candidates))
 
-    # ---- Final Classification ------------------------------------------
-    lines.append("## 最终分类")
+    # Binary encoding explanation (former 最终分类 text)
+    lines.append("### 编码说明")
     lines.append("")
-    lines.append(f"**二进制编码**: `{{{report.binary_encoding.encoding_string}}}`")
-    lines.append("")
-    lines.append("- **编码说明**: 每一位对应一个事件类别（按 event_id 升序），")
+    lines.append("- 每一位对应一个事件类别（按 event_id 升序，位序 1..11，")
+    lines.append("  第 9 位为正常占位恒为 0），")
     lines.append("  `1` 表示该类别被检测到，`0` 表示未检测到。")
     lines.append("")
     if report.binary_encoding.detected_events:
@@ -180,16 +244,16 @@ def _render_markdown(report: Report) -> str:
     lines.append(f"{report.final_classification}")
     lines.append("")
 
-    # ---- Adjudication Details ------------------------------------------
-    lines.append("## 裁决详情")
+    # Adjudication Details
+    lines.append("### 裁决详情")
     lines.append("")
     if report.adjudication_reasoning:
-        lines.append("### 总体裁决推理")
+        lines.append("#### 总体裁决推理")
         lines.append(report.adjudication_reasoning)
         lines.append("")
 
     if report.reasoning_chain:
-        lines.append("### 逐事件推理链")
+        lines.append("#### 逐事件推理链")
         lines.append("")
         lines.append("| 事件ID | 事件名称 | 决策 | 思考过程 | 决策依据 |")
         lines.append("|--------|----------|------|----------|----------|")
@@ -211,7 +275,7 @@ def _render_markdown(report: Report) -> str:
         lines.append("")
 
     if report.audit_log:
-        lines.append("### 审计日志")
+        lines.append("#### 审计日志")
         lines.append("| 事件 | 动作 | 原因 | 规则 |")
         lines.append("|------|------|------|------|")
         for entry in report.audit_log:
@@ -219,32 +283,6 @@ def _render_markdown(report: Report) -> str:
             rule_str = entry.rule_id or "无"
             lines.append(f"| {entry.event_name} | {action_icon} | {entry.reason} | {rule_str} |")
         lines.append("")
-    lines.append("")
-
-    # ---- Disposal Recommendations --------------------------------------
-    lines.append("## 处置建议")
-    lines.append("")
-    if report.disposal_recommendations:
-        for idx, rec in enumerate(report.disposal_recommendations, start=1):
-            lines.append(f"{idx}. {rec}")
-    else:
-        lines.append("_暂无处置建议。_")
-    lines.append("")
-
-    # ---- Analysis Stats ------------------------------------------------
-    lines.append("## 分析统计")
-    lines.append("")
-    lines.append(f"- **分析耗时**: {report.analysis_duration_sec:.2f} s")
-    usage = report.llm_usage_stats
-    if usage:
-        lines.append(f"- **VLM 提供商**: {usage.get('provider', 'unknown')}")
-        lines.append(f"- **模型**: {usage.get('model', 'unknown')}")
-        lines.append(f"- **调用次数**: {usage.get('total_calls', 0)}")
-        lines.append(f"- **Prompt Tokens**: {usage.get('total_prompt_tokens', 0)}")
-        lines.append(f"- **Completion Tokens**: {usage.get('total_completion_tokens', 0)}")
-        lines.append(f"- **总 Tokens**: {usage.get('total_tokens', 0)}")
-        if usage.get('failed_calls', 0):
-            lines.append(f"- **失败调用**: {usage.get('failed_calls', 0)}")
     lines.append("")
 
     # ---- Footer --------------------------------------------------------
@@ -257,12 +295,42 @@ def _render_markdown(report: Report) -> str:
     return "\n".join(lines)
 
 
+def _render_event_thought(result: EventResult) -> List[str]:
+    """Render the per-category thought summary used in 最终分析 → 逐类别分析."""
+    lines: List[str] = []
+    if result.grounding_overturned:
+        status = "⚠️ 检出但被锚定核验推翻"
+    elif result.detected:
+        status = "✅ 检出"
+    else:
+        status = "❌ 未检出"
+    lines.append(f"#### {result.event_name}(class{result.event_id})——{status}")
+    lines.append("")
+    if result.grounding_overturned:
+        thought = result.grounding_note
+    elif result.detected:
+        thought = (
+            result.grounding_note
+            or result.adjudication_reasoning
+            or result.reasoning
+            or result.summary
+        )
+    else:
+        thought = result.summary
+    if thought:
+        lines.append(thought)
+        lines.append("")
+    return lines
+
+
 def _render_event_result(result: EventResult, expert_candidates: Optional[List[Dict[str, Any]]] = None) -> List[str]:
-    """Render a single :class:`EventResult` as Markdown lines."""
+    """Render a single :class:`EventResult` as Markdown lines (full detail, appendix)."""
     try:
         lines: List[str] = []
-        status_icon = "✅" if result.detected else "❌"
+        status_icon = "⚠️" if result.grounding_overturned else ("✅" if result.detected else "❌")
         name_line = f"### {status_icon} 事件 {result.event_id}: {result.event_name}"
+        if result.grounding_overturned:
+            name_line += "（检出→核验推翻）"
         if result.event_name_en:
             name_line += f" / {result.event_name_en}"
         lines.append(name_line)
@@ -285,7 +353,10 @@ def _render_event_result(result: EventResult, expert_candidates: Optional[List[D
         lines.append("#### 裁决后结果")
         lines.append("| 字段 | 内容 |")
         lines.append("|------|------|")
-        lines.append(f"| 是否检测到 | {'**是**' if result.detected else '否'} |")
+        if result.grounding_overturned:
+            lines.append("| 是否检测到 | 检出→核验推翻 |")
+        else:
+            lines.append(f"| 是否检测到 | {'**是**' if result.detected else '否'} |")
         if result.summary:
             lines.append(f"| 摘要 | {result.summary} |")
         if result.reasoning:
@@ -349,6 +420,15 @@ def _render_event_result(result: EventResult, expert_candidates: Optional[List[D
         if result.adjudication_reasoning:
             lines.append("#### 裁决推理")
             lines.append(result.adjudication_reasoning)
+            lines.append("")
+
+        # 展示锚定核验层对该事件的分析
+        if result.grounding_note:
+            lines.append("#### 锚定核验")
+            if result.grounding_overturned:
+                lines.append(f"**结论：检出→核验推翻。** {result.grounding_note}")
+            else:
+                lines.append(result.grounding_note)
             lines.append("")
 
         # 展示专家原始分析（进入裁决层之前的决策）

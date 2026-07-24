@@ -4,18 +4,25 @@
 # Reusable prompt templates for VLM calls.
 # Each template uses Jinja2 syntax for variable substitution.
 #
+# 作用:本文件含 scene_understanding / expert_response_reflection / adjudication
+#      三个通用模板(各事件的检测模板已拆分至 event_*.yaml)。
+# 影响:统一由 core/config_manager.py 的 _load_prompt_templates 按 prompts/*.yaml
+#      glob 加载;scene_understanding 与 expert_response_reflection 由
+#      core/expert_agent.py 使用(先验知识注入 / 响应反思),adjudication 由
+#      core/pipeline_steps.py 的 AdjudicationStep 使用(多专家结果裁决)。
+#
 # 模板顺序与 event_categories.yaml 中的 event_id 对应：
 #   1. scene_understanding — 先验知识生成参考（v2.0.0 不再被 pipeline 自动调用）
-#   2. illegal_parking_detection — event_id 0
-#   3. emergency_lane_occupancy_detection — event_id 1
-#   4. traffic_accident_detection — event_id 2
-#   5. pedestrian_detection — event_id 3
-#   6. non_motor_vehicle_detection — event_id 4
-#   7. heavy_congestion_detection — event_id 5
-#   8. road_construction_detection — event_id 6
-#   9. direct_reversing_detection — event_id 7
-#   10. thrown_object_detection — event_id 8
-#   11. lane_change_solid_detection — event_id 9 (is_active=false)
+#   2. illegal_parking_detection — event_id 1
+#   3. emergency_lane_occupancy_detection — event_id 2
+#   4. traffic_accident_detection — event_id 3
+#   5. pedestrian_detection — event_id 4
+#   6. non_motor_vehicle_detection — event_id 5
+#   7. heavy_congestion_detection — event_id 6
+#   8. road_construction_detection — event_id 7
+#   9. direct_reversing_detection — event_id 8
+#   10. thrown_object_detection — event_id 10
+#   11. lane_change_solid_detection — event_id 11 (is_active=false)
 # =============================================================================
 
 
@@ -110,7 +117,7 @@ prompt_templates:
 
 
   # ---------------------------------------------------------------------------
-  # 2. Illegal Parking Detection (event_id=0)
+  # 2. Illegal Parking Detection (event_id=1)
   # Purpose: Detect vehicles that have come to a complete stop on the roadway.
   # ---------------------------------------------------------------------------
 
@@ -200,11 +207,11 @@ prompt_templates:
       输出格式示例（直接返回 JSON，不要 Markdown 代码块）：
       {
         "event_results": [
-          {"event_id": 0, "event_name": "应急车道占用", "detected": true, "summary": "...", "instances": [{"start_time_sec": 0.0, "end_time_sec": 1.0, "evidence_frames": [0], "description": "...", "reasoning": "..."}]}
+          {"event_id": 2, "event_name": "应急车道占用", "detected": true, "summary": "...", "instances": [{"start_time_sec": 0.0, "end_time_sec": 1.0, "evidence_frames": [0], "description": "...", "reasoning": "..."}]}
         ],
-        "audit_log": [{"event_id": 0, "event_name": "...", "action": "excluded|included", "reason": "...", "rule_id": "..."}],
+        "audit_log": [{"event_id": 2, "event_name": "...", "action": "excluded|included", "reason": "...", "rule_id": "..."}],
         "adjudication_reasoning": "...",
-        "reasoning_chain": [{"event_id": 0, "event_name": "...", "decision": "保留|排除", "thought_process": "...", "basis": "..."}]
+        "reasoning_chain": [{"event_id": 2, "event_name": "...", "decision": "保留|排除", "thought_process": "...", "basis": "..."}]
       }
 
       说明：event_results 必填；audit_log、adjudication_reasoning、reasoning_chain 可选。

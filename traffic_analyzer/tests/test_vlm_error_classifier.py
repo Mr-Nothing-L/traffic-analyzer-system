@@ -1,5 +1,10 @@
 """
 Unit tests for VLM error classification helpers.
+
+[文件说明]
+作用:测试 VLM 错误分类辅助函数,覆盖致命错误判定、可重试错误判定与故障转移触发条件。
+上游:pytest 自动发现并执行本文件测试。
+下游:traffic_analyzer/core/vlm_error_classifier.py(被测模块)。
 """
 
 from __future__ import annotations

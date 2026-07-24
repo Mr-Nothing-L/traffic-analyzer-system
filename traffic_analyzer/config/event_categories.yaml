@@ -1,11 +1,21 @@
 # =============================================================================
 # 交通事件类别配置 (Traffic Event Categories)
 # =============================================================================
+# [文件说明]
+# 作用:定义全部交通事件类别(event_categories),含事件编号/名称、检测模式、
+#      prompt_template_id、置信度阈值、判定定义,以及跨事件推理规则和裁决规则;
+#      二进制编码输出的位序即对应 event_id 1..11。
+# 影响:由 core/config_manager.py 加载并校验(与 annotation_spec.yaml 事件 ID 一致性),
+#      经 get_event_categories()/get_active_event_categories() 供 expert_agent 与
+#      pipeline_steps.py 专家分发、sft_label_rewrite.py、grounding_verification.py、
+#      report_generator、batch_evaluate.py 及 web/evidence_api.py 使用。
+#
 # 事件定义 / 检测模式 / Prompt 模板 / 裁决规则 全部通过 YAML 配置。
 # 新增事件无需改代码，只需在本文件追加并运行 validate-config。
 #
-# 输出格式：二进制编码 {bit_0_bit_1_..._bit_9}
-# 示例：{1_0_1_0_0_0_0_0_1_0} 表示事件 0、2、8 被检出。
+# 输出格式：二进制编码 {bit_1_bit_2_..._bit_11}
+# 位序 = 全局事件编号 1..11（标注文档 v4.5 的 action 编号；编号 9 = 正常占位，恒为 0）。
+# 示例：{1_0_1_0_0_0_0_0_0_1_0} 表示事件 1、3、10 被检出。
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -19,8 +29,8 @@
 # -----------------------------------------------------------------------------
 
 event_categories:
-  # --- event_id: 0 | 违法停车 (A) ---
-  - event_id: 0
+  # --- event_id: 1 | 违法停车 (A) ---
+  - event_id: 1
     event_code: "A"
     name: "Illegal Parking"
     name_zh: "违法停车"
@@ -37,8 +47,8 @@ event_categories:
       4. 涉及交通事故的场景中，静止车辆属于事故，不重复判定为违法停车。
       5. 施工区域内静止的施工保障车辆仍判定为违法停车。
 
-  # --- event_id: 1 | 应急车道占用 (B) ---
-  - event_id: 1
+  # --- event_id: 2 | 应急车道占用 (B) ---
+  - event_id: 2
     event_code: "B"
     name: "Emergency Lane Occupancy"
     name_zh: "应急车道占用"
@@ -57,8 +67,8 @@ event_categories:
 
       排除：行人与摩托车在应急车道不算占用应急车道；交通事故涉及的占用无需标注。
 
-  # --- event_id: 2 | 交通事故 (C) ---
-  - event_id: 2
+  # --- event_id: 3 | 交通事故 (C) ---
+  - event_id: 3
     event_code: "C"
     name: "Traffic Accident"
     name_zh: "交通事故"
@@ -71,8 +81,8 @@ event_categories:
       交通事故包括：车辆碰撞、翻车、起火/冒烟、路面散落物、动物进入车道等。
       注意：单独车辆机械故障（无碰撞、无人员伤亡、无财产损失）不算事故。
 
-  # --- event_id: 3 | 高速公路行人出现 (D) ---
-  - event_id: 3
+  # --- event_id: 4 | 高速公路行人出现 (D) ---
+  - event_id: 4
     event_code: "D"
     name: "Person Presence in Highway"
     name_zh: "高速公路行人出现"
@@ -85,8 +95,8 @@ event_categories:
       行人出现：高速公路车道、路肩、中央隔离带、匝道等区域行走的普通人或滞留驾乘人员。
       注意：进入车道的动物（牛、羊、野猪等）不属于本事件，按抛洒物处理。
 
-  # --- event_id: 4 | 摩托车出现 (E) ---
-  - event_id: 4
+  # --- event_id: 5 | 摩托车出现 (E) ---
+  - event_id: 5
     event_code: "E"
     name: "Motorcycle Presence"
     name_zh: "摩托车出现"
@@ -99,8 +109,8 @@ event_categories:
       摩托车出现：两轮/三轮摩托车在高速公路上行驶或静止。
       注意：电动自行车、自行车、三轮车不属于摩托车，不判定为本事件。
 
-  # --- event_id: 5 | 严重拥堵 (F) ---
-  - event_id: 5
+  # --- event_id: 6 | 严重拥堵 (F) ---
+  - event_id: 6
     event_code: "F"
     name: "Heavy Congestion"
     name_zh: "拥堵"
@@ -114,8 +124,8 @@ event_categories:
       特征：车辆速度下降、车间距变小、出现排队或走走停停；单条车道通行能力下降也按拥堵标注。
       无需具体阈值，与正常车流密集不同。
 
-  # --- event_id: 6 | 道路施工 (G) ---
-  - event_id: 6
+  # --- event_id: 7 | 道路施工 (G) ---
+  - event_id: 7
     event_code: "G"
     name: "Road Construction"
     name_zh: "道路施工"
@@ -130,8 +140,8 @@ event_categories:
       - 或路面作业的施工设备
       排除：单一清扫车日常清洁；应急救援车辆；施工车辆缓行/停车、人员仅捡垃圾等非施工操作。
 
-  # --- event_id: 7 | 车辆逆行/倒车 (H) ---
-  - event_id: 7
+  # --- event_id: 8 | 车辆逆行/倒车 (H) ---
+  - event_id: 8
     event_code: "H"
     name: "Vehicle Reversing"
     name_zh: "车辆逆行/倒车"
@@ -144,8 +154,8 @@ event_categories:
       车辆逆行/倒车：车辆移动方向与所在车道正常流向相反。
       判定依据：白倒车灯亮、车辆相对于固定参照物反向移动、车头朝向与正常流向相反。
 
-  # --- event_id: 8 | 抛洒物 (J) ---
-  - event_id: 8
+  # --- event_id: 10 | 抛洒物 (J) ---
+  - event_id: 10
     event_code: "J"
     name: "Thrown Objects"
     name_zh: "抛洒物"
@@ -160,8 +170,8 @@ event_categories:
       排除：施工区域内正常放置的物品；事故碎片（由事故统一标注）；路面正常设施；车辆正常装载物。
       三角警示牌：起到提醒作用时不标；无提醒作用（倒地、不在事故车后正常放置）按抛洒物处理。
 
-  # --- event_id: 9 | 实线变道 (K) [关闭中] ---
-  - event_id: 9
+  # --- event_id: 11 | 实线变道 (K) [关闭中] ---
+  - event_id: 11
     event_code: "K"
     name: "Lane Change over Solid Line"
     name_zh: "实线变道"
@@ -197,7 +207,7 @@ adjudication_rules:
 # 自定义事件示例（取消注释即可启用）
 # =============================================================================
 # event_categories:
-#   - event_id: 10
+#   - event_id: 12
 #     event_code: "Z"
 #     name_zh: "动物穿越"
 #     detection_mode: "expert_agent"

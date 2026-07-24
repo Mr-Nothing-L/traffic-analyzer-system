@@ -1,4 +1,14 @@
-"""Image loading helpers and low-level drawing primitives."""
+"""Image loading helpers and low-level drawing primitives.
+
+[文件说明]
+作用:图像加载与底层绘制原语:``load_image`` 将 numpy/bytes/PIL 统一为 RGB
+    PIL 图像;``_draw_crosshair`` 画中心十字;``_draw_text_with_background``
+    画带底色文字;``_load_scaled_font`` 加载可缩放系统字体(含回退)。
+上游:utils 内 roi_composite/roi_motion/construction_evidence_gallery/
+    emergency_lane_occupancy,并经 far_non_motor_enhancer 间接服务于
+    core/expert_agent_far_enhancement.py。
+下游:PIL/OpenCV;系统字体文件(探测常见 Linux/macOS/Windows 路径)。
+"""
 
 from __future__ import annotations
 

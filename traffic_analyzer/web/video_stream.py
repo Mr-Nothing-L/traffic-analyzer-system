@@ -8,6 +8,14 @@ the workspace may hold — the real surveillance clips are MPEG-4 Part 2
 Probe results are cached per path+mtime. When ffprobe/ffmpeg is missing or
 the transcode cannot start, the endpoint answers 501 so the frontend can
 fall back to frame-stepping.
+
+[文件说明]
+作用:视频流播放接口。浏览器可原生播放的编码(h264/mp4、vp8/vp9/av1 等)直接
+FileResponse(支持 HTTP Range);其余监控码流(Xvid 类、H.265、MJPEG)用 ffmpeg 实时转码为
+fragmented MP4 经 StreamingResponse 输出,客户端断连即终止 ffmpeg;ffprobe 探测结果按
+path+mtime 缓存,ffmpeg/ffprobe 缺失或转码失败时返回 501,供前端降级为逐帧浏览。
+上游:web/app.py(挂载路由);web/static 前端 <video> 播放。
+下游:web/workspace.py(视频路径解析);系统 ffmpeg/ffprobe 外部命令。
 """
 
 from __future__ import annotations

@@ -1,5 +1,10 @@
 """
 Unit tests for provider-specific callers in vlm_provider_clients.py.
+
+[文件说明]
+作用:测试各 provider 专用调用封装,覆盖 Anthropic(含 tools)与 Google 调用的请求构造与响应解析。
+上游:pytest 自动发现并执行本文件测试。
+下游:traffic_analyzer/core/vlm_provider_clients.py(被测模块)。
 """
 
 from __future__ import annotations

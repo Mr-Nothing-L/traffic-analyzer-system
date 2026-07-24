@@ -3,6 +3,18 @@
 This module was split out of :mod:`traffic_analyzer.core.expert_agent`.
 It contains the legacy tool-call parsing and Anthropic native-tool execution
 paths.  No new functionality was added.
+
+[文件说明]
+作用:ExpertAgent 的工具调用执行器(ToolCallExecutor),从 expert_agent.py
+拆出。包含三种路径:解析 VLM 输出中的 <tool_call> 文本并路由执行、
+Anthropic native tool 两阶段调用(call_with_tools → 执行 → 回填结果二次
+调用),以及将跟踪工具结果注入 prompt 的二次 VLM 调用(_second_vlm_call)。
+上游:core/expert_agent.py(ExpertAgent 通过 _tool_executor 属性委托调用)。
+下游:core/vlm_engine.py 的 VLMInferenceEngine.call / call_with_tools /
+call_with_tool_results 及内部 anthropic payload 构建工具;tools/
+tool_router.py 与 tools/tool_registry.py(ToolRouter 路由与默认注册表);
+core/expert_agent_far_enhancement.py 的 _EXPERT_RESPONSE_SCHEMA;
+utils/event_detection.py 的 parse_expert_response。
 """
 
 from __future__ import annotations

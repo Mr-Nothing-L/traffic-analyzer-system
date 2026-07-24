@@ -1,4 +1,16 @@
-"""Shared event-detection helpers used by both the orchestrator and pipeline steps."""
+"""Shared event-detection helpers used by both the orchestrator and pipeline steps.
+
+[文件说明]
+作用:事件检测共享辅助函数:``select_event_images`` 按 vlm_max_frames 均匀抽取
+    粗筛关键帧供 VLM 检测;``parse_expert_response`` 将 VLM 响应解析为
+    EventCandidate(严格布尔解析,防 ``bool('false')`` 误判);
+    ``reflect_expert_candidate`` 对专家候选做文本反思一致性检查(fail-open)。
+上游:``select_event_images`` 被 core/pipeline_steps.py、core/sft_label_rewrite.py、
+    core/grounding_verification.py 共用;解析/反思函数被 core/expert_agent.py、
+    core/expert_agent_far_enhancement.py、core/expert_agent_tools.py 使用。
+下游:models/schemas.py 的 AnalysisContext/EventCandidate/EventCategory/EventInstance;
+    VLM 引擎与反思 prompt 模板由调用方以参数传入。
+"""
 
 from __future__ import annotations
 

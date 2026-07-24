@@ -4,6 +4,21 @@ PipelineStep module for the traffic analyzer framework.
 Provides a pluggable step-based architecture for the analysis pipeline.
 Each step encapsulates a discrete phase of analysis (expert agent layer,
 adjudication) with built-in retry support.
+
+[文件说明]
+作用:分析流水线的步骤基类与核心步骤实现。PipelineStep 为抽象基类
+(execute 带计时/降级);ExpertAgentLayer 为第 2 步,并行调度各激活事件
+的 ExpertAgent;AdjudicationStep 为第 3 步,单次 VLM 调用裁决全部专家
+候选(含缺失事件重试、专家重跑与降级回填),结果写入
+context.event_results。另被 grounding_verification.py 与
+sft_label_rewrite.py 继承 PipelineStep。
+上游:traffic_analyzer/orchestrator/analysis_orchestrator.py 的 [2/4]
+Expert Agent Layer 与 [3/4] Adjudication 步骤。
+下游:core/expert_agent.py 的 ExpertAgent;core/vlm_engine.py 的
+VLMInferenceEngine.call;core/config_manager.py(加载 adjudication prompt
+模板、裁决规则、事件类别);utils/event_detection.py 的
+select_event_images;utils/annotation_spec_loader.py(加载 config/
+annotation_spec.yaml);config 下 prompts/adjudication 等配置。
 """
 
 from __future__ import annotations

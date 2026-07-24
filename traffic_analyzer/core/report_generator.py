@@ -2,6 +2,13 @@
 
 Produces structured reports (JSON, Markdown, binary encoding) from
 event detection results, scene understanding, and video metadata.
+
+[文件说明]
+作用:报告生成器(ReportGenerator),将事件检测结果、场景理解、视频元数据与
+     使用统计组装为 Report 模型,并导出 JSON、Markdown 与二进制编码。
+上游:orchestrator/analysis_orchestrator.py、orchestrator/reject_report_factory.py、cli.py。
+下游:core/report_markdown_renderer.py(_render_markdown 渲染 Markdown)、
+     models/schemas.py 的 Report/EventResult 等模型。
 """
 
 from __future__ import annotations
@@ -114,7 +121,7 @@ class ReportGenerator:
                 overall_traffic_description=f"报告生成过程中发生错误: {exc}",
                 event_results=[],
                 binary_encoding=BinaryEncoding(
-                    encoding_string="_".join(["_"] * 10),
+                    encoding_string="_".join(["_"] * 11),
                     event_count=0,
                     detected_events=[],
                 ),
@@ -174,18 +181,20 @@ class ReportGenerator:
         """
         Create a :class:`BinaryEncoding` from detection results.
 
-        The encoding string uses the format ``{bit_0_bit_1_..._bit_n}``
-        where *bit_i* is ``1`` when the corresponding event category was
-        detected and ``0`` otherwise.
+        The encoding string uses the format ``{bit_1_bit_2_..._bit_N}``
+        where *bit_i* is ``1`` when the event category with global
+        ``event_id == i`` was detected and ``0`` otherwise. Bit positions
+        follow the annotation document v4.5 action numbers (1..11); id 9 is
+        the "normal" placeholder and is always ``0``.
 
         Parameters
         ----------
         event_results:
             Detection results (need not be sorted).
         total_categories:
-            Total number of event categories that define the bit width.
+            Maximum event_id that defines the bit width (bits 1..N).
             If ``0`` the width is inferred from the maximum ``event_id``
-            present in *event_results* plus one.
+            present in *event_results*.
 
         Returns
         -------
@@ -199,7 +208,7 @@ class ReportGenerator:
             detected_events: List[int] = []
             bits: List[str] = []
 
-            for eid in range(total_categories):
+            for eid in range(1, total_categories + 1):
                 if detected_map.get(eid, False):
                     bits.append("1")
                     detected_events.append(eid)
@@ -221,7 +230,7 @@ class ReportGenerator:
                 exc_info=True,
             )
             return BinaryEncoding(
-                encoding_string="_".join(["_"] * 10),
+                encoding_string="_".join(["_"] * 11),
                 event_count=0,
                 detected_events=[],
             )
@@ -231,10 +240,10 @@ class ReportGenerator:
     # ------------------------------------------------------------------
 
     def _infer_total_categories(self, event_results: List[EventResult]) -> int:
-        """Infer bit width from results (max event_id + 1, at least 0)."""
+        """Infer bit width from results (max event_id, at least 0)."""
         if not event_results:
             return 0
-        return max(r.event_id for r in event_results) + 1
+        return max(r.event_id for r in event_results)
 
     def _generate_overall_description(
         self, scene_info: SceneInfo, event_results: List[EventResult]

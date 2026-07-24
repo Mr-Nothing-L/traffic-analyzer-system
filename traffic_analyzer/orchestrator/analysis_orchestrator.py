@@ -8,6 +8,11 @@ Wires all modules together into a cohesive analysis pipeline:
 4. Adjudication (post-processing)
 5. Cross-validate with CV tracks if provided
 6. Generate final report
+
+[文件说明]
+作用:主流水线编排类 AnalysisOrchestrator。analyze() 串联:[1/4]视频预处理(粗/精细采样,预筛拒绝时直接出拒绝报告)→[2/4]专家层事件检测→[3/4]裁决(失败时兜底用原始候选)→[3.4/4]锚定核验(推翻幻觉检出)→[3.5/4]SFT 标签改写与证据导出(可选)→[4/4]生成最终报告;from_config_dir() 为工厂方法。
+上游:traffic_analyzer/cli.py(命令行入口);tests/test_orchestrator.py、tests/test_evidence_exporter.py。
+下游:core/config_manager.py(YAML 配置加载)、core/video_preprocessor.py、core/vlm_engine.py、core/pipeline_steps.py(ExpertAgentLayer/AdjudicationStep)、core/grounding_verification.py、core/sft_label_rewrite.py、core/evidence_exporter.py、core/report_generator.py、models/schemas.py(AnalysisContext/Report 等)、utils/tool_call_logger.py;同包 candidate_fallback、orchestrator_exceptions、reject_report_factory、video_meta_extractor。
 """
 
 from __future__ import annotations
@@ -20,6 +25,7 @@ from typing import Any, Dict, List, Optional
 
 from traffic_analyzer.core.config_manager import ConfigManager
 from traffic_analyzer.core.evidence_exporter import export_evidence
+from traffic_analyzer.core.grounding_verification import GroundingVerificationStep
 from traffic_analyzer.core.pipeline_steps import (
     AdjudicationStep,
     ExpertAgentLayer,
@@ -183,7 +189,7 @@ class AnalysisOrchestrator:
                 reject_reason=str(exc),
                 checks=getattr(exc, "checks", None),
                 usage_stats=self.vlm_engine.get_usage_stats(),
-                total_categories=len(self.config_manager.get_event_categories()),
+                total_categories=self._max_event_id(),
             )
         except Exception as exc:
             logger.error(
@@ -205,7 +211,7 @@ class AnalysisOrchestrator:
                 video_meta=video_meta,
                 reject_reason=reject_reason,
                 usage_stats=self.vlm_engine.get_usage_stats(),
-                total_categories=len(self.config_manager.get_event_categories()),
+                total_categories=self._max_event_id(),
             )
         step_times["preprocessing"] = time.perf_counter() - t0
         context.keyframes = keyframes
@@ -271,6 +277,31 @@ class AnalysisOrchestrator:
         detected_count = sum(1 for r in event_results if r.detected)
         logger.info("  Events detected: %d / %d", detected_count, len(event_results))
 
+        # Step 3.4: Grounding verification (optional; overturns hallucinated positives)
+        logger.info("[3.4/4] Grounding verification...")
+        t0 = time.perf_counter()
+        try:
+            grounding_step = GroundingVerificationStep(self.config_manager, self.vlm_engine)
+            grounding_result = grounding_step.execute(context)
+            if grounding_result.success and grounding_result.data:
+                overturned = sum(1 for r in grounding_result.data if not r["grounded"])
+                logger.info("  Grounding verification: %d positive(s) overturned", overturned)
+        except FatalAPIError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "[orchestrator:analyze] GROUNDING_VERIFICATION_ERROR | video=%s | %s",
+                video_path,
+                exc,
+                exc_info=True,
+            )
+        step_times["grounding_verification"] = time.perf_counter() - t0
+        # EventResult 为可变模型，核验步骤就地修改（推翻的 detected=False）；
+        # context.event_results 与本地 event_results 共享同一批对象，天然同步。
+        event_results = list(context.event_results.values())
+        detected_count = sum(1 for r in event_results if r.detected)
+        logger.info("  Events detected after grounding check: %d / %d", detected_count, len(event_results))
+
         # Step 3.5: SFT label rewrite (optional, auxiliary)
         if context.config is not None and getattr(context.config, "sft_label_enabled", False):
             logger.info("[3.5/4] SFT label rewrite...")
@@ -313,7 +344,7 @@ class AnalysisOrchestrator:
         logger.info("[4/4] Generating report...")
         t0 = time.perf_counter()
         usage_stats = self.vlm_engine.get_usage_stats()
-        total_categories = len(self.config_manager.get_event_categories())
+        total_categories = self._max_event_id()
         try:
             with tool_call(
                 "report_generator.generate",
@@ -385,6 +416,13 @@ class AnalysisOrchestrator:
     # ------------------------------------------------------------------
     # Pipeline steps
     # ------------------------------------------------------------------
+
+    def _max_event_id(self) -> int:
+        """Max configured event_id; defines the binary encoding bit width (bits 1..N)."""
+        return max(
+            (c.event_id for c in self.config_manager.get_event_categories()),
+            default=0,
+        )
 
     @staticmethod
     def _extract_video_meta(video_path: str) -> VideoMetadata:

@@ -1,4 +1,10 @@
-"""Unit tests for traffic_analyzer.cli module."""
+"""Unit tests for traffic_analyzer.cli module.
+
+[文件说明]
+作用:测试 CLI 入口 build_parser/cmd_analyze/cmd_validate_config/main,覆盖子命令解析、参数校验与分析命令行为。
+上游:pytest 自动发现并执行本文件测试。
+下游:traffic_analyzer/cli.py(被测模块)。
+"""
 
 from __future__ import annotations
 
@@ -187,7 +193,7 @@ class TestCmdValidateConfig:
         mock_exists.return_value = True
         mock_manager = MagicMock()
         mock_manager.get_event_categories.return_value = [
-            MagicMock(event_id=0, name="A", detection_mode=MagicMock(value="expert_agent")),
+            MagicMock(event_id=1, name="A", detection_mode=MagicMock(value="expert_agent")),
         ]
         mock_manager.validate_config.return_value = []
         mock_config_cls.return_value = mock_manager

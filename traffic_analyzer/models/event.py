@@ -1,5 +1,10 @@
 """
 Event detection and adjudication models for the traffic analyzer framework.
+
+[文件说明]
+作用:定义事件检测与裁决相关模型:EventCategory(事件类目定义)、EventInstance/EventResult(单类目检测结果,含 grounding_note/grounding_overturned 锚定核验字段)、EventCandidate(专家层原始候选)、CrossEventInferenceRule、AdjudicationRule、AuditEntry、AdjudicationResult(裁决输出)。
+上游:models/schemas.py、models/context.py、models/report.py 引用;间接服务于 core/expert_agent.py、core/pipeline_steps.py、core/grounding_verification.py、core/report_generator.py、core/report_markdown_renderer.py。
+下游:models/enums.py;pydantic。
 """
 
 from __future__ import annotations
@@ -13,7 +18,7 @@ from .enums import ConfidenceLevel, DetectionMode
 
 class EventCategory(BaseModel):
     """Definition of a detectable event category."""
-    event_id: int = Field(..., ge=0, description="Zero-based index for binary encoding")
+    event_id: int = Field(..., ge=1, description="Global event number (annotation doc v4.5 action number); bit position in binary encoding")
     event_code: str = Field(..., description="Short code, e.g. 'A', 'B'")
     name: str = Field(..., description="Human-readable name")
     name_zh: str = Field(..., description="Chinese name")
@@ -89,6 +94,8 @@ class EventResult(BaseModel):
     reasoning: str = ""
     analysis_process: List[str] = Field(default_factory=list)
     adjudication_reasoning: str = Field(default="", description="裁决层对该事件的详细推理过程")
+    grounding_note: str = Field(default="", description="锚定核验层对该事件的分析说明")
+    grounding_overturned: bool = Field(default=False, description="裁决检出但被锚定核验推翻")
     expert_raw_description: str = Field(default="", description="ExpertAgent原始自然语言描述")
     cv_evidence: str = Field(default="", description="CV帧差检测证据")
     tool_results: List[Dict[str, Any]] = Field(default_factory=list, description="工具调用结果列表")

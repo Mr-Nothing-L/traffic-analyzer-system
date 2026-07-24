@@ -1,4 +1,13 @@
+# =============================================================================
 # Annotation Specification for Traffic Event Detection
+# =============================================================================
+# [文件说明]
+# 作用:交通事件检测标注规范(由 XLSX 标注文档转换而来),含全局标注准则、
+#      各事件的描述与边界条件(boundary_conditions),供裁决 prompt 使用。
+# 影响:由 utils/annotation_spec_loader.py 加载并生成 prompt 文本,注入
+#      core/pipeline_steps.py AdjudicationStep 的裁决 prompt;config_manager.py
+#      校验其事件 ID 与 event_categories.yaml 一致。
+#
 # Converted from XLSX标注规范文档
 # This file drives the adjudication prompt — edit here instead of the xlsx.
 
@@ -19,7 +28,7 @@ annotation_spec:
   # Event definitions
   # ---------------------------------------------------------------------------
   events:
-    - event_id: 0
+    - event_id: 1
       action_label: "违法停车"
       description: >
         车辆在道路上由行驶状态变为静止状态。
@@ -31,7 +40,7 @@ annotation_spec:
 
        
 
-    - event_id: 1
+    - event_id: 2
       action_label: "应急车道占用"
       description: >
         车辆进入、停止、占用或在应急车道/导流区内行驶，均构成应急车道占用。
@@ -43,7 +52,7 @@ annotation_spec:
         - "交通事故涉及的占用应急车道，无需标注"
         - "应急车道中工程车若未紧挨着或者被锥桶包围，需要标注"
 
-    - event_id: 2
+    - event_id: 3
       action_label: "交通事故"
       description: >
         由车辆引发、导致正常交通流突然中断、车辆异常停止，并造成人员伤亡或财产损失的事件。主要指车辆碰撞事故。
@@ -52,7 +61,7 @@ annotation_spec:
         - "事故发生区域包括行车道、应急车道、导流区和路肩"
         - "大模型的事件检测，就按照正常的理解思维确定。例如警车+路锥+一地碎片的组合，可按照交通事故进行标注"
 
-    - event_id: 3
+    - event_id: 4
       action_label: "行人/施工人员"
       description: >
         行人或动物进入机动车道或其他禁止进入的区域。
@@ -63,14 +72,14 @@ annotation_spec:
         - "机动车道/其他禁止的区域——高速最外侧的护栏内"
         - "人员必须实际站在路面或路肩上，站在车辆上或者车辆尾部平台未落地的不需要上报"
 
-    - event_id: 4
+    - event_id: 5
       action_label: "摩托车出现"
       description: >
         摩托车（两轮/三轮）违法驶入高速公路区域的事件。
       boundary_conditions:
         - "摩托车不管是走是停，都算闯入"
 
-    - event_id: 5
+    - event_id: 6
       action_label: "拥堵"
       description: >
         道路上出现单车道或多车道通行能力下降的状况,影响道路整体通行效率的交通事件。
@@ -79,7 +88,7 @@ annotation_spec:
         - "单条车道通行能力下降按拥堵标注。至于具体的拥堵原因，看不到的不用管"
         - "无需具体阈值"
 
-    - event_id: 6
+    - event_id: 7
       action_label: "施工"
       description: >
         默认同时出现以下情况时，判定为施工事件：
@@ -96,7 +105,7 @@ annotation_spec:
         - "施工区域内，仅应急车道占用事件无需上报，属于正常施工。施工区域内的机动车静止停放仍应判定为违法停车。"
         - "施工区域中违停要标注出来"
 
-    - event_id: 7
+    - event_id: 8
       action_label: "车辆逆行/倒车"
       description: >
         车辆在道路上行驶方向与交通标志或标线所指示的规定方向相反。
@@ -104,7 +113,7 @@ annotation_spec:
         - "只针对机动车"
         - "施工区域内，车辆往返施工不算逆行"
 
-    - event_id: 8
+    - event_id: 10
       action_label: "抛洒物"
       description: >
         物体遗落至车道内，对车辆正常通行造成干扰风险。
@@ -116,7 +125,7 @@ annotation_spec:
         - "交通事故涉及的碎片不作为抛洒物标注"
         - "20260420新增：三角牌等标识牌在起到提醒作用时不标注，无提醒作用则按抛洒物处理"
 
-    - event_id: 9
+    - event_id: 11
       action_label: "实线变道"
       description: >
         车辆在禁止变道区域穿行，判定为违规变道事件。

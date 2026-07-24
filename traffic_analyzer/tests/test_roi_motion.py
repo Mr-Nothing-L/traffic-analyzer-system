@@ -1,4 +1,10 @@
-"""Unit tests for the ROI motion comparison panel annotations."""
+"""Unit tests for the ROI motion comparison panel annotations.
+
+[文件说明]
+作用:测试 ROI 运动对比面板标注绘制 _draw_panel_annotations,重点回归十字准星使用裁剪相对坐标。
+上游:pytest 自动发现并执行本文件测试。
+下游:traffic_analyzer/utils/roi_motion.py(被测模块)。
+"""
 
 from __future__ import annotations
 

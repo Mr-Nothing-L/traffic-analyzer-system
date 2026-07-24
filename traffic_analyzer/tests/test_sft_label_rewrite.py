@@ -1,11 +1,16 @@
 """Unit tests for the SFT label rewrite step.
 
 Covers:
-- :data:`traffic_analyzer.core.sft_label_rewrite.EVENT_ID_TO_ACTION`.
+- "action 即 event_id" 语义（event_id 全局采用标注文档 v4.5 编号，无映射表）。
 - Pure helpers: :func:`build_description`, :func:`build_sample`,
   :func:`find_ungrounded_positive_event_ids`, :func:`write_sample`.
 - :class:`traffic_analyzer.core.sft_label_rewrite.SftLabelRewriteStep`
   (guards, success path, quarantine gate, fail-open semantics).
+
+[文件说明]
+作用:测试 SFT 标签重写步骤及纯函数,覆盖 "action 即 event_id" 语义、样本构造、隔离闸门与 fail-open 行为。
+上游:pytest 自动发现并执行本文件测试。
+下游:traffic_analyzer/core/sft_label_rewrite.py(被测模块)。
 """
 
 from __future__ import annotations
@@ -19,7 +24,6 @@ import pytest
 
 from traffic_analyzer.core.config_manager import ConfigManager
 from traffic_analyzer.core.sft_label_rewrite import (
-    EVENT_ID_TO_ACTION,
     SftLabelRewriteStep,
     build_description,
     build_sample,
@@ -43,18 +47,21 @@ from traffic_analyzer.models.schemas import (
 # Helpers / mocks
 # ---------------------------------------------------------------------------
 
+# 全局 event_id = 标注文档 v4.5 的 action 编号（9 = 正常占位，无对应事件）。
 _NAME_ZH: Dict[int, str] = {
-    0: "违法停车",
-    1: "应急车道占用",
-    2: "交通事故",
-    3: "高速公路行人出现",
-    4: "摩托车出现",
-    5: "拥堵",
-    6: "道路施工",
-    7: "车辆逆行/倒车",
-    8: "抛洒物",
-    9: "实线变道",
+    1: "违法停车",
+    2: "应急车道占用",
+    3: "交通事故",
+    4: "高速公路行人出现",
+    5: "摩托车出现",
+    6: "拥堵",
+    7: "道路施工",
+    8: "车辆逆行/倒车",
+    10: "抛洒物",
+    11: "实线变道",
 }
+
+_EVENT_IDS: List[int] = sorted(_NAME_ZH)
 
 
 class _SftSystemConfig(SystemConfig):
@@ -117,13 +124,13 @@ def _make_categories() -> List[EventCategory]:
             description=f"desc {eid}",
             definition=f"定义 {eid}",
         )
-        for eid in range(10)
+        for eid in _EVENT_IDS
     ]
 
 
 def _make_event_results(detected_ids: tuple = ()) -> Dict[int, EventResult]:
     results: Dict[int, EventResult] = {}
-    for eid in range(10):
+    for eid in _EVENT_IDS:
         detected = eid in detected_ids
         instances = (
             [
@@ -150,11 +157,11 @@ def _make_event_results(detected_ids: tuple = ()) -> Dict[int, EventResult]:
 
 
 def _make_resp_data(
-    present_ids: tuple = (1,),
+    present_ids: tuple = (2,),
     ungrounded: tuple = (),
 ) -> Dict[str, Any]:
     thoughts: List[Dict[str, Any]] = []
-    for eid in range(10):
+    for eid in _EVENT_IDS:
         present = eid in present_ids
         thinking = (
             "应急车道区域：画面最右侧白色实线以外为应急车道，无导流区；"
@@ -190,7 +197,7 @@ def _make_video_meta(
 
 def _make_context(
     config: Optional[SystemConfig],
-    detected_ids: tuple = (1,),
+    detected_ids: tuple = (2,),
     num_frames: int = 6,
     with_keyframes: bool = True,
 ) -> AnalysisContext:
@@ -221,29 +228,34 @@ def config_manager() -> ConfigManager:
 
 
 # ---------------------------------------------------------------------------
-# EVENT_ID_TO_ACTION mapping tests
+# "action 即 event_id" tests
 # ---------------------------------------------------------------------------
 
 
-class TestEventIdToAction:
-    def test_full_mapping_matches_annotation_doc_v45(self) -> None:
-        """标注文档 v4.5：action 1-11 共 10 个事件，action 9 = 正常占位跳过。"""
-        assert EVENT_ID_TO_ACTION == {
-            0: 1,
-            1: 2,
-            2: 3,
-            3: 4,
-            4: 5,
-            5: 6,
-            6: 7,
-            7: 8,
-            8: 10,
-            9: 11,
-        }
+class TestActionEqualsEventId:
+    def test_action_list_equals_sorted_detected_ids(self) -> None:
+        """event_id 全局采用 v4.5 编号，action 列表即排序后的 detected event_id。"""
+        sample = build_sample(
+            _make_resp_data(present_ids=(2, 10, 11)),
+            _make_event_results(detected_ids=(11, 2, 10)),
+            _make_categories(),
+            _make_video_meta(),
+        )
 
-    def test_mapping_has_ten_entries_and_skips_action_9(self) -> None:
-        assert len(EVENT_ID_TO_ACTION) == 10
-        assert sorted(EVENT_ID_TO_ACTION.values()) == [1, 2, 3, 4, 5, 6, 7, 8, 10, 11]
+        assert sample["action"] == [2, 10, 11]
+
+    def test_class_lines_use_event_id_directly(self) -> None:
+        """classN 行的 N 直接等于 event_id；9 为正常占位，永不出现在结论中。"""
+        desc = build_description(
+            _make_resp_data(),
+            _make_event_results(detected_ids=(10, 11)),
+            _make_categories(),
+        )
+
+        answer = desc.split("<answer>\n", 1)[1]
+        assert "class10: 抛洒物" in answer
+        assert "class11: 实线变道" in answer
+        assert "class9" not in answer
 
 
 # ---------------------------------------------------------------------------
@@ -255,17 +267,17 @@ class TestBuildDescription:
     def test_think_covers_all_ten_categories_in_fixed_order(self) -> None:
         categories = _make_categories()
         desc = build_description(
-            _make_resp_data(), _make_event_results(detected_ids=(1,)), categories
+            _make_resp_data(), _make_event_results(detected_ids=(2,)), categories
         )
 
-        positions = [desc.index(f"{_NAME_ZH[eid]}：") for eid in range(10)]
+        positions = [desc.index(f"{_NAME_ZH[eid]}：") for eid in _EVENT_IDS]
         assert positions == sorted(positions)
         assert "【" not in desc
 
     def test_answer_scene_elements_first_conclusion_last(self) -> None:
         categories = _make_categories()
         desc = build_description(
-            _make_resp_data(), _make_event_results(detected_ids=(1, 2)), categories
+            _make_resp_data(), _make_event_results(detected_ids=(2, 3)), categories
         )
 
         assert desc.startswith("<think>\n")
@@ -301,9 +313,9 @@ class TestBuildDescription:
         )
 
         think = desc.split("</think>", 1)[0]
-        assert f"{_NAME_ZH[8]}：" not in think
-        assert f"{_NAME_ZH[7]}：" in think
-        assert f"{_NAME_ZH[9]}：" in think
+        assert f"{_NAME_ZH[10]}：" not in think
+        assert f"{_NAME_ZH[8]}：" in think
+        assert f"{_NAME_ZH[11]}：" in think
 
 
 # ---------------------------------------------------------------------------
@@ -315,7 +327,7 @@ class TestBuildSample:
     def test_field_types_and_values_per_key(self) -> None:
         sample = build_sample(
             _make_resp_data(),
-            _make_event_results(detected_ids=(1, 8)),
+            _make_event_results(detected_ids=(2, 10)),
             _make_categories(),
             _make_video_meta(),
         )
@@ -331,7 +343,7 @@ class TestBuildSample:
         }
         assert sample["chunk"] == "chunk #1"
         assert isinstance(sample["idx"], int) and sample["idx"] == 1
-        assert sample["action"] == [2, 10]  # event_id 1→2, 8→10
+        assert sample["action"] == [2, 10]  # action 即 event_id：应急车道占用、抛洒物
         assert all(isinstance(a, int) for a in sample["action"])
         assert isinstance(sample["description"], str)
         assert isinstance(sample["start_timestamp"], float)
@@ -404,7 +416,7 @@ class TestWriteSample:
     def test_writes_json_round_trip(self, tmp_path: Path) -> None:
         sample = build_sample(
             _make_resp_data(),
-            _make_event_results(detected_ids=(1,)),
+            _make_event_results(detected_ids=(2,)),
             _make_categories(),
             _make_video_meta(),
         )
@@ -428,7 +440,7 @@ class TestSftLabelRewriteStep:
         engine = _MockVLMEngine(response=_make_resp_data())
         step = SftLabelRewriteStep(config_manager, engine)
         context = _make_context(
-            _SftSystemConfig(sft_label_output_dir=str(tmp_path)), detected_ids=(1,)
+            _SftSystemConfig(sft_label_output_dir=str(tmp_path)), detected_ids=(2,)
         )
 
         result = step._execute(context)
@@ -453,7 +465,7 @@ class TestSftLabelRewriteStep:
         engine = _MockVLMEngine(response=_make_resp_data())
         step = SftLabelRewriteStep(config_manager, engine)
         context = _make_context(
-            _SftSystemConfig(sft_label_output_dir=str(tmp_path)), detected_ids=(1,)
+            _SftSystemConfig(sft_label_output_dir=str(tmp_path)), detected_ids=(2,)
         )
 
         step._execute(context)
@@ -469,7 +481,7 @@ class TestSftLabelRewriteStep:
         )
         verdicts = json.loads(context_vars["verdicts_json"])
         assert len(verdicts) == active_count  # 未激活类别不进入 prompt
-        assert all(v["event_id"] not in (8, 9) for v in verdicts)
+        assert all(v["event_id"] not in (10, 11) for v in verdicts)
         assert verdicts[1]["detected"] is True
         assert verdicts[1]["instances"][0]["start_time_sec"] == 1.0
         assert verdicts[0]["detected"] is False
@@ -479,10 +491,10 @@ class TestSftLabelRewriteStep:
     def test_quarantine_writes_to_subdirectory(
         self, config_manager: ConfigManager, tmp_path: Path
     ) -> None:
-        engine = _MockVLMEngine(response=_make_resp_data(ungrounded=(1,)))
+        engine = _MockVLMEngine(response=_make_resp_data(ungrounded=(2,)))
         step = SftLabelRewriteStep(config_manager, engine)
         context = _make_context(
-            _SftSystemConfig(sft_label_output_dir=str(tmp_path)), detected_ids=(1,)
+            _SftSystemConfig(sft_label_output_dir=str(tmp_path)), detected_ids=(2,)
         )
 
         result = step._execute(context)
@@ -570,7 +582,7 @@ class TestSftLabelRewriteStep:
         engine = _MockVLMEngine(response=_make_resp_data())
         step = SftLabelRewriteStep(config_manager, engine)
         context = _make_context(
-            _SftSystemConfig(sft_label_output_dir=str(tmp_path)), detected_ids=(1,)
+            _SftSystemConfig(sft_label_output_dir=str(tmp_path)), detected_ids=(2,)
         )
 
         with patch.object(

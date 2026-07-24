@@ -1,4 +1,10 @@
-"""Integration tests for the far-distance non-motor vehicle enhancement flow."""
+"""Integration tests for the far-distance non-motor vehicle enhancement flow.
+
+[文件说明]
+作用:集成测试 ExpertAgent 远距非机动车增强流程,覆盖增强触发、图像合成与结果写回。
+上游:pytest 自动发现并执行本文件测试。
+下游:traffic_analyzer/core/expert_agent.py(被测模块)。
+"""
 
 from __future__ import annotations
 
@@ -89,7 +95,7 @@ def config_manager() -> ConfigManager:
 @pytest.fixture
 def non_motor_category(config_manager: ConfigManager) -> Any:
     categories = config_manager.get_event_categories()
-    category = next(c for c in categories if c.event_id == 4)
+    category = next(c for c in categories if c.event_id == 5)
     assert category.prompt_template_id == "non_motor_vehicle_detection"
     return category
 
@@ -97,7 +103,7 @@ def non_motor_category(config_manager: ConfigManager) -> Any:
 @pytest.fixture
 def pedestrian_category(config_manager: ConfigManager) -> Any:
     categories = config_manager.get_event_categories()
-    category = next(c for c in categories if c.event_id == 3)
+    category = next(c for c in categories if c.event_id == 4)
     assert category.prompt_template_id == "pedestrian_detection"
     return category
 
@@ -105,7 +111,7 @@ def pedestrian_category(config_manager: ConfigManager) -> Any:
 @pytest.fixture
 def construction_category(config_manager: ConfigManager) -> Any:
     categories = config_manager.get_event_categories()
-    category = next(c for c in categories if c.event_id == 6)
+    category = next(c for c in categories if c.event_id == 7)
     assert category.prompt_template_id == "road_construction_detection"
     return category
 
@@ -268,8 +274,8 @@ def test_far_enhancement_success(make_agent, analysis_context) -> None:
     raw = candidate.raw_vlm_response
     composite_path = Path(raw["composite_image_path"])
     motion_path = Path(raw["motion_composite_image_path"])
-    assert composite_path.name == "test_video_event_4_frame_0_composite.jpg"
-    assert "event_4_frame_0_motion_1.jpg" in str(motion_path)
+    assert composite_path.name == "test_video_event_5_frame_0_composite.jpg"
+    assert "event_5_frame_0_motion_1.jpg" in str(motion_path)
     assert composite_path.exists()
     assert motion_path.exists()
 
@@ -410,11 +416,11 @@ def test_far_enhancement_saves_assets_next_to_report(make_agent, analysis_contex
 
         assert candidate.detected is True
         raw = candidate.raw_vlm_response
-        assert raw["composite_image_path"] == "tmp_img/test_video/test_video_event_4_frame_0_composite.jpg"
-        assert raw["motion_composite_image_path"] == "tmp_img/test_video/test_video_event_4_frame_0_motion_1.jpg"
+        assert raw["composite_image_path"] == "tmp_img/test_video/test_video_event_5_frame_0_composite.jpg"
+        assert raw["motion_composite_image_path"] == "tmp_img/test_video/test_video_event_5_frame_0_motion_1.jpg"
 
-        composite_file = report_dir / "tmp_img" / "test_video" / "test_video_event_4_frame_0_composite.jpg"
-        motion_file = report_dir / "tmp_img" / "test_video" / "test_video_event_4_frame_0_motion_1.jpg"
+        composite_file = report_dir / "tmp_img" / "test_video" / "test_video_event_5_frame_0_composite.jpg"
+        motion_file = report_dir / "tmp_img" / "test_video" / "test_video_event_5_frame_0_motion_1.jpg"
         assert composite_file.exists()
         assert motion_file.exists()
 
@@ -473,7 +479,7 @@ def test_later_better_frame_chosen_over_earlier_worse(make_agent, analysis_conte
 
     assert candidate.detected is True
     composite_path = Path(candidate.raw_vlm_response["composite_image_path"])
-    assert composite_path.name == "test_video_event_4_frame_1_composite.jpg"
+    assert composite_path.name == "test_video_event_5_frame_1_composite.jpg"
     assert candidate.instances[0].evidence_frames == [1, 2]
 
     roi_calls = [c for c in engine.calls if c["template_id"] == "far_non_motor_roi_detection"]
@@ -510,7 +516,7 @@ def test_high_scoring_false_does_not_block_lower_true(make_agent) -> None:
 
     assert candidate.detected is True
     composite_path = Path(candidate.raw_vlm_response["composite_image_path"])
-    assert composite_path.name == "test_video_event_4_frame_1_composite.jpg"
+    assert composite_path.name == "test_video_event_5_frame_1_composite.jpg"
     assert candidate.instances[0].evidence_frames == [1, 0]
     assert "frame 1 confirmed" in candidate.instances[0].reasoning
 
@@ -546,7 +552,7 @@ def test_filter_skips_invalid_bbox(make_agent, bbox, expected_frame) -> None:
 
     assert candidate.detected is True
     composite_path = Path(candidate.raw_vlm_response["composite_image_path"])
-    assert composite_path.name == f"test_video_event_4_frame_{expected_frame}_composite.jpg"
+    assert composite_path.name == f"test_video_event_5_frame_{expected_frame}_composite.jpg"
 
     final_calls = [c for c in agent.vlm_engine.calls if c["template_id"] == "non_motor_vehicle_detection"]
     assert len(final_calls) == 1
@@ -723,7 +729,7 @@ def test_fallback_accepts_uncertainty_reasoning(make_agent) -> None:
 
 
 def test_non_motor_low_confidence_filter(make_agent) -> None:
-    """Only ROI candidates with confidence >= 0.6 enter the final classifier for event_id=4."""
+    """Only ROI candidates with confidence >= 0.6 enter the final classifier for event_id=5."""
     context = _make_analysis_context(num_frames=3, vlm_max_frames=6)
     agent, engine = make_agent(
         {
@@ -818,7 +824,7 @@ def test_dual_composite_paths(make_agent) -> None:
     assert "composite_image_path" in raw
     assert "motion_composite_image_path" in raw
     motion_path = Path(raw["motion_composite_image_path"])
-    assert "event_4_frame_0_motion_1.jpg" in str(motion_path)
+    assert "event_5_frame_0_motion_1.jpg" in str(motion_path)
     assert motion_path.exists()
 
     final_calls = [c for c in engine.calls if c["template_id"] == "non_motor_vehicle_detection"]
@@ -957,7 +963,7 @@ def test_pedestrian_far_enhancement_success(make_agent, pedestrian_category, ana
         candidate = _detect_with_patched_dir(agent, analysis_context)
 
     assert candidate.detected is True
-    assert candidate.event_id == 3
+    assert candidate.event_id == 4
     # The first positive frame is returned immediately.
     assert "第0帧红框内为一名站立行人" in candidate.summary
     assert len(candidate.instances) == 1
@@ -1002,7 +1008,7 @@ def test_pedestrian_far_enhancement_negative(make_agent, pedestrian_category, an
     candidate = _detect_with_patched_dir(agent, analysis_context)
 
     assert candidate.detected is False
-    assert candidate.event_id == 3
+    assert candidate.event_id == 4
     assert "未检测到" in candidate.summary
 
 
@@ -1066,7 +1072,7 @@ def test_pedestrian_far_enhancement_fallback_high_confidence(
     candidate = _detect_with_patched_dir(agent, analysis_context)
 
     assert candidate.detected is True
-    assert candidate.event_id == 3
+    assert candidate.event_id == 4
     assert candidate.raw_vlm_response["far_enhancement"].get("fallback") is True
     assert "第0帧红色方框内" in candidate.summary
     assert "直立人形轮廓" in candidate.summary
@@ -1272,10 +1278,10 @@ def test_construction_gallery_success(
     candidate = _detect_with_patched_dir(agent, analysis_context)
 
     assert candidate.detected is True
-    assert candidate.event_id == 6
+    assert candidate.event_id == 7
     raw = candidate.raw_vlm_response
     assert "gallery_image_path" in raw
-    assert raw["gallery_image_path"].endswith("_event_6_frame_1_gallery.jpg")
+    assert raw["gallery_image_path"].endswith("_event_7_frame_1_gallery.jpg")
 
     gallery_path = Path(str(raw["gallery_image_path"]).replace("tmp_img/", ""))
     # Resolve against the patched temp dir prefix if needed.
@@ -1401,8 +1407,8 @@ def test_construction_gallery_saves_assets_next_to_report(
         candidate = agent.detect(analysis_context)
 
         assert candidate.detected is True
-        assert candidate.raw_vlm_response["gallery_image_path"] == "tmp_img/test_video/test_video_event_6_frame_1_gallery.jpg"
-        gallery_file = report_dir / "tmp_img" / "test_video" / "test_video_event_6_frame_1_gallery.jpg"
+        assert candidate.raw_vlm_response["gallery_image_path"] == "tmp_img/test_video/test_video_event_7_frame_1_gallery.jpg"
+        gallery_file = report_dir / "tmp_img" / "test_video" / "test_video_event_7_frame_1_gallery.jpg"
         assert gallery_file.exists()
 
         final_calls = [c for c in engine.calls if c["template_id"] == "road_construction_detection"]
@@ -1987,7 +1993,7 @@ def test_pedestrian_structured_veto_false_keeps_detected(
 def test_pedestrian_low_confidence_filter_excludes_below_threshold(
     make_agent, pedestrian_category, analysis_context
 ) -> None:
-    """Only ROI candidates with confidence >= 0.6 enter the final classifier for event_id=3."""
+    """Only ROI candidates with confidence >= 0.6 enter the final classifier for event_id=4."""
     agent, engine = make_agent(
         {
             "far_pedestrian_roi_detection": [
@@ -2217,7 +2223,7 @@ def test_far_enhancement_failure_returns_negative_for_enabled_events(make_agent)
         candidate = agent.detect(_make_analysis_context())
 
     assert candidate.detected is False
-    assert candidate.event_id == 4
+    assert candidate.event_id == 5
     assert "增强检测失败" in candidate.summary
     # The direct VLM call with raw frames must not happen.
     final_calls = [
@@ -2245,7 +2251,7 @@ def test_top_k_zero_returns_negative_without_index_error(
     candidate = _detect_with_patched_dir(agent, analysis_context)
 
     assert candidate.detected is False
-    assert candidate.event_id == 4
+    assert candidate.event_id == 5
     assert "未检测到" in candidate.summary
 
 
@@ -2273,7 +2279,7 @@ def test_final_classifier_string_false_detected_stays_negative(
     candidate = _detect_with_patched_dir(agent, analysis_context)
 
     assert candidate.detected is False
-    assert candidate.event_id == 4
+    assert candidate.event_id == 5
 
 
 def test_pedestrian_final_classifier_tolerates_malformed_instances(

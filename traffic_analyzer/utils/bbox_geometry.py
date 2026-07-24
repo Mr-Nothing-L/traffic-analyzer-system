@@ -1,4 +1,14 @@
-"""Normalized bounding-box geometry utilities."""
+"""Normalized bounding-box geometry utilities.
+
+[文件说明]
+作用:归一化 bbox([0,1] 区间 [x1,y1,x2,y2])的几何计算:中心放大
+    ``compute_enlarged_bbox``、宽高比校验 ``is_bbox_aspect_valid``、
+    像素面积/最小尺寸判定 ``is_bbox_large_enough``。
+上游:utils 内 roi_composite/roi_motion/construction_evidence_gallery/
+    emergency_lane_occupancy,并经 far_non_motor_enhancer 间接服务于
+    core/expert_agent_far_enhancement.py。
+下游:无,纯函数,无外部依赖。
+"""
 
 from __future__ import annotations
 

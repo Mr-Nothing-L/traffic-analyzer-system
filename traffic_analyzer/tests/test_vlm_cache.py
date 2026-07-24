@@ -1,5 +1,10 @@
 """
 Unit tests for vlm_cache.py (DiskCache corrupt-row self-healing).
+
+[文件说明]
+作用:测试 DiskCache 磁盘缓存,重点覆盖损坏缓存行的自愈(读取失败时清理)行为。
+上游:pytest 自动发现并执行本文件测试。
+下游:traffic_analyzer/core/vlm_cache.py(被测模块)。
 """
 
 from __future__ import annotations

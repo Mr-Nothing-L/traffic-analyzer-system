@@ -3,6 +3,11 @@ Failover unit tests for VLMInferenceEngine.
 
 These tests exercise the multi-provider failover logic introduced in Wave 3.
 All external SDK calls are mocked; no real network requests are made.
+
+[文件说明]
+作用:测试 VLMInferenceEngine 多 provider 故障转移逻辑,覆盖失败切换、缓存键计算等(全部 mock,无真实网络请求)。
+上游:pytest 自动发现并执行本文件测试。
+下游:traffic_analyzer/core/vlm_engine.py(被测模块)。
 """
 
 from __future__ import annotations

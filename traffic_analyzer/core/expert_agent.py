@@ -8,6 +8,20 @@ This file is now a thin compatibility layer.  The far-distance enhancement
 and tool-call execution implementations live in
 :mod:`traffic_analyzer.core.expert_agent_far_enhancement` and
 :mod:`traffic_analyzer.core.expert_agent_tools` respectively.
+
+[文件说明]
+作用:单事件检测代理 ExpertAgent。每个实例只负责一个事件类别的事实识别
+(选帧→加载 prompt 模板并注入 scene_understanding 先验→VLM 调用→解析为
+EventCandidate,可选自我反思),不做任何过滤/排除,裁决留给后续步骤。
+本文件为兼容层,远距离增强与工具调用实现拆分到同目录另两个模块。
+上游:core/pipeline_steps.py 的 ExpertAgentLayer(并行调度)与
+AdjudicationStep(缺失事件时重跑专家)。
+下游:core/vlm_engine.py 的 VLMInferenceEngine.call;core/config_manager.py
+加载 config/prompts/ 下的 event_N.yaml 事件模板及 scene_understanding、
+expert_response_reflection 模板;core/expert_agent_far_enhancement.py 的
+FarEnhancementDetector;core/expert_agent_tools.py 的 ToolCallExecutor;
+utils/event_detection.py 的 select_event_images / parse_expert_response /
+reflect_expert_candidate。
 """
 
 from __future__ import annotations

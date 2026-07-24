@@ -4,6 +4,15 @@ A *workspace* is a directory of videos the user analyzes. Inference results
 live under ``<workspace>/analysis/<video_stem>/`` (see the shared contract):
 ``report.md``, ``<video_stem>.json`` (SFT sample), ``<video_stem>_evidence.json``
 and an ``images/`` subdirectory.
+
+[文件说明]
+作用:工作区状态(WorkspaceState)与视频发现、路径安全校验(防目录穿越);定义
+analysis/<stem>/ 结果目录契约,并提供 /api/workspace、/api/workspace/videos、
+/api/workspace/tree 路由。
+上游:web/app.py(挂载路由);web/ 下 jobs、evidence_api、frames、video_stream、evaluate
+均复用其 require_workspace/validate_stem/analysis_dir 等辅助函数。
+下游:无包内模块依赖,仅读写工作区文件系统;VIDEO_EXTENSIONS 与 scripts/batch_evaluate.py
+的视频发现保持一致。
 """
 
 from __future__ import annotations

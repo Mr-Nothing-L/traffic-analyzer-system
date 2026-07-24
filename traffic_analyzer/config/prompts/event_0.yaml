@@ -1,5 +1,9 @@
 # =============================================================================
-# event_id 0 — 违法停车检测
+# event_id 1 — 违法停车检测
+# 作用:含 template_id=illegal_parking_detection 的违法停车事件检测模板。
+# 影响:统一由 core/config_manager.py 的 _load_prompt_templates 按 prompts/*.yaml
+#      glob 加载;illegal_parking_detection 由 core/expert_agent.py 按事件类别的
+#      prompt_template_id 调用执行检测。
 # =============================================================================
 
 prompt_templates:
@@ -8,7 +12,7 @@ prompt_templates:
 
 
   # ---------------------------------------------------------------------------
-  # 2. Illegal Parking Detection (event_id=0)
+  # 2. Illegal Parking Detection (event_id=1)
   # Purpose: Detect vehicles that have come to a complete stop on the roadway.
   # ---------------------------------------------------------------------------
   - template_id: "illegal_parking_detection"
@@ -76,5 +80,5 @@ prompt_templates:
     output_format_hint: "JSON"
 
   # ---------------------------------------------------------------------------
-  # 3. Emergency Lane Occupancy Detection (event_id=1)
+  # 3. Emergency Lane Occupancy Detection (event_id=2)
   # ---------------------------------------------------------------------------

@@ -1,4 +1,10 @@
-"""Tests for the per-video evidence exporter (web UI evidence.json)."""
+"""Tests for the per-video evidence exporter (web UI evidence.json).
+
+[文件说明]
+作用:测试 export_evidence 按视频导出 evidence.json 证据文件(供 web UI 使用)的结构与内容。
+上游:pytest 自动发现并执行本文件测试。
+下游:traffic_analyzer/core/evidence_exporter.py(被测模块)。
+"""
 
 from __future__ import annotations
 
@@ -58,7 +64,7 @@ def _make_video_meta() -> VideoMetadata:
 
 
 def _occupancy_raw_response() -> Dict[str, Any]:
-    """Raw response shape produced by the event_id=1 occupancy branch."""
+    """Raw response shape produced by the event_id=2 occupancy branch."""
     prefix = "tmp_img/test_video/test_video_event_1_occupancy"
     return {
         "mask_overlay_image_path": f"{prefix}/02_masks_overlay.jpg",
@@ -97,11 +103,11 @@ def _make_occupancy_context(report_dir: Path) -> AnalysisContext:
         video_meta=_make_video_meta(),
         output_dir=str(report_dir),
     )
-    context.event_results[1] = EventResult(
-        event_id=1, event_name="应急车道占用", detected=True
+    context.event_results[2] = EventResult(
+        event_id=2, event_name="应急车道占用", detected=True
     )
-    context.event_candidates[1] = EventCandidate(
-        event_id=1,
+    context.event_candidates[2] = EventCandidate(
+        event_id=2,
         event_name="应急车道占用",
         detected=True,
         raw_vlm_response=_occupancy_raw_response(),
@@ -139,7 +145,7 @@ class TestEvidenceContract:
 
         assert len(payload["events"]) == 1
         event = payload["events"][0]
-        assert event["event_id"] == 1
+        assert event["event_id"] == 2
         assert event["name"] == "应急车道占用"
         assert event["detected"] is True
 
@@ -188,15 +194,15 @@ class TestEvidenceContract:
     def test_detected_false_event_with_no_raw_data(self, tmp_path: Path) -> None:
         """Events without coordinate data are included with empty lists."""
         context = AnalysisContext(video_meta=_make_video_meta())
-        context.event_results[2] = EventResult(
-            event_id=2, event_name="抛洒物", detected=False
+        context.event_results[10] = EventResult(
+            event_id=10, event_name="抛洒物", detected=False
         )
 
         out = export_evidence(context, tmp_path / "sft")
         payload = json.loads(out.read_text(encoding="utf-8"))
 
         event = payload["events"][0]
-        assert event["event_id"] == 2
+        assert event["event_id"] == 10
         assert event["name"] == "抛洒物"
         assert event["detected"] is False
         assert event["calibration"] == {
@@ -218,11 +224,11 @@ class TestEvidenceContract:
             video_meta=_make_video_meta(),
             output_dir=str(report_dir),
         )
-        context.event_results[6] = EventResult(
-            event_id=6, event_name="道路施工", detected=True
+        context.event_results[7] = EventResult(
+            event_id=7, event_name="道路施工", detected=True
         )
-        context.event_candidates[6] = EventCandidate(
-            event_id=6,
+        context.event_candidates[7] = EventCandidate(
+            event_id=7,
             event_name="道路施工",
             detected=True,
             raw_vlm_response={
@@ -270,11 +276,11 @@ class TestEvidenceContract:
             video_meta=_make_video_meta(),
             output_dir=str(report_dir),
         )
-        context.event_results[4] = EventResult(
-            event_id=4, event_name="摩托车出现", detected=True
+        context.event_results[5] = EventResult(
+            event_id=5, event_name="摩托车出现", detected=True
         )
-        context.event_candidates[4] = EventCandidate(
-            event_id=4,
+        context.event_candidates[5] = EventCandidate(
+            event_id=5,
             event_name="摩托车出现",
             detected=True,
             raw_vlm_response={
@@ -321,8 +327,8 @@ class TestFailOpen:
 
     def test_missing_video_meta_still_writes_events(self, tmp_path: Path) -> None:
         context = AnalysisContext()
-        context.event_results[1] = EventResult(
-            event_id=1, event_name="应急车道占用", detected=False
+        context.event_results[2] = EventResult(
+            event_id=2, event_name="应急车道占用", detected=False
         )
 
         out = export_evidence(context, tmp_path / "sft")
@@ -338,11 +344,11 @@ class TestFailOpen:
             video_meta=_make_video_meta(),
             output_dir=str(tmp_path / "reports"),
         )
-        context.event_results[6] = EventResult(
-            event_id=6, event_name="道路施工", detected=True
+        context.event_results[7] = EventResult(
+            event_id=7, event_name="道路施工", detected=True
         )
-        context.event_candidates[6] = EventCandidate(
-            event_id=6,
+        context.event_candidates[7] = EventCandidate(
+            event_id=7,
             event_name="道路施工",
             detected=True,
             raw_vlm_response={
@@ -368,8 +374,8 @@ class TestFailOpen:
 
     def test_unwritable_out_dir_returns_none(self, tmp_path: Path) -> None:
         context = AnalysisContext(video_meta=_make_video_meta())
-        context.event_results[1] = EventResult(
-            event_id=1, event_name="应急车道占用", detected=False
+        context.event_results[2] = EventResult(
+            event_id=2, event_name="应急车道占用", detected=False
         )
         blocker = tmp_path / "blocker"
         blocker.write_text("not a dir", encoding="utf-8")
@@ -394,7 +400,7 @@ def mock_config_manager() -> MagicMock:
     manager.load_all.return_value = system_config
     manager.get_event_categories.return_value = [
         EventCategory(
-            event_id=0,
+            event_id=1,
             event_code="A",
             name="Test Event A",
             name_zh="测试事件A",
@@ -448,7 +454,7 @@ def mock_report_generator() -> MagicMock:
     report = Report(
         video_info=_make_video_meta(),
         scene_summary=SceneInfo(road_count=2),
-        binary_encoding=BinaryEncoding(encoding_string="1", detected_events=[0]),
+        binary_encoding=BinaryEncoding(encoding_string="1", detected_events=[1]),
     )
     generator.generate.return_value = report
     return generator
@@ -464,14 +470,14 @@ def orchestrator(
     expert_layer = MagicMock()
     expert_layer.execute.return_value = MagicMock(
         success=True,
-        data=[EventCandidate(event_id=0, event_name="Test Event A", detected=True)],
+        data=[EventCandidate(event_id=1, event_name="Test Event A", detected=True)],
     )
     adjudication_step = MagicMock()
     adjudication_step.execute.return_value = MagicMock(
         success=True,
         data=AdjudicationResult(
             event_results=[
-                EventResult(event_id=0, event_name="Test Event A", detected=True),
+                EventResult(event_id=1, event_name="Test Event A", detected=True),
             ],
             adjudication_reasoning="Test reasoning",
             reasoning_chain=[],
