@@ -537,19 +537,31 @@ class TestConfigEvents:
         resp = client.get("/api/config/events")
         assert resp.status_code == 200
 
-        yaml_path = (
-            Path(__file__).resolve().parents[3]
-            / "traffic_analyzer"
-            / "config"
-            / "event_categories.yaml"
+        config_dir = Path(__file__).resolve().parents[3] / "traffic_analyzer" / "config"
+        data = yaml.safe_load((config_dir / "event_categories.yaml").read_text(encoding="utf-8"))
+        options_data = yaml.safe_load(
+            (config_dir / "event_options.yaml").read_text(encoding="utf-8")
         )
-        data = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+        options_index = {
+            int(ev["event_id"]): [
+                {
+                    "key": str(g["key"]),
+                    "label": str(g.get("label") or g["key"]),
+                    "options": [str(o) for o in g.get("options") or []],
+                    "required": bool(g.get("required", False)),
+                    "multi": bool(g.get("multi", False)),
+                }
+                for g in ev.get("groups") or []
+            ]
+            for ev in options_data.get("event_options") or []
+        }
         expected = sorted(
             (
                 {
                     "event_id": c["event_id"],
                     "name_zh": c["name_zh"],
                     "is_active": c.get("is_active", True),
+                    "options": options_index.get(int(c["event_id"]), []),
                 }
                 for c in data["event_categories"]
             ),
@@ -558,6 +570,25 @@ class TestConfigEvents:
         assert resp.json() == expected
         # 当前配置:0-7 激活,8 抛洒物 / 9 实线变道 未激活。
         assert [e["is_active"] for e in resp.json()] == [True] * 8 + [False] * 2
+
+    def test_options_closed_enums(self) -> None:
+        client = TestClient(create_app())
+        events = {e["event_id"]: e for e in client.get("/api/config/events").json()}
+        # 8 个激活事件均有非空属性组;抛洒物(10)已定义但未激活;实线变道(11)未定义
+        for ev_id in (1, 2, 3, 4, 5, 6, 7, 8, 10):
+            assert events[ev_id]["options"], f"event {ev_id} missing options"
+        assert events[11]["options"] == []
+        # 属性组契约:key/label/封闭 options/required;施工要素为多选
+        for ev in events.values():
+            for g in ev["options"]:
+                assert g["key"] and g["label"] and g["options"]
+                assert isinstance(g["required"], bool)
+        work = next(g for g in events[7]["options"] if g["key"] == "work_elements")
+        assert work["multi"] is True
+        # 违停基准样例:lane_type/direction/vehicle_type 三组必填
+        keys = [g["key"] for g in events[1]["options"]]
+        assert keys == ["lane_type", "direction", "vehicle_type"]
+        assert "应急车道" in events[1]["options"][0]["options"]
 
 
 class TestSftPut:
@@ -625,6 +656,63 @@ class TestSftPut:
         payload["action"] = action
         resp = client.put("/api/results/v1/sft", json=payload)
         assert resp.status_code == 422
+
+    def test_put_event_attributes_ok(self, tmp_path: Path) -> None:
+        client = self._client(tmp_path)
+        payload = _sft_payload()
+        payload["event_attributes"] = {
+            "1": {"lane_type": "应急车道", "direction": "来向", "vehicle_type": "工程车"},
+            "7": {"direction": "去向", "work_elements": ["施工车辆", "施工人员"]},
+        }
+        resp = client.put("/api/results/v1/sft", json=payload)
+        assert resp.status_code == 200
+        assert resp.json() == payload
+        disk = json.loads(
+            (tmp_path / "analysis" / "v1" / "v1.json").read_text(encoding="utf-8")
+        )
+        assert disk == payload
+
+    @pytest.mark.parametrize(
+        "attrs",
+        [
+            {"1": {"vehicle_type": "跑车"}},                # 枚举外取值
+            {"1": {"color": "红"}},                         # 未定义的属性键
+            {"99": {"direction": "来向"}},                  # 未定义的事件
+            {"11": {"direction": "来向"}},                  # 未定义选项的事件(实线变道)
+            {"1": {"direction": ""}},                       # 空串不是合法选项
+            {"7": {"work_elements": "施工车辆"}},           # 多选组必须是列表
+            {"7": {"work_elements": ["施工车辆", "烟花"]}},  # 列表内含枚举外取值
+            {"1": {"direction": ["来向"]}},                 # 单选组必须是字符串
+        ],
+    )
+    def test_put_event_attributes_invalid_422(
+        self, tmp_path: Path, attrs: Dict[str, Any]
+    ) -> None:
+        client = self._client(tmp_path)
+        payload = _sft_payload()
+        payload["event_attributes"] = attrs
+        resp = client.put("/api/results/v1/sft", json=payload)
+        assert resp.status_code == 422
+        # 磁盘文件未被改动。
+        disk = json.loads(
+            (tmp_path / "analysis" / "v1" / "v1.json").read_text(encoding="utf-8")
+        )
+        assert disk == _sft_payload()
+
+    def test_put_without_event_attributes_keeps_legacy_shape(
+        self, tmp_path: Path
+    ) -> None:
+        # 旧格式(无 event_attributes)编辑保存后仍是 7 键,不引入 null 字段。
+        client = self._client(tmp_path)
+        payload = _sft_payload()
+        payload["description"] = "<think>\n仅文字编辑。\n</think>\n<answer>\n天气：晴天\n</answer>"
+        resp = client.put("/api/results/v1/sft", json=payload)
+        assert resp.status_code == 200
+        disk = json.loads(
+            (tmp_path / "analysis" / "v1" / "v1.json").read_text(encoding="utf-8")
+        )
+        assert disk == payload
+        assert "event_attributes" not in disk
 
 
 # ---------------------------------------------------------------------------
@@ -1726,8 +1814,15 @@ class TestConfigEventsFailures:
         client = TestClient(create_app())
         resp = client.get("/api/config/events")
         assert resp.status_code == 200
+        from traffic_analyzer.web.evidence_api import _event_options_index
+
         assert resp.json() == [
-            {"event_id": 1, "name_zh": "违法停车", "is_active": True}
+            {
+                "event_id": 1,
+                "name_zh": "违法停车",
+                "is_active": True,
+                "options": _event_options_index()[1],
+            }
         ]
 
     def test_empty_yaml_500(

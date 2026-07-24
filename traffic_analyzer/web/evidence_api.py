@@ -10,18 +10,22 @@ only allows edits to the user-editable coordinate/label fields:
 - ``events[*].evidence_regions[*].box_rel``
 - ``events[*].evidence_regions[*].label``
 
-The SFT PUT endpoint only allows ``description`` / ``action`` edits.
-Any other difference versus the on-disk version is rejected with 422.
+The SFT PUT endpoint only allows ``description`` / ``action`` /
+``event_attributes`` edits; attribute values are validated against the closed
+enums in ``config/event_options.yaml``. Any other difference versus the
+on-disk version is rejected with 422.
 
 [文件说明]
 作用:结果读取与证据/SFT 编辑接口。GET 读取 <workspace>/analysis/<stem>/ 下的
 report.md、<stem>.json(SFT 样本)、<stem>_evidence.json 及图片;evidence PUT 仅允许修改
-标定多边形与证据框/标签,SFT PUT 仅允许 description/action,其余字段与磁盘版本比对
+标定多边形与证据框/标签,SFT PUT 仅允许 description/action/event_attributes
+(event_attributes 按 event_options.yaml 封闭枚举校验),其余字段与磁盘版本比对
 不一致即 422;写入采用 tmp+os.replace 原子写并按 stem 加锁,同 stem 有在跑 infer 任务
 时返回 409。
 上游:web/app.py(挂载路由);web/static 前端(结果查看与标注编辑)。
 下游:web/workspace.py(路径与 stem 校验)、web/jobs.py(在跑任务检查)、
-config/event_categories.yaml(/api/config/events 供 SFT 编辑器按事件分框)。
+config/event_categories.yaml 与 config/event_options.yaml
+(/api/config/events 供 SFT 编辑器按事件分框与渲染结构化选项)。
 """
 
 from __future__ import annotations
@@ -30,6 +34,7 @@ import json
 import os
 import threading
 from collections import defaultdict
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -49,6 +54,34 @@ _EVENT_CATEGORIES_YAML = (
     / "config"
     / "event_categories.yaml"
 )
+_EVENT_OPTIONS_YAML = (
+    Path(__file__).resolve().parents[2]
+    / "traffic_analyzer"
+    / "config"
+    / "event_options.yaml"
+)
+
+
+@lru_cache(maxsize=1)
+def _event_options_index() -> Dict[int, List[Dict[str, Any]]]:
+    """event_options.yaml 的封闭枚举定义:{event_id: [属性组, ...]}(保持声明顺序)。"""
+    data = yaml.safe_load(_EVENT_OPTIONS_YAML.read_text(encoding="utf-8")) or {}
+    index: Dict[int, List[Dict[str, Any]]] = {}
+    for ev in data.get("event_options") or []:
+        groups = [
+            {
+                "key": str(g["key"]),
+                "label": str(g.get("label") or g["key"]),
+                "options": [str(o) for o in g.get("options") or []],
+                "required": bool(g.get("required", False)),
+                "multi": bool(g.get("multi", False)),
+            }
+            for g in ev.get("groups") or []
+            if "key" in g
+        ]
+        if "event_id" in ev:
+            index[int(ev["event_id"])] = groups
+    return index
 
 
 # ---------------------------------------------------------------------------
@@ -133,11 +166,46 @@ class Evidence(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# SFT sample (only description / action are user-editable)
+# SFT sample (only description / action / event_attributes are user-editable)
 # ---------------------------------------------------------------------------
 
 # 标注文档 v4.5 的合法 action 编号(action 9 = 正常占位,不出现)。
 _ALLOWED_ACTION_IDS = frozenset({1, 2, 3, 4, 5, 6, 7, 8, 10, 11})
+
+
+def _check_event_attributes(value: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """event_attributes 严格枚举校验:event_id/属性键必须已定义,值必须在封闭选项内。"""
+    index = _event_options_index()
+    for ev_key, attrs in value.items():
+        try:
+            ev_id = int(ev_key)
+        except (TypeError, ValueError):
+            raise ValueError(f"event_attributes: invalid event id {ev_key!r}")
+        groups = {g["key"]: g for g in index.get(ev_id) or []}
+        if not groups:
+            raise ValueError(f"event_attributes: no options defined for event {ev_key!r}")
+        if not isinstance(attrs, dict):
+            raise ValueError(f"event_attributes[{ev_key!r}] must be an object")
+        for key, val in attrs.items():
+            group = groups.get(key)
+            if group is None:
+                raise ValueError(
+                    f"event_attributes[{ev_key!r}]: unknown attribute {key!r}"
+                )
+            allowed = group["options"]
+            if group["multi"]:
+                if not isinstance(val, list) or not all(
+                    isinstance(v, str) and v in allowed for v in val
+                ):
+                    raise ValueError(
+                        f"event_attributes[{ev_key!r}][{key!r}] must be a list "
+                        f"within {allowed}"
+                    )
+            elif not isinstance(val, str) or val not in allowed:
+                raise ValueError(
+                    f"event_attributes[{ev_key!r}][{key!r}] must be one of {allowed}"
+                )
+    return value
 
 
 class SftSample(BaseModel):
@@ -152,6 +220,7 @@ class SftSample(BaseModel):
     start_timestamp: Any
     end_timestamp: Any
     chunk_name: Any
+    event_attributes: Optional[Dict[str, Dict[str, Any]]] = None
 
     @field_validator("action")
     @classmethod
@@ -161,6 +230,15 @@ class SftSample(BaseModel):
                 f"action ids must be a subset of {sorted(_ALLOWED_ACTION_IDS)}"
             )
         return value
+
+    @field_validator("event_attributes")
+    @classmethod
+    def _check_attrs(
+        cls, value: Optional[Dict[str, Dict[str, Any]]]
+    ) -> Optional[Dict[str, Dict[str, Any]]]:
+        if value is None:
+            return value
+        return _check_event_attributes(value)
 
 
 # ---------------------------------------------------------------------------
@@ -238,10 +316,11 @@ def _strip_editable(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _strip_sft_editable(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """与 ``_strip_editable`` 同理:仅 description / action 允许不同。"""
+    """与 ``_strip_editable`` 同理:仅 description / action / event_attributes 允许不同。"""
     copy = json.loads(json.dumps(payload, ensure_ascii=False))
     copy["description"] = _MASK
     copy["action"] = _MASK
+    copy["event_attributes"] = _MASK
     return copy
 
 
@@ -335,11 +414,16 @@ def put_evidence(stem: str, body: Evidence, request: Request) -> Dict[str, Any]:
 
 @router.get("/api/config/events")
 def get_config_events() -> List[Dict[str, Any]]:
-    """事件类别配置(供 SFT 编辑器按事件分框),按 event_id 排序。"""
+    """事件类别配置(供 SFT 编辑器按事件分框),按 event_id 排序。
+
+    每个事件附带 ``options``:event_options.yaml 中定义的结构化属性组
+    (封闭枚举,只读选项集);未定义的事件返回空列表。
+    """
     try:
         data = (
             yaml.safe_load(_EVENT_CATEGORIES_YAML.read_text(encoding="utf-8")) or {}
         )
+        options_index = _event_options_index()
     except (OSError, yaml.YAMLError) as exc:
         raise HTTPException(
             status_code=500, detail=f"Failed to load event categories config: {exc}"
@@ -349,6 +433,7 @@ def get_config_events() -> List[Dict[str, Any]]:
             "event_id": int(cat["event_id"]),
             "name_zh": str(cat.get("name_zh") or ""),
             "is_active": bool(cat.get("is_active", True)),
+            "options": options_index.get(int(cat["event_id"]), []),
         }
         for cat in data.get("event_categories") or []
         if "event_id" in cat and "name_zh" in cat
@@ -373,12 +458,15 @@ def put_sft(stem: str, body: SftSample, request: Request) -> Dict[str, Any]:
             raise HTTPException(status_code=404, detail="SFT file not found")
 
         new_payload = body.model_dump()
+        if new_payload.get("event_attributes") is None:
+            # 未提交结构化属性时保持旧格式:不往磁盘样本里塞 null 字段
+            del new_payload["event_attributes"]
         if not isinstance(disk, dict) or _strip_sft_editable(disk) != _strip_sft_editable(
             new_payload
         ):
             raise HTTPException(
                 status_code=422,
-                detail="Only description and action may be modified",
+                detail="Only description, action and event_attributes may be modified",
             )
 
         _atomic_write_json(sft_path, new_payload)

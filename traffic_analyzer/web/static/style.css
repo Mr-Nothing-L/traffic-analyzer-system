@@ -811,6 +811,41 @@ body.hsplit-dragging { cursor: row-resize; user-select: none; }
 }
 .sft-ev.inactive .sft-ev-text { background: transparent; }
 
+/* 结构化选项 chips(封闭枚举,只读选项集;无增删入口) */
+.sft-attrs { display: flex; flex-direction: column; gap: 10px; margin-bottom: 8px; }
+.sft-attr-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.sft-chips { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+.sft-chip {
+  height: 22px;
+  padding: 0 10px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--text2);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+.sft-chip:hover { background: var(--accent-soft); }
+.sft-chip.selected { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+/* 必填缺失软提醒:事件名旁 6px 黄点,hover 显示缺哪项(不拦截保存) */
+.sft-warn-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #C9A227;
+  cursor: help;
+  animation: sft-warn-in 0.2s ease;
+}
+@keyframes sft-warn-in { from { opacity: 0; } to { opacity: 1; } }
+
+/* chip 改动实时渲染回文本框时的淡入(避免跳变感) */
+.sft-ev-text.sft-fade { animation: sft-text-in 0.15s ease; }
+@keyframes sft-text-in { from { opacity: 0.35; } to { opacity: 1; } }
+
 .sft-unmatched {
   background: #FBF9F4;
   color: var(--text2);

@@ -1,0 +1,143 @@
+# =============================================================================
+# SFT 结构化选项配置 (封闭枚举,唯一事实源)
+# =============================================================================
+# [文件说明]
+# 作用:定义每个事件类别的结构化属性组(键/中文名/封闭选项/是否必填/是否多选),
+#      供 SFT 编辑器渲染只读选项 chips;选项值不允许在 UI 中增删改,
+#      后端 PUT /api/results/{stem}/sft 对 event_attributes 做严格枚举校验。
+# 影响:由 web/evidence_api.py 加载(GET /api/config/events 返回 options,
+#      PUT sft 校验 event_attributes);前端 js/sft.js 据此渲染 chips 与骨架句。
+#
+# 约定:
+#   - groups 数组顺序即 UI 展示顺序与骨架模板槽位顺序;
+#   - multi: true 的组(如施工要素)值为选项列表,其余为单选字符串;
+#   - required: true 的组未选时,编辑器在事件名旁给黄色圆点软提醒(不拦截保存);
+#   - 未激活事件(如抛洒物)可定义选项,但编辑器不渲染 chips。
+# =============================================================================
+
+event_options:
+  # --- event_id: 1 | 违法停车 ---
+  - event_id: 1
+    groups:
+      - key: lane_type
+        label: 车道类型
+        required: true
+        options: [行车道, 应急车道, 导流区, 路肩]
+      - key: direction
+        label: 方向
+        required: true
+        options: [来向, 去向]
+      - key: vehicle_type
+        label: 车辆类型
+        required: true
+        options: [小型车, 大客车, 货车, 工程车]
+
+  # --- event_id: 2 | 应急车道占用 ---
+  - event_id: 2
+    groups:
+      - key: lane_type
+        label: 车道类型
+        required: true
+        options: [行车道, 应急车道, 导流区, 路肩]
+      - key: direction
+        label: 方向
+        required: true
+        options: [来向, 去向]
+      - key: vehicle_type
+        label: 车辆类型
+        required: true
+        options: [小型车, 大客车, 货车, 工程车]
+
+  # --- event_id: 3 | 交通事故 ---
+  - event_id: 3
+    groups:
+      - key: lane_type
+        label: 车道类型
+        required: true
+        options: [行车道, 应急车道, 导流区, 路肩]
+      - key: direction
+        label: 方向
+        required: true
+        options: [来向, 去向]
+      - key: vehicle_type
+        label: 车辆类型
+        required: true
+        options: [小型车, 大客车, 货车, 工程车]
+
+  # --- event_id: 4 | 高速公路行人出现 ---
+  - event_id: 4
+    groups:
+      - key: person_type
+        label: 人员类型
+        required: true
+        options: [行人, 施工人员, 滞留驾乘人员]
+      - key: direction
+        label: 方向
+        required: true
+        options: [来向, 去向]
+
+  # --- event_id: 5 | 摩托车出现 ---
+  - event_id: 5
+    groups:
+      - key: direction
+        label: 方向
+        required: true
+        options: [来向, 去向]
+      - key: non_motor_type
+        label: 非机动车类型
+        required: true
+        # 电动自行车须排在自行车之前:旧样本关键词回填按 options 顺序首个命中
+        options: [摩托车, 电动自行车, 自行车, 三轮车]
+
+  # --- event_id: 6 | 拥堵 ---
+  - event_id: 6
+    groups:
+      - key: direction
+        label: 方向
+        required: true
+        options: [来向, 去向]
+      - key: scope
+        label: 范围
+        required: true
+        options: [单车道, 多车道]
+
+  # --- event_id: 7 | 道路施工 ---
+  - event_id: 7
+    groups:
+      - key: direction
+        label: 方向
+        required: true
+        options: [来向, 去向]
+      - key: work_elements
+        label: 施工要素
+        required: true
+        multi: true
+        options: [施工车辆, 交通锥/隔离栏, 施工标志牌, 施工人员, 车道封闭]
+
+  # --- event_id: 8 | 车辆逆行/倒车 ---
+  - event_id: 8
+    groups:
+      - key: lane_type
+        label: 车道类型
+        required: true
+        options: [行车道, 应急车道, 导流区, 路肩]
+      - key: direction
+        label: 方向
+        required: true
+        options: [来向, 去向]
+      - key: vehicle_type
+        label: 车辆类型
+        required: true
+        options: [小型车, 大客车, 货车, 工程车]
+
+  # --- event_id: 10 | 抛洒物(未激活,定义但不默认展示) ---
+  - event_id: 10
+    groups:
+      - key: direction
+        label: 方向
+        required: true
+        options: [来向, 去向]
+      - key: object_type
+        label: 物体类型
+        required: true
+        options: [塑料袋/纸张, 水瓶/容器, 木板/构件, 泥土/散落物, 三角警示牌, 其他]

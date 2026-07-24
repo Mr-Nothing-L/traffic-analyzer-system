@@ -17,7 +17,7 @@ export const state = {
   evTabIdx: 0,
   evalData: null,           // /api/evaluate/latest 返回
   eventConfig: null,        // /api/config/events 缓存([{event_id, name_zh, is_active}])
-  sftDraft: null,           // SFT 编辑草稿 {texts, checks, unmatched, env}
+  sftDraft: null,           // SFT 编辑草稿 {texts, checks, attrs, skeletons, unmatched, env}
   sftSavedSig: '',          // 已保存草稿的签名(用于 dirty 判断)
   cleanups: [],             // 主区重渲染前的清理函数
   tree: { loaded: false, root: [], children: {}, expanded: new Set() }, // 侧栏文件树
