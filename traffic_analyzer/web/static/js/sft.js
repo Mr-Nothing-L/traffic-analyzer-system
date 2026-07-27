@@ -220,6 +220,24 @@ function mentionsValue(text, value) {
   return aliasesOf(value).some(a => text.indexOf(a) >= 0);
 }
 
+// 多选组「声明提及 → 选项」映射专用的扩展关键词:仅用于把声明提及串归到选项,
+// 不进 SFT_ATTR_ALIASES,避免影响旧样本的启发式分词/回填(如 人员 过于泛化,
+// 进入别名表会让旧样本里「无人员行走」之类的背景句误标/误回填 施工人员)
+const SFT_MULTI_MAP_EXTRA = { '施工人员': ['人员'] };
+
+// 声明提及串映射到组内选项:提及中命中某选项的书写形态(选项文本 + 别名 +
+// 映射专用扩展词),最长命中优先,并列按 options 定义顺序;均不命中返回 null
+// (未映射提及保持现状:仍标注为 token、仍留在 attr_mentions)
+function mapMentionToOption(group, mention) {
+  let best = null, bestLen = 0;
+  group.options.forEach(opt => {
+    aliasesOf(opt).concat(SFT_MULTI_MAP_EXTRA[opt] || []).forEach(a => {
+      if (a.length > bestLen && mention.indexOf(a) >= 0) { best = opt; bestLen = a.length; }
+    });
+  });
+  return best;
+}
+
 // 把旧值的全部书写形态一次性替换为新值(单趟扫描,替换结果不会被二次命中)
 function replaceAliases(text, oldVal, newVal) {
   return text.replace(aliasRe(oldVal), newVal);
@@ -426,6 +444,10 @@ function refreshWarnDots(body) {
 //      见 SFT_REPLACE_SKIP_GROUPS);
 //   4) 旧值在主语绑定句中完全未出现(或新选/新增多选) → 前置插入骨架句,仅一次;
 //   取消选中/移除多选不删词:旧值在文本中则保留原文,不在才补骨架。
+//   多选组在声明通道下另按「声明提及→选项」映射同步(见 mapMentionToOption):
+//   取消选中的选项,其映射提及转为纯文本并移出该组 attr_mentions(词保留在
+//   正文中作事实描述,暂存 mentionsOff);重新选中时仍在文本中的暂存提及恢复
+//   标注与声明;未映射提及保持现状。
 function applyChipChange(body, ev, group, value) {
   const d = state.sftDraft;
   const id = ev.event_id;
@@ -448,6 +470,36 @@ function applyChipChange(body, ev, group, value) {
   let text = String(d.texts[id] || '');
   // 声明通道锚点:该组声明提及所在的 span(仅声明通道 + 单选换值时非空)
   const decl = declaredMentions(ev);
+  // 多选组的声明提及同步:取消选中 → 该选项映射到的声明提及移出 decl(重渲染
+  // 即为纯文本,保存时不再上送),暂存 mentionsOff 供重新选中时恢复;
+  // 新选中 → 暂存中映射到该选项且仍在文本里的提及加回 decl(重新标注)。
+  // 未映射提及两边都不动;span 缓存作废,骨架分支与重渲染按新声明重算
+  if (group.multi && decl) {
+    const offAll = d.mentionsOff || (d.mentionsOff = {});
+    const off = offAll[id] || (offAll[id] = {});
+    if (!added) { // 取消选中 value
+      const keep = [], moved = [];
+      (decl[group.key] || []).forEach(s => {
+        (mapMentionToOption(group, s) === value ? moved : keep).push(s);
+      });
+      if (moved.length) {
+        decl[group.key] = keep;
+        off[group.key] = (off[group.key] || []).concat(moved);
+        d.mentionSpans[id] = null;
+      }
+    } else { // 新选中 added:恢复暂存提及
+      const remain = [], restored = [];
+      (off[group.key] || []).forEach(s => {
+        if (mapMentionToOption(group, s) === added && text.indexOf(s) >= 0) restored.push(s);
+        else remain.push(s);
+      });
+      if (restored.length) {
+        off[group.key] = remain;
+        decl[group.key] = (decl[group.key] || []).concat(restored);
+        d.mentionSpans[id] = null;
+      }
+    }
+  }
   const declList = decl && oldVal && newVal ? (decl[group.key] || []) : [];
   const declSpans = declList.length ? declaredSpans(ev, text) : null;
   const mySpans = declSpans ? declSpans.filter(sp => sp.group === group.key) : [];
