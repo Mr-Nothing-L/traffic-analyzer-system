@@ -2046,3 +2046,153 @@ class TestTranscodeRobustness:
         resp = video_stream._transcode_response(_MP4TEST_MPEG4, None)
         _one_chunk_then_disconnect(resp)
         assert "-nostdin" in captured["argv"]
+
+
+# ---------------------------------------------------------------------------
+# B1: yaml 缓存按 (path, mtime) 失效
+# ---------------------------------------------------------------------------
+
+
+class TestYamlCacheInvalidation:
+    def test_event_options_cache_follows_mtime(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """编辑 event_options.yaml 后,下一次读取反映新内容(无需重启)。"""
+        from traffic_analyzer.web import evidence_api
+
+        cfg = tmp_path / "event_options.yaml"
+        cfg.write_text(
+            yaml.safe_dump(
+                {
+                    "event_options": [
+                        {"event_id": 1, "groups": [{"key": "a", "options": ["x"]}]}
+                    ]
+                },
+                allow_unicode=True,
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(evidence_api, "_EVENT_OPTIONS_YAML", cfg)
+
+        first = evidence_api._event_options_index()
+        assert [g["key"] for g in first[1]] == ["a"]
+
+        cfg.write_text(
+            yaml.safe_dump(
+                {
+                    "event_options": [
+                        {"event_id": 1, "groups": [{"key": "b", "options": ["y"]}]}
+                    ]
+                },
+                allow_unicode=True,
+            ),
+            encoding="utf-8",
+        )
+        future = time.time() + 10
+        os.utime(cfg, (future, future))  # 保证 mtime 变化(同秒写可能撞 mtime)
+
+        second = evidence_api._event_options_index()
+        assert [g["key"] for g in second[1]] == ["b"]
+
+    def test_event_name_cache_follows_mtime(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """编辑 event_categories.yaml 后,_event_name_index 同样自动失效。"""
+        from traffic_analyzer.web import evidence_api
+
+        cfg = tmp_path / "event_categories.yaml"
+        cfg.write_text(
+            yaml.safe_dump(
+                {"event_categories": [{"event_id": 1, "name_zh": "违法停车"}]},
+                allow_unicode=True,
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(evidence_api, "_EVENT_CATEGORIES_YAML", cfg)
+
+        assert evidence_api._event_name_index() == {"违法停车": 1}
+
+        cfg.write_text(
+            yaml.safe_dump(
+                {"event_categories": [{"event_id": 1, "name_zh": "违规停车"}]},
+                allow_unicode=True,
+            ),
+            encoding="utf-8",
+        )
+        future = time.time() + 10
+        os.utime(cfg, (future, future))
+
+        assert evidence_api._event_name_index() == {"违规停车": 1}
+
+
+# ---------------------------------------------------------------------------
+# B2: PUT 区分「字段未提交」(保留磁盘)与「显式 null」(删除键)
+# ---------------------------------------------------------------------------
+
+
+class TestSftPutOptionalFieldSemantics:
+    def _client_with_attributes(self, tmp_path: Path) -> TestClient:
+        """磁盘样本带 event_attributes / attr_mentions 的工作区客户端。"""
+        workspace = _make_workspace(tmp_path)
+        _make_results(workspace, "v1")
+        payload = _sft_payload()
+        payload["event_attributes"] = {
+            "2": {"lane_type": "应急车道", "direction": "去向", "vehicle_type": "小型车"}
+        }
+        payload["attr_mentions"] = {"2": {"lane_type": ["应急车道"]}}
+        (workspace / "analysis" / "v1" / "v1.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        return TestClient(create_app(workspace=str(workspace)))
+
+    def _read_disk(self, tmp_path: Path) -> Dict[str, Any]:
+        return json.loads(
+            (tmp_path / "analysis" / "v1" / "v1.json").read_text(encoding="utf-8")
+        )
+
+    def test_omitted_event_attributes_preserves_disk_value(
+        self, tmp_path: Path
+    ) -> None:
+        """磁盘已有结构化标注时,不带 event_attributes 的 PUT 不得将其擦除。"""
+        client = self._client_with_attributes(tmp_path)
+        payload = _sft_payload()  # 不带 event_attributes / attr_mentions
+        payload["description"] = (
+            "<think>\n应急车道占用：一辆白色小车静止于应急车道。\n</think>\n"
+            "<answer>\n天气：晴天\n</answer>"
+        )
+        resp = client.put("/api/results/v1/sft", json=payload)
+        assert resp.status_code == 200
+
+        disk = self._read_disk(tmp_path)
+        assert disk["event_attributes"] == {
+            "2": {"lane_type": "应急车道", "direction": "去向", "vehicle_type": "小型车"}
+        }
+        assert disk["attr_mentions"] == {"2": {"lane_type": ["应急车道"]}}
+        # 响应体同样带回保留的标注(前端可直接刷新)。
+        assert resp.json()["event_attributes"] == disk["event_attributes"]
+
+    def test_explicit_null_event_attributes_deletes_key(self, tmp_path: Path) -> None:
+        """显式提交 event_attributes=null 是显式清除语义:键从磁盘样本中删除。"""
+        client = self._client_with_attributes(tmp_path)
+        payload = _sft_payload()
+        payload["event_attributes"] = None
+        resp = client.put("/api/results/v1/sft", json=payload)
+        assert resp.status_code == 200
+
+        disk = self._read_disk(tmp_path)
+        assert "event_attributes" not in disk
+        # attr_mentions 未提交:磁盘值保留。
+        assert disk["attr_mentions"] == {"2": {"lane_type": ["应急车道"]}}
+
+    def test_explicit_null_attr_mentions_deletes_key(self, tmp_path: Path) -> None:
+        """attr_mentions 与 event_attributes 同一契约。"""
+        client = self._client_with_attributes(tmp_path)
+        payload = _sft_payload()
+        payload["attr_mentions"] = None
+        resp = client.put("/api/results/v1/sft", json=payload)
+        assert resp.status_code == 200
+
+        disk = self._read_disk(tmp_path)
+        assert "attr_mentions" not in disk
+        assert "event_attributes" in disk

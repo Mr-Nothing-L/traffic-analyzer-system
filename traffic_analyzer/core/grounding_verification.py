@@ -184,7 +184,8 @@ class GroundingVerificationStep(PipelineStep):
         # 5. Apply the verdicts: overturn ungroundable positives.
         grounding_by_id: Dict[int, Dict[str, Any]] = {}
         for item in raw_results:
-            if isinstance(item, dict) and isinstance(item.get("event_id"), int):
+            # type(...) is int:JSON true 是 bool(True == 1),不得当作 event 1。
+            if isinstance(item, dict) and type(item.get("event_id")) is int:
                 grounding_by_id[item["event_id"]] = item
 
         records: List[Dict[str, Any]] = []
@@ -199,7 +200,9 @@ class GroundingVerificationStep(PipelineStep):
                 )
                 records.append({"event_id": eid, "grounded": True, "analysis": ""})
                 continue
-            grounded = bool(item.get("grounded", True))
+            # 仅在显式 false 时推翻:null/缺失按可锚定处理,避免误杀真实阳性。
+            grounded_value = item.get("grounded")
+            grounded = True if grounded_value is None else bool(grounded_value)
             analysis = str(item.get("analysis") or "").strip()
             records.append({"event_id": eid, "grounded": grounded, "analysis": analysis})
             if grounded:

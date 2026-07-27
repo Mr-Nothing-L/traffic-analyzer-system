@@ -15,6 +15,10 @@ The SFT PUT endpoint only allows ``description`` / ``action`` /
 against the closed enums in ``config/event_options.yaml``, and each declared
 mention string must appear in the corresponding event's think-section text.
 Any other difference versus the on-disk version is rejected with 422.
+For the two optional fields the PUT distinguishes "not submitted" from
+"explicit null" (via ``exclude_unset``): an omitted field preserves the
+on-disk value as-is (legacy samples stay without the key, annotated samples
+keep their annotations); an explicit ``null`` deletes the key.
 
 [文件说明]
 作用:结果读取与证据/SFT 编辑接口。GET 读取 <workspace>/analysis/<stem>/ 下的
@@ -22,8 +26,9 @@ report.md、<stem>.json(SFT 样本)、<stem>_evidence.json 及图片;evidence PU
 标定多边形与证据框/标签,SFT PUT 仅允许 description/action/event_attributes/attr_mentions
 (event_attributes 按 event_options.yaml 封闭枚举校验;attr_mentions 的每个提及串
 必须出现在对应事件的 think 段落正文中),其余字段与磁盘版本比对
-不一致即 422;写入采用 tmp+os.replace 原子写并按 stem 加锁,同 stem 有在跑 infer 任务
-时返回 409。
+不一致即 422;event_attributes/attr_mentions 区分「未提交」(保留磁盘原值,
+旧格式样本不新增字段)与「显式 null」(删除该键);写入采用 tmp+os.replace
+原子写并按 stem 加锁(409 在跑 infer 检查在锁内复查,消除 TOCTOU)。
 上游:web/app.py(挂载路由);web/static 前端(结果查看与标注编辑)。
 下游:web/workspace.py(路径与 stem 校验)、web/jobs.py(在跑任务检查)、
 config/event_categories.yaml 与 config/event_options.yaml
@@ -65,10 +70,19 @@ _EVENT_OPTIONS_YAML = (
 )
 
 
-@lru_cache(maxsize=1)
-def _event_options_index() -> Dict[int, List[Dict[str, Any]]]:
-    """event_options.yaml 的封闭枚举定义:{event_id: [属性组, ...]}(保持声明顺序)。"""
-    data = yaml.safe_load(_EVENT_OPTIONS_YAML.read_text(encoding="utf-8")) or {}
+def _yaml_mtime_ns(path: Path) -> int:
+    """文件 mtime(纳秒);缺失时返回 -1(后续 read_text 仍按原样抛错)。"""
+    try:
+        return path.stat().st_mtime_ns
+    except OSError:
+        return -1
+
+
+@lru_cache(maxsize=8)
+def _event_options_index_cached(
+    path: str, mtime_ns: int
+) -> Dict[int, List[Dict[str, Any]]]:
+    data = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
     index: Dict[int, List[Dict[str, Any]]] = {}
     for ev in data.get("event_options") or []:
         groups = [
@@ -87,15 +101,34 @@ def _event_options_index() -> Dict[int, List[Dict[str, Any]]]:
     return index
 
 
-@lru_cache(maxsize=1)
-def _event_name_index() -> Dict[str, int]:
-    """事件中文名 → event_id(用于在 description 的 think 段落中定位事件文本)。"""
-    data = yaml.safe_load(_EVENT_CATEGORIES_YAML.read_text(encoding="utf-8")) or {}
+def _event_options_index() -> Dict[int, List[Dict[str, Any]]]:
+    """event_options.yaml 的封闭枚举定义:{event_id: [属性组, ...]}(保持声明顺序)。
+
+    按 (路径, mtime) 缓存:运行中编辑 yaml 后下一次读取自动失效,无需重启。
+    """
+    return _event_options_index_cached(
+        str(_EVENT_OPTIONS_YAML), _yaml_mtime_ns(_EVENT_OPTIONS_YAML)
+    )
+
+
+@lru_cache(maxsize=8)
+def _event_name_index_cached(path: str, mtime_ns: int) -> Dict[str, int]:
+    data = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
     return {
         str(cat["name_zh"]): int(cat["event_id"])
         for cat in data.get("event_categories") or []
         if "event_id" in cat and "name_zh" in cat
     }
+
+
+def _event_name_index() -> Dict[str, int]:
+    """事件中文名 → event_id(用于在 description 的 think 段落中定位事件文本)。
+
+    与 _event_options_index 同口径:按 (路径, mtime) 缓存,yaml 变更自动失效。
+    """
+    return _event_name_index_cached(
+        str(_EVENT_CATEGORIES_YAML), _yaml_mtime_ns(_EVENT_CATEGORIES_YAML)
+    )
 
 
 def _think_sections(description: str) -> Dict[int, str]:
@@ -479,9 +512,10 @@ def get_result_file(stem: str, request: Request, path: str = Query(...)) -> File
 def put_evidence(stem: str, body: Evidence, request: Request) -> Dict[str, Any]:
     workspace = workspace_mod.require_workspace(request)
     workspace_mod.validate_stem(stem)
-    _reject_active_infer(request, stem)
     evidence_path = workspace_mod.analysis_dir(workspace, stem) / f"{stem}_evidence.json"
     with _put_locks[stem]:
+        # 锁内复查 409:检查与写文件之间不能再插入新的 infer 任务(TOCTOU)。
+        _reject_active_infer(request, stem)
         disk = _read_json(evidence_path)
         if disk is None:
             raise HTTPException(status_code=404, detail="Evidence file not found")
@@ -541,20 +575,24 @@ def get_config_events() -> List[Dict[str, Any]]:
 def put_sft(stem: str, body: SftSample, request: Request) -> Dict[str, Any]:
     workspace = workspace_mod.require_workspace(request)
     workspace_mod.validate_stem(stem)
-    _reject_active_infer(request, stem)
     sft_path = workspace_mod.analysis_dir(workspace, stem) / f"{stem}.json"
     with _put_locks[stem]:
+        # 锁内复查 409:检查与写文件之间不能再插入新的 infer 任务(TOCTOU)。
+        _reject_active_infer(request, stem)
         disk = _read_json(sft_path)
         if disk is None:
             raise HTTPException(status_code=404, detail="SFT file not found")
 
-        new_payload = body.model_dump()
-        if new_payload.get("event_attributes") is None:
-            # 未提交结构化属性时保持旧格式:不往磁盘样本里塞 null 字段
-            del new_payload["event_attributes"]
-        if new_payload.get("attr_mentions") is None:
-            # 同理:未提交声明提及时不落 null 字段
-            del new_payload["attr_mentions"]
+        # exclude_unset 区分「字段未提交」与「显式 null」:
+        # - 未提交:保留磁盘现状(旧格式样本不新增字段;已有结构化标注不丢失);
+        # - 显式 null:删除该键(显式清除语义,经正常写路径落盘)。
+        new_payload = body.model_dump(exclude_unset=True)
+        for field in ("event_attributes", "attr_mentions"):
+            if field not in new_payload:
+                if isinstance(disk, dict) and field in disk:
+                    new_payload[field] = disk[field]
+            elif new_payload[field] is None:
+                del new_payload[field]
         if not isinstance(disk, dict) or _strip_sft_editable(disk) != _strip_sft_editable(
             new_payload
         ):

@@ -82,7 +82,13 @@ function computeDeclSpans(decl, text, prev) {
       if (!occ.length) return;
       const prevCnt = prev ? prev.filter(p => p.group === gk && p.str === s).length : 0;
       let starts = occ;
-      if (prevCnt && occ.length > prevCnt) {
+      if (!prevCnt) {
+        // 首次计算(无旧 span 锚点,如初次渲染):出现次数按该串的声明次数封顶
+        // (生成侧对同一组的声明串已去重,通常为 1),取文本中的前 N 处——
+        // 背景句里的同形词不参与标注;出现次数不足声明次数时全部保留
+        const declCount = (decl[gk] || []).filter(x => x === s).length;
+        if (occ.length > declCount) starts = occ.slice(0, declCount);
+      } else if (occ.length > prevCnt) {
         starts = occ.map(o => {
           let best = Infinity;
           prev.forEach(p => {
@@ -149,6 +155,44 @@ function replaceDeclaredSpans(text, spans, groupKey, newVal) {
     }
   });
   return { text: out + text.slice(pos), spans: next };
+}
+
+// 按一组文本变更区间(edits:[{start,end,newLen}],按 start 升序、互不重叠)平移 span:
+// 区间之前的 span 不动,之后的平移长度差,与变更区间重叠的 span 丢弃
+// (丢弃后由 computeDeclSpans 按声明串重算兜底,与骨架差异区间同一语义)
+function shiftSpansForEdits(spans, edits) {
+  if (!edits.length) return spans;
+  const next = [];
+  spans.forEach(sp => {
+    let ns = sp.start, ne = sp.end, drop = false;
+    edits.forEach(e => {
+      if (sp.end <= e.start) return;
+      if (sp.start >= e.end) {
+        const d = e.newLen - (e.end - e.start);
+        ns += d; ne += d;
+      } else {
+        drop = true;
+      }
+    });
+    if (!drop) next.push({ start: ns, end: ne, group: sp.group, str: sp.str });
+  });
+  return next;
+}
+
+// 骨架前缀就地换新(文本以 oldSk 开头):文本前缀 oldSk → newSk,并按
+// 「公共前缀/公共后缀」定位差异区间,其后的 span 平移长度差、重叠的丢弃。
+// 所有改动骨架前缀的分支共用,保证声明通道的 span 缓存随文本同步、不失锚
+function swapSkeletonPrefix(text, spans, oldSk, newSk) {
+  let cs = 0;
+  while (cs < oldSk.length && cs < newSk.length && oldSk[cs] === newSk[cs]) cs++;
+  let ce = 0;
+  while (ce < oldSk.length - cs && ce < newSk.length - cs
+         && oldSk[oldSk.length - 1 - ce] === newSk[newSk.length - 1 - ce]) ce++;
+  const edit = { start: cs, end: oldSk.length - ce, newLen: newSk.length - ce };
+  return {
+    text: newSk + text.slice(oldSk.length),
+    spans: shiftSpansForEdits(spans, [edit]),
+  };
 }
 
 // --- chip→文本同步:旧值别名全词替换 -----------------------------------------
@@ -416,35 +460,45 @@ function applyChipChange(body, ev, group, value) {
     decl[group.key] = [newVal];
     let spans = r.spans;
     // 骨架前缀(模型按模板写的主语句)含旧值但不是声明提及:就地换为新骨架,
-    // 保持与 chips 一致;按新旧骨架的差异区间精确平移其后的 span
+    // 保持与 chips 一致;其后的 span 按差异区间平移(与差异区间重叠的丢弃)
     if (oldSk && newSk !== oldSk && text.indexOf(oldSk) === 0) {
-      let cs = 0;
-      while (cs < oldSk.length && cs < newSk.length && oldSk[cs] === newSk[cs]) cs++;
-      let ce = 0;
-      while (ce < oldSk.length - cs && ce < newSk.length - cs
-             && oldSk[oldSk.length - 1 - ce] === newSk[newSk.length - 1 - ce]) ce++;
-      const delta = (newSk.length - ce) - (oldSk.length - ce);
-      text = newSk + text.slice(oldSk.length);
-      const cut = oldSk.length - ce;
-      spans = [];
-      r.spans.forEach(sp => {
-        if (sp.end <= cs) spans.push(sp);
-        else if (sp.start >= cut) {
-          spans.push({ start: sp.start + delta, end: sp.end + delta, group: sp.group, str: sp.str });
-        }
-        // 与差异区间重叠的 span(理论上不存在:声明提及已在上面被替换)丢弃
-      });
+      const sw = swapSkeletonPrefix(text, r.spans, oldSk, newSk);
+      text = sw.text;
+      spans = sw.spans;
     }
     d.mentionSpans[id] = spans;
   } else if (oldSk && text.indexOf(oldSk) === 0) {
-    text = newSk + text.slice(oldSk.length);
+    // 骨架前缀就地换新;声明通道下其余组的 span 同步平移,避免后续
+    // 声明提及替换因文本移位而落在骨架的同形词上
+    const spans = decl ? declaredSpans(ev, text) : null;
+    const sw = swapSkeletonPrefix(text, spans || [], oldSk, newSk);
+    text = sw.text;
+    if (spans) d.mentionSpans[id] = sw.spans;
   } else if (oldVal && newVal && !SFT_REPLACE_SKIP_GROUPS[group.key] && mentionsValue(subjectText(ev, text), oldVal)) {
-    // 仅替换主语绑定句内的旧值形态;背景句里的同形词保持原文
-    text = mapSubjectRanges(text, subjectRanges(ev, text), seg => replaceAliases(seg, oldVal, newVal));
+    // 仅替换主语绑定句内的旧值形态;背景句里的同形词保持原文。
+    // 声明通道下同步平移其余组的 span(与替换区间重叠的丢弃,重算兜底)
+    const spans = decl ? declaredSpans(ev, text) : null;
+    const ranges = subjectRanges(ev, text);
+    const re = aliasRe(oldVal);
+    const edits = [];
+    let out = '', pos = 0, m;
+    while ((m = re.exec(text)) !== null) {
+      if (!ranges.some(r => m.index >= r[0] && m.index + m[0].length <= r[1])) continue;
+      out += text.slice(pos, m.index) + newVal;
+      pos = m.index + m[0].length;
+      edits.push({ start: m.index, end: pos, newLen: newVal.length });
+    }
+    text = out + text.slice(pos);
+    if (spans) d.mentionSpans[id] = shiftSpansForEdits(spans, edits);
   } else if (newSk && newSk !== oldSk && !(group.multi && !added)) {
     const probe = group.multi ? added : oldVal;
     if (!probe || !mentionsValue(subjectText(ev, text), probe)) {
-      text = text ? newSk + ';' + text : newSk;
+      // 前置骨架句(仅一次):声明通道下全部 span 平移「骨架句+分隔符」长度,
+      // 否则后续声明提及替换会落在骨架里的同形词上
+      const spans = decl ? declaredSpans(ev, text) : null;
+      const prefix = text ? newSk + ';' : newSk;
+      text = prefix + text;
+      if (spans) d.mentionSpans[id] = shiftSpansForEdits(spans, [{ start: 0, end: 0, newLen: prefix.length }]);
     }
   }
   d.texts[id] = text;
@@ -540,8 +594,27 @@ function buildSftRevision() {
     });
     if (Object.keys(clean).length) attrsOut[ev.event_id] = clean;
   });
-  // 声明提及原样随草稿带出(编辑器不增删,chip 替换时同步更新);旧样本为 null
-  const mentionsOut = d.mentions ? JSON.parse(JSON.stringify(d.mentions)) : null;
+  // 声明提及随草稿带出前,逐条按当前事件文本过滤(与后端 _check_attr_mentions
+  // 同一子串口径):人工编辑删掉的提及不再上送,避免保存 422;过滤后的空数组、
+  // 空组以及未激活/无选项组事件的条目一并省略(后端对无选项事件直接拒绝),
+  // 全空时输出 null(后端不落 null 字段,即移除 attr_mentions)
+  let mentionsOut = null;
+  if (d.mentions) {
+    const mo = {};
+    events.forEach(ev => {
+      if (!ev.is_active || !evOptions(ev).length) return;
+      const raw = d.mentions[ev.event_id];
+      if (!raw) return;
+      const t = String(d.texts[ev.event_id] || '').trim();
+      const clean = {};
+      Object.keys(raw).forEach(k => {
+        const keep = (raw[k] || []).filter(s => s && t.indexOf(s) >= 0);
+        if (keep.length) clean[k] = keep;
+      });
+      if (Object.keys(clean).length) mo[ev.event_id] = clean;
+    });
+    if (Object.keys(mo).length) mentionsOut = mo;
+  }
   return {
     description: '<think>\n' + think + '\n</think>\n<answer>\n' + answerLines.join('\n') + '\n</answer>',
     action: checked.map(ev => ev.event_id),
@@ -581,15 +654,21 @@ function initSftDraft(sft) {
       texts[ev.event_id] = '';
       checks[ev.event_id] = false;
     }
-    if (mentions) {
+    // 声明提及与 attrs 同一门槛:仅保留已激活且有选项组的事件;空数组与空组一律丢弃
+    // (未激活事件的段落在 parseSftDescription 已丢弃,保留其提及保存必遭后端 422;
+    //  无选项组的事件如实线变道,后端校验「no options defined」同样拒绝)
+    if (mentions && ev.is_active && evOptions(ev).length) {
       const raw = rawMentions[ev.event_id] || rawMentions[String(ev.event_id)];
       if (raw && typeof raw === 'object') {
         const clean = {};
         evOptions(ev).forEach(g => {
           const v = raw[g.key];
-          if (Array.isArray(v)) clean[g.key] = v.filter(s => typeof s === 'string' && s);
+          if (Array.isArray(v)) {
+            const arr = v.filter(s => typeof s === 'string' && s);
+            if (arr.length) clean[g.key] = arr;
+          }
         });
-        mentions[ev.event_id] = clean;
+        if (Object.keys(clean).length) mentions[ev.event_id] = clean;
       }
     }
   });
@@ -744,7 +823,23 @@ function bindSftEditor(body) {
       }
     });
     el.addEventListener('blur', () => {
-      if (ev) renderTokens(el, ev);
+      if (!ev) return;
+      renderTokens(el, ev);
+      // 人工编辑把声明提及改没时提醒:保存时这些提及会被自动丢弃(见 buildSftRevision)
+      const decl = declaredMentions(ev);
+      const dd = state.sftDraft;
+      if (decl && dd) {
+        const t = String(dd.texts[ev.event_id] || '');
+        const gone = [];
+        Object.keys(decl).forEach(gk => (decl[gk] || []).forEach(s => {
+          if (s && t.indexOf(s) < 0 && gone.indexOf(s) < 0) gone.push(s);
+        }));
+        const sig = gone.join('');
+        if (gone.length && dd.mentionGoneSig !== sig) {
+          toast('声明提及「' + gone.join('」、「') + '」已不在文本中,保存时将自动移除');
+        }
+        dd.mentionGoneSig = sig;
+      }
     });
     // token hover 反向联动:同事件卡内同组 chips 加描边提示
     el.addEventListener('mouseover', e => {

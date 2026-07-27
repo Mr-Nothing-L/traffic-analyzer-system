@@ -50,6 +50,8 @@ export async function selectVideo(rel) {
   state.results = null;
   state.evidenceDraft = null;
   state.evidenceDirty = false;
+  state.sftDraft = null;    // 切换视频时丢弃未保存的 SFT 草稿,避免幽灵 dirty 态
+  state.sftSavedSig = '';
   invalidateSidebar(); renderSidebar();
   runCleanups();
   $('#main').innerHTML = skeletons();

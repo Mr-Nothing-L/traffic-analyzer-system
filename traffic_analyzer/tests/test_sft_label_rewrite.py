@@ -27,6 +27,7 @@ from traffic_analyzer.core.config_manager import ConfigManager
 from traffic_analyzer.core.sft_label_rewrite import (
     _SFT_REWRITE_RESPONSE_SCHEMA,
     _normalize_attributes,
+    _positive_event_details,
     _skeleton_sentence,
     _validate_attr_mentions,
     SftLabelRewriteStep,
@@ -443,7 +444,9 @@ class TestAnchoringGate:
         assert find_ungrounded_positive_event_ids(resp_data, event_results) == [1]
 
     def test_ungrounded_negative_event_does_not_quarantine(self) -> None:
-        resp_data = _make_resp_data(ungrounded=(2,))
+        # ungrounded 指向未检出事件不隔离;event 1 present=true,避免触发
+        # present=false ∧ detected 的漏报隔离规则(该规则有独立测试覆盖)。
+        resp_data = _make_resp_data(present_ids=(1, 2), ungrounded=(2,))
         event_results = _make_event_results(detected_ids=(1,))
 
         assert find_ungrounded_positive_event_ids(resp_data, event_results) == []
@@ -967,3 +970,105 @@ class TestBuildSampleAttributes:
 
         assert sample["attr_mentions"]["2"]["vehicle_type"] == ["小型车"]
         assert "MENTION_NOT_SUBSTRING" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# B5a: present=true 但裁决未检出的事件按阴性处理(think 与结论一致)
+# ---------------------------------------------------------------------------
+
+
+class TestPresentButNotDetected:
+    def test_think_section_uses_negative_fallback(self) -> None:
+        """present=true 的事件若裁决 detected=false,不得拼装骨架+detail
+        (否则 think 段给出阳性描述而最终结论不含该事件,样本自相矛盾)。"""
+        desc = build_description(
+            _make_resp_data(present_ids=(2, 3)),
+            _make_event_results(detected_ids=(2,)),
+            _make_categories(),
+        )
+
+        think = desc.split("</think>", 1)[0]
+        # 检出事件 2 仍是骨架+detail。
+        assert "应急车道占用：去向一侧应急车道内有小型车占用。" in think
+        # 未检出事件 3:无骨架(交通事故骨架含「发生交通事故」)、无 detail,
+        # 按阴性回退。
+        assert "发生交通事故" not in think
+        assert "交通事故：未发现。" in think
+        # 结论与 think 一致:不含 class3。
+        answer = desc.split("<answer>\n", 1)[1]
+        assert "class2: 应急车道占用" in answer
+        assert "class3" not in answer
+
+
+# ---------------------------------------------------------------------------
+# B5b: present=false ∧ detected=true(漏报 ungrounded_event_ids)同样隔离
+# ---------------------------------------------------------------------------
+
+
+class TestImplicitUngroundedQuarantine:
+    def test_present_false_positive_event_triggers_quarantine(self) -> None:
+        """改写模型对检出事件给出 present=false(无法锚定)却漏写
+        ungrounded_event_ids 时,样本同样写入 quarantine。"""
+        resp_data = _make_resp_data(present_ids=(2,))  # event 1 present=false
+        event_results = _make_event_results(detected_ids=(1,))
+
+        assert find_ungrounded_positive_event_ids(resp_data, event_results) == [1]
+
+    def test_present_false_negative_event_does_not_quarantine(self) -> None:
+        """present=false 且裁决也未检出:正常阴性,不隔离。"""
+        resp_data = _make_resp_data(present_ids=())
+        event_results = _make_event_results(detected_ids=())
+
+        assert find_ungrounded_positive_event_ids(resp_data, event_results) == []
+
+    def test_explicit_and_implicit_ungrounded_merged(self) -> None:
+        """显式 ungrounded 列表与 present=false 漏报取并集,排序去重。"""
+        resp_data = _make_resp_data(present_ids=(2,), ungrounded=(2,))
+        event_results = _make_event_results(detected_ids=(1, 2))
+
+        assert find_ungrounded_positive_event_ids(resp_data, event_results) == [1, 2]
+
+    def test_step_quarantines_implicit_ungrounded_sample(
+        self, config_manager: ConfigManager, tmp_path: Path
+    ) -> None:
+        """端到端:漏报 ungrounded_event_ids 的样本写入 quarantine/ 子目录。"""
+        engine = _MockVLMEngine(response=_make_resp_data(present_ids=()))
+        step = SftLabelRewriteStep(config_manager, engine)
+        context = _make_context(
+            _SftSystemConfig(sft_label_output_dir=str(tmp_path)), detected_ids=(2,)
+        )
+
+        result = step._execute(context)
+
+        assert result == tmp_path / "quarantine" / "02_Event_129_1748049879151_1.json"
+        assert result is not None and result.exists()
+        assert not (tmp_path / "02_Event_129_1748049879151_1.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# B6: JSON true(bool)不得被当作 event_id 1(True == 1)
+# ---------------------------------------------------------------------------
+
+
+class TestBoolEventIdRejected:
+    def test_bool_in_ungrounded_event_ids_ignored(self) -> None:
+        resp_data = _make_resp_data(present_ids=(1,))  # event 1 present=true
+        resp_data["ungrounded_event_ids"] = [True]
+        event_results = _make_event_results(detected_ids=(1,))
+
+        assert find_ungrounded_positive_event_ids(resp_data, event_results) == []
+
+    def test_bool_event_id_in_thoughts_ignored(self) -> None:
+        """event_thoughts 里 event_id=true 的条目不得归入 event 1。"""
+        resp_data = _make_resp_data(present_ids=())
+        resp_data["event_thoughts"].append(
+            {
+                "event_id": True,
+                "present": True,
+                "attributes": {},
+                "detail": "幻觉细节。",
+                "attr_mentions": {},
+            }
+        )
+
+        assert _positive_event_details(resp_data) == {}

@@ -42,9 +42,11 @@ export function renderEvalCard() {
 
   const body = $('#eval-body');
   if (running) {
+    // 后端 log_tail 是字符串数组(逐行);归一化为多行文本,空数组不渲染 pre 块
+    const lt = Array.isArray(evalJob.log_tail) ? evalJob.log_tail.join('\n') : (evalJob.log_tail || '');
     body.innerHTML = '<div class="eval-running"><span class="spinner"></span><span>'
       + jobStepText(evalJob) + '</span></div>'
-      + (evalJob.log_tail ? '<pre class="md" style="margin-top:10px"><code>' + esc(evalJob.log_tail) + '</code></pre>' : '');
+      + (lt ? '<pre class="md" style="margin-top:10px"><code>' + esc(lt) + '</code></pre>' : '');
     return;
   }
   if (!state.evalData) {
@@ -93,16 +95,23 @@ function evalTableHtml(data) {
   return html;
 }
 
+let evalPosting = false; // 提交防抖:双击时第二次直接忽略,与按钮 disabled 无关
 export async function runEvaluate() {
+  if (evalPosting) return;
+  evalPosting = true;
   try {
-    await api('/api/evaluate', { method: 'POST', body: {} });
-    toast('评估任务已提交');
-    pollJobs();
-  } catch (e) {
-    toast('评估提交失败(' + e.status + '):' + e.message, 'err');
+    try {
+      await api('/api/evaluate', { method: 'POST', body: {} });
+      toast('评估任务已提交');
+      pollJobs();
+    } catch (e) {
+      toast('评估提交失败(' + e.status + '):' + e.message, 'err');
+    }
+    renderEvalCard();
+    syncButtons();
+  } finally {
+    evalPosting = false;
   }
-  renderEvalCard();
-  syncButtons();
 }
 
 export async function loadEvalLatest() {
@@ -118,27 +127,39 @@ export async function loadEvalLatest() {
 /* ================================================================
    动作:推理
    ================================================================ */
+let inferPosting = false; // 提交防抖:双击时第二次直接忽略,与按钮 disabled 无关
 export async function startInfer() {
   const rels = state.videos.filter(v => state.checked.has(v.rel)).map(v => v.rel);
-  if (!rels.length) return;
+  if (!rels.length || inferPosting) return;
+  inferPosting = true;
   try {
-    await api('/api/infer', { method: 'POST', body: { rels: rels } });
-    toast('已提交 ' + rels.length + ' 个推理任务');
-    pollJobs().then(schedulePoll); // 提交后立即进入活动任务的 1.5s 轮询
-  } catch (e) {
-    toast('推理提交失败(' + e.status + '):' + e.message, 'err');
+    try {
+      await api('/api/infer', { method: 'POST', body: { rels: rels } });
+      toast('已提交 ' + rels.length + ' 个推理任务');
+      pollJobs().then(schedulePoll); // 提交后立即进入活动任务的 1.5s 轮询
+    } catch (e) {
+      toast('推理提交失败(' + e.status + '):' + e.message, 'err');
+    }
+    syncButtons();
+  } finally {
+    inferPosting = false;
   }
-  syncButtons();
 }
 
 // 失败任务重试:仅对该视频重新 POST /api/infer,轮询会自动更新状态徽标
 export async function retryInfer(rel) {
+  if (inferPosting) return;
+  inferPosting = true;
   try {
-    await api('/api/infer', { method: 'POST', body: { rels: [rel] } });
-    toast('已重新提交推理:' + rel);
-    pollJobs().then(schedulePoll);
-  } catch (e) {
-    toast('重试提交失败(' + e.status + '):' + e.message, 'err');
+    try {
+      await api('/api/infer', { method: 'POST', body: { rels: [rel] } });
+      toast('已重新提交推理:' + rel);
+      pollJobs().then(schedulePoll);
+    } catch (e) {
+      toast('重试提交失败(' + e.status + '):' + e.message, 'err');
+    }
+  } finally {
+    inferPosting = false;
   }
 }
 

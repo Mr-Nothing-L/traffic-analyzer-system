@@ -16,6 +16,12 @@ export async function applyWorkspace(ws) {
   state.currentRel = null;
   state.checked.clear();
   state.evalData = null;
+  // 工作区切换:丢弃一切与当前视频绑定的草稿/dirty 态,避免 hasUnsavedEdits() 幽灵为真
+  state.results = null;
+  state.evidenceDraft = null;
+  state.evidenceDirty = false;
+  state.sftDraft = null;
+  state.sftSavedSig = '';
   await Promise.all([loadTree(), loadEvalLatest()]);
   renderWelcome();
   renderSidebar();

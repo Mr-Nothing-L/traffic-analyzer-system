@@ -330,7 +330,8 @@ def _positive_event_details(
     if not isinstance(raw_thoughts, list):
         return details
     for item in raw_thoughts:
-        if not isinstance(item, dict) or not isinstance(item.get("event_id"), int):
+        # type(...) is int:JSON true 是 bool(True == 1),不得当作 event 1。
+        if not isinstance(item, dict) or type(item.get("event_id")) is not int:
             continue
         if item.get("present") is not True:
             continue
@@ -366,15 +367,17 @@ def build_description(
     ends with the conclusion (``classN: 事件名`` lines consistent with the
     ``action`` list).
 
-    present=true 事件的 think 段由代码拼装:骨架句(结构化属性按
-    ``_SKELETON_TEMPLATES`` 拼成,空值从句省略) + detail;present=false
-    事件保持改写模型的 thinking 原文。
+    present=true 且裁决检出(detected)事件的 think 段由代码拼装:骨架句
+    (结构化属性按 ``_SKELETON_TEMPLATES`` 拼成,空值从句省略) + detail;
+    present=true 但未被裁决检出的事件按阴性处理(避免 think 段与最终结论
+    自相矛盾);present=false 事件保持改写模型的 thinking 原文。
     """
     thoughts_by_id: Dict[int, Mapping[str, Any]] = {}
     raw_thoughts = resp_data.get("event_thoughts")
     if isinstance(raw_thoughts, list):
         for item in raw_thoughts:
-            if isinstance(item, dict) and isinstance(item.get("event_id"), int):
+            # type(...) is int:JSON true 是 bool(True == 1),不得当作 event 1。
+            if isinstance(item, dict) and type(item.get("event_id")) is int:
                 thoughts_by_id[item["event_id"]] = item
 
     details = _positive_event_details(resp_data)
@@ -389,7 +392,9 @@ def build_description(
         if not cat.is_active:
             continue
         thought = thoughts_by_id.get(cat.event_id, {})
-        det = details.get(cat.event_id)
+        # 骨架+detail 仅用于「裁决检出」的 present 事件;present=true 但裁决
+        # 未检出的事件按阴性处理,避免 think 段与最终结论自相矛盾。
+        det = details.get(cat.event_id) if cat.event_id in detected_set else None
         if det is not None:
             skeleton = _skeleton_sentence(cat.event_id, det["attributes"])
             segments: List[str] = []
@@ -496,19 +501,31 @@ def find_ungrounded_positive_event_ids(
 
     Any overlap between the rewrite model's ``ungrounded_event_ids`` and the
     adjudicated ``detected=True`` events means the sample would teach
-    hallucination and must be quarantined.
+    hallucination and must be quarantined. Additionally, a ``present=false``
+    thought for an adjudicated positive means the rewrite model could not
+    ground the event but forgot to list it in ``ungrounded_event_ids`` — such
+    samples are quarantined too.
     """
+    detected_ids = {
+        eid for eid, er in event_results.items() if getattr(er, "detected", False)
+    }
+    quarantine: set = set()
     ungrounded = resp_data.get("ungrounded_event_ids")
-    if not isinstance(ungrounded, list):
-        return []
-    positive: List[int] = []
-    for eid in ungrounded:
-        if not isinstance(eid, int):
-            continue
-        er = event_results.get(eid)
-        if er is not None and getattr(er, "detected", False):
-            positive.append(eid)
-    return sorted(positive)
+    if isinstance(ungrounded, list):
+        for eid in ungrounded:
+            # type(...) is int:JSON true 是 bool(True == 1),不得当作 event 1。
+            if type(eid) is int and eid in detected_ids:
+                quarantine.add(eid)
+    # present=false ∧ detected=true:改写模型无法锚定该阳性事件但漏报了
+    # ungrounded_event_ids,同样按幻觉样本隔离。
+    raw_thoughts = resp_data.get("event_thoughts")
+    if isinstance(raw_thoughts, list):
+        for item in raw_thoughts:
+            if not isinstance(item, dict) or type(item.get("event_id")) is not int:
+                continue
+            if item.get("present") is False and item["event_id"] in detected_ids:
+                quarantine.add(item["event_id"])
+    return sorted(quarantine)
 
 
 def write_sample(

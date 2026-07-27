@@ -294,6 +294,50 @@ class TestGroundingVerificationStep:
             {"event_id": 7, "grounded": True, "analysis": ""},
         ]
 
+    def test_grounded_null_treated_as_grounded(
+        self, config_manager: ConfigManager
+    ) -> None:
+        """grounded=null(键存在但值为空)不得推翻真实阳性:按可锚定处理。"""
+        engine = _MockVLMEngine(
+            response=_make_resp_data(
+                [{"event_id": 7, "grounded": None, "analysis": "模型未给出明确结论。"}]
+            )
+        )
+        step = GroundingVerificationStep(config_manager, engine)
+        context = _make_context(SystemConfig(grounding_check_enable=True))
+
+        records = step._execute(context)
+
+        er = context.event_results[7]
+        assert er.detected is True
+        assert er.grounding_overturned is False
+        assert len(er.instances) == 1
+        assert records == [
+            {"event_id": 7, "grounded": True, "analysis": "模型未给出明确结论。"}
+        ]
+
+    def test_bool_event_id_not_matched_to_event_1(
+        self, config_manager: ConfigManager
+    ) -> None:
+        """event_id=true(JSON bool,True == 1)不得匹配 event 1:该阳性按
+        「响应缺失」处理,不推翻。"""
+        engine = _MockVLMEngine(
+            response=_make_resp_data(
+                [{"event_id": True, "grounded": False, "analysis": "bool id。"}]
+            )
+        )
+        step = GroundingVerificationStep(config_manager, engine)
+        context = _make_context(
+            SystemConfig(grounding_check_enable=True), detected_ids=(1,)
+        )
+
+        records = step._execute(context)
+
+        er = context.event_results[1]
+        assert er.detected is True
+        assert er.grounding_overturned is False
+        assert records == [{"event_id": 1, "grounded": True, "analysis": ""}]
+
     def test_guard_skips_when_no_positive_events(
         self, config_manager: ConfigManager
     ) -> None:

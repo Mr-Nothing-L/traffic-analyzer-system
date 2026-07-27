@@ -91,10 +91,13 @@ function mockEvidence(stem) {
   };
 }
 
-// 与 traffic_analyzer/config/event_categories.yaml 一致(0-7 激活,8/9 未激活)
-const MOCK_EVENT_CONFIG = EVENT_NAMES_10.map((name, i) => ({
-  event_id: i, name_zh: name, is_active: i < 8,
-}));
+// 与 traffic_analyzer/config/event_categories.yaml 一致:编号 1-8 激活,10/11 未激活
+// (编号 9 为「正常」占位,不在配置中;SFT 编辑器按 event_id 匹配草稿/勾选态)
+const MOCK_EVENT_IDS = [1, 2, 3, 4, 5, 6, 7, 8, 10, 11];
+const MOCK_EVENT_CONFIG = EVENT_NAMES_10.map((name, i) => {
+  const id = MOCK_EVENT_IDS[i];
+  return { event_id: id, name_zh: name, is_active: id <= 8 };
+});
 
 function mockSft(stem) {
   return {
