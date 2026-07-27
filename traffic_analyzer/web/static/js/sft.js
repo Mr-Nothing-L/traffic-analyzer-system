@@ -348,12 +348,14 @@ function applyChipChange(body, ev, group, value) {
   declList.forEach(s => declaredForms(ev, group.key, s).forEach(f => {
     if (declForms.indexOf(f) < 0) declForms.push(f);
   }));
-  if (oldSk && text.indexOf(oldSk) === 0) {
-    text = newSk + text.slice(oldSk.length);
-  } else if (declForms.length && declForms.some(f => text.indexOf(f) >= 0)) {
-    // 声明串即锚点:整文替换为新值;声明提及同步为新值(保存时随 attr_mentions 落盘)
+  if (declForms.length && declForms.some(f => text.indexOf(f) >= 0)) {
+    // 声明串即锚点:整文替换为新值(骨架前缀含声明串,随同一趟替换自然改写,
+    // 不走骨架前缀就地更新——否则正文其余声明提及会残留旧值,文本自相矛盾);
+    // 声明提及同步为新值(保存时随 attr_mentions 落盘,后端子串校验方能通过)
     text = text.replace(new RegExp(declForms.sort((a, b) => b.length - a.length).map(escRe).join('|'), 'g'), newVal);
     decl[group.key] = [newVal];
+  } else if (oldSk && text.indexOf(oldSk) === 0) {
+    text = newSk + text.slice(oldSk.length);
   } else if (oldVal && newVal && !SFT_REPLACE_SKIP_GROUPS[group.key] && mentionsValue(subjectText(ev, text), oldVal)) {
     // 仅替换主语绑定句内的旧值形态;背景句里的同形词保持原文
     text = mapSubjectRanges(text, subjectRanges(ev, text), seg => replaceAliases(seg, oldVal, newVal));
