@@ -11,15 +11,17 @@ only allows edits to the user-editable coordinate/label fields:
 - ``events[*].evidence_regions[*].label``
 
 The SFT PUT endpoint only allows ``description`` / ``action`` /
-``event_attributes`` edits; attribute values are validated against the closed
-enums in ``config/event_options.yaml``. Any other difference versus the
-on-disk version is rejected with 422.
+``event_attributes`` / ``attr_mentions`` edits; attribute values are validated
+against the closed enums in ``config/event_options.yaml``, and each declared
+mention string must appear in the corresponding event's think-section text.
+Any other difference versus the on-disk version is rejected with 422.
 
 [文件说明]
 作用:结果读取与证据/SFT 编辑接口。GET 读取 <workspace>/analysis/<stem>/ 下的
 report.md、<stem>.json(SFT 样本)、<stem>_evidence.json 及图片;evidence PUT 仅允许修改
-标定多边形与证据框/标签,SFT PUT 仅允许 description/action/event_attributes
-(event_attributes 按 event_options.yaml 封闭枚举校验),其余字段与磁盘版本比对
+标定多边形与证据框/标签,SFT PUT 仅允许 description/action/event_attributes/attr_mentions
+(event_attributes 按 event_options.yaml 封闭枚举校验;attr_mentions 的每个提及串
+必须出现在对应事件的 think 段落正文中),其余字段与磁盘版本比对
 不一致即 422;写入采用 tmp+os.replace 原子写并按 stem 加锁,同 stem 有在跑 infer 任务
 时返回 409。
 上游:web/app.py(挂载路由);web/static 前端(结果查看与标注编辑)。
@@ -32,6 +34,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 from collections import defaultdict
 from functools import lru_cache
@@ -41,7 +44,7 @@ from typing import Any, Dict, List, Optional
 import yaml
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, ValidationInfo, field_validator
 
 from traffic_analyzer.web import workspace as workspace_mod
 
@@ -82,6 +85,39 @@ def _event_options_index() -> Dict[int, List[Dict[str, Any]]]:
         if "event_id" in ev:
             index[int(ev["event_id"])] = groups
     return index
+
+
+@lru_cache(maxsize=1)
+def _event_name_index() -> Dict[str, int]:
+    """事件中文名 → event_id(用于在 description 的 think 段落中定位事件文本)。"""
+    data = yaml.safe_load(_EVENT_CATEGORIES_YAML.read_text(encoding="utf-8")) or {}
+    return {
+        str(cat["name_zh"]): int(cat["event_id"])
+        for cat in data.get("event_categories") or []
+        if "event_id" in cat and "name_zh" in cat
+    }
+
+
+def _think_sections(description: str) -> Dict[int, str]:
+    """description 的 <think> 按空行分段,「事件名：」前缀定位各事件段落正文。
+
+    与前端 js/sft.js 的 parseSftDescription 同一口径:重复段落取首段,
+    匹配不到事件名的段落忽略。
+    """
+    sections: Dict[int, str] = {}
+    m = re.search(r"<think>([\s\S]*?)</think>", description or "")
+    if not m:
+        return sections
+    names = _event_name_index()
+    for para in re.split(r"\n\s*\n", m.group(1).strip()):
+        p = para.strip()
+        pm = re.match(r"^([^：\n]{1,30})：", p)
+        if not pm:
+            continue
+        ev_id = names.get(pm.group(1))
+        if ev_id is not None and ev_id not in sections:
+            sections[ev_id] = p[pm.end() :].strip()
+    return sections
 
 
 # ---------------------------------------------------------------------------
@@ -166,7 +202,7 @@ class Evidence(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# SFT sample (only description / action / event_attributes are user-editable)
+# SFT sample (only description / action / event_attributes / attr_mentions are user-editable)
 # ---------------------------------------------------------------------------
 
 # 标注文档 v4.5 的合法 action 编号(action 9 = 正常占位,不出现)。
@@ -201,10 +237,53 @@ def _check_event_attributes(value: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[
                         f"event_attributes[{ev_key!r}][{key!r}] must be a list "
                         f"within {allowed}"
                     )
-            elif not isinstance(val, str) or val not in allowed:
+            elif val is not None and (not isinstance(val, str) or val not in allowed):
+                # 契约允许 null(VLM 看不清时输出 null);非 null 必须命中枚举。
                 raise ValueError(
                     f"event_attributes[{ev_key!r}][{key!r}] must be one of {allowed}"
                 )
+    return value
+
+
+def _check_attr_mentions(
+    value: Dict[str, Dict[str, Any]], description: str
+) -> Dict[str, Dict[str, Any]]:
+    """attr_mentions 校验:event_id/属性键必须已定义,值必须为字符串数组(可空),
+    且每个提及串必须出现在对应事件的 description think 段落正文中
+    (与 _strip_editable 同哲学的 best-effort 一致性检查,找不到即拒绝)。"""
+    index = _event_options_index()
+    sections: Optional[Dict[int, str]] = None  # 按需解析
+    for ev_key, groups_map in value.items():
+        try:
+            ev_id = int(ev_key)
+        except (TypeError, ValueError):
+            raise ValueError(f"attr_mentions: invalid event id {ev_key!r}")
+        groups = {g["key"]: g for g in index.get(ev_id) or []}
+        if not groups:
+            raise ValueError(f"attr_mentions: no options defined for event {ev_key!r}")
+        if not isinstance(groups_map, dict):
+            raise ValueError(f"attr_mentions[{ev_key!r}] must be an object")
+        for key, mentions in groups_map.items():
+            if key not in groups:
+                raise ValueError(
+                    f"attr_mentions[{ev_key!r}]: unknown attribute {key!r}"
+                )
+            if not isinstance(mentions, list) or not all(
+                isinstance(s, str) for s in mentions
+            ):
+                raise ValueError(
+                    f"attr_mentions[{ev_key!r}][{key!r}] must be an array of strings"
+                )
+            if mentions:
+                if sections is None:
+                    sections = _think_sections(description)
+                text = sections.get(ev_id, "")
+                for s in mentions:
+                    if s not in text:
+                        raise ValueError(
+                            f"attr_mentions[{ev_key!r}][{key!r}]: mention {s!r} "
+                            f"not found in event {ev_id} description think-section"
+                        )
     return value
 
 
@@ -221,6 +300,7 @@ class SftSample(BaseModel):
     end_timestamp: Any
     chunk_name: Any
     event_attributes: Optional[Dict[str, Dict[str, Any]]] = None
+    attr_mentions: Optional[Dict[str, Dict[str, Any]]] = None
 
     @field_validator("action")
     @classmethod
@@ -239,6 +319,16 @@ class SftSample(BaseModel):
         if value is None:
             return value
         return _check_event_attributes(value)
+
+    @field_validator("attr_mentions")
+    @classmethod
+    def _check_mentions(
+        cls, value: Optional[Dict[str, Dict[str, Any]]], info: ValidationInfo
+    ) -> Optional[Dict[str, Dict[str, Any]]]:
+        if value is None:
+            return value
+        # description 在字段顺序上先于 attr_mentions 完成校验,可直接取用
+        return _check_attr_mentions(value, str(info.data.get("description") or ""))
 
 
 # ---------------------------------------------------------------------------
@@ -316,11 +406,12 @@ def _strip_editable(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _strip_sft_editable(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """与 ``_strip_editable`` 同理:仅 description / action / event_attributes 允许不同。"""
+    """与 ``_strip_editable`` 同理:仅 description / action / event_attributes / attr_mentions 允许不同。"""
     copy = json.loads(json.dumps(payload, ensure_ascii=False))
     copy["description"] = _MASK
     copy["action"] = _MASK
     copy["event_attributes"] = _MASK
+    copy["attr_mentions"] = _MASK
     return copy
 
 
@@ -461,12 +552,18 @@ def put_sft(stem: str, body: SftSample, request: Request) -> Dict[str, Any]:
         if new_payload.get("event_attributes") is None:
             # 未提交结构化属性时保持旧格式:不往磁盘样本里塞 null 字段
             del new_payload["event_attributes"]
+        if new_payload.get("attr_mentions") is None:
+            # 同理:未提交声明提及时不落 null 字段
+            del new_payload["attr_mentions"]
         if not isinstance(disk, dict) or _strip_sft_editable(disk) != _strip_sft_editable(
             new_payload
         ):
             raise HTTPException(
                 status_code=422,
-                detail="Only description, action and event_attributes may be modified",
+                detail=(
+                    "Only description, action, event_attributes and "
+                    "attr_mentions may be modified"
+                ),
             )
 
         _atomic_write_json(sft_path, new_payload)

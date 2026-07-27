@@ -54,6 +54,45 @@ function evOptions(ev) {
   return Array.isArray(ev.options) ? ev.options : [];
 }
 
+// --- 双通道分词:样本含 attr_mentions 且声明了该事件时走「声明提及通道」 --------
+// 声明通道:只标注 attr_mentions 声明的表面串(精确匹配;若声明串恰是某选项的
+// 值/别名,则扩展该选项的全部书写形态以增强鲁棒性),不跑主语句/关键词启发式;
+// 未声明的事件与旧样本保持原有启发式路径不变。
+function declaredMentions(ev) {
+  const d = state.sftDraft;
+  if (!d || !d.mentions) return null;
+  return d.mentions[ev.event_id] || null;
+}
+
+// 声明串的全部匹配形态:自身;若恰为组内某选项的值/别名,并入该选项的全部形态
+function declaredForms(ev, groupKey, s) {
+  const forms = [s];
+  const g = evOptions(ev).find(g => g.key === groupKey);
+  if (g) {
+    g.options.forEach(opt => {
+      if (opt === s || (SFT_ATTR_ALIASES[opt] || []).indexOf(s) >= 0) {
+        aliasesOf(opt).forEach(a => { if (forms.indexOf(a) < 0) forms.push(a); });
+      }
+    });
+  }
+  return forms;
+}
+
+// 声明通道的「别名 → 组」索引,按形态长度降序(最长优先,与 tokenIndex 同约定)
+function declaredTokenIndex(ev, decl) {
+  const list = [];
+  const seen = {};
+  Object.keys(decl).forEach(gk => {
+    (decl[gk] || []).forEach(s => {
+      declaredForms(ev, gk, s).forEach(f => {
+        const k = gk + ' ' + f;
+        if (!seen[k]) { seen[k] = 1; list.push({ alias: f, group: gk }); }
+      });
+    });
+  });
+  return list.sort((x, y) => y.alias.length - x.alias.length);
+}
+
 // --- chip→文本同步:旧值别名全词替换 -----------------------------------------
 // 车道类型/范围的选项词(行车道/应急车道/导流区/路肩、单车道/多车道)与道路通用
 // 词汇高度重叠,场景描述里常出现非属性含义的同一写法(如"护栏外应急车道边缘"),
@@ -178,11 +217,13 @@ function tokenizeSegHtml(idx, seg) {
   return html;
 }
 
-// 纯文本 → 带 token 标注的 HTML;仅主语绑定句内的命中渲染为 token,
-// 背景句保持纯文本(见 SFT_SUBJECT_PATTERNS)
+// 纯文本 → 带 token 标注的 HTML;声明通道(attr_mentions)仅标注声明串(全文本,
+// 无主语句过滤);否则仅主语绑定句内的启发式命中渲染为 token,背景句保持纯文本
 function tokenHtml(ev, text) {
-  const idx = tokenIndex(ev);
   const t = String(text || '');
+  const decl = declaredMentions(ev);
+  if (decl) return tokenizeSegHtml(declaredTokenIndex(ev, decl), t);
+  const idx = tokenIndex(ev);
   const ranges = subjectRanges(ev, t);
   let html = '', pos = 0;
   ranges.forEach(r => {
@@ -272,10 +313,13 @@ function refreshWarnDots(body) {
 
 // chip 变更 → 文本同步(优先级从高到低):
 //   1) 已前置的骨架前缀就地更新(保证骨架只前置一次,不堆叠);
-//   2) 单选换值且旧值出现在主语绑定句中 → 主语绑定句内旧值的全部别名形态
+//   2) 声明通道(attr_mentions)且该组有声明串、单选换值 → 声明串及其别名形态
+//      整文替换为新值(锚点精确,主语句规则与 skip 组均不适用),并同步更新
+//      草稿里的声明提及;声明串已不在文本中时回退现行行为;
+//   3) 单选换值且旧值出现在主语绑定句中 → 主语绑定句内旧值的全部别名形态
 //      全词替换为新值(背景句同形词不动;车道类型/范围等 skip 组除外,
 //      见 SFT_REPLACE_SKIP_GROUPS);
-//   3) 旧值在主语绑定句中完全未出现(或新选/新增多选) → 前置插入骨架句,仅一次;
+//   4) 旧值在主语绑定句中完全未出现(或新选/新增多选) → 前置插入骨架句,仅一次;
 //   取消选中/移除多选不删词:旧值在文本中则保留原文,不在才补骨架。
 function applyChipChange(body, ev, group, value) {
   const d = state.sftDraft;
@@ -297,8 +341,19 @@ function applyChipChange(body, ev, group, value) {
   const newSk = skeleton(ev, attrs);
   d.skeletons[id] = newSk;
   let text = String(d.texts[id] || '');
+  // 声明通道锚点:该组声明串的全部匹配形态(仅声明通道 + 单选换值时非空)
+  const decl = declaredMentions(ev);
+  const declList = decl && oldVal && newVal ? (decl[group.key] || []) : [];
+  const declForms = [];
+  declList.forEach(s => declaredForms(ev, group.key, s).forEach(f => {
+    if (declForms.indexOf(f) < 0) declForms.push(f);
+  }));
   if (oldSk && text.indexOf(oldSk) === 0) {
     text = newSk + text.slice(oldSk.length);
+  } else if (declForms.length && declForms.some(f => text.indexOf(f) >= 0)) {
+    // 声明串即锚点:整文替换为新值;声明提及同步为新值(保存时随 attr_mentions 落盘)
+    text = text.replace(new RegExp(declForms.sort((a, b) => b.length - a.length).map(escRe).join('|'), 'g'), newVal);
+    decl[group.key] = [newVal];
   } else if (oldVal && newVal && !SFT_REPLACE_SKIP_GROUPS[group.key] && mentionsValue(subjectText(ev, text), oldVal)) {
     // 仅替换主语绑定句内的旧值形态;背景句里的同形词保持原文
     text = mapSubjectRanges(text, subjectRanges(ev, text), seg => replaceAliases(seg, oldVal, newVal));
@@ -401,10 +456,13 @@ function buildSftRevision() {
     });
     if (Object.keys(clean).length) attrsOut[ev.event_id] = clean;
   });
+  // 声明提及原样随草稿带出(编辑器不增删,chip 替换时同步更新);旧样本为 null
+  const mentionsOut = d.mentions ? JSON.parse(JSON.stringify(d.mentions)) : null;
   return {
     description: '<think>\n' + think + '\n</think>\n<answer>\n' + answerLines.join('\n') + '\n</answer>',
     action: checked.map(ev => ev.event_id),
     event_attributes: Object.keys(attrsOut).length ? attrsOut : null,
+    attr_mentions: mentionsOut,
   };
 }
 
@@ -414,13 +472,17 @@ export function sftSignature() {
 
 // 从 sft 样本初始化编辑草稿(检出初值 = action 反映射;未激活事件留空不勾)
 // attrs:新格式取文件 event_attributes(按当前选项定义清洗);旧格式按关键词回猜(原文不动)
+// mentions:样本含 attr_mentions 时按事件声明的表面串(按当前选项定义清洗),
+//   该事件走声明通道分词/锚定;样本无 attr_mentions 时整体为 null,全量走启发式
 function initSftDraft(sft) {
   const events = state.eventConfig || [];
   const parsed = parseSftDescription(sft.description, events);
   const actions = Array.isArray(sft.action) ? sft.action : [];
   const hasFileAttrs = sft.event_attributes != null && typeof sft.event_attributes === 'object';
   const fileAttrs = hasFileAttrs ? sft.event_attributes : {};
+  const rawMentions = (sft.attr_mentions != null && typeof sft.attr_mentions === 'object') ? sft.attr_mentions : null;
   const texts = {}, checks = {}, attrs = {}, skeletons = {};
+  const mentions = rawMentions ? {} : null;
   events.forEach(ev => {
     if (ev.is_active) {
       texts[ev.event_id] = parsed.sections[ev.event_id] || '';
@@ -435,9 +497,21 @@ function initSftDraft(sft) {
       texts[ev.event_id] = '';
       checks[ev.event_id] = false;
     }
+    if (mentions) {
+      const raw = rawMentions[ev.event_id] || rawMentions[String(ev.event_id)];
+      if (raw && typeof raw === 'object') {
+        const clean = {};
+        evOptions(ev).forEach(g => {
+          const v = raw[g.key];
+          if (Array.isArray(v)) clean[g.key] = v.filter(s => typeof s === 'string' && s);
+        });
+        mentions[ev.event_id] = clean;
+      }
+    }
   });
   state.sftDraft = {
     texts: texts, checks: checks, attrs: attrs, skeletons: skeletons,
+    mentions: mentions,
     unmatched: parsed.unmatched, env: parsed.env,
   };
   state.sftSavedSig = sftSignature();
@@ -640,7 +714,7 @@ async function saveSft() {
   if (!stem || !state.results || !state.results.sft_label) return;
   const btn = $('#btn-sft-save');
   if (btn) btn.disabled = true;
-  // 只改 description / action / event_attributes,其余字段原样提交(后端会校验)
+  // 只改 description / action / event_attributes / attr_mentions,其余字段原样提交(后端会校验)
   const payload = Object.assign({}, state.results.sft_label, buildSftRevision());
   const inFlightSig = sftSignature(); // 在途 payload 的签名,用于识别保存期间的继续编辑
   try {

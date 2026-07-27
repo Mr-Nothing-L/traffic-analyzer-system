@@ -7,33 +7,47 @@
 .side-filter {
   display: flex;
   gap: 6px;
-  padding: 0 14px 8px;
+  padding: 0 14px 10px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--border); /* 与文件列表分区 */
 }
 
 #side-filter-input {
   flex: 1;
   min-width: 0;
+  height: 26px;
   font-size: 12px;
-  padding: 4px 8px;
+  padding: 0 8px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--card);
   color: var(--text);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
-#side-filter-input:focus { border-color: var(--accent); outline: none; }
+#side-filter-input:focus {
+  border-color: var(--accent);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
 #side-filter-input::placeholder { color: var(--text2); }
 
 #side-sort-select {
   flex: 0 0 auto;
+  height: 26px;
   font-size: 12px;
-  padding: 3px 4px;
+  padding: 0 4px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--card);
   color: var(--text2);
   cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
-#side-sort-select:focus { border-color: var(--accent); outline: none; }
+#side-sort-select:focus {
+  border-color: var(--accent);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
 
 /* ---------- 失败任务重试按钮(紧邻「失败」徽标) ---------- */
 .retry-btn {

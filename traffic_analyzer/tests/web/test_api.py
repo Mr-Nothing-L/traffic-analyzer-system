@@ -714,6 +714,74 @@ class TestSftPut:
         assert disk == payload
         assert "event_attributes" not in disk
 
+    def test_put_attr_mentions_ok(self, tmp_path: Path) -> None:
+        # 声明提及合法:键为已知事件/属性组,值为字符串数组(空数组允许),
+        # 每个提及串出现在对应事件的 think 段落正文中。
+        client = self._client(tmp_path)
+        payload = _sft_payload()
+        payload["attr_mentions"] = {
+            "2": {
+                "vehicle_type": ["白色小车", "小车"],
+                "lane_type": ["应急车道"],
+                "direction": [],
+            }
+        }
+        resp = client.put("/api/results/v1/sft", json=payload)
+        assert resp.status_code == 200
+        assert resp.json() == payload
+        disk = json.loads(
+            (tmp_path / "analysis" / "v1" / "v1.json").read_text(encoding="utf-8")
+        )
+        assert disk == payload
+
+    def test_put_event_attributes_null_single_ok(self, tmp_path: Path) -> None:
+        """契约允许单选属性为 null(VLM 看不清时);多选空数组允许。"""
+        client = self._client(tmp_path)
+        payload = _sft_payload()
+        payload["event_attributes"] = {
+            "2": {"lane_type": "应急车道", "direction": None, "vehicle_type": None}
+        }
+        resp = client.put("/api/results/v1/sft", json=payload)
+        assert resp.status_code == 200
+        disk = json.loads(
+            (tmp_path / "analysis" / "v1" / "v1.json").read_text(encoding="utf-8")
+        )
+        assert disk["event_attributes"]["2"]["direction"] is None
+
+    @pytest.mark.parametrize(
+        "mentions",
+        [
+            {"2": {"vehicle_type": ["黄色工程作业车"]}},  # 提及串不在事件 2 正文
+            {"2": {"color": ["红"]}},                     # 未定义的属性键
+            {"2": {"vehicle_type": "小车"}},              # 值必须是数组
+            {"2": {"vehicle_type": ["小车", 3]}},         # 数组内必须都是字符串
+            {"99": {"direction": ["来向"]}},              # 未定义的事件
+        ],
+    )
+    def test_put_attr_mentions_invalid_422(
+        self, tmp_path: Path, mentions: Dict[str, Any]
+    ) -> None:
+        client = self._client(tmp_path)
+        payload = _sft_payload()
+        payload["attr_mentions"] = mentions
+        resp = client.put("/api/results/v1/sft", json=payload)
+        assert resp.status_code == 422
+        # 磁盘文件未被改动。
+        disk = json.loads(
+            (tmp_path / "analysis" / "v1" / "v1.json").read_text(encoding="utf-8")
+        )
+        assert disk == _sft_payload()
+
+    def test_put_attr_mentions_not_found_detail_names_mention(
+        self, tmp_path: Path
+    ) -> None:
+        client = self._client(tmp_path)
+        payload = _sft_payload()
+        payload["attr_mentions"] = {"2": {"vehicle_type": ["黄色工程作业车"]}}
+        resp = client.put("/api/results/v1/sft", json=payload)
+        assert resp.status_code == 422
+        assert "黄色工程作业车" in resp.text
+
 
 # ---------------------------------------------------------------------------
 # Result images

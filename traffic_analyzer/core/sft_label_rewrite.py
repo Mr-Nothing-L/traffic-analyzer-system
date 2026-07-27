@@ -9,6 +9,12 @@ solely in what the raw frames show. Samples whose positive events cannot be
 grounded in the raw frames are written to a ``quarantine/`` subdirectory —
 they would otherwise teach the student model to hallucinate.
 
+present=true events additionally carry structured ``attributes`` (closed enums
+from ``config/event_options.yaml``), a free-text ``detail`` and
+``attr_mentions`` (exact substrings of detail bound to each attribute); the
+sample gains top-level ``event_attributes`` / ``attr_mentions`` for the Web
+editor's token mapping.
+
 [文件说明]
 作用:可选的裁决后 SFT 标签改写步骤(SftLabelRewriteStep,--sft-label 模式
 启用)。以裁决结论为特权提示,让 VLM 仅基于原始粗关键帧重写出一条 SFT
@@ -28,8 +34,11 @@ from __future__ import annotations
 
 import json
 import logging
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
+
+import yaml
 
 from traffic_analyzer.core.pipeline_steps import PipelineStep
 from traffic_analyzer.core.vlm_engine import FatalAPIError
@@ -47,6 +56,9 @@ logger = logging.getLogger(__name__)
 # 因此 SFT 样本的 action / classN 直接等于 event_id，无需映射。
 
 # JSON schema for the rewrite VLM response (forces valid JSON output).
+# 注意:vlm_response_parser._validate_schema_basic 只校验顶层 required;
+# event_thoughts 条目级约束(present=true 时 attributes 封闭枚举、
+# attr_mentions 必须为 detail 的逐字子串)由本模块代码层校验并清洗。
 _SFT_REWRITE_RESPONSE_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "required": [
@@ -64,11 +76,29 @@ _SFT_REWRITE_RESPONSE_SCHEMA: Dict[str, Any] = {
             "type": "array",
             "items": {
                 "type": "object",
-                "required": ["event_id", "present", "thinking"],
+                # present=false 条目只带 thinking;present=true 条目带
+                # attributes/detail/attr_mentions,条目级 required 仅约束
+                # event_id/present,其余形状在代码层按 present 分支校验。
+                "required": ["event_id", "present"],
                 "properties": {
                     "event_id": {"type": "integer"},
                     "present": {"type": "boolean"},
                     "thinking": {"type": "string"},
+                    "attributes": {
+                        "type": "object",
+                        "additionalProperties": {
+                            "type": ["string", "array", "null"],
+                            "items": {"type": "string"},
+                        },
+                    },
+                    "detail": {"type": "string"},
+                    "attr_mentions": {
+                        "type": "object",
+                        "additionalProperties": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                    },
                 },
             },
         },
@@ -78,6 +108,242 @@ _SFT_REWRITE_RESPONSE_SCHEMA: Dict[str, Any] = {
         },
     },
 }
+
+
+# ---------------------------------------------------------------------------
+# 结构化属性:封闭枚举(event_options.yaml)、别名归一、骨架句、attr_mentions 校验
+# ---------------------------------------------------------------------------
+
+_EVENT_OPTIONS_PATH = (
+    Path(__file__).resolve().parents[1] / "config" / "event_options.yaml"
+)
+
+
+@lru_cache(maxsize=1)
+def _event_options_index() -> Dict[int, List[Dict[str, Any]]]:
+    """event_options.yaml 的封闭枚举定义:{event_id: [属性组, ...]}(保持声明顺序)。
+
+    与 web/evidence_api._event_options_index 同口径,生成侧归一/校验复用同一
+    事实源,保证产出的 event_attributes 一定能通过 PUT 的严格枚举校验。
+    """
+    data = yaml.safe_load(_EVENT_OPTIONS_PATH.read_text(encoding="utf-8")) or {}
+    index: Dict[int, List[Dict[str, Any]]] = {}
+    for ev in data.get("event_options") or []:
+        groups = [
+            {
+                "key": str(g["key"]),
+                "label": str(g.get("label") or g["key"]),
+                "options": [str(o) for o in g.get("options") or []],
+                "required": bool(g.get("required", False)),
+                "multi": bool(g.get("multi", False)),
+            }
+            for g in ev.get("groups") or []
+            if "key" in g
+        ]
+        if "event_id" in ev:
+            index[int(ev["event_id"])] = groups
+    return index
+
+
+# 属性值别名表(与 web/static/js/sft.js 的 SFT_ATTR_ALIASES 保持一致):
+# VLM 写出别名形态时归一到封闭枚举,枚举词本身总是合法书写形态。
+_ATTR_ALIASES: Dict[str, List[str]] = {
+    "行车道": ["主车道"],
+    "来向": ["对向"],
+    "小型车": ["小车", "轿车", "私家车"],
+    "大客车": ["客车", "大巴"],
+    "货车": ["卡车"],
+    "工程车": ["工程作业车", "工程车辆", "施工车", "清障车", "救援车"],
+    "施工人员": ["工人"],
+    "滞留驾乘人员": ["驾乘人员", "滞留人员"],
+    "摩托车": ["摩托"],
+    "电动自行车": ["电动车", "电瓶车"],
+    "单车道": ["一条车道"],
+    "多车道": ["多条车道", "全部车道"],
+    "施工车辆": ["工程车", "施工车"],
+    "交通锥/隔离栏": ["交通锥", "锥桶", "路锥", "隔离栏", "锥形桶"],
+    "施工标志牌": ["施工标志", "标志牌", "施工牌"],
+    "车道封闭": ["封闭车道", "封路"],
+    "塑料袋/纸张": ["塑料袋", "纸张", "塑料"],
+    "水瓶/容器": ["水瓶", "瓶子"],
+    "木板/构件": ["木板", "木条"],
+    "泥土/散落物": ["泥土", "散落物", "碎石"],
+    "三角警示牌": ["三角牌"],
+}
+
+# 骨架句模板(与 web/static/js/sft.js 的 SFT_SKELETON_TEMPLATES 保持一致):
+# 字符串为固定文字;(slot, pre, post) 为该属性有值时输出的从句,空值整句省略。
+_SKELETON_TEMPLATES: Dict[int, List[Any]] = {
+    1: [("direction", "", "一侧"), ("lane_type", "", "内"), "停有一辆", ("vehicle_type", "", "")],
+    2: [("direction", "", "一侧"), ("lane_type", "", "内"), ("vehicle_type", "有", "占用")],
+    3: [("direction", "", "一侧"), ("lane_type", "", "内"), "发生交通事故", ("vehicle_type", ",涉及", "")],
+    4: [("direction", "", "一侧"), "出现", ("person_type", "", "")],
+    5: [("direction", "", "一侧"), "出现", ("non_motor_type", "", "")],
+    6: [("direction", "", "一侧"), "出现", ("scope", "", ""), "拥堵"],
+    7: [("direction", "", "一侧"), "道路施工", ("work_elements", ",现场有", "")],
+    8: [("direction", "", "一侧"), ("lane_type", "", "内"), ("vehicle_type", "有", "逆行")],
+}
+
+
+def _match_option(group: Mapping[str, Any], text: str) -> Optional[str]:
+    """精确匹配枚举词或别名,命中返回枚举值,否则返回 None。"""
+    for option in group["options"]:
+        if text == option or text in _ATTR_ALIASES.get(option, []):
+            return option
+    return None
+
+
+def _normalize_attributes(event_id: int, raw_attrs: Any) -> Dict[str, Any]:
+    """按 event_options 封闭枚举归一 attributes。
+
+    未定义的键丢弃(告警);单选非法值置 null(告警),多选非法项丢弃(告警)、
+    结果按 options 声明顺序排列;缺失/看不清的属性保持 null(多选为 [])。
+    """
+    groups = _event_options_index().get(event_id) or []
+    raw = raw_attrs if isinstance(raw_attrs, dict) else {}
+    known_keys = {g["key"] for g in groups}
+    for key in raw:
+        if key not in known_keys:
+            logger.warning(
+                "[sft_label_rewrite] ATTR_UNKNOWN_KEY | event_id=%s key=%r 已丢弃",
+                event_id,
+                key,
+            )
+    normalized: Dict[str, Any] = {}
+    for group in groups:
+        key = group["key"]
+        value = raw.get(key)
+        if group["multi"]:
+            if isinstance(value, str):
+                items: List[Any] = [value]
+            elif isinstance(value, list):
+                items = list(value)
+            else:
+                items = []
+            picked: List[str] = []
+            for item in items:
+                if not isinstance(item, str) or not item.strip():
+                    continue
+                matched = _match_option(group, item.strip())
+                if matched is None:
+                    logger.warning(
+                        "[sft_label_rewrite] ATTR_NORMALIZE | event_id=%s attr=%s "
+                        "value=%r 不在封闭枚举内,已丢弃",
+                        event_id,
+                        key,
+                        item,
+                    )
+                    continue
+                if matched not in picked:
+                    picked.append(matched)
+            normalized[key] = [o for o in group["options"] if o in picked]
+        else:
+            if isinstance(value, str) and value.strip():
+                matched = _match_option(group, value.strip())
+                if matched is None:
+                    logger.warning(
+                        "[sft_label_rewrite] ATTR_NORMALIZE | event_id=%s attr=%s "
+                        "value=%r 不在封闭枚举内,置 null",
+                        event_id,
+                        key,
+                        value,
+                    )
+                normalized[key] = matched
+            else:
+                normalized[key] = None
+    return normalized
+
+
+def _validate_attr_mentions(
+    event_id: int, detail: str, raw_mentions: Any
+) -> Dict[str, List[str]]:
+    """attr_mentions 校验:键必须为该事件的属性键,每个字符串必须是 detail 的
+    逐字子串(exact substring);非法项丢弃并告警,Web 侧按精确字符串映射 token。"""
+    groups = _event_options_index().get(event_id) or []
+    valid_keys = {g["key"] for g in groups}
+    mentions: Dict[str, List[str]] = {}
+    if not isinstance(raw_mentions, dict):
+        return mentions
+    for key, values in raw_mentions.items():
+        if key not in valid_keys:
+            logger.warning(
+                "[sft_label_rewrite] MENTION_UNKNOWN_KEY | event_id=%s key=%r 已丢弃",
+                event_id,
+                key,
+            )
+            continue
+        if not isinstance(values, list):
+            logger.warning(
+                "[sft_label_rewrite] MENTION_BAD_SHAPE | event_id=%s key=%r 非数组,已丢弃",
+                event_id,
+                key,
+            )
+            continue
+        kept: List[str] = []
+        for value in values:
+            if isinstance(value, str) and value and value in detail:
+                if value not in kept:
+                    kept.append(value)
+            else:
+                logger.warning(
+                    "[sft_label_rewrite] MENTION_NOT_SUBSTRING | event_id=%s key=%r "
+                    "value=%r 不是 detail 的逐字子串,已丢弃",
+                    event_id,
+                    key,
+                    value,
+                )
+        if kept:
+            mentions[key] = kept
+    return mentions
+
+
+def _skeleton_sentence(event_id: int, attrs: Mapping[str, Any]) -> str:
+    """按骨架模板把已选属性拼成一句,空值从句整体省略(与 JS skeleton 同语义)。"""
+    parts = _SKELETON_TEMPLATES.get(event_id)
+    if not parts:
+        return ""
+    out: List[str] = []
+    for part in parts:
+        if isinstance(part, str):
+            out.append(part)
+            continue
+        slot, pre, post = part
+        value = attrs.get(slot)
+        if isinstance(value, list):
+            if value:
+                out.append(pre + "、".join(value) + post)
+        elif value:
+            out.append(pre + str(value) + post)
+    return "".join(out)
+
+
+def _positive_event_details(
+    resp_data: Mapping[str, Any]
+) -> Dict[int, Dict[str, Any]]:
+    """present=true 条目的结构化数据:{event_id: {attributes, detail, attr_mentions}}。
+
+    attributes 已经过封闭枚举归一,attr_mentions 已经过逐字子串校验;
+    detail 缺失时回退 thinking(兼容旧形状响应)。
+    """
+    details: Dict[int, Dict[str, Any]] = {}
+    raw_thoughts = resp_data.get("event_thoughts")
+    if not isinstance(raw_thoughts, list):
+        return details
+    for item in raw_thoughts:
+        if not isinstance(item, dict) or not isinstance(item.get("event_id"), int):
+            continue
+        if item.get("present") is not True:
+            continue
+        eid = item["event_id"]
+        detail = str(item.get("detail") or item.get("thinking") or "").strip()
+        details[eid] = {
+            "attributes": _normalize_attributes(eid, item.get("attributes")),
+            "detail": detail,
+            "attr_mentions": _validate_attr_mentions(
+                eid, detail, item.get("attr_mentions")
+            ),
+        }
+    return details
 
 
 def _detected_event_ids(event_results: Mapping[int, EventResult]) -> List[int]:
@@ -99,6 +365,10 @@ def build_description(
     thinking), ``<answer>`` carries weather / time-of-day / scene first and
     ends with the conclusion (``classN: 事件名`` lines consistent with the
     ``action`` list).
+
+    present=true 事件的 think 段由代码拼装:骨架句(结构化属性按
+    ``_SKELETON_TEMPLATES`` 拼成,空值从句省略) + detail;present=false
+    事件保持改写模型的 thinking 原文。
     """
     thoughts_by_id: Dict[int, Mapping[str, Any]] = {}
     raw_thoughts = resp_data.get("event_thoughts")
@@ -107,6 +377,7 @@ def build_description(
             if isinstance(item, dict) and isinstance(item.get("event_id"), int):
                 thoughts_by_id[item["event_id"]] = item
 
+    details = _positive_event_details(resp_data)
     detected_ids = _detected_event_ids(event_results)
     detected_set = set(detected_ids)
     name_by_id = {c.event_id: c.name_zh for c in categories}
@@ -118,7 +389,19 @@ def build_description(
         if not cat.is_active:
             continue
         thought = thoughts_by_id.get(cat.event_id, {})
-        thinking = str(thought.get("thinking") or "").strip()
+        det = details.get(cat.event_id)
+        if det is not None:
+            skeleton = _skeleton_sentence(cat.event_id, det["attributes"])
+            segments: List[str] = []
+            if skeleton:
+                segments.append(skeleton + "。")
+            if det["detail"]:
+                segments.append(det["detail"])
+            thinking = "".join(segments) or str(
+                thought.get("thinking") or ""
+            ).strip()
+        else:
+            thinking = str(thought.get("thinking") or "").strip()
         if not thinking:
             thinking = (
                 "（改写响应缺少该类思考）"
@@ -174,6 +457,24 @@ def build_sample(
         if not chunk_name and video_meta.file_path:
             chunk_name = Path(video_meta.file_path).name
 
+    # 结构化属性契约(与 Web 编辑器对齐):
+    # - event_attributes:{str(event_id): {attr_key: 枚举值/null(多选为列表)}},
+    #   仅覆盖 detected 且 present=true 且在 event_options.yaml 中定义了属性组
+    #   的事件(如实线变道(11) 无属性组,不出现);
+    # - attr_mentions:{str(event_id): {attr_key: [detail 的逐字子串, ...]}},
+    #   同样仅覆盖上述事件,且只保留非空标注。
+    details = _positive_event_details(resp_data)
+    detected_set = set(action)
+    options_index = _event_options_index()
+    event_attributes: Dict[str, Any] = {}
+    attr_mentions: Dict[str, Any] = {}
+    for eid in sorted(details):
+        if eid not in detected_set or not options_index.get(eid):
+            continue
+        event_attributes[str(eid)] = details[eid]["attributes"]
+        if details[eid]["attr_mentions"]:
+            attr_mentions[str(eid)] = details[eid]["attr_mentions"]
+
     return {
         "chunk": "chunk #1",
         "idx": 1,
@@ -182,6 +483,8 @@ def build_sample(
         "start_timestamp": 0.0,
         "end_timestamp": end_timestamp,
         "chunk_name": chunk_name,
+        "event_attributes": event_attributes,
+        "attr_mentions": attr_mentions,
     }
 
 

@@ -16,6 +16,7 @@ Covers:
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from unittest.mock import patch
@@ -24,6 +25,10 @@ import pytest
 
 from traffic_analyzer.core.config_manager import ConfigManager
 from traffic_analyzer.core.sft_label_rewrite import (
+    _SFT_REWRITE_RESPONSE_SCHEMA,
+    _normalize_attributes,
+    _skeleton_sentence,
+    _validate_attr_mentions,
     SftLabelRewriteStep,
     build_description,
     build_sample,
@@ -62,6 +67,21 @@ _NAME_ZH: Dict[int, str] = {
 }
 
 _EVENT_IDS: List[int] = sorted(_NAME_ZH)
+
+# present=true 事件的结构化属性(键/值均取自 event_options.yaml 封闭枚举;
+# 实线变道(11) 无属性组,为空对象)。
+_PRESENT_ATTRS: Dict[int, Dict[str, Any]] = {
+    1: {"lane_type": "应急车道", "direction": "来向", "vehicle_type": "工程车"},
+    2: {"lane_type": "应急车道", "direction": "去向", "vehicle_type": "小型车"},
+    3: {"lane_type": "行车道", "direction": "来向", "vehicle_type": "货车"},
+    4: {"person_type": "行人", "direction": "去向"},
+    5: {"direction": "来向", "non_motor_type": "摩托车"},
+    6: {"direction": "去向", "scope": "多车道"},
+    7: {"direction": "来向", "work_elements": ["交通锥/隔离栏", "施工车辆"]},
+    8: {"lane_type": "行车道", "direction": "去向", "vehicle_type": "货车"},
+    10: {"direction": "来向", "object_type": "其他"},
+    11: {},
+}
 
 
 class _SftSystemConfig(SystemConfig):
@@ -156,20 +176,45 @@ def _make_event_results(detected_ids: tuple = ()) -> Dict[int, EventResult]:
     return results
 
 
+def _make_present_item(eid: int) -> Dict[str, Any]:
+    """present=true 条目:attributes/detail/attr_mentions(detail 由属性值拼成,
+    保证 attr_mentions 全部是 detail 的逐字子串)。"""
+    attrs = _PRESENT_ATTRS[eid]
+    flat: List[str] = []
+    for value in attrs.values():
+        flat.extend(value if isinstance(value, list) else [value])
+    detail = "、".join(flat) + "，主体目标在原始帧中清晰可辨。"
+    mentions: Dict[str, List[str]] = {}
+    for key, value in attrs.items():
+        values = value if isinstance(value, list) else [value]
+        hits = [v for v in values if v in detail]
+        if hits:
+            mentions[key] = hits
+    return {
+        "event_id": eid,
+        "present": True,
+        "attributes": dict(attrs),
+        "detail": detail,
+        "attr_mentions": mentions,
+    }
+
+
 def _make_resp_data(
     present_ids: tuple = (2,),
     ungrounded: tuple = (),
 ) -> Dict[str, Any]:
     thoughts: List[Dict[str, Any]] = []
     for eid in _EVENT_IDS:
-        present = eid in present_ids
-        thinking = (
-            "应急车道区域：画面最右侧白色实线以外为应急车道，无导流区；"
-            "占用应急车道车辆类型：一辆白色小车；位置：去向一侧应急车道内静止。"
-            if present
-            else f"未发现{_NAME_ZH[eid]}。画面中无相关迹象。"
-        )
-        thoughts.append({"event_id": eid, "present": present, "thinking": thinking})
+        if eid in present_ids:
+            thoughts.append(_make_present_item(eid))
+        else:
+            thoughts.append(
+                {
+                    "event_id": eid,
+                    "present": False,
+                    "thinking": f"未发现{_NAME_ZH[eid]}。画面中无相关迹象。",
+                }
+            )
     return {
         "weather": "晴天",
         "time_of_day": "白天",
@@ -340,6 +385,8 @@ class TestBuildSample:
             "start_timestamp",
             "end_timestamp",
             "chunk_name",
+            "event_attributes",
+            "attr_mentions",
         }
         assert sample["chunk"] == "chunk #1"
         assert isinstance(sample["idx"], int) and sample["idx"] == 1
@@ -351,6 +398,8 @@ class TestBuildSample:
         assert isinstance(sample["end_timestamp"], float)
         assert sample["end_timestamp"] == 19.734
         assert sample["chunk_name"] == "02_Event_129_1748049879151_1.mp4"
+        assert isinstance(sample["event_attributes"], dict)
+        assert isinstance(sample["attr_mentions"], dict)
 
     def test_empty_action_is_normal_sample(self) -> None:
         sample = build_sample(
@@ -456,6 +505,17 @@ class TestSftLabelRewriteStep:
         assert loaded["chunk_name"] == "02_Event_129_1748049879151_1.mp4"
         assert "<think>" in loaded["description"]
         assert "class2: 应急车道占用" in loaded["description"]
+        # 结构化属性契约:detected 且 present 的事件进入 event_attributes/attr_mentions
+        assert loaded["event_attributes"] == {
+            "2": {"lane_type": "应急车道", "direction": "去向", "vehicle_type": "小型车"}
+        }
+        assert loaded["attr_mentions"] == {
+            "2": {
+                "lane_type": ["应急车道"],
+                "direction": ["去向"],
+                "vehicle_type": ["小型车"],
+            }
+        }
         # No quarantine file for a fully grounded sample.
         assert not (tmp_path / "quarantine").exists()
 
@@ -594,3 +654,316 @@ class TestSftLabelRewriteStep:
 
         assert result is None
         assert engine.calls == []
+
+
+# ---------------------------------------------------------------------------
+# Response schema shape tests
+# ---------------------------------------------------------------------------
+
+
+class TestSchemaShape:
+    def test_item_level_requires_only_event_id_and_present(self) -> None:
+        """present 两个分支(阴性 thinking / 阳性 attributes+detail+attr_mentions)
+        共用同一 items schema,条目级 required 只约束 event_id/present。"""
+        item_schema = _SFT_REWRITE_RESPONSE_SCHEMA["properties"]["event_thoughts"][
+            "items"
+        ]
+        assert item_schema["required"] == ["event_id", "present"]
+        props = item_schema["properties"]
+        for key in ("thinking", "attributes", "detail", "attr_mentions"):
+            assert key in props
+
+    def test_top_level_required_unchanged(self) -> None:
+        assert _SFT_REWRITE_RESPONSE_SCHEMA["required"] == [
+            "weather",
+            "time_of_day",
+            "scene",
+            "event_thoughts",
+            "ungrounded_event_ids",
+        ]
+
+
+# ---------------------------------------------------------------------------
+# Attribute normalization tests (alias → enum, invalid → null + warning)
+# ---------------------------------------------------------------------------
+
+
+class TestNormalizeAttributes:
+    def test_alias_maps_to_closed_enum(self) -> None:
+        attrs = _normalize_attributes(
+            1,
+            {"lane_type": "应急车道", "direction": "对向", "vehicle_type": "工程车辆"},
+        )
+
+        assert attrs == {
+            "lane_type": "应急车道",
+            "direction": "来向",
+            "vehicle_type": "工程车",
+        }
+
+    def test_invalid_value_becomes_none_with_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level(logging.WARNING):
+            attrs = _normalize_attributes(
+                1,
+                {"lane_type": "紧急停车带", "direction": "来向", "vehicle_type": "工程车"},
+            )
+
+        assert attrs["lane_type"] is None
+        assert attrs["direction"] == "来向"
+        assert "ATTR_NORMALIZE" in caplog.text
+
+    def test_unknown_key_dropped_with_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level(logging.WARNING):
+            attrs = _normalize_attributes(
+                4, {"person_type": "行人", "direction": "去向", "color": "红色"}
+            )
+
+        assert set(attrs.keys()) == {"person_type", "direction"}
+        assert "ATTR_UNKNOWN_KEY" in caplog.text
+
+    def test_missing_required_group_defaults_to_none(self) -> None:
+        attrs = _normalize_attributes(2, {"direction": "去向"})
+
+        assert attrs == {"lane_type": None, "direction": "去向", "vehicle_type": None}
+
+    def test_multi_normalized_deduped_and_in_option_order(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level(logging.WARNING):
+            attrs = _normalize_attributes(
+                7,
+                {
+                    "direction": "来向",
+                    "work_elements": ["锥桶", "施工车辆", "锥桶", "外星物质"],
+                },
+            )
+
+        # 按 event_options.yaml options 声明顺序输出(施工车辆 在 交通锥/隔离栏 之前)
+        assert attrs["work_elements"] == ["施工车辆", "交通锥/隔离栏"]
+        assert "ATTR_NORMALIZE" in caplog.text  # 外星物质 被丢弃
+
+    def test_multi_missing_defaults_to_empty_list(self) -> None:
+        attrs = _normalize_attributes(7, {"direction": "去向"})
+
+        assert attrs["work_elements"] == []
+
+
+# ---------------------------------------------------------------------------
+# attr_mentions substring validation tests
+# ---------------------------------------------------------------------------
+
+
+class TestAttrMentionsValidation:
+    def test_exact_substrings_kept_others_dropped(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        detail = "来向一侧应急车道内停有一辆黄色工程作业车，车身黄色。"
+        with caplog.at_level(logging.WARNING):
+            mentions = _validate_attr_mentions(
+                1,
+                detail,
+                {
+                    "vehicle_type": ["黄色工程作业车", "工程作业车", "绿色工程车"],
+                    "lane_type": ["应急车道"],
+                    "direction": ["去向"],  # 不在 detail 中
+                },
+            )
+
+        assert mentions == {
+            "vehicle_type": ["黄色工程作业车", "工程作业车"],
+            "lane_type": ["应急车道"],
+        }
+        assert "MENTION_NOT_SUBSTRING" in caplog.text
+
+    def test_unknown_attr_key_dropped(self) -> None:
+        mentions = _validate_attr_mentions(
+            4, "去向一侧出现一名行人。", {"vehicle_type": ["行人"], "person_type": ["行人"]}
+        )
+
+        assert mentions == {"person_type": ["行人"]}
+
+    def test_non_dict_or_non_list_returns_empty(self) -> None:
+        assert _validate_attr_mentions(1, "detail", "bad") == {}
+        assert _validate_attr_mentions(1, "detail", {"lane_type": "应急车道"}) == {}
+
+    def test_duplicate_mentions_deduped(self) -> None:
+        mentions = _validate_attr_mentions(
+            2, "应急车道内有小车。", {"lane_type": ["应急车道", "应急车道"]}
+        )
+
+        assert mentions == {"lane_type": ["应急车道"]}
+
+
+# ---------------------------------------------------------------------------
+# Skeleton sentence tests (mirrors JS SFT_SKELETON_TEMPLATES semantics)
+# ---------------------------------------------------------------------------
+
+
+class TestSkeletonSentence:
+    def test_full_attributes_render_all_clauses(self) -> None:
+        sentence = _skeleton_sentence(
+            1, {"lane_type": "应急车道", "direction": "来向", "vehicle_type": "工程车"}
+        )
+
+        assert sentence == "来向一侧应急车道内停有一辆工程车"
+
+    def test_null_clauses_omitted(self) -> None:
+        sentence = _skeleton_sentence(
+            2, {"lane_type": None, "direction": "去向", "vehicle_type": None}
+        )
+
+        assert sentence == "去向一侧"
+
+    def test_multi_values_joined(self) -> None:
+        sentence = _skeleton_sentence(
+            7,
+            {"direction": "来向", "work_elements": ["施工车辆", "交通锥/隔离栏"]},
+        )
+
+        assert sentence == "来向一侧道路施工,现场有施工车辆、交通锥/隔离栏"
+
+    def test_event_without_template_returns_empty(self) -> None:
+        assert _skeleton_sentence(11, {}) == ""
+
+
+# ---------------------------------------------------------------------------
+# build_description skeleton+detail composition / negative path tests
+# ---------------------------------------------------------------------------
+
+
+class TestBuildDescriptionAttributes:
+    def test_present_event_think_is_skeleton_plus_detail(self) -> None:
+        desc = build_description(
+            _make_resp_data(present_ids=(2,)),
+            _make_event_results(detected_ids=(2,)),
+            _make_categories(),
+        )
+
+        think = desc.split("</think>", 1)[0]
+        assert (
+            "应急车道占用：去向一侧应急车道内有小型车占用。"
+            "应急车道、去向、小型车，主体目标在原始帧中清晰可辨。"
+        ) in think
+
+    def test_null_attributes_omit_skeleton_clauses(self) -> None:
+        resp_data = _make_resp_data(present_ids=(2,))
+        for item in resp_data["event_thoughts"]:
+            if item["event_id"] == 2:
+                item["attributes"] = {
+                    "lane_type": None,
+                    "direction": "去向",
+                    "vehicle_type": None,
+                }
+        desc = build_description(
+            resp_data, _make_event_results(detected_ids=(2,)), _make_categories()
+        )
+
+        assert "应急车道占用：去向一侧。" in desc
+
+    def test_alias_in_response_normalized_before_render(self) -> None:
+        resp_data = _make_resp_data(present_ids=(1,))
+        for item in resp_data["event_thoughts"]:
+            if item["event_id"] == 1:
+                item["attributes"]["vehicle_type"] = "工程车辆"
+        desc = build_description(
+            resp_data, _make_event_results(detected_ids=(1,)), _make_categories()
+        )
+
+        assert "违法停车：来向一侧应急车道内停有一辆工程车。" in desc
+
+    def test_negative_path_unchanged(self) -> None:
+        """present=false 事件的 think 段仍是改写模型的 thinking 原文。"""
+        desc = build_description(
+            _make_resp_data(present_ids=(2,)),
+            _make_event_results(detected_ids=(2,)),
+            _make_categories(),
+        )
+
+        assert "违法停车：未发现违法停车。画面中无相关迹象。" in desc
+        assert "交通事故：未发现交通事故。画面中无相关迹象。" in desc
+
+
+# ---------------------------------------------------------------------------
+# build_sample event_attributes / attr_mentions contract tests
+# ---------------------------------------------------------------------------
+
+
+class TestBuildSampleAttributes:
+    def test_event_attributes_and_attr_mentions_shape(self) -> None:
+        sample = build_sample(
+            _make_resp_data(present_ids=(2,)),
+            _make_event_results(detected_ids=(2,)),
+            _make_categories(),
+            _make_video_meta(),
+        )
+
+        assert sample["event_attributes"] == {
+            "2": {"lane_type": "应急车道", "direction": "去向", "vehicle_type": "小型车"}
+        }
+        assert sample["attr_mentions"] == {
+            "2": {
+                "lane_type": ["应急车道"],
+                "direction": ["去向"],
+                "vehicle_type": ["小型车"],
+            }
+        }
+
+    def test_present_but_not_detected_is_excluded(self) -> None:
+        sample = build_sample(
+            _make_resp_data(present_ids=(2, 3)),
+            _make_event_results(detected_ids=(2,)),
+            _make_categories(),
+            _make_video_meta(),
+        )
+
+        assert set(sample["event_attributes"].keys()) == {"2"}
+        assert set(sample["attr_mentions"].keys()) == {"2"}
+
+    def test_event_without_options_is_excluded(self) -> None:
+        """实线变道(11) 无属性组:即使 present+detected 也不进结构化字段,
+        但 think 段仍使用其 detail。"""
+        sample = build_sample(
+            _make_resp_data(present_ids=(11,)),
+            _make_event_results(detected_ids=(11,)),
+            _make_categories(),
+            _make_video_meta(),
+        )
+
+        assert sample["event_attributes"] == {}
+        assert sample["attr_mentions"] == {}
+        assert "实线变道：，主体目标在原始帧中清晰可辨。" in sample["description"]
+
+    def test_no_positives_emit_empty_dicts(self) -> None:
+        sample = build_sample(
+            _make_resp_data(present_ids=()),
+            _make_event_results(),
+            _make_categories(),
+            _make_video_meta(),
+        )
+
+        assert sample["event_attributes"] == {}
+        assert sample["attr_mentions"] == {}
+
+    def test_invalid_mentions_dropped_from_sample(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        resp_data = _make_resp_data(present_ids=(2,))
+        for item in resp_data["event_thoughts"]:
+            if item["event_id"] == 2:
+                item["attr_mentions"] = {
+                    "vehicle_type": ["小型车", "一辆根本不存在的字符串"],
+                }
+        with caplog.at_level(logging.WARNING):
+            sample = build_sample(
+                resp_data,
+                _make_event_results(detected_ids=(2,)),
+                _make_categories(),
+                _make_video_meta(),
+            )
+
+        assert sample["attr_mentions"]["2"]["vehicle_type"] == ["小型车"]
+        assert "MENTION_NOT_SUBSTRING" in caplog.text
