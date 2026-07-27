@@ -386,6 +386,18 @@ function renderTokens(el, ev, pulseGroup, text) {
   }
 }
 
+// chip hover ↔ token 联动:on=true 时同事件卡内同组 token 加脉冲、异组 token 淡化;
+// 仅切换 class,动画全在 CSS(prefers-reduced-motion 由全局块关闭)
+function linkChipHover(chip, on) {
+  const card = chip.closest('.sft-ev');
+  if (!card) return;
+  const group = chip.dataset.attr;
+  $$('.sft-tok', card).forEach(tok => {
+    tok.classList.toggle('sft-tok-link', on && tok.dataset.attr === group);
+    tok.classList.toggle('sft-tok-dim', on && tok.dataset.attr !== group);
+  });
+}
+
 function sftEditorHtml() {
   const d = state.sftDraft;
   let html = '<div class="sft-section-title">事件思考(按事件编辑;「检出」勾选在保存时联动 action 与结论)</div>';
@@ -497,6 +509,19 @@ function bindSftEditor(body) {
     el.addEventListener('blur', () => {
       if (ev) renderTokens(el, ev);
     });
+    // token hover 反向联动:同事件卡内同组 chips 加描边提示
+    el.addEventListener('mouseover', e => {
+      const tok = e.target.closest && e.target.closest('.sft-tok');
+      const card = el.closest('.sft-ev');
+      if (!card) return;
+      $$('[data-ev-chip]', card).forEach(c => {
+        c.classList.toggle('sft-chip-link', !!tok && c.dataset.attr === tok.dataset.attr);
+      });
+    });
+    el.addEventListener('mouseleave', () => {
+      const card = el.closest('.sft-ev');
+      if (card) $$('.sft-chip-link', card).forEach(c => c.classList.remove('sft-chip-link'));
+    });
   });
   $$('input[data-ev-check]', body).forEach(cb => {
     cb.addEventListener('change', () => {
@@ -513,6 +538,8 @@ function bindSftEditor(body) {
       if (!ev || !group) return;
       applyChipChange(body, ev, group, chip.dataset.value);
     });
+    chip.addEventListener('mouseenter', () => linkChipHover(chip, true));
+    chip.addEventListener('mouseleave', () => linkChipHover(chip, false));
   });
   $$('[data-env]', body).forEach(el => {
     el.addEventListener('input', () => {

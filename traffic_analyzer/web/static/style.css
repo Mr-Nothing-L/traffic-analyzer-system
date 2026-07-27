@@ -840,6 +840,16 @@ body.hsplit-dragging { cursor: row-resize; user-select: none; }
 @media (prefers-reduced-motion: reduce) {
   .sft-tok.sft-tok-pulse { animation: none; }
 }
+.sft-tok { transition: opacity 0.15s ease; }
+/* chip hover 联动:同事件卡内同组 token 持续轻柔脉冲(辉光+底色加深),异组 token 淡化 */
+.sft-tok.sft-tok-link { animation: sft-tok-link 1.2s ease-in-out infinite; }
+@keyframes sft-tok-link {
+  0%, 100% { background: var(--accent-soft); box-shadow: 0 0 0 0 transparent; }
+  50% { background: #EFCDB9; box-shadow: 0 0 0 3px var(--accent-soft), 0 0 8px var(--accent); }
+}
+.sft-tok.sft-tok-dim { opacity: 0.55; }
+/* token hover 反向联动:该组 chips 加同色系描边 */
+.sft-chip.sft-chip-link { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
 
 /* 结构化选项 chips(封闭枚举,只读选项集;无增删入口) */
 .sft-attrs { display: flex; flex-direction: column; gap: 10px; margin-bottom: 8px; }
