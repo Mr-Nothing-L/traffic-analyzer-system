@@ -802,6 +802,128 @@ class TestAttrMentionsValidation:
 
 
 # ---------------------------------------------------------------------------
+# Multi-select attr_mentions contract tests (nested option → substrings object)
+# ---------------------------------------------------------------------------
+
+
+class TestMultiAttrMentionsNested:
+    _DETAIL = (
+        "来向一侧道路施工，作业区内停有一辆黄色工程车，周围摆放多个锥桶，"
+        "还有身穿橙色工作服的人员在指挥交通。"
+    )
+
+    def test_nested_object_accepted_for_multi_group(self) -> None:
+        mentions = _validate_attr_mentions(
+            7,
+            self._DETAIL,
+            {
+                "direction": ["来向"],
+                "work_elements": {
+                    "施工车辆": ["黄色工程车"],
+                    "交通锥/隔离栏": ["锥桶"],
+                    "施工人员": ["身穿橙色工作服的人员"],
+                },
+            },
+        )
+
+        assert mentions == {
+            "direction": ["来向"],
+            "work_elements": {
+                "施工车辆": ["黄色工程车"],
+                "交通锥/隔离栏": ["锥桶"],
+                "施工人员": ["身穿橙色工作服的人员"],
+            },
+        }
+
+    def test_legacy_flat_array_still_accepted_for_multi_group(self) -> None:
+        mentions = _validate_attr_mentions(
+            7,
+            self._DETAIL,
+            {"work_elements": ["黄色工程车", "锥桶"]},
+        )
+
+        assert mentions == {"work_elements": ["黄色工程车", "锥桶"]}
+
+    def test_bad_option_name_dropped_with_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level(logging.WARNING):
+            mentions = _validate_attr_mentions(
+                7,
+                self._DETAIL,
+                {
+                    "work_elements": {
+                        "工程车": ["黄色工程车"],  # 别名/非枚举原文,非法
+                        "施工车辆": ["黄色工程车"],
+                    }
+                },
+            )
+
+        assert mentions == {"work_elements": {"施工车辆": ["黄色工程车"]}}
+        assert "MENTION_UNKNOWN_OPTION" in caplog.text
+
+    def test_non_substring_string_dropped_in_nested(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level(logging.WARNING):
+            mentions = _validate_attr_mentions(
+                7,
+                self._DETAIL,
+                {
+                    "work_elements": {
+                        "施工车辆": ["黄色工程车", "绿色压路机"],
+                        "施工标志牌": ["施工标志牌"],  # 不在 detail 中
+                    }
+                },
+            )
+
+        assert mentions == {"work_elements": {"施工车辆": ["黄色工程车"]}}
+        assert "MENTION_NOT_SUBSTRING" in caplog.text
+
+    def test_single_select_group_rejects_nested_object(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level(logging.WARNING):
+            mentions = _validate_attr_mentions(
+                7, self._DETAIL, {"direction": {"来向": ["来向"]}}
+            )
+
+        assert mentions == {}
+        assert "MENTION_BAD_SHAPE" in caplog.text
+
+    def test_build_sample_emits_nested_shape_for_multi_group(self) -> None:
+        resp_data = _make_resp_data(present_ids=(7,))
+        for item in resp_data["event_thoughts"]:
+            if item["event_id"] == 7:
+                item["detail"] = self._DETAIL
+                item["attr_mentions"] = {
+                    "direction": ["来向"],
+                    "work_elements": {
+                        "施工车辆": ["黄色工程车"],
+                        "交通锥/隔离栏": ["锥桶"],
+                        "施工人员": ["身穿橙色工作服的人员"],
+                    },
+                }
+        sample = build_sample(
+            resp_data,
+            _make_event_results(detected_ids=(7,)),
+            _make_categories(),
+            _make_video_meta(),
+        )
+
+        assert sample["attr_mentions"] == {
+            "7": {
+                "direction": ["来向"],
+                "work_elements": {
+                    "施工车辆": ["黄色工程车"],
+                    "交通锥/隔离栏": ["锥桶"],
+                    "施工人员": ["身穿橙色工作服的人员"],
+                },
+            }
+        }
+
+
+# ---------------------------------------------------------------------------
 # Skeleton sentence tests (mirrors JS SFT_SKELETON_TEMPLATES semantics)
 # ---------------------------------------------------------------------------
 

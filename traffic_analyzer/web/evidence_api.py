@@ -281,9 +281,10 @@ def _check_event_attributes(value: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[
 def _check_attr_mentions(
     value: Dict[str, Dict[str, Any]], description: str
 ) -> Dict[str, Dict[str, Any]]:
-    """attr_mentions 校验:event_id/属性键必须已定义,值必须为字符串数组(可空),
-    且每个提及串必须出现在对应事件的 description think 段落正文中
-    (与 _strip_editable 同哲学的 best-effort 一致性检查,找不到即拒绝)。"""
+    """attr_mentions 校验:event_id/属性键必须已定义;单选组值为字符串数组(可空),
+    多选组值为字符串数组(旧扁平格式)或「选项名 → 字符串数组」嵌套对象(选项名
+    必须在该组 options 内);每个提及串必须出现在对应事件的 description think
+    段落正文中(与 _strip_editable 同哲学的 best-effort 一致性检查,找不到即拒绝)。"""
     index = _event_options_index()
     sections: Optional[Dict[int, str]] = None  # 按需解析
     for ev_key, groups_map in value.items():
@@ -296,27 +297,52 @@ def _check_attr_mentions(
             raise ValueError(f"attr_mentions: no options defined for event {ev_key!r}")
         if not isinstance(groups_map, dict):
             raise ValueError(f"attr_mentions[{ev_key!r}] must be an object")
+        # (属性键, 提及串) 统一收集,随后按事件 think 段落做子串校验
+        flat: List[Any] = []
         for key, mentions in groups_map.items():
-            if key not in groups:
+            group = groups.get(key)
+            if group is None:
                 raise ValueError(
                     f"attr_mentions[{ev_key!r}]: unknown attribute {key!r}"
                 )
-            if not isinstance(mentions, list) or not all(
+            if isinstance(mentions, dict):
+                # 新格式多选组:嵌套 per-option 绑定(选项名 → 字符串数组)
+                if not group["multi"]:
+                    raise ValueError(
+                        f"attr_mentions[{ev_key!r}][{key!r}] must be an array of strings"
+                    )
+                for opt, strs in mentions.items():
+                    if opt not in group["options"]:
+                        raise ValueError(
+                            f"attr_mentions[{ev_key!r}][{key!r}]: option {opt!r} "
+                            f"not in group options"
+                        )
+                    if not isinstance(strs, list) or not all(
+                        isinstance(s, str) for s in strs
+                    ):
+                        raise ValueError(
+                            f"attr_mentions[{ev_key!r}][{key!r}][{opt!r}] must be "
+                            f"an array of strings"
+                        )
+                    flat.extend((key, s) for s in strs)
+            elif isinstance(mentions, list) and all(
                 isinstance(s, str) for s in mentions
             ):
+                flat.extend((key, s) for s in mentions)
+            else:
                 raise ValueError(
                     f"attr_mentions[{ev_key!r}][{key!r}] must be an array of strings"
                 )
-            if mentions:
-                if sections is None:
-                    sections = _think_sections(description)
-                text = sections.get(ev_id, "")
-                for s in mentions:
-                    if s not in text:
-                        raise ValueError(
-                            f"attr_mentions[{ev_key!r}][{key!r}]: mention {s!r} "
-                            f"not found in event {ev_id} description think-section"
-                        )
+        if flat:
+            if sections is None:
+                sections = _think_sections(description)
+            text = sections.get(ev_id, "")
+            for key, s in flat:
+                if s not in text:
+                    raise ValueError(
+                        f"attr_mentions[{ev_key!r}][{key!r}]: mention {s!r} "
+                        f"not found in event {ev_id} description think-section"
+                    )
     return value
 
 

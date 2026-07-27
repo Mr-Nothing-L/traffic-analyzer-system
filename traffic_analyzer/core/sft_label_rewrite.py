@@ -11,7 +11,9 @@ they would otherwise teach the student model to hallucinate.
 
 present=true events additionally carry structured ``attributes`` (closed enums
 from ``config/event_options.yaml``), a free-text ``detail`` and
-``attr_mentions`` (exact substrings of detail bound to each attribute); the
+``attr_mentions`` (exact substrings of detail bound to each attribute; for
+multi-select groups the value is a nested ``{option_name: [substrings]}``
+object instead of a flat array); the
 sample gains top-level ``event_attributes`` / ``attr_mentions`` for the Web
 editor's token mapping.
 
@@ -94,9 +96,23 @@ _SFT_REWRITE_RESPONSE_SCHEMA: Dict[str, Any] = {
                     "detail": {"type": "string"},
                     "attr_mentions": {
                         "type": "object",
+                        # 单选属性为字符串数组;多选属性(如施工要素 work_elements)
+                        # 为「枚举选项名 → 字符串数组」的嵌套对象(兼容旧扁平数组,
+                        # 严格校验在代码层 _validate_attr_mentions 完成)。
                         "additionalProperties": {
-                            "type": "array",
-                            "items": {"type": "string"},
+                            "anyOf": [
+                                {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                },
+                                {
+                                    "type": "object",
+                                    "additionalProperties": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                    },
+                                },
+                            ]
                         },
                     },
                 },
@@ -254,44 +270,87 @@ def _normalize_attributes(event_id: int, raw_attrs: Any) -> Dict[str, Any]:
     return normalized
 
 
+def _filter_mention_strings(
+    event_id: int, key: str, detail: str, values: Any
+) -> List[str]:
+    """逐字子串过滤:保留 detail 中逐字出现的非空字符串(去重),其余告警丢弃。"""
+    if not isinstance(values, list):
+        logger.warning(
+            "[sft_label_rewrite] MENTION_BAD_SHAPE | event_id=%s key=%r 非数组,已丢弃",
+            event_id,
+            key,
+        )
+        return []
+    kept: List[str] = []
+    for value in values:
+        if isinstance(value, str) and value and value in detail:
+            if value not in kept:
+                kept.append(value)
+        else:
+            logger.warning(
+                "[sft_label_rewrite] MENTION_NOT_SUBSTRING | event_id=%s key=%r "
+                "value=%r 不是 detail 的逐字子串,已丢弃",
+                event_id,
+                key,
+                value,
+            )
+    return kept
+
+
 def _validate_attr_mentions(
     event_id: int, detail: str, raw_mentions: Any
-) -> Dict[str, List[str]]:
+) -> Dict[str, Any]:
     """attr_mentions 校验:键必须为该事件的属性键,每个字符串必须是 detail 的
-    逐字子串(exact substring);非法项丢弃并告警,Web 侧按精确字符串映射 token。"""
+    逐字子串(exact substring);非法项丢弃并告警,Web 侧按精确字符串映射 token。
+
+    单选属性的值为字符串数组;多选属性(如施工要素 work_elements)接受两种形态:
+    - 新契约:{枚举选项名: [子串, ...]},选项名必须是该组 options 的原文
+      (如「施工车辆」「交通锥/隔离栏」),无可见内容的选项省略;
+    - 旧契约:扁平字符串数组(旧样本仍合法,原样保留)。
+    """
     groups = _event_options_index().get(event_id) or []
-    valid_keys = {g["key"] for g in groups}
-    mentions: Dict[str, List[str]] = {}
+    group_by_key = {g["key"]: g for g in groups}
+    mentions: Dict[str, Any] = {}
     if not isinstance(raw_mentions, dict):
         return mentions
     for key, values in raw_mentions.items():
-        if key not in valid_keys:
+        group = group_by_key.get(key)
+        if group is None:
             logger.warning(
                 "[sft_label_rewrite] MENTION_UNKNOWN_KEY | event_id=%s key=%r 已丢弃",
                 event_id,
                 key,
             )
             continue
-        if not isinstance(values, list):
-            logger.warning(
-                "[sft_label_rewrite] MENTION_BAD_SHAPE | event_id=%s key=%r 非数组,已丢弃",
-                event_id,
-                key,
-            )
-            continue
-        kept: List[str] = []
-        for value in values:
-            if isinstance(value, str) and value and value in detail:
-                if value not in kept:
-                    kept.append(value)
-            else:
+        if isinstance(values, dict):
+            if not group["multi"]:
                 logger.warning(
-                    "[sft_label_rewrite] MENTION_NOT_SUBSTRING | event_id=%s key=%r "
-                    "value=%r 不是 detail 的逐字子串,已丢弃",
+                    "[sft_label_rewrite] MENTION_BAD_SHAPE | event_id=%s key=%r "
+                    "单选属性的值须为字符串数组,已丢弃",
                     event_id,
                     key,
-                    value,
                 )
+                continue
+            kept_options: Dict[str, List[str]] = {}
+            for option, opt_values in values.items():
+                if option not in group["options"]:
+                    logger.warning(
+                        "[sft_label_rewrite] MENTION_UNKNOWN_OPTION | event_id=%s "
+                        "key=%r option=%r 不在封闭枚举内,已丢弃",
+                        event_id,
+                        key,
+                        option,
+                    )
+                    continue
+                kept = _filter_mention_strings(
+                    event_id, key, detail, opt_values
+                )
+                if kept:
+                    kept_options[option] = kept
+            if kept_options:
+                mentions[key] = kept_options
+            continue
+        kept = _filter_mention_strings(event_id, key, detail, values)
         if kept:
             mentions[key] = kept
     return mentions
@@ -466,8 +525,10 @@ def build_sample(
     # - event_attributes:{str(event_id): {attr_key: 枚举值/null(多选为列表)}},
     #   仅覆盖 detected 且 present=true 且在 event_options.yaml 中定义了属性组
     #   的事件(如实线变道(11) 无属性组,不出现);
-    # - attr_mentions:{str(event_id): {attr_key: [detail 的逐字子串, ...]}},
-    #   同样仅覆盖上述事件,且只保留非空标注。
+    # - attr_mentions:{str(event_id): {attr_key: 标注}},同样仅覆盖上述事件且
+    #   只保留非空标注;单选属性的标注为 [detail 的逐字子串, ...],多选属性
+    #   (如施工要素 work_elements)为 {枚举选项名: [逐字子串, ...]} 的嵌套
+    #   对象(旧样本的扁平数组形态原样保留)。
     details = _positive_event_details(resp_data)
     detected_set = set(action)
     options_index = _event_options_index()

@@ -7,11 +7,12 @@ import { api } from './api.js';
 
 // ---------------------------------------------------------------------------
 // 结构化选项(chips):封闭枚举,只读选项集,三层联动
-//   chips(选中态) → 文本同步(见 applyChipChange:声明通道按声明提及 span 锚定
-//   替换,旧样本走主语句内别名全词替换) → 文本框
-//   文本框为 contenteditable 富文本:声明通道仅声明提及的 span 渲染为 token,
-//   旧样本主语句内命中选项别名的片段渲染为 token;可自由编辑(纯文本),
-//   blur/chip 变更时重新分词;chips 不从手动编辑回写
+//   chips(选中态) → 文本同步(见 applyChipChange:声明提及 span 锚定替换 +
+//   骨架前缀就地换新) → 文本框
+//   文本框为 contenteditable 富文本:仅声明提及的 span 渲染为 token;可自由编辑
+//   (纯文本),blur/chip 变更时重新分词;chips 不从手动编辑回写。
+//   chips 仅在样本对该事件声明了 attr_mentions 时渲染;无声明的样本/事件
+//   退化为纯文本卡(无 chips、无 token,不做任何启发式分词/回填)
 // ---------------------------------------------------------------------------
 
 // 骨架模板:字符串为固定文字;{slot, pre, post} 为该属性有值时输出的从句(空值整句省略)
@@ -26,7 +27,8 @@ const SFT_SKELETON_TEMPLATES = {
   8: [{ slot: 'direction', post: '一侧' }, { slot: 'lane_type', post: '内' }, { slot: 'vehicle_type', pre: '有', post: '逆行' }],
 };
 
-// 旧样本回填:选项关键词别名(选项文本本身总是首个关键词);按 options 顺序首个命中
+// 选项关键词别名(选项文本本身总是首个关键词):仅供 mapMentionToOption 把旧样本
+// 扁平多选数组里的声明提及串归到选项;不再用于分词/替换/回填
 const SFT_ATTR_ALIASES = {
   '行车道': ['主车道'],
   '来向': ['对向'],
@@ -56,14 +58,24 @@ function evOptions(ev) {
   return Array.isArray(ev.options) ? ev.options : [];
 }
 
-// --- 双通道分词:样本含 attr_mentions 且声明了该事件时走「声明提及通道」 --------
+// --- 声明提及分词:样本含 attr_mentions 且声明了该事件时走「声明提及通道」 ------
 // 声明通道:模型声明的表面串是唯一权威——只标注/只替换声明串本身出现的位置
 // (span 锚定,无正则、无别名扩展),背景句中的同形词一律不动;
-// 未声明的事件与旧样本保持原有启发式路径(主语句锚定 + 选项别名)不变。
+// 未声明的事件与无 attr_mentions 的旧样本为纯文本卡(无 chips、无 token)。
 function declaredMentions(ev) {
   const d = state.sftDraft;
   if (!d || !d.mentions) return null;
   return d.mentions[ev.event_id] || null;
+}
+
+// 组的声明提及串列表:单选组与旧扁平多选为字符串数组;新格式多选组为
+// 「选项名 → 字符串数组」的嵌套对象,展开为全部提及串(只保留组归属)
+function groupMentionStrings(v) {
+  if (Array.isArray(v)) return v;
+  if (v && typeof v === 'object') {
+    return Object.keys(v).reduce((acc, k) => acc.concat(v[k] || []), []);
+  }
+  return [];
 }
 
 // 声明提及的位置 span 列表:[{start, end, group, str}],按 start 升序、互不重叠。
@@ -74,7 +86,8 @@ function declaredMentions(ev) {
 function computeDeclSpans(decl, text, prev) {
   const cand = [];
   Object.keys(decl).forEach(gk => {
-    (decl[gk] || []).forEach(s => {
+    const strs = groupMentionStrings(decl[gk]);
+    strs.forEach(s => {
       if (!s) return;
       const occ = [];
       let i = text.indexOf(s);
@@ -86,7 +99,7 @@ function computeDeclSpans(decl, text, prev) {
         // 首次计算(无旧 span 锚点,如初次渲染):出现次数按该串的声明次数封顶
         // (生成侧对同一组的声明串已去重,通常为 1),取文本中的前 N 处——
         // 背景句里的同形词不参与标注;出现次数不足声明次数时全部保留
-        const declCount = (decl[gk] || []).filter(x => x === s).length;
+        const declCount = strs.filter(x => x === s).length;
         if (occ.length > declCount) starts = occ.slice(0, declCount);
       } else if (occ.length > prevCnt) {
         starts = occ.map(o => {
@@ -195,38 +208,20 @@ function swapSkeletonPrefix(text, spans, oldSk, newSk) {
   };
 }
 
-// --- chip→文本同步:旧值别名全词替换 -----------------------------------------
-// 车道类型/范围的选项词(行车道/应急车道/导流区/路肩、单车道/多车道)与道路通用
-// 词汇高度重叠,场景描述里常出现非属性含义的同一写法(如"护栏外应急车道边缘"),
-// 全局替换会误伤正文 → 这些组不做替换,仅在骨架前置场景下同步(见 applyChipChange)。
-const SFT_REPLACE_SKIP_GROUPS = { lane_type: 1, scope: 1 };
-
 // 选项值的全部书写形态(自身 + 别名),按长度降序:最长优先匹配,
 // 避免短别名吃掉长别名(如 客车 匹配进 大客车、小车 匹配进 小型车)
 function aliasesOf(value) {
   return [value].concat(SFT_ATTR_ALIASES[value] || []).sort((a, b) => b.length - a.length);
 }
 
-function escRe(s) {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-function aliasRe(value) {
-  return new RegExp(aliasesOf(value).map(escRe).join('|'), 'g');
-}
-
-// 文本中是否出现该选项值的任一书写形态
-function mentionsValue(text, value) {
-  return aliasesOf(value).some(a => text.indexOf(a) >= 0);
-}
-
-// 多选组「声明提及 → 选项」映射专用的扩展关键词:仅用于把声明提及串归到选项,
-// 不进 SFT_ATTR_ALIASES,避免影响旧样本的启发式分词/回填(如 人员 过于泛化,
-// 进入别名表会让旧样本里「无人员行走」之类的背景句误标/误回填 施工人员)
+// 旧扁平多选数组「声明提及 → 选项」映射专用的扩展关键词:仅用于把声明提及串
+// 归到选项,不进 SFT_ATTR_ALIASES(如 人员 过于泛化,进入别名表会让旧样本里
+// 「无人员行走」之类的提及误归到 施工人员)
 const SFT_MULTI_MAP_EXTRA = { '施工人员': ['人员'] };
 
-// 声明提及串映射到组内选项:提及中命中某选项的书写形态(选项文本 + 别名 +
-// 映射专用扩展词),最长命中优先,并列按 options 定义顺序;均不命中返回 null
+// 声明提及串映射到组内选项(仅供旧扁平多选数组;新格式为嵌套 per-option 绑定,
+// 无需映射):提及中命中某选项的书写形态(选项文本 + 别名 + 映射专用扩展词),
+// 最长命中优先,并列按 options 定义顺序;均不命中返回 null
 // (未映射提及保持现状:仍标注为 token、仍留在 attr_mentions)
 function mapMentionToOption(group, mention) {
   let best = null, bestLen = 0;
@@ -238,120 +233,13 @@ function mapMentionToOption(group, mention) {
   return best;
 }
 
-// 把旧值的全部书写形态一次性替换为新值(单趟扫描,替换结果不会被二次命中)
-function replaceAliases(text, oldVal, newVal) {
-  return text.replace(aliasRe(oldVal), newVal);
-}
-
-// --- 主语句锚定:标注/替换/回填只作用于「描述事件主体」的句子 -----------------
-// 背景句(如"旁边行车道上的货车、小车持续驶过"描述正常通行)里的属性词并非
-// 事件主体属性,不应渲染为 token、不应被 chip 替换、也不参与 chips 回填。
-// 判定:按 。;与换行切句,命中该事件主语-谓语模式的句子为「主语绑定句」;
-// 含「结论:」的句子恒为主语绑定句。
-// 已知过包含(启发式宁多勿漏):行人/人员类模式会把"无人员行走"这类否定场景句
-// 也判为绑定句;整段无一句命中时回退为全文,保证不丢标注。
-const SFT_SUBJECT_PATTERNS = {
-  1: /停着|停有|停放|停于|静止|占用|构成|判定/,       // 违法停车
-  2: /停着|停有|停放|停于|静止|占用|构成|判定/,       // 应急车道占用
-  3: /事故|碰撞|追尾|刮擦|剐蹭|撞击/,                 // 交通事故
-  4: /行人|人员|人影|施工人员|工人/,                  // 高速公路行人出现
-  5: /摩托|电动自行车|电动车|电瓶车|自行车|三轮车/,   // 摩托车出现
-  6: /拥堵|缓行|排队|车龙/,                           // 拥堵
-  7: /施工|作业|封闭/,                               // 道路施工
-  8: /逆行|倒车/,                                     // 车辆逆行/倒车
-  10: /抛洒|散落|掉落|遗撒/,                          // 抛洒物
-};
-
-// 按 。;;与换行切句,返回 [{start, end}](end 不含分隔符)
-function splitSentences(t) {
-  const out = [];
-  let start = 0;
-  for (let i = 0; i <= t.length; i++) {
-    if (i === t.length || t[i] === '。' || t[i] === '；' || t[i] === ';' || t[i] === '\n') {
-      if (i > start) out.push({ start: start, end: i });
-      start = i + 1;
-    }
-  }
-  return out;
-}
-
-// 主语绑定句的字符范围(升序、不重叠);事件无模式或整段无命中时回退为全文
-function subjectRanges(ev, t) {
-  const re = SFT_SUBJECT_PATTERNS[ev.event_id];
-  const ranges = [];
-  if (re) {
-    splitSentences(t).forEach(s => {
-      const seg = t.slice(s.start, s.end);
-      if (re.test(seg) || seg.indexOf('结论:') >= 0 || seg.indexOf('结论：') >= 0) {
-        ranges.push([s.start, s.end]);
-      }
-    });
-  }
-  return ranges.length ? ranges : [[0, t.length]];
-}
-
-// 按范围把文本拆成交替片段,仅对主语绑定片段应用 fn,其余原样拼接
-function mapSubjectRanges(t, ranges, fn) {
-  let out = '', pos = 0;
-  ranges.forEach(r => {
-    out += t.slice(pos, r[0]) + fn(t.slice(r[0], r[1]));
-    pos = r[1];
-  });
-  return out + t.slice(pos);
-}
-
-// 主语绑定句拼接文本(供回填/提及判断;分隔符防跨句误拼出关键词)
-function subjectText(ev, text) {
-  const t = String(text || '');
-  return subjectRanges(ev, t).map(r => t.slice(r[0], r[1])).join('。');
-}
-
-// --- token 标注:事件文本中命中任一选项别名的片段渲染为带组标记的 span --------
-// 该事件所有组的「别名 → 组」索引,按别名长度降序;同位置先列出的组优先
-function tokenIndex(ev) {
-  const list = [];
-  evOptions(ev).forEach(g => {
-    g.options.forEach(opt => {
-      aliasesOf(opt).forEach(a => list.push({ alias: a, group: g.key }));
-    });
-  });
-  return list.sort((x, y) => y.alias.length - x.alias.length);
-}
-
-// 主语绑定句片段 → 带 token 标注的 HTML(逐字符贪心,最长别名优先)
-function tokenizeSegHtml(idx, seg) {
-  let html = '', i = 0;
-  while (i < seg.length) {
-    let hit = null;
-    for (let k = 0; k < idx.length; k++) {
-      if (seg.startsWith(idx[k].alias, i)) { hit = idx[k]; break; }
-    }
-    if (hit) {
-      html += '<span class="sft-tok" data-attr="' + esc(hit.group) + '">' + esc(hit.alias) + '</span>';
-      i += hit.alias.length;
-    } else {
-      html += esc(seg[i]);
-      i += 1;
-    }
-  }
-  return html;
-}
-
-// 纯文本 → 带 token 标注的 HTML;声明通道(attr_mentions)仅标注声明提及所在的
-// span(全文本,无主语句过滤;背景同形词保持纯文本);否则仅主语绑定句内的
-// 启发式命中渲染为 token,背景句保持纯文本
+// 纯文本 → 带 token 标注的 HTML:仅声明提及(attr_mentions)所在的 span 标注为
+// token(全文本精确子串定位;背景同形词保持纯文本);无声明提及的样本/事件
+// 整体渲染为纯文本,不做任何启发式命中
 function tokenHtml(ev, text) {
   const t = String(text || '');
-  const decl = declaredMentions(ev);
-  if (decl) return tokenizeSpansHtml(declaredSpans(ev, t), t);
-  const idx = tokenIndex(ev);
-  const ranges = subjectRanges(ev, t);
-  let html = '', pos = 0;
-  ranges.forEach(r => {
-    html += esc(t.slice(pos, r[0])) + tokenizeSegHtml(idx, t.slice(r[0], r[1]));
-    pos = r[1];
-  });
-  return html + esc(t.slice(pos));
+  if (!declaredMentions(ev)) return esc(t);
+  return tokenizeSpansHtml(declaredSpans(ev, t), t);
 }
 
 // 骨架句:按模板把已选属性拼成一句,空值从句整体省略
@@ -370,24 +258,6 @@ function skeleton(ev, attrs) {
     }
   });
   return out;
-}
-
-// 旧样本(无 event_attributes)按关键词回猜 chips;原文不动
-// 仅在主语绑定句内回猜:背景句里的属性词(如正常通行的货车/小车)不参与,
-// 避免把背景提及误回填为主体属性(如违停主体是工程车却回填成小型车)
-function guessAttrsFromText(ev, text) {
-  const attrs = {};
-  const t = subjectText(ev, text);
-  evOptions(ev).forEach(g => {
-    const hit = [];
-    g.options.forEach(opt => {
-      const kws = [opt].concat(SFT_ATTR_ALIASES[opt] || []);
-      if (kws.some(k => k && t.indexOf(k) >= 0)) hit.push(opt);
-    });
-    if (g.multi) { if (hit.length) attrs[g.key] = hit; }
-    else if (hit.length) attrs[g.key] = hit[0];
-  });
-  return attrs;
 }
 
 // 新格式:event_attributes 只保留当前选项定义内合法的键值(防御旧配置漂移)
@@ -433,21 +303,17 @@ function refreshWarnDots(body) {
 }
 
 // chip 变更 → 文本同步(优先级从高到低):
-//   1) 已前置的骨架前缀就地更新(保证骨架只前置一次,不堆叠);
-//   2) 声明通道(attr_mentions)且该组有声明提及、单选换值 → 位置锚定替换:
-//      仅声明提及所在的 span 替换为新值(无别名扩展;背景句同形词不动,
-//      主语句规则与 skip 组均不适用),并同步更新草稿里的声明提及与 span;
+//   1) 声明通道(attr_mentions)且该组有声明提及、单选换值 → 位置锚定替换:
+//      仅声明提及所在的 span 替换为新值(无别名扩展;背景句同形词不动),
+//      并同步更新草稿里的声明提及与 span;
 //      骨架前缀含旧值但非声明提及(如模型按模板写的主语句)时就地换新骨架;
-//      声明串已不在文本中时回退现行行为;
-//   3) 单选换值且旧值出现在主语绑定句中 → 主语绑定句内旧值的全部别名形态
-//      全词替换为新值(背景句同形词不动;车道类型/范围等 skip 组除外,
-//      见 SFT_REPLACE_SKIP_GROUPS);
-//   4) 旧值在主语绑定句中完全未出现(或新选/新增多选) → 前置插入骨架句,仅一次;
-//   取消选中/移除多选不删词:旧值在文本中则保留原文,不在才补骨架。
-//   多选组在声明通道下另按「声明提及→选项」映射同步(见 mapMentionToOption):
-//   取消选中的选项,其映射提及转为纯文本并移出该组 attr_mentions(词保留在
-//   正文中作事实描述,暂存 mentionsOff);重新选中时仍在文本中的暂存提及恢复
-//   标注与声明;未映射提及保持现状。
+//   2) 已前置的骨架前缀就地更新(保证骨架只前置一次,不堆叠);
+//   取消选中/移除多选不删词:旧值在文本中则保留原文。
+//   多选组的声明提及同步:新格式为嵌套 per-option 绑定(选项名 → 提及串数组),
+//   直接按选项键增删;旧扁平数组按「声明提及→选项」别名映射归选项
+//   (见 mapMentionToOption)。取消选中的选项,其提及转为纯文本并移出该组
+//   attr_mentions(词保留在正文中作事实描述,暂存 mentionsOff);重新选中时
+//   仍在文本中的暂存提及恢复标注与声明;未映射提及保持现状。
 function applyChipChange(body, ev, group, value) {
   const d = state.sftDraft;
   const id = ev.event_id;
@@ -470,16 +336,43 @@ function applyChipChange(body, ev, group, value) {
   let text = String(d.texts[id] || '');
   // 声明通道锚点:该组声明提及所在的 span(仅声明通道 + 单选换值时非空)
   const decl = declaredMentions(ev);
-  // 多选组的声明提及同步:取消选中 → 该选项映射到的声明提及移出 decl(重渲染
+  // 多选组的声明提及同步:嵌套格式(选项名 → 提及串数组)按选项键直接增删;
+  // 旧扁平数组按别名映射归选项。取消选中 → 该选项的声明提及移出 decl(重渲染
   // 即为纯文本,保存时不再上送),暂存 mentionsOff 供重新选中时恢复;
-  // 新选中 → 暂存中映射到该选项且仍在文本里的提及加回 decl(重新标注)。
+  // 新选中 → 暂存中仍在文本里的提及加回 decl(重新标注)。
   // 未映射提及两边都不动;span 缓存作废,骨架分支与重渲染按新声明重算
   if (group.multi && decl) {
     const offAll = d.mentionsOff || (d.mentionsOff = {});
     const off = offAll[id] || (offAll[id] = {});
-    if (!added) { // 取消选中 value
+    const isNest = v => !!v && !Array.isArray(v) && typeof v === 'object';
+    const cur = decl[group.key];
+    const stash = off[group.key];
+    if (isNest(cur) || (!cur && isNest(stash))) {
+      // 新格式:嵌套 per-option 绑定,选项名即键,无需别名映射
+      if (!added) { // 取消选中 value
+        const moved = (cur && cur[value]) || [];
+        if (moved.length) {
+          const rest = {};
+          Object.keys(cur).forEach(o => { if (o !== value && cur[o].length) rest[o] = cur[o]; });
+          if (Object.keys(rest).length) decl[group.key] = rest;
+          else delete decl[group.key];
+          off[group.key] = Object.assign(isNest(stash) ? stash : {}, { [value]: moved });
+          d.mentionSpans[id] = null;
+        }
+      } else { // 新选中 added:恢复暂存提及
+        const cand = (isNest(stash) && stash[added]) || [];
+        const restored = cand.filter(s => text.indexOf(s) >= 0);
+        if (restored.length) {
+          const gone = cand.filter(s => restored.indexOf(s) < 0);
+          if (gone.length) stash[added] = gone; else delete stash[added];
+          const nest = isNest(decl[group.key]) ? decl[group.key] : (decl[group.key] = {});
+          nest[added] = restored;
+          d.mentionSpans[id] = null;
+        }
+      }
+    } else if (!added) { // 旧扁平数组:取消选中 value
       const keep = [], moved = [];
-      (decl[group.key] || []).forEach(s => {
+      (cur || []).forEach(s => {
         (mapMentionToOption(group, s) === value ? moved : keep).push(s);
       });
       if (moved.length) {
@@ -487,7 +380,7 @@ function applyChipChange(body, ev, group, value) {
         off[group.key] = (off[group.key] || []).concat(moved);
         d.mentionSpans[id] = null;
       }
-    } else { // 新选中 added:恢复暂存提及
+    } else { // 旧扁平数组:新选中 added,恢复暂存提及
       const remain = [], restored = [];
       (off[group.key] || []).forEach(s => {
         if (mapMentionToOption(group, s) === added && text.indexOf(s) >= 0) restored.push(s);
@@ -500,7 +393,7 @@ function applyChipChange(body, ev, group, value) {
       }
     }
   }
-  const declList = decl && oldVal && newVal ? (decl[group.key] || []) : [];
+  const declList = decl && oldVal && newVal ? groupMentionStrings(decl[group.key]) : [];
   const declSpans = declList.length ? declaredSpans(ev, text) : null;
   const mySpans = declSpans ? declSpans.filter(sp => sp.group === group.key) : [];
   if (mySpans.length) {
@@ -526,32 +419,6 @@ function applyChipChange(body, ev, group, value) {
     const sw = swapSkeletonPrefix(text, spans || [], oldSk, newSk);
     text = sw.text;
     if (spans) d.mentionSpans[id] = sw.spans;
-  } else if (oldVal && newVal && !SFT_REPLACE_SKIP_GROUPS[group.key] && mentionsValue(subjectText(ev, text), oldVal)) {
-    // 仅替换主语绑定句内的旧值形态;背景句里的同形词保持原文。
-    // 声明通道下同步平移其余组的 span(与替换区间重叠的丢弃,重算兜底)
-    const spans = decl ? declaredSpans(ev, text) : null;
-    const ranges = subjectRanges(ev, text);
-    const re = aliasRe(oldVal);
-    const edits = [];
-    let out = '', pos = 0, m;
-    while ((m = re.exec(text)) !== null) {
-      if (!ranges.some(r => m.index >= r[0] && m.index + m[0].length <= r[1])) continue;
-      out += text.slice(pos, m.index) + newVal;
-      pos = m.index + m[0].length;
-      edits.push({ start: m.index, end: pos, newLen: newVal.length });
-    }
-    text = out + text.slice(pos);
-    if (spans) d.mentionSpans[id] = shiftSpansForEdits(spans, edits);
-  } else if (newSk && newSk !== oldSk && !(group.multi && !added)) {
-    const probe = group.multi ? added : oldVal;
-    if (!probe || !mentionsValue(subjectText(ev, text), probe)) {
-      // 前置骨架句(仅一次):声明通道下全部 span 平移「骨架句+分隔符」长度,
-      // 否则后续声明提及替换会落在骨架里的同形词上
-      const spans = decl ? declaredSpans(ev, text) : null;
-      const prefix = text ? newSk + ';' : newSk;
-      text = prefix + text;
-      if (spans) d.mentionSpans[id] = shiftSpansForEdits(spans, [{ start: 0, end: 0, newLen: prefix.length }]);
-    }
   }
   d.texts[id] = text;
   const el = $('[data-ev-text="' + id + '"]', body);
@@ -660,8 +527,19 @@ function buildSftRevision() {
       const t = String(d.texts[ev.event_id] || '').trim();
       const clean = {};
       Object.keys(raw).forEach(k => {
-        const keep = (raw[k] || []).filter(s => s && t.indexOf(s) >= 0);
-        if (keep.length) clean[k] = keep;
+        const v = raw[k];
+        if (Array.isArray(v)) {
+          const keep = v.filter(s => s && t.indexOf(s) >= 0);
+          if (keep.length) clean[k] = keep;
+        } else if (v && typeof v === 'object') {
+          // 嵌套 per-option 绑定:逐选项过滤,空选项与空组一并省略
+          const nest = {};
+          Object.keys(v).forEach(o => {
+            const keepOpt = (v[o] || []).filter(s => s && t.indexOf(s) >= 0);
+            if (keepOpt.length) nest[o] = keepOpt;
+          });
+          if (Object.keys(nest).length) clean[k] = nest;
+        }
       });
       if (Object.keys(clean).length) mo[ev.event_id] = clean;
     });
@@ -680,9 +558,12 @@ export function sftSignature() {
 }
 
 // 从 sft 样本初始化编辑草稿(检出初值 = action 反映射;未激活事件留空不勾)
-// attrs:新格式取文件 event_attributes(按当前选项定义清洗);旧格式按关键词回猜(原文不动)
-// mentions:样本含 attr_mentions 时按事件声明的表面串(按当前选项定义清洗),
-//   该事件走声明通道分词/锚定;样本无 attr_mentions 时整体为 null,全量走启发式
+// mentions:样本含 attr_mentions 时按事件声明的表面串(按当前选项定义清洗;
+//   多选组兼容嵌套「选项名 → 字符串数组」与旧扁平数组),该事件走声明通道
+//   分词/锚定并渲染 chips;样本无 attr_mentions 时整体为 null,事件卡退化为
+//   纯文本(无 chips、无 token,不做任何启发式)
+// attrs:取文件 event_attributes(按当前选项定义清洗),随保存原样带回;
+//   无 attr_mentions 的样本 attrs 仅用于保数据,不渲染 options UI、不回猜
 function initSftDraft(sft) {
   const events = state.eventConfig || [];
   const parsed = parseSftDescription(sft.description, events);
@@ -696,17 +577,11 @@ function initSftDraft(sft) {
     if (ev.is_active) {
       texts[ev.event_id] = parsed.sections[ev.event_id] || '';
       checks[ev.event_id] = actions.indexOf(ev.event_id) >= 0;
-      if (evOptions(ev).length) {
-        attrs[ev.event_id] = hasFileAttrs
-          ? sanitizeFileAttrs(ev, fileAttrs[ev.event_id] || fileAttrs[String(ev.event_id)])
-          : guessAttrsFromText(ev, texts[ev.event_id]);
-        skeletons[ev.event_id] = skeleton(ev, attrs[ev.event_id]);
-      }
     } else {
       texts[ev.event_id] = '';
       checks[ev.event_id] = false;
     }
-    // 声明提及与 attrs 同一门槛:仅保留已激活且有选项组的事件;空数组与空组一律丢弃
+    // 声明提及仅保留已激活且有选项组的事件;空数组与空组一律丢弃
     // (未激活事件的段落在 parseSftDescription 已丢弃,保留其提及保存必遭后端 422;
     //  无选项组的事件如实线变道,后端校验「no options defined」同样拒绝)
     if (mentions && ev.is_active && evOptions(ev).length) {
@@ -715,12 +590,31 @@ function initSftDraft(sft) {
         const clean = {};
         evOptions(ev).forEach(g => {
           const v = raw[g.key];
-          if (Array.isArray(v)) {
+          if (Array.isArray(v)) { // 扁平数组(单选组及旧样本多选组)
             const arr = v.filter(s => typeof s === 'string' && s);
             if (arr.length) clean[g.key] = arr;
+          } else if (g.multi && v && typeof v === 'object') {
+            // 新格式多选组:嵌套「选项名 → 字符串数组」,选项名按当前定义清洗
+            const nest = {};
+            Object.keys(v).forEach(o => {
+              if (g.options.indexOf(o) < 0 || !Array.isArray(v[o])) return;
+              const arr = v[o].filter(s => typeof s === 'string' && s);
+              if (arr.length) nest[o] = arr;
+            });
+            if (Object.keys(nest).length) clean[g.key] = nest;
           }
         });
         if (Object.keys(clean).length) mentions[ev.event_id] = clean;
+      }
+    }
+    // attrs 取文件 event_attributes(按当前选项定义清洗),随保存原样带回——
+    // 无声明提及的样本虽为纯文本卡(无 chips),已有结构化标注不得因保存丢失;
+    // skeletons 仅供 chips 文本联动,仅在有声明提及(渲染 chips)时初始化
+    if (ev.is_active && evOptions(ev).length && hasFileAttrs) {
+      attrs[ev.event_id] = sanitizeFileAttrs(
+        ev, fileAttrs[ev.event_id] || fileAttrs[String(ev.event_id)]);
+      if (mentions && mentions[ev.event_id]) {
+        skeletons[ev.event_id] = skeleton(ev, attrs[ev.event_id]);
       }
     }
   });
@@ -771,8 +665,10 @@ function sftEditorHtml() {
   let html = '<div class="sft-section-title">事件思考(按事件编辑;「检出」勾选在保存时联动 action 与结论)</div>';
   (state.eventConfig || []).forEach(ev => {
     const opts = ev.is_active ? evOptions(ev) : [];
+    // chips 仅在该事件有声明提及(attr_mentions)时渲染;无声明退化为纯文本卡
+    const hasDecl = !!(d.mentions && d.mentions[ev.event_id]);
     let chipsHtml = '';
-    if (opts.length) {
+    if (opts.length && hasDecl) {
       chipsHtml = '<div class="sft-attrs">' + opts.map(g => {
         const cur = (d.attrs[ev.event_id] || {})[g.key];
         const pills = g.options.map(opt => {
@@ -788,7 +684,7 @@ function sftEditorHtml() {
     html += '<div class="sft-ev' + (ev.is_active ? '' : ' inactive') + '">'
       + '<div class="sft-ev-head">'
       + '<span class="sft-ev-name">' + esc(ev.name_zh) + '</span>'
-      + (opts.length ? '<span class="sft-warn-dot" data-ev-warn="' + ev.event_id + '" hidden></span>' : '')
+      + (opts.length && hasDecl ? '<span class="sft-warn-dot" data-ev-warn="' + ev.event_id + '" hidden></span>' : '')
       + (ev.is_active ? '' : '<span class="sft-ev-tag">未激活</span>')
       + '<label class="sft-ev-check"><input type="checkbox" data-ev-check="' + ev.event_id + '"'
       + (d.checks[ev.event_id] ? ' checked' : '') + '>检出</label>'
@@ -883,7 +779,7 @@ function bindSftEditor(body) {
       if (decl && dd) {
         const t = String(dd.texts[ev.event_id] || '');
         const gone = [];
-        Object.keys(decl).forEach(gk => (decl[gk] || []).forEach(s => {
+        Object.keys(decl).forEach(gk => groupMentionStrings(decl[gk]).forEach(s => {
           if (s && t.indexOf(s) < 0 && gone.indexOf(s) < 0) gone.push(s);
         }));
         const sig = gone.join('');

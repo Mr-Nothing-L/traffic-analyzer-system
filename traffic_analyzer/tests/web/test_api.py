@@ -734,6 +734,63 @@ class TestSftPut:
         )
         assert disk == payload
 
+    def _roadwork_payload(self) -> Dict[str, Any]:
+        """事件 7(道路施工,含多选组 work_elements)的 SFT 样本。"""
+        payload = _sft_payload()
+        payload["action"] = [7]
+        payload["description"] = (
+            "<think>\n道路施工：来向一侧道路施工,现场有黄色工程车与锥桶。\n"
+            "</think>\n<answer>\n天气：晴天\n时间：白天\n场景：高速公路主路。\n"
+            "最终结论：本视频块检出以下事件。\nclass7: 道路施工\n</answer>"
+        )
+        return payload
+
+    def test_put_attr_mentions_nested_multi_ok(self, tmp_path: Path) -> None:
+        # 多选组新格式:嵌套「选项名 → 提及串数组」;选项名须在该组 options 内,
+        # 提及串仍按事件 think 段落子串校验。
+        client = self._client(tmp_path)
+        payload = self._roadwork_payload()
+        payload["attr_mentions"] = {
+            "7": {
+                "work_elements": {
+                    "施工车辆": ["黄色工程车"],
+                    "交通锥/隔离栏": ["锥桶"],
+                }
+            }
+        }
+        resp = client.put("/api/results/v1/sft", json=payload)
+        assert resp.status_code == 200
+        assert resp.json() == payload
+        disk = json.loads(
+            (tmp_path / "analysis" / "v1" / "v1.json").read_text(encoding="utf-8")
+        )
+        assert disk == payload
+
+    def test_put_attr_mentions_flat_multi_still_ok(self, tmp_path: Path) -> None:
+        # 旧扁平数组的多选组提及仍然合法(向后兼容)。
+        client = self._client(tmp_path)
+        payload = self._roadwork_payload()
+        payload["attr_mentions"] = {
+            "7": {"work_elements": ["黄色工程车", "锥桶"]}
+        }
+        resp = client.put("/api/results/v1/sft", json=payload)
+        assert resp.status_code == 200
+        assert resp.json() == payload
+
+    def test_put_attr_mentions_nested_bad_option_422(self, tmp_path: Path) -> None:
+        # 嵌套对象的选项名不在该组 options 内 → 422,磁盘不改动。
+        client = self._client(tmp_path)
+        payload = self._roadwork_payload()
+        payload["attr_mentions"] = {
+            "7": {"work_elements": {"烟花": ["烟花"]}}
+        }
+        resp = client.put("/api/results/v1/sft", json=payload)
+        assert resp.status_code == 422
+        disk = json.loads(
+            (tmp_path / "analysis" / "v1" / "v1.json").read_text(encoding="utf-8")
+        )
+        assert disk == _sft_payload()
+
     def test_put_event_attributes_null_single_ok(self, tmp_path: Path) -> None:
         """契约允许单选属性为 null(VLM 看不清时);多选空数组允许。"""
         client = self._client(tmp_path)
@@ -755,6 +812,8 @@ class TestSftPut:
             {"2": {"color": ["红"]}},                     # 未定义的属性键
             {"2": {"vehicle_type": "小车"}},              # 值必须是数组
             {"2": {"vehicle_type": ["小车", 3]}},         # 数组内必须都是字符串
+            {"2": {"vehicle_type": {"小型车": ["小车"]}}},  # 单选组不允许嵌套对象
+            {"7": {"work_elements": {"施工车辆": "黄色工程车"}}},  # 嵌套值必须是数组
             {"99": {"direction": ["来向"]}},              # 未定义的事件
         ],
     )
