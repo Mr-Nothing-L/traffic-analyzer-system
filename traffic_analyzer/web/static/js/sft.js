@@ -7,9 +7,11 @@ import { api } from './api.js';
 
 // ---------------------------------------------------------------------------
 // 结构化选项(chips):封闭枚举,只读选项集,三层联动
-//   chips(选中态) → 文本同步(别名全词替换,见 applyChipChange) → 文本框
-//   文本框为 contenteditable 富文本:命中任一选项别名的片段渲染为 token 标注,
-//   可自由编辑(纯文本),blur/chip 变更时重新分词;chips 不从手动编辑回写
+//   chips(选中态) → 文本同步(见 applyChipChange:声明通道按声明提及 span 锚定
+//   替换,旧样本走主语句内别名全词替换) → 文本框
+//   文本框为 contenteditable 富文本:声明通道仅声明提及的 span 渲染为 token,
+//   旧样本主语句内命中选项别名的片段渲染为 token;可自由编辑(纯文本),
+//   blur/chip 变更时重新分词;chips 不从手动编辑回写
 // ---------------------------------------------------------------------------
 
 // 骨架模板:字符串为固定文字;{slot, pre, post} 为该属性有值时输出的从句(空值整句省略)
@@ -55,42 +57,98 @@ function evOptions(ev) {
 }
 
 // --- 双通道分词:样本含 attr_mentions 且声明了该事件时走「声明提及通道」 --------
-// 声明通道:只标注 attr_mentions 声明的表面串(精确匹配;若声明串恰是某选项的
-// 值/别名,则扩展该选项的全部书写形态以增强鲁棒性),不跑主语句/关键词启发式;
-// 未声明的事件与旧样本保持原有启发式路径不变。
+// 声明通道:模型声明的表面串是唯一权威——只标注/只替换声明串本身出现的位置
+// (span 锚定,无正则、无别名扩展),背景句中的同形词一律不动;
+// 未声明的事件与旧样本保持原有启发式路径(主语句锚定 + 选项别名)不变。
 function declaredMentions(ev) {
   const d = state.sftDraft;
   if (!d || !d.mentions) return null;
   return d.mentions[ev.event_id] || null;
 }
 
-// 声明串的全部匹配形态:自身;若恰为组内某选项的值/别名,并入该选项的全部形态
-function declaredForms(ev, groupKey, s) {
-  const forms = [s];
-  const g = evOptions(ev).find(g => g.key === groupKey);
-  if (g) {
-    g.options.forEach(opt => {
-      if (opt === s || (SFT_ATTR_ALIASES[opt] || []).indexOf(s) >= 0) {
-        aliasesOf(opt).forEach(a => { if (forms.indexOf(a) < 0) forms.push(a); });
-      }
-    });
-  }
-  return forms;
-}
-
-// 声明通道的「别名 → 组」索引,按形态长度降序(最长优先,与 tokenIndex 同约定)
-function declaredTokenIndex(ev, decl) {
-  const list = [];
-  const seen = {};
+// 声明提及的位置 span 列表:[{start, end, group, str}],按 start 升序、互不重叠。
+// 缓存于 state.sftDraft.mentionSpans[event_id];仅当缓存与当前文本不再吻合
+// (人工编辑过)时才按声明串精确子串搜索重算——重算时若同一声明串的出现次数
+// 多于旧 span 数(chip 同步后的裸值如 小型车 可能在背景句另有同形词),
+// 按「与旧 span 最近」原则取前 N 个,保证链式编辑后背景同形词仍不被误标。
+function computeDeclSpans(decl, text, prev) {
+  const cand = [];
   Object.keys(decl).forEach(gk => {
     (decl[gk] || []).forEach(s => {
-      declaredForms(ev, gk, s).forEach(f => {
-        const k = gk + ' ' + f;
-        if (!seen[k]) { seen[k] = 1; list.push({ alias: f, group: gk }); }
-      });
+      if (!s) return;
+      const occ = [];
+      let i = text.indexOf(s);
+      while (i >= 0) { occ.push(i); i = text.indexOf(s, i + 1); }
+      if (!occ.length) return;
+      const prevCnt = prev ? prev.filter(p => p.group === gk && p.str === s).length : 0;
+      let starts = occ;
+      if (prevCnt && occ.length > prevCnt) {
+        starts = occ.map(o => {
+          let best = Infinity;
+          prev.forEach(p => {
+            if (p.group === gk && p.str === s) best = Math.min(best, Math.abs(o - p.start));
+          });
+          return [o, best];
+        }).sort((a, b) => a[1] - b[1] || a[0] - b[0]).slice(0, prevCnt).map(x => x[0]);
+      }
+      starts.forEach(st => cand.push({ start: st, end: st + s.length, group: gk, str: s }));
     });
   });
-  return list.sort((x, y) => y.alias.length - x.alias.length);
+  // 同起点长串优先(如 黄色工程作业车 吞掉内含的 工程作业车),贪心去重叠
+  cand.sort((a, b) => (a.start - b.start) || (b.str.length - a.str.length));
+  const out = [];
+  let lastEnd = -1;
+  cand.forEach(sp => {
+    if (sp.start >= lastEnd) { out.push(sp); lastEnd = sp.end; }
+  });
+  return out;
+}
+
+function spansMatchText(spans, text) {
+  return spans.every(sp => text.slice(sp.start, sp.end) === sp.str);
+}
+
+// 取该事件的声明提及 span(声明通道专用);缓存失效时按声明串精确搜索重算
+function declaredSpans(ev, text) {
+  const d = state.sftDraft;
+  const decl = declaredMentions(ev);
+  const id = ev.event_id;
+  if (!d.mentionSpans) d.mentionSpans = {};
+  const cached = d.mentionSpans[id];
+  if (cached && spansMatchText(cached, text)) return cached;
+  const spans = computeDeclSpans(decl, String(text || ''), cached);
+  d.mentionSpans[id] = spans;
+  return spans;
+}
+
+// 声明通道的 token 渲染:仅 span 位置标注为 token,其余一律纯文本
+function tokenizeSpansHtml(spans, t) {
+  let html = '', pos = 0;
+  spans.forEach(sp => {
+    if (sp.start < pos) return; // 防御:重叠 span 已在 computeDeclSpans 去除
+    html += esc(t.slice(pos, sp.start))
+      + '<span class="sft-tok" data-attr="' + esc(sp.group) + '">' + esc(t.slice(sp.start, sp.end)) + '</span>';
+    pos = sp.end;
+  });
+  return html + esc(t.slice(pos));
+}
+
+// 位置锚定替换:仅把 groupKey 组的 span 内容替换为 newVal(背景同形词不动),
+// 同步平移其余 span 并返回新文本与新 span 列表
+function replaceDeclaredSpans(text, spans, groupKey, newVal) {
+  let out = '', pos = 0, delta = 0;
+  const next = [];
+  spans.forEach(sp => {
+    if (sp.group === groupKey) {
+      out += text.slice(pos, sp.start) + newVal;
+      pos = sp.end;
+      next.push({ start: sp.start + delta, end: sp.start + delta + newVal.length, group: sp.group, str: newVal });
+      delta += newVal.length - (sp.end - sp.start);
+    } else {
+      next.push({ start: sp.start + delta, end: sp.end + delta, group: sp.group, str: sp.str });
+    }
+  });
+  return { text: out + text.slice(pos), spans: next };
 }
 
 // --- chip→文本同步:旧值别名全词替换 -----------------------------------------
@@ -217,12 +275,13 @@ function tokenizeSegHtml(idx, seg) {
   return html;
 }
 
-// 纯文本 → 带 token 标注的 HTML;声明通道(attr_mentions)仅标注声明串(全文本,
-// 无主语句过滤);否则仅主语绑定句内的启发式命中渲染为 token,背景句保持纯文本
+// 纯文本 → 带 token 标注的 HTML;声明通道(attr_mentions)仅标注声明提及所在的
+// span(全文本,无主语句过滤;背景同形词保持纯文本);否则仅主语绑定句内的
+// 启发式命中渲染为 token,背景句保持纯文本
 function tokenHtml(ev, text) {
   const t = String(text || '');
   const decl = declaredMentions(ev);
-  if (decl) return tokenizeSegHtml(declaredTokenIndex(ev, decl), t);
+  if (decl) return tokenizeSpansHtml(declaredSpans(ev, t), t);
   const idx = tokenIndex(ev);
   const ranges = subjectRanges(ev, t);
   let html = '', pos = 0;
@@ -313,9 +372,11 @@ function refreshWarnDots(body) {
 
 // chip 变更 → 文本同步(优先级从高到低):
 //   1) 已前置的骨架前缀就地更新(保证骨架只前置一次,不堆叠);
-//   2) 声明通道(attr_mentions)且该组有声明串、单选换值 → 声明串及其别名形态
-//      整文替换为新值(锚点精确,主语句规则与 skip 组均不适用),并同步更新
-//      草稿里的声明提及;声明串已不在文本中时回退现行行为;
+//   2) 声明通道(attr_mentions)且该组有声明提及、单选换值 → 位置锚定替换:
+//      仅声明提及所在的 span 替换为新值(无别名扩展;背景句同形词不动,
+//      主语句规则与 skip 组均不适用),并同步更新草稿里的声明提及与 span;
+//      骨架前缀含旧值但非声明提及(如模型按模板写的主语句)时就地换新骨架;
+//      声明串已不在文本中时回退现行行为;
 //   3) 单选换值且旧值出现在主语绑定句中 → 主语绑定句内旧值的全部别名形态
 //      全词替换为新值(背景句同形词不动;车道类型/范围等 skip 组除外,
 //      见 SFT_REPLACE_SKIP_GROUPS);
@@ -341,19 +402,40 @@ function applyChipChange(body, ev, group, value) {
   const newSk = skeleton(ev, attrs);
   d.skeletons[id] = newSk;
   let text = String(d.texts[id] || '');
-  // 声明通道锚点:该组声明串的全部匹配形态(仅声明通道 + 单选换值时非空)
+  // 声明通道锚点:该组声明提及所在的 span(仅声明通道 + 单选换值时非空)
   const decl = declaredMentions(ev);
   const declList = decl && oldVal && newVal ? (decl[group.key] || []) : [];
-  const declForms = [];
-  declList.forEach(s => declaredForms(ev, group.key, s).forEach(f => {
-    if (declForms.indexOf(f) < 0) declForms.push(f);
-  }));
-  if (declForms.length && declForms.some(f => text.indexOf(f) >= 0)) {
-    // 声明串即锚点:整文替换为新值(骨架前缀含声明串,随同一趟替换自然改写,
-    // 不走骨架前缀就地更新——否则正文其余声明提及会残留旧值,文本自相矛盾);
+  const declSpans = declList.length ? declaredSpans(ev, text) : null;
+  const mySpans = declSpans ? declSpans.filter(sp => sp.group === group.key) : [];
+  if (mySpans.length) {
+    // 声明提及即锚点:仅 span 位置替换为新值(无别名扩展,背景句同形词不动;
+    // 链式编辑时上一次写入的新值靠 span 位置继续锚定,不会误伤背景);
     // 声明提及同步为新值(保存时随 attr_mentions 落盘,后端子串校验方能通过)
-    text = text.replace(new RegExp(declForms.sort((a, b) => b.length - a.length).map(escRe).join('|'), 'g'), newVal);
+    const r = replaceDeclaredSpans(text, declSpans, group.key, newVal);
+    text = r.text;
     decl[group.key] = [newVal];
+    let spans = r.spans;
+    // 骨架前缀(模型按模板写的主语句)含旧值但不是声明提及:就地换为新骨架,
+    // 保持与 chips 一致;按新旧骨架的差异区间精确平移其后的 span
+    if (oldSk && newSk !== oldSk && text.indexOf(oldSk) === 0) {
+      let cs = 0;
+      while (cs < oldSk.length && cs < newSk.length && oldSk[cs] === newSk[cs]) cs++;
+      let ce = 0;
+      while (ce < oldSk.length - cs && ce < newSk.length - cs
+             && oldSk[oldSk.length - 1 - ce] === newSk[newSk.length - 1 - ce]) ce++;
+      const delta = (newSk.length - ce) - (oldSk.length - ce);
+      text = newSk + text.slice(oldSk.length);
+      const cut = oldSk.length - ce;
+      spans = [];
+      r.spans.forEach(sp => {
+        if (sp.end <= cs) spans.push(sp);
+        else if (sp.start >= cut) {
+          spans.push({ start: sp.start + delta, end: sp.end + delta, group: sp.group, str: sp.str });
+        }
+        // 与差异区间重叠的 span(理论上不存在:声明提及已在上面被替换)丢弃
+      });
+    }
+    d.mentionSpans[id] = spans;
   } else if (oldSk && text.indexOf(oldSk) === 0) {
     text = newSk + text.slice(oldSk.length);
   } else if (oldVal && newVal && !SFT_REPLACE_SKIP_GROUPS[group.key] && mentionsValue(subjectText(ev, text), oldVal)) {
@@ -514,6 +596,7 @@ function initSftDraft(sft) {
   state.sftDraft = {
     texts: texts, checks: checks, attrs: attrs, skeletons: skeletons,
     mentions: mentions,
+    mentionSpans: {}, // 声明通道的提及位置缓存(event_id → spans),按需惰性计算
     unmatched: parsed.unmatched, env: parsed.env,
   };
   state.sftSavedSig = sftSignature();
