@@ -84,6 +84,69 @@ function replaceAliases(text, oldVal, newVal) {
   return text.replace(aliasRe(oldVal), newVal);
 }
 
+// --- 主语句锚定:标注/替换/回填只作用于「描述事件主体」的句子 -----------------
+// 背景句(如"旁边行车道上的货车、小车持续驶过"描述正常通行)里的属性词并非
+// 事件主体属性,不应渲染为 token、不应被 chip 替换、也不参与 chips 回填。
+// 判定:按 。;与换行切句,命中该事件主语-谓语模式的句子为「主语绑定句」;
+// 含「结论:」的句子恒为主语绑定句。
+// 已知过包含(启发式宁多勿漏):行人/人员类模式会把"无人员行走"这类否定场景句
+// 也判为绑定句;整段无一句命中时回退为全文,保证不丢标注。
+const SFT_SUBJECT_PATTERNS = {
+  1: /停着|停有|停放|停于|静止|占用|构成|判定/,       // 违法停车
+  2: /停着|停有|停放|停于|静止|占用|构成|判定/,       // 应急车道占用
+  3: /事故|碰撞|追尾|刮擦|剐蹭|撞击/,                 // 交通事故
+  4: /行人|人员|人影|施工人员|工人/,                  // 高速公路行人出现
+  5: /摩托|电动自行车|电动车|电瓶车|自行车|三轮车/,   // 摩托车出现
+  6: /拥堵|缓行|排队|车龙/,                           // 拥堵
+  7: /施工|作业|封闭/,                               // 道路施工
+  8: /逆行|倒车/,                                     // 车辆逆行/倒车
+  10: /抛洒|散落|掉落|遗撒/,                          // 抛洒物
+};
+
+// 按 。;;与换行切句,返回 [{start, end}](end 不含分隔符)
+function splitSentences(t) {
+  const out = [];
+  let start = 0;
+  for (let i = 0; i <= t.length; i++) {
+    if (i === t.length || t[i] === '。' || t[i] === '；' || t[i] === ';' || t[i] === '\n') {
+      if (i > start) out.push({ start: start, end: i });
+      start = i + 1;
+    }
+  }
+  return out;
+}
+
+// 主语绑定句的字符范围(升序、不重叠);事件无模式或整段无命中时回退为全文
+function subjectRanges(ev, t) {
+  const re = SFT_SUBJECT_PATTERNS[ev.event_id];
+  const ranges = [];
+  if (re) {
+    splitSentences(t).forEach(s => {
+      const seg = t.slice(s.start, s.end);
+      if (re.test(seg) || seg.indexOf('结论:') >= 0 || seg.indexOf('结论：') >= 0) {
+        ranges.push([s.start, s.end]);
+      }
+    });
+  }
+  return ranges.length ? ranges : [[0, t.length]];
+}
+
+// 按范围把文本拆成交替片段,仅对主语绑定片段应用 fn,其余原样拼接
+function mapSubjectRanges(t, ranges, fn) {
+  let out = '', pos = 0;
+  ranges.forEach(r => {
+    out += t.slice(pos, r[0]) + fn(t.slice(r[0], r[1]));
+    pos = r[1];
+  });
+  return out + t.slice(pos);
+}
+
+// 主语绑定句拼接文本(供回填/提及判断;分隔符防跨句误拼出关键词)
+function subjectText(ev, text) {
+  const t = String(text || '');
+  return subjectRanges(ev, t).map(r => t.slice(r[0], r[1])).join('。');
+}
+
 // --- token 标注:事件文本中命中任一选项别名的片段渲染为带组标记的 span --------
 // 该事件所有组的「别名 → 组」索引,按别名长度降序;同位置先列出的组优先
 function tokenIndex(ev) {
@@ -96,25 +159,37 @@ function tokenIndex(ev) {
   return list.sort((x, y) => y.alias.length - x.alias.length);
 }
 
-// 纯文本 → 带 token 标注的 HTML(逐字符贪心,最长别名优先)
-function tokenHtml(ev, text) {
-  const idx = tokenIndex(ev);
-  const t = String(text || '');
+// 主语绑定句片段 → 带 token 标注的 HTML(逐字符贪心,最长别名优先)
+function tokenizeSegHtml(idx, seg) {
   let html = '', i = 0;
-  while (i < t.length) {
+  while (i < seg.length) {
     let hit = null;
     for (let k = 0; k < idx.length; k++) {
-      if (t.startsWith(idx[k].alias, i)) { hit = idx[k]; break; }
+      if (seg.startsWith(idx[k].alias, i)) { hit = idx[k]; break; }
     }
     if (hit) {
       html += '<span class="sft-tok" data-attr="' + esc(hit.group) + '">' + esc(hit.alias) + '</span>';
       i += hit.alias.length;
     } else {
-      html += esc(t[i]);
+      html += esc(seg[i]);
       i += 1;
     }
   }
   return html;
+}
+
+// 纯文本 → 带 token 标注的 HTML;仅主语绑定句内的命中渲染为 token,
+// 背景句保持纯文本(见 SFT_SUBJECT_PATTERNS)
+function tokenHtml(ev, text) {
+  const idx = tokenIndex(ev);
+  const t = String(text || '');
+  const ranges = subjectRanges(ev, t);
+  let html = '', pos = 0;
+  ranges.forEach(r => {
+    html += esc(t.slice(pos, r[0])) + tokenizeSegHtml(idx, t.slice(r[0], r[1]));
+    pos = r[1];
+  });
+  return html + esc(t.slice(pos));
 }
 
 // 骨架句:按模板把已选属性拼成一句,空值从句整体省略
@@ -136,9 +211,11 @@ function skeleton(ev, attrs) {
 }
 
 // 旧样本(无 event_attributes)按关键词回猜 chips;原文不动
+// 仅在主语绑定句内回猜:背景句里的属性词(如正常通行的货车/小车)不参与,
+// 避免把背景提及误回填为主体属性(如违停主体是工程车却回填成小型车)
 function guessAttrsFromText(ev, text) {
   const attrs = {};
-  const t = String(text || '');
+  const t = subjectText(ev, text);
   evOptions(ev).forEach(g => {
     const hit = [];
     g.options.forEach(opt => {
@@ -195,9 +272,10 @@ function refreshWarnDots(body) {
 
 // chip 变更 → 文本同步(优先级从高到低):
 //   1) 已前置的骨架前缀就地更新(保证骨架只前置一次,不堆叠);
-//   2) 单选换值且旧值出现在文本中 → 旧值的全部别名形态全词替换为新值
-//      (观察/分析/结论一致;车道类型/范围等 skip 组除外,见 SFT_REPLACE_SKIP_GROUPS);
-//   3) 旧值完全未出现(或新选/新增多选) → 前置插入骨架句,仅一次;
+//   2) 单选换值且旧值出现在主语绑定句中 → 主语绑定句内旧值的全部别名形态
+//      全词替换为新值(背景句同形词不动;车道类型/范围等 skip 组除外,
+//      见 SFT_REPLACE_SKIP_GROUPS);
+//   3) 旧值在主语绑定句中完全未出现(或新选/新增多选) → 前置插入骨架句,仅一次;
 //   取消选中/移除多选不删词:旧值在文本中则保留原文,不在才补骨架。
 function applyChipChange(body, ev, group, value) {
   const d = state.sftDraft;
@@ -221,11 +299,12 @@ function applyChipChange(body, ev, group, value) {
   let text = String(d.texts[id] || '');
   if (oldSk && text.indexOf(oldSk) === 0) {
     text = newSk + text.slice(oldSk.length);
-  } else if (oldVal && newVal && !SFT_REPLACE_SKIP_GROUPS[group.key] && mentionsValue(text, oldVal)) {
-    text = replaceAliases(text, oldVal, newVal);
+  } else if (oldVal && newVal && !SFT_REPLACE_SKIP_GROUPS[group.key] && mentionsValue(subjectText(ev, text), oldVal)) {
+    // 仅替换主语绑定句内的旧值形态;背景句里的同形词保持原文
+    text = mapSubjectRanges(text, subjectRanges(ev, text), seg => replaceAliases(seg, oldVal, newVal));
   } else if (newSk && newSk !== oldSk && !(group.multi && !added)) {
     const probe = group.multi ? added : oldVal;
-    if (!probe || !mentionsValue(text, probe)) {
+    if (!probe || !mentionsValue(subjectText(ev, text), probe)) {
       text = text ? newSk + ';' + text : newSk;
     }
   }
@@ -386,15 +465,14 @@ function renderTokens(el, ev, pulseGroup, text) {
   }
 }
 
-// chip hover ↔ token 联动:on=true 时同事件卡内同组 token 加脉冲、异组 token 淡化;
-// 仅切换 class,动画全在 CSS(prefers-reduced-motion 由全局块关闭)
+// chip hover ↔ token 联动:on=true 时同事件卡内同组 token 加深高亮,
+// 异组 token 不做任何变化(不淡化);仅切换 class,样式全在 CSS
 function linkChipHover(chip, on) {
   const card = chip.closest('.sft-ev');
   if (!card) return;
   const group = chip.dataset.attr;
   $$('.sft-tok', card).forEach(tok => {
     tok.classList.toggle('sft-tok-link', on && tok.dataset.attr === group);
-    tok.classList.toggle('sft-tok-dim', on && tok.dataset.attr !== group);
   });
 }
 
