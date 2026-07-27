@@ -81,7 +81,12 @@ def create_app(workspace: Optional[str] = None) -> FastAPI:
         # The SPA must always revalidate: a stale cached js/main.js/index.html
         # breaks the UI after upgrades (heuristic caching otherwise applies).
         response = await call_next(request)
-        if request.url.path in ("/", "/index.html", "/js/main.js", "/style.css"):
+        # Cover the SPA shell AND all ES modules under /js/ — a stale cached
+        # module (e.g. sft.js) silently breaks the UI after upgrades.
+        if (
+            request.url.path in ("/", "/index.html", "/style.css")
+            or request.url.path.startswith("/js/")
+        ):
             response.headers["Cache-Control"] = "no-cache"
         return response
 
