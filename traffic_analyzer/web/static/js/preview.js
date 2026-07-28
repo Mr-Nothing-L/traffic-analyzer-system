@@ -193,28 +193,28 @@ function expertLaneCls(ex) {
 
 const EXPERT_CATCH_RATE = 0.9;  // displayed 线性逼近 target 的恒定速率(fraction/秒)
 const EXPERT_CREEP_RATE = 0.04; // 到达 target 且仍 running 时,向下个里程碑缓行的速率
-const LANE_CELLS = 14;  // 每条泳道的像素格数
-const TOTAL_CELLS = 18; // 顶部总条的像素格数
+const LANE_CELLS = 12;  // 每条泳道的像素列数(3×N 网格)
+const TOTAL_CELLS = 18; // 顶部总条的像素列数
 
-// 分段像素条 HTML:cells 格,每格 4 条子像素(从上到下堆叠,点亮顺序亦从上到下)
+// 分段像素条 HTML:cells 列,每列 3 个均等方块像素(从上到下堆叠,点亮顺序亦从上到下)
 function pixelBarHtml(cells) {
   const cell = '<span class="pixel-cell">'
-    + '<span class="pixel-sub"></span>'.repeat(4) + '</span>';
+    + '<span class="pixel-sub"></span>'.repeat(3) + '</span>';
   return cell.repeat(cells);
 }
 
-// 按 displayed(0..1)点亮像素条:displayed×格数 = 整格数 + 格内小数;
-// 整格 4 子像素全亮,frontier 格按小数×4 从上到下点亮子像素;
-// 下一条待点亮子像素加 .frontier 明暗脉冲(仅 opts.running 时)
+// 按 displayed(0..1)点亮像素条:displayed×列数 = 整列数 + 列内小数;
+// 整列 3 像素全亮,frontier 列按小数×3 从上到下点亮;
+// 下一个待点亮像素加 .frontier 明暗脉冲(仅 opts.running 时)
 function paintPixelBar(cells, displayed, opts) {
   const n = cells.length;
   if (!n) return;
   const pos = Math.max(0, Math.min(1, displayed)) * n;
   const full = Math.min(n, Math.floor(pos));
-  const litInFrontier = Math.min(3, Math.floor((pos - full) * 4));
+  const litInFrontier = Math.min(2, Math.floor((pos - full) * 3));
   const running = !!(opts && opts.running);
   for (let i = 0; i < n; i++) {
-    const lit = i < full ? 4 : (i === full ? litInFrontier : 0);
+    const lit = i < full ? 3 : (i === full ? litInFrontier : 0);
     const subs = cells[i].children;
     for (let s = 0; s < subs.length; s++) {
       const frontier = running && i === full && full < n && s === lit;
@@ -265,9 +265,11 @@ function mountExpertPanel(job) {
     wrap.innerHTML = list.length
       ? list.map(ex =>
           '<div class="expert-lane lane-queued" data-lane="' + esc(ex.name) + '">'
+          + '<div class="lane-top">'
           + '<span class="expert-name" title="' + esc(ex.name) + '">' + esc(ex.name) + '</span>'
-          + '<div class="pixel-bar">' + pixelBarHtml(LANE_CELLS) + '</div>'
           + '<span class="expert-phase"></span>'
+          + '</div>'
+          + '<div class="pixel-bar">' + pixelBarHtml(LANE_CELLS) + '</div>'
           + '</div>').join('')
       : '<div class="empty-note">等待后端推送专家进度…</div>';
     list.forEach(ex => {

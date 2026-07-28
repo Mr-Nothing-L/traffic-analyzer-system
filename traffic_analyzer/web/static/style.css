@@ -1341,20 +1341,20 @@ body.hsplit-dragging { cursor: row-resize; user-select: none; }
 }
 
 /* ---------- 推理进度:像素块进度条 / 专家工作间 ---------- */
-/* 分段像素条:.pixel-cell 为竖向容器,内含 4 条 .pixel-sub 细横条(从上到下堆叠);
-   未点亮子像素为空像素底色 #EFEAE0,.on 点亮(颜色随泳道状态类) */
+/* 分段像素条:每列 3 个均等方块像素(从上到下堆叠,点亮顺序亦从上到下);
+   未点亮像素为空像素底色 #EFEAE0,.on 点亮(颜色随泳道状态类) */
 .pixel-bar { display: flex; gap: 3px; }
 .pixel-cell {
   flex: 0 0 auto;
-  width: 12px;
-  height: 16px;
+  width: 8px;
   display: flex;
   flex-direction: column;
-  justify-content: space-between;
+  gap: 2px;
 }
 .pixel-sub {
   display: block;
-  height: 2.5px;
+  width: 8px;
+  height: 8px;
   border-radius: 1px;
   background: #EFEAE0; /* 空像素 */
 }
@@ -1366,14 +1366,14 @@ body.hsplit-dragging { cursor: row-resize; user-select: none; }
   50% { opacity: 0.25; }
 }
 
-/* 侧栏 running 行:8 格迷你像素条(格内 4 子条,尺寸更小) + 行内停止键 */
+/* 侧栏 running 行:8 列迷你像素条(每列 3 个方块,尺寸更小) + 行内停止键 */
 .mini-prog {
   flex: 0 0 auto;
   align-self: center;
   gap: 2px;
 }
-.mini-prog .pixel-cell { width: 5px; height: 8px; }
-.mini-prog .pixel-sub { height: 1px; }
+.mini-prog .pixel-cell { width: 4px; gap: 1px; }
+.mini-prog .pixel-sub { width: 4px; height: 4px; }
 /* 不定态(fraction 为 null):子像素波浪循环点亮,替代旧渐变扫光 */
 .mini-prog.indet .pixel-sub {
   background: var(--accent);
@@ -1416,19 +1416,21 @@ body.hsplit-dragging { cursor: row-resize; user-select: none; }
 .expert-head { display: flex; align-items: center; gap: 12px; }
 .expert-head .expert-total { flex: 1; }
 .expert-step { font-size: 12.5px; color: var(--text2); white-space: nowrap; }
-.expert-lanes { display: flex; flex-direction: column; gap: 8px; }
-.expert-lane { display: flex; align-items: center; gap: 10px; font-size: 12px; }
+/* 泳道两列分布:避免名称/进度条/文字三栏横向拉撑导致的空间浪费 */
+.expert-lanes { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; }
+.expert-lane { display: flex; flex-direction: column; gap: 5px; font-size: 12px; min-width: 0; }
+.lane-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .expert-name {
-  flex: 0 0 110px;
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text);
 }
-.expert-lane .pixel-bar { flex: 1; }
+/* 行为文字 chip:浅色背景 + 细框,与进度条框呼应 */
 .expert-phase {
-  flex: 0 0 160px;
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1436,6 +1438,20 @@ body.hsplit-dragging { cursor: row-resize; user-select: none; }
   text-align: right;
   font-size: 11.5px;
   color: var(--text2);
+  background: #F3EEE4;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 6px;
+}
+/* 进度条外框:呼应 Kimi 集群的 [▓▓……] 括号感 */
+.expert-lane .pixel-bar,
+.expert-head .expert-total {
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: #FCFAF5;
+  padding: 3px 5px;
+  width: fit-content;
+  max-width: 100%;
 }
 /* 泳道状态色:queued 灰 / running 橙(--accent)/ done+detected 绿 / done+undetected 灰绿 / error 红 */
 .expert-lane.lane-queued .pixel-sub.on { background: #D8D1C2; }

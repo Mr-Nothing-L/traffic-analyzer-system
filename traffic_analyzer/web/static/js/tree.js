@@ -86,20 +86,20 @@ const CHECK_SVG = '<svg class="badge-check" viewBox="0 0 12 12" aria-hidden="tru
 const MINI_CELLS = 8;
 function miniPixelHtml() {
   const cell = '<span class="pixel-cell">'
-    + '<span class="pixel-sub"></span>'.repeat(4) + '</span>';
+    + '<span class="pixel-sub"></span>'.repeat(3) + '</span>';
   return cell.repeat(MINI_CELLS);
 }
 
-// 与 preview.js paintPixelBar 同构的点亮逻辑(无 frontier 脉冲):整格全亮,frontier 格按小数×4 点亮子像素
+// 与 preview.js paintPixelBar 同构的点亮逻辑(无 frontier 脉冲):整列全亮,frontier 列按小数×3 点亮
 function paintMiniProgress(el, frac) {
   const cells = el.children;
   const n = cells.length;
   if (!n) return;
   const pos = Math.max(0, Math.min(1, frac)) * n;
   const full = Math.min(n, Math.floor(pos));
-  const litInFrontier = Math.min(3, Math.floor((pos - full) * 4));
+  const litInFrontier = Math.min(2, Math.floor((pos - full) * 3));
   for (let i = 0; i < n; i++) {
-    const lit = i < full ? 4 : (i === full ? litInFrontier : 0);
+    const lit = i < full ? 3 : (i === full ? litInFrontier : 0);
     const subs = cells[i].children;
     for (let s = 0; s < subs.length; s++) subs[s].classList.toggle('on', s < lit);
   }
