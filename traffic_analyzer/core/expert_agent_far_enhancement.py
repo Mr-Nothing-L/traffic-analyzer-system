@@ -61,6 +61,7 @@ from traffic_analyzer.utils.far_non_motor_enhancer import (
     is_bbox_large_enough,
     load_image,
 )
+from traffic_analyzer.utils.progress import get_reporter as _get_progress_reporter
 
 logger = logging.getLogger(__name__)
 
@@ -527,6 +528,8 @@ class FarEnhancementDetector:
         checks and, as a last resort, retry once with a shorter prompt.
         """
         global_index = frame_info["global_index"]
+
+        _get_progress_reporter().phase("reclassify")
 
         # Pedestrian final classifier returns a full expert response so that
         # the adjudication layer receives the same structured instances as
@@ -1421,6 +1424,7 @@ class FarEnhancementDetector:
 
         # --- Final classifier on annotated vehicles + zoom grid ------------
         try:
+            _get_progress_reporter().phase("reclassify")
             response = self.vlm_engine.call(
                 template=template,
                 images=[masks_path, vehicles_path, zoom_grid_path],
@@ -1665,6 +1669,7 @@ class FarEnhancementDetector:
 
         # --- Final classifier on the gallery --------------------------------
         try:
+            _get_progress_reporter().phase("reclassify")
             response = self.vlm_engine.call(
                 template=template,
                 images=[gallery_path],
@@ -1791,6 +1796,7 @@ class FarEnhancementDetector:
             self.category.name_zh,
             len(images),
         )
+        _get_progress_reporter().phase("evidence")
 
         far_cfg = template.far_object_enhancement
         roi_template_id = far_cfg.roi_template_id

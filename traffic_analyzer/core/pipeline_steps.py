@@ -35,6 +35,7 @@ from traffic_analyzer.core.expert_agent import ExpertAgent
 from traffic_analyzer.core.vlm_engine import FatalAPIError, VLMInferenceEngine
 from traffic_analyzer.utils.annotation_spec_loader import AnnotationSpecLoader
 from traffic_analyzer.utils.event_detection import select_event_images as _select_event_images_impl
+from traffic_analyzer.utils.progress import get_reporter as _get_progress_reporter
 from traffic_analyzer.models.schemas import (
     AnalysisContext,
     AdjudicationResult,
@@ -231,6 +232,13 @@ class ExpertAgentLayer(PipelineStep):
 
         candidates: List[EventCandidate] = []
 
+        progress_reporter = _get_progress_reporter()
+        progress_reporter.register([cat.name_zh for cat in expert_categories] + ["裁决"])
+
+        def _run_expert(agent: ExpertAgent, category: Any) -> EventCandidate:
+            progress_reporter.start(category.name_zh)
+            return agent.detect(context)
+
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             future_to_category = {}
             for category in expert_categories:
@@ -239,7 +247,7 @@ class ExpertAgentLayer(PipelineStep):
                     vlm_engine=self.vlm_engine,
                     config_manager=self.config_manager,
                 )
-                future = executor.submit(agent.detect, context)
+                future = executor.submit(_run_expert, agent, category)
                 future_to_category[future] = category
 
             for future in as_completed(future_to_category):
@@ -248,6 +256,7 @@ class ExpertAgentLayer(PipelineStep):
                     candidate = future.result()
                     candidates.append(candidate)
                     context.event_candidates[candidate.event_id] = candidate
+                    progress_reporter.done(category.name_zh, candidate.detected)
                     logger.info(
                         "ExpertAgent[%s]: detected=%s",
                         category.name_zh,
@@ -256,6 +265,7 @@ class ExpertAgentLayer(PipelineStep):
                 except FatalAPIError:
                     raise
                 except Exception as exc:
+                    progress_reporter.error(category.name_zh)
                     logger.error(
                         "[pipeline_steps:ExpertAgentLayer] EXPERT_ERROR | event_id=%d event_name=%s | %s",
                         category.event_id,
@@ -288,6 +298,8 @@ class AdjudicationStep(PipelineStep):
         if not candidates:
             logger.info("No event candidates to adjudicate")
             return AdjudicationResult()
+
+        _get_progress_reporter().phase("裁决", "prepare")
 
         # 1. Load adjudication rules
         try:
@@ -376,6 +388,7 @@ class AdjudicationStep(PipelineStep):
             }
 
             try:
+                _get_progress_reporter().phase("裁决", "main_detect")
                 response = self.vlm_engine.call(
                     template=template,
                     images=images,
@@ -680,6 +693,8 @@ class AdjudicationStep(PipelineStep):
             sorted(active_event_ids),
         )
 
+        _get_progress_reporter().done("裁决", None)
+
         return AdjudicationResult(
             event_results=event_results,
             audit_log=audit_log,
@@ -757,6 +772,8 @@ class AdjudicationStep(PipelineStep):
                 )
             )
             context.event_results[candidate.event_id] = event_results[-1]
+
+        _get_progress_reporter().done("裁决", None)
 
         return AdjudicationResult(
             event_results=event_results,

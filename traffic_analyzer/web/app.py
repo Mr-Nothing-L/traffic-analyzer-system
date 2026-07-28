@@ -7,7 +7,8 @@ forward arguments).
 
 [文件说明]
 作用:FastAPI 应用工厂 create_app():装配 workspace/fs/jobs/evidence_api/frames/
-video_stream/evaluate 各路由,挂载 web/static 前端并为其禁用缓存,注册 lifespan/atexit
+video_stream/evaluate 各路由,提供 /api/expert-phases 专家阶段定义接口,挂载
+web/static 前端并为其禁用缓存,注册 lifespan/atexit
 钩子以在服务退出时停止所有排队/运行中的分析子进程;通过 TRAFFIC_ANALYZER_WEB_WORKSPACE
 环境变量接收预设工作区(工厂模式无法转发参数)。
 上游:traffic_analyzer/cli.py 的 web 子命令(uvicorn "traffic_analyzer.web.app:create_app")。
@@ -18,13 +19,14 @@ web/static 前端静态文件。
 from __future__ import annotations
 
 import atexit
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 
 from traffic_analyzer.web import (
@@ -40,6 +42,9 @@ from traffic_analyzer.web import (
 logger = logging.getLogger(__name__)
 
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
+# Expert phase definitions served by GET /api/expert-phases (frontend uses
+# them to cap the progress climb); shipped next to this module.
+_EXPERT_PHASES_JSON = Path(__file__).resolve().parent / "expert_phases.json"
 WORKSPACE_ENV_VAR = "TRAFFIC_ANALYZER_WEB_WORKSPACE"
 
 
@@ -75,6 +80,18 @@ def create_app(workspace: Optional[str] = None) -> FastAPI:
     app.include_router(frames.router)
     app.include_router(video_stream.router)
     app.include_router(evaluate.router)
+
+    @app.get("/api/expert-phases")
+    def get_expert_phases() -> Any:
+        """Expert phase definitions (JSON file shipped beside this module)."""
+        if not _EXPERT_PHASES_JSON.is_file():
+            raise HTTPException(status_code=404, detail="expert_phases.json not found")
+        try:
+            return json.loads(_EXPERT_PHASES_JSON.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise HTTPException(
+                status_code=500, detail=f"expert_phases.json unreadable: {exc}"
+            )
 
     @app.middleware("http")
     async def _no_cache_static(request, call_next):

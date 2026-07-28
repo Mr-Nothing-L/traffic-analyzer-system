@@ -7,7 +7,7 @@ import { api, videoSource, metaUrl, sourceFrameUrl, imageUrl } from './api.js';
 import { latestJobForStem, renderSidebar, invalidateSidebar } from './tree.js';
 import { renderSftBody } from './sft.js';
 import { renderEvidenceCard } from './evidence.js';
-import { renderEvalCard } from './jobs.js';
+import { renderEvalCard, cancelJob, jobStepText } from './jobs.js';
 
 export function runCleanups() {
   state.cleanups.forEach(fn => { try { fn(); } catch (e) { /* ignore */ } });
@@ -104,10 +104,20 @@ function renderResults() {
       + '<div class="card-body" id="ev-body"></div></div>';
   } else {
     const job = latestJobForStem(stem);
-    const note = job && (job.status === 'running' || job.status === 'queued')
-      ? '该视频正在推理队列中,完成后此处将展示 SFT 标注、分析报告与证据。'
-      : '该视频尚未推理,暂无分析结果。在左侧勾选后点击「开始推理」即可分析。';
-    html += '<div class="card"><div class="card-body empty-note">' + esc(note) + '</div></div>';
+    if (job && job.status === 'running') {
+      // 推理进行中:empty-note 替换为「专家工作间」面板(泳道进度由 mountExpertPanel 驱动)
+      html += '<div class="card" id="card-experts"><div class="card-head">'
+        + '<span class="card-title">专家工作间</span>'
+        + '<span class="card-sub">' + esc(stem) + '</span></div>'
+        + '<div class="card-body" id="experts-body"></div></div>';
+    } else {
+      const note = job && job.status === 'queued'
+        ? '该视频正在推理队列中,完成后此处将展示 SFT 标注、分析报告与证据。'
+        : (job && job.status === 'failed'
+          ? '该视频上次推理未完成(已停止或失败),暂无分析结果。可在左侧点击 ↻ 重试,或重新勾选后点击「开始推理」。'
+          : '该视频尚未推理,暂无分析结果。在左侧勾选后点击「开始推理」即可分析。');
+      html += '<div class="card"><div class="card-body empty-note">' + esc(note) + '</div></div>';
+    }
   }
 
   html += '<div id="eval-card-slot"></div></div></div></div>';
@@ -118,9 +128,157 @@ function renderResults() {
     renderSftBody(r.sft_label);
     renderReportBody(r.report_md, stem);
     renderEvidenceCard(stem, source);
+  } else {
+    const job = latestJobForStem(stem);
+    if (job && job.status === 'running') mountExpertPanel(job);
   }
   renderEvalCard();
   initHSplit();
+}
+
+/* ------------------------------------------------------------ 专家工作间(推理进行面板) */
+// GET /api/expert-phases 的阶段定义缓存(每类别 [{fraction, label}]);404 时记 null,走内置 fallback 封顶
+let expertPhasesPromise = null;
+function loadExpertPhases() {
+  if (!expertPhasesPromise) {
+    expertPhasesPromise = api('/api/expert-phases')
+      .then(d => (d && d.categories) || d || null)
+      .catch(() => null);
+  }
+  return expertPhasesPromise;
+}
+
+// 泳道 displayed 到达 target 后的缓行封顶:阶段序列中 displayed 之后的下一个里程碑(绝不越过);
+// 无阶段定义(/api/expert-phases 404)时封顶在当前 fraction+0.1 或 1.0
+function nextMilestone(phases, name, displayed, target) {
+  const seq = phases && phases[name];
+  if (Array.isArray(seq)) {
+    const next = seq.map(s => s.fraction)
+      .filter(f => typeof f === 'number' && f > displayed + 0.005)
+      .sort((a, b) => a - b)[0];
+    if (next != null) return Math.min(next, 1);
+  }
+  return Math.min(Math.max(target, displayed) + 0.1, 1);
+}
+
+// 泳道状态 → 样式类:queued 灰 / running 橙 / done+detected 绿 / done+undetected 灰绿 / error 红
+function expertLaneCls(ex) {
+  if (ex.status === 'running') return 'lane-running';
+  if (ex.status === 'done') return ex.detected ? 'lane-detected' : 'lane-clear';
+  if (ex.status === 'error') return 'lane-error';
+  return 'lane-queued';
+}
+
+const EXPERT_CATCH_RATE = 0.9;  // displayed 线性逼近 target 的恒定速率(fraction/秒)
+const EXPERT_CREEP_RATE = 0.04; // 到达 target 且仍 running 时,向下个里程碑缓行的速率
+
+function mountExpertPanel(job) {
+  const body = $('#experts-body');
+  if (!body) return;
+  const stem = job.stem;
+  body.innerHTML =
+    '<div class="expert-panel">'
+    + '<div class="expert-head">'
+    + '<div class="progress-track expert-total"><div class="progress-fill" id="exp-total-fill"></div></div>'
+    + '<span class="expert-step" id="exp-step"></span>'
+    + '<button class="btn btn-ghost btn-sm stop-btn" id="exp-stop" title="停止推理">■ 停止推理</button>'
+    + '</div>'
+    + '<div class="expert-lanes" id="exp-lanes"></div>'
+    + '</div>';
+  $('#exp-stop').addEventListener('click', () => cancelJob(job.id));
+
+  const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  let phases = null;
+  loadExpertPhases().then(d => { phases = d; });
+
+  const lanes = new Map(); // name -> {displayed, row, fill, phaseEl, cls}
+  let laneSig = '';
+  let totalDisplayed = 0;
+  let lastT = performance.now();
+  let rafId = 0;
+
+  // 泳道 DOM 按专家名单签名重建(后端首次透出 experts 前可能为空)
+  function syncLanes(list) {
+    const sig = list.map(e => e.name).join('|');
+    if (sig === laneSig) return;
+    laneSig = sig;
+    lanes.clear();
+    const wrap = $('#exp-lanes');
+    if (!wrap) return;
+    wrap.innerHTML = list.length
+      ? list.map(ex =>
+          '<div class="expert-lane lane-queued" data-lane="' + esc(ex.name) + '">'
+          + '<span class="expert-name" title="' + esc(ex.name) + '">' + esc(ex.name) + '</span>'
+          + '<div class="progress-track"><div class="progress-fill"></div></div>'
+          + '<span class="expert-phase"></span>'
+          + '</div>').join('')
+      : '<div class="empty-note">等待后端推送专家进度…</div>';
+    list.forEach(ex => {
+      const row = wrap.querySelector('[data-lane="' + CSS.escape(ex.name) + '"]');
+      if (row) {
+        lanes.set(ex.name, {
+          displayed: 0, cls: 'lane-queued', row: row,
+          fill: row.querySelector('.progress-fill'),
+          phaseEl: row.querySelector('.expert-phase'),
+        });
+      }
+    });
+  }
+
+  function stopLoop() {
+    if (rafId) cancelAnimationFrame(rafId);
+    rafId = 0;
+  }
+
+  function frame(now) {
+    const dt = Math.min(0.1, (now - lastT) / 1000);
+    lastT = now;
+    const cur = latestJobForStem(stem); // 轮询写入的 state.jobs 是进度的唯一来源
+    if (!cur || cur.status !== 'running' || !document.body.contains(body)) {
+      stopLoop();
+      // 失败(含用户停止):原地换成失败提示;done 由轮询触发的 selectVideo 重载为结果卡
+      if (cur && cur.status === 'failed' && document.body.contains(body)) {
+        body.innerHTML = '<div class="empty-note">推理已停止或失败,暂无分析结果。'
+          + '可在左侧点击 ↻ 重试,或重新勾选后点击「开始推理」。</div>';
+      }
+      return;
+    }
+    const cp = cur.progress || {};
+    const list = Array.isArray(cp.experts) ? cp.experts : [];
+    syncLanes(list);
+    list.forEach(ex => {
+      const lane = lanes.get(ex.name);
+      if (!lane) return;
+      const target = ex.status === 'queued' ? 0
+        : (typeof ex.fraction === 'number' ? ex.fraction : (ex.status === 'done' ? 1 : 0));
+      let d = lane.displayed;
+      if (ex.status === 'queued') d = 0;
+      else if (reduced) d = target; // reduced-motion:无动画,直接到位
+      else if (d < target) d = Math.min(target, d + EXPERT_CATCH_RATE * dt);
+      else if (ex.status === 'running') {
+        const cap = nextMilestone(phases, ex.name, d, target);
+        if (d < cap) d = Math.min(cap, d + EXPERT_CREEP_RATE * dt);
+      }
+      lane.displayed = d;
+      lane.fill.style.width = (d * 100).toFixed(1) + '%';
+      lane.phaseEl.textContent = ex.label || '';
+      lane.phaseEl.title = ex.label || '';
+      const cls = expertLaneCls(ex);
+      if (cls !== lane.cls) { lane.cls = cls; lane.row.className = 'expert-lane ' + cls; }
+    });
+    // 总进度条:同样的线性逼近,但不缓行
+    const tf = typeof cp.fraction === 'number' ? cp.fraction : 0;
+    totalDisplayed = reduced || totalDisplayed >= tf ? tf
+      : Math.min(tf, totalDisplayed + EXPERT_CATCH_RATE * dt);
+    const totalFill = $('#exp-total-fill');
+    if (totalFill) totalFill.style.width = (totalDisplayed * 100).toFixed(1) + '%';
+    const stepEl = $('#exp-step');
+    if (stepEl) stepEl.textContent = jobStepText(cur);
+    rafId = requestAnimationFrame(frame);
+  }
+
+  state.cleanups.push(stopLoop); // 主区重渲染前自动停帧
+  rafId = requestAnimationFrame(frame);
 }
 
 /* ------------------------------------------------------------ 上下分隔条(预览常驻) */

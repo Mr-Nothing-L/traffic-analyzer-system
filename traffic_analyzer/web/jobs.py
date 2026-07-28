@@ -3,12 +3,14 @@
 Inference and evaluation run as child processes, one at a time, on a single
 worker thread. The child's stdout and stderr are merged and read line by
 line to update the job's progress (from the analyzer's ``[x/4]`` step
-markers) and to keep a rolling log tail (~30 lines).
+markers and ``EXPERT_PROGRESS|`` expert-lane markers) and to keep a rolling
+log tail (~30 lines).
 
 [文件说明]
 作用:单工作线程串行子进程任务队列(JobManager)。build_infer_command 构造
 ``python -m traffic_analyzer analyze`` 命令(带 --sft-label),build_evaluate_command 构造
-scripts/batch_evaluate.py 评估命令;解析子进程输出的 [x/4] 步骤标记更新进度,
+scripts/batch_evaluate.py 评估命令;解析子进程输出的 [x/4] 步骤标记及
+EXPERT_PROGRESS| 专家泳道标记(register/start/phase/done)更新进度,
 提供 /api/infer、/api/jobs、/api/jobs/{id}/cancel 接口;shutdown/cancel 先 SIGTERM 后
 SIGKILL,避免遗留子进程。
 上游:web/app.py(挂载路由,lifespan/atexit 时调用 shutdown);web/evaluate.py(复用
@@ -42,6 +44,11 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 TOTAL_STEPS = 5
 
 _LOG_TAIL_LINES = 30
+
+# Analyzer stdout also emits EXPERT_PROGRESS|<kind>|... lanes markers; the
+# last registered lane is the adjudication (裁决) lane.
+_EXPERT_MARKER = "EXPERT_PROGRESS|"
+_JUDGE_NAME = "裁决"
 
 # stdout step marker -> (step_index, step_label). "[3.5/4]" must be matched
 # before "[3/4]".
@@ -100,6 +107,9 @@ class Job:
     returncode: Optional[int] = None
     log_tail: Deque[str] = field(default_factory=lambda: deque(maxlen=_LOG_TAIL_LINES))
     proc: Optional[subprocess.Popen] = None  # live child while running
+    # Expert lanes: {name, status: queued|running|done|error,
+    # detected: bool|None, fraction: float, label: str}
+    experts: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -113,6 +123,7 @@ class Job:
                 "step_index": self.step_index,
                 "total_steps": TOTAL_STEPS,
                 "fraction": self.fraction,
+                "experts": [dict(lane) for lane in self.experts],
             },
             "log_tail": list(self.log_tail),
             "returncode": self.returncode,
@@ -199,11 +210,14 @@ class JobManager:
             line = line.rstrip("\n")
             with self._lock:
                 job.log_tail.append(line)
+                if line.startswith(_EXPERT_MARKER):
+                    _apply_expert_progress(job, line)
+                    continue
                 for marker, step_index, step_label in _STEP_MARKERS:
                     if marker in line:
                         job.step_index = step_index
                         job.step_label = step_label
-                        job.fraction = step_index / TOTAL_STEPS
+                        _recompute_fraction(job)
                         break
         returncode = proc.wait()
         with self._lock:
@@ -261,6 +275,84 @@ class JobManager:
                 job.status = "failed"
             job.log_tail.append("cancelled by user")
         return job
+
+
+def _expert_lane(job: Job, name: str) -> Optional[Dict[str, Any]]:
+    for lane in job.experts:
+        if lane["name"] == name:
+            return lane
+    return None
+
+
+def _apply_expert_progress(job: Job, line: str) -> None:
+    """Update ``job.experts`` from one ``EXPERT_PROGRESS|...`` stdout line.
+
+    Contract (emitted by the analyzer child)::
+
+        EXPERT_PROGRESS|register|<total>|<name1>,<name2>,…   (last is 裁决)
+        EXPERT_PROGRESS|start|<name>
+        EXPERT_PROGRESS|phase|<name>|<fraction 0-1>|<label>
+        EXPERT_PROGRESS|done|<done>/<total>|<name>|<detected|undetected|error>
+
+    Malformed lines are ignored. Caller must hold the job lock.
+    """
+    parts = line[len(_EXPERT_MARKER):].split("|")
+    try:
+        kind = parts[0]
+        if kind == "register" and len(parts) >= 3:
+            job.experts = [
+                {"name": name, "status": "queued", "detected": None,
+                 "fraction": 0.0, "label": ""}
+                for name in parts[2].split(",")
+                if name
+            ]
+        elif kind == "start" and len(parts) >= 2:
+            lane = _expert_lane(job, parts[1])
+            if lane is not None:
+                lane["status"] = "running"
+        elif kind == "phase" and len(parts) >= 4:
+            lane = _expert_lane(job, parts[1])
+            if lane is not None:
+                lane["fraction"] = float(parts[2])
+                lane["label"] = parts[3]
+        elif kind == "done" and len(parts) >= 4:
+            lane = _expert_lane(job, parts[2])
+            if lane is not None:
+                if parts[3] == "error":
+                    lane["status"] = "error"
+                else:
+                    lane["status"] = "done"
+                    # "done" token(裁决收尾)→ detected 保持 None(无检出语义)
+                    lane["detected"] = (
+                        True if parts[3] == "detected"
+                        else False if parts[3] == "undetected"
+                        else None
+                    )
+                lane["fraction"] = 1.0
+    except ValueError:
+        return
+    _recompute_fraction(job)
+
+
+def _recompute_fraction(job: Job) -> None:
+    """Overall fraction on the 5-step scale, refined by expert lane progress.
+
+    Expert step (2): (2 + mean of category lane fractions) / 5 — 类别泳道是
+    除裁决外的泳道。Adjudication step (3): (3 + 裁决 lane fraction) / 5.
+    Everything else stays step_index / 5. Caller must hold the job lock.
+    """
+    if job.step_index == 2:
+        lanes = [e for e in job.experts if e["name"] != _JUDGE_NAME]
+        if lanes:
+            mean = sum(e["fraction"] for e in lanes) / len(lanes)
+            job.fraction = (2 + mean) / TOTAL_STEPS
+            return
+    if job.step_index == 3:
+        judge = _expert_lane(job, _JUDGE_NAME)
+        if judge is not None:
+            job.fraction = (3 + judge["fraction"]) / TOTAL_STEPS
+            return
+    job.fraction = job.step_index / TOTAL_STEPS
 
 
 def _terminate_proc(proc: subprocess.Popen, timeout: float = 3.0) -> None:

@@ -1,0 +1,70 @@
+{
+  "default": {
+    "prepare":    { "fraction": 0.05, "label": "选帧备料" },
+    "main_detect": { "fraction": 0.15, "label": "主检测分析" },
+    "evidence":   { "fraction": 0.30, "label": "证据合成" },
+    "reclassify": { "fraction": 0.45, "label": "目标复核" },
+    "parse":      { "fraction": 0.55, "label": "解析判定" },
+    "reflect":    { "fraction": 0.70, "label": "反思复核" },
+    "finish":     { "fraction": 0.90, "label": "收尾" }
+  },
+  "违法停车": {
+    "main_detect": { "fraction": 0.15, "label": "扫描路肩与车道边缘" },
+    "evidence":    { "fraction": 0.30, "label": "合成静止车辆证据" },
+    "reclassify":  { "fraction": 0.45, "label": "排除缓行排队车流" },
+    "reflect":     { "fraction": 0.70, "label": "复核违停时长依据" }
+  },
+  "应急车道占用": {
+    "prepare":     { "fraction": 0.05, "label": "标定应急车道区域" },
+    "main_detect": { "fraction": 0.15, "label": "巡检应急车道" },
+    "evidence":    { "fraction": 0.30, "label": "标注占道车辆与压线" },
+    "reclassify":  { "fraction": 0.45, "label": "核对车身压线比例" }
+  },
+  "交通事故": {
+    "main_detect": { "fraction": 0.15, "label": "搜寻碰撞与散落物" },
+    "evidence":    { "fraction": 0.30, "label": "拼合事故现场证据" },
+    "reclassify":  { "fraction": 0.45, "label": "甄别急刹与真实事故" },
+    "reflect":     { "fraction": 0.70, "label": "复核事故痕迹链" }
+  },
+  "高速公路行人出现": {
+    "main_detect": { "fraction": 0.15, "label": "搜寻行人身影" },
+    "evidence":    { "fraction": 0.30, "label": "放大远处人形目标" },
+    "reclassify":  { "fraction": 0.45, "label": "甄别行人与养护作业" },
+    "reflect":     { "fraction": 0.70, "label": "复核人形轮廓证据" }
+  },
+  "摩托车出现": {
+    "main_detect": { "fraction": 0.15, "label": "搜寻两轮车轮廓" },
+    "evidence":    { "fraction": 0.30, "label": "放大远处两轮目标" },
+    "reclassify":  { "fraction": 0.45, "label": "排除自行车误判" },
+    "reflect":     { "fraction": 0.70, "label": "复核骑手与车型特征" }
+  },
+  "严重拥堵": {
+    "main_detect": { "fraction": 0.15, "label": "评估车流密度" },
+    "evidence":    { "fraction": 0.30, "label": "统计车道排队长度" },
+    "reclassify":  { "fraction": 0.45, "label": "区分缓行与严重拥堵" },
+    "reflect":     { "fraction": 0.70, "label": "复核拥堵区间范围" }
+  },
+  "拥堵": {
+    "main_detect": { "fraction": 0.15, "label": "评估车流密度" },
+    "evidence":    { "fraction": 0.30, "label": "统计车道排队长度" },
+    "reclassify":  { "fraction": 0.45, "label": "区分缓行与严重拥堵" },
+    "reflect":     { "fraction": 0.70, "label": "复核拥堵区间范围" }
+  },
+  "道路施工": {
+    "main_detect": { "fraction": 0.15, "label": "识别施工设施" },
+    "evidence":    { "fraction": 0.30, "label": "合成施工证据画廊" },
+    "reclassify":  { "fraction": 0.45, "label": "确认作业区要素齐全" },
+    "reflect":     { "fraction": 0.70, "label": "复核锥桶标牌证据" }
+  },
+  "车辆逆行/倒车": {
+    "main_detect": { "fraction": 0.15, "label": "追踪车辆行驶方向" },
+    "evidence":    { "fraction": 0.30, "label": "比对帧间位移方向" },
+    "reclassify":  { "fraction": 0.45, "label": "排除掉头与跟车" },
+    "reflect":     { "fraction": 0.70, "label": "复核逆行动机证据" }
+  },
+  "裁决": {
+    "prepare":     { "fraction": 0.3, "label": "汇总候选" },
+    "main_detect": { "fraction": 0.6, "label": "交叉裁决" },
+    "finish":      { "fraction": 1.0, "label": "定案" }
+  }
+}

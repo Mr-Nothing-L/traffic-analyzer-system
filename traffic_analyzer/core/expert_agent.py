@@ -49,6 +49,7 @@ from traffic_analyzer.utils.event_detection import (
     reflect_expert_candidate,
     select_event_images,
 )
+from traffic_analyzer.utils.progress import get_reporter as _get_progress_reporter
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +136,8 @@ class ExpertAgent:
         # the template is possibly mutated by prior-knowledge injection.
         enable_far_enhancement = template.far_object_enhancement.enabled
 
+        _get_progress_reporter().phase("prepare")
+
         # -- 3. Inject prior knowledge (scene_understanding rules) -----------
         # scene_understanding prompt contains universal rules (direction,
         # emergency lane identification, camera perspective) that all experts
@@ -196,6 +199,7 @@ class ExpertAgent:
         # -- 5. Far-distance object enhancement (template-driven) ---------------
         candidate: Optional[EventCandidate] = None
         if enable_far_enhancement:
+            _get_progress_reporter().phase("main_detect")
             candidate = self._detect_with_far_enhancement(
                 context=context,
                 images=images,
@@ -225,6 +229,7 @@ class ExpertAgent:
         # -- 6. Direct VLM call (used when far enhancement is disabled) --------
         if candidate is None:
             try:
+                _get_progress_reporter().phase("main_detect")
                 response = self.vlm_engine.call(
                     template=template,
                     images=images,
@@ -258,6 +263,7 @@ class ExpertAgent:
             )
 
         # -- 7. Optional self-consistency reflection ---------------------------
+        _get_progress_reporter().phase("parse")
         reflection_enabled = (
             context.config.expert_enable_reflection
             if context.config is not None
@@ -277,12 +283,14 @@ class ExpertAgent:
                 )
                 return candidate
 
+            _get_progress_reporter().phase("reflect")
             candidate = reflect_expert_candidate(
                 candidate=candidate,
                 category=self.category,
                 vlm_engine=self.vlm_engine,
                 reflection_template=reflection_template,
             )
+            _get_progress_reporter().phase("finish")
 
         return candidate
 

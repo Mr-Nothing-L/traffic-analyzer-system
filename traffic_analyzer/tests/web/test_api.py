@@ -1091,6 +1091,143 @@ class TestJobs:
 
 
 # ---------------------------------------------------------------------------
+# Jobs: EXPERT_PROGRESS lane parsing
+# ---------------------------------------------------------------------------
+
+
+# Fake child emitting the EXPERT_PROGRESS contract with flush=True so the
+# parent's line-by-line reader sees lanes mid-run (sleep leaves a sampling
+# window after the phase lines of 占道 and 裁决).
+_FAKE_EXPERT_SCRIPT = (
+    "import time;"
+    "p=lambda s: print(s, flush=True);"
+    "p('[2/4] Expert Agent Layer...');"
+    "p('EXPERT_PROGRESS|register|3|违停,占道,裁决');"
+    "p('EXPERT_PROGRESS|start|违停');"
+    "p('EXPERT_PROGRESS|phase|违停|0.5|抽帧');"
+    "p('EXPERT_PROGRESS|start|占道');"
+    "p('EXPERT_PROGRESS|phase|占道|0.25|掩码');"
+    "time.sleep(1.0);"
+    "p('EXPERT_PROGRESS|done|1/3|违停|detected');"
+    "p('EXPERT_PROGRESS|done|2/3|占道|undetected');"
+    "p('[3/4] Adjudication...');"
+    "p('EXPERT_PROGRESS|start|裁决');"
+    "p('EXPERT_PROGRESS|phase|裁决|0.5|汇总');"
+    "time.sleep(1.0);"
+    "p('EXPERT_PROGRESS|done|3/3|裁决|detected');"
+    "p('[3.5/4] SFT label rewrite...');"
+    "p('[4/4] Generating report...')"
+)
+
+
+def _wait_until(cond: Any, timeout: float = 15.0) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if cond():
+            return True
+        time.sleep(0.02)
+    return False
+
+
+class TestExpertProgress:
+    def _submit(self, script: str) -> Any:
+        from traffic_analyzer.web.jobs import JobManager
+
+        manager = JobManager()
+        manager.submit("infer", [sys.executable, "-c", script], stem="x")
+        return manager._jobs[1]
+
+    def test_lanes_and_fraction_climb(self) -> None:
+        job = self._submit(_FAKE_EXPERT_SCRIPT)
+
+        # Mid expert phase: category lanes (all but 裁决) mean drives fraction.
+        assert _wait_until(
+            lambda: len(job.experts) == 3
+            and job.experts[0]["fraction"] == 0.5
+            and job.experts[1]["fraction"] == 0.25
+        )
+        assert job.experts[0] == {
+            "name": "违停", "status": "running", "detected": None,
+            "fraction": 0.5, "label": "抽帧",
+        }
+        assert job.experts[2]["status"] == "queued"
+        assert job.step_index == 2
+        assert job.fraction == pytest.approx((2 + (0.5 + 0.25) / 2) / 5)
+
+        # Adjudication phase: the 裁决 lane drives the fraction.
+        assert _wait_until(
+            lambda: job.step_index == 3 and job.experts[2]["fraction"] == 0.5
+        )
+        assert job.experts[0]["status"] == "done"
+        assert job.experts[0]["detected"] is True
+        assert job.experts[0]["fraction"] == 1.0
+        assert job.experts[1]["status"] == "done"
+        assert job.experts[1]["detected"] is False
+        assert job.experts[2]["status"] == "running"
+        assert job.experts[2]["label"] == "汇总"
+        assert job.fraction == pytest.approx((3 + 0.5) / 5)
+
+        assert _wait_until(lambda: job.status in ("done", "failed"))
+        assert job.status == "done"
+        assert job.experts[2]["detected"] is True
+        assert job.fraction == 1.0
+
+    def test_error_lane_and_to_dict(self) -> None:
+        script = (
+            "p=lambda s: print(s, flush=True);"
+            "p('[2/4] Expert Agent Layer...');"
+            "p('EXPERT_PROGRESS|register|2|占道,裁决');"
+            "p('EXPERT_PROGRESS|done|1/2|占道|error');"
+            "p('EXPERT_PROGRESS|done|2/2|裁决|undetected')"
+        )
+        job = self._submit(script)
+        assert _wait_until(lambda: job.status in ("done", "failed"))
+        assert job.status == "done"
+        assert job.experts[0] == {
+            "name": "占道", "status": "error", "detected": None,
+            "fraction": 1.0, "label": "",
+        }
+        assert job.experts[1]["status"] == "done"
+        assert job.experts[1]["detected"] is False
+        # to_dict exposes lanes under progress (as a copy).
+        progress = job.to_dict()["progress"]
+        assert progress["experts"] == job.experts
+        assert progress["experts"] is not job.experts
+
+    def test_step_markers_without_lanes_unchanged(self) -> None:
+        """No register line: fraction stays step_index/5 (legacy behavior)."""
+        job = self._submit(_FAKE_INFER_SCRIPT)
+        assert _wait_until(lambda: job.status in ("done", "failed"))
+        assert job.status == "done"
+        assert job.experts == []
+        assert job.step_index == 5
+
+
+class TestExpertPhasesApi:
+    def test_missing_file_404(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "traffic_analyzer.web.app._EXPERT_PHASES_JSON", tmp_path / "nope.json"
+        )
+        client = TestClient(create_app())
+        assert client.get("/api/expert-phases").status_code == 404
+
+    def test_returns_file_content(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        payload = {
+            "version": 1,
+            "experts": [{"name": "占道", "phases": ["抽帧", "掩码"]}],
+        }
+        path = tmp_path / "expert_phases.json"
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        monkeypatch.setattr("traffic_analyzer.web.app._EXPERT_PHASES_JSON", path)
+        client = TestClient(create_app())
+        resp = client.get("/api/expert-phases")
+        assert resp.status_code == 200
+        assert resp.json() == payload
+
+
+# ---------------------------------------------------------------------------
 # Jobs: process lifecycle (shutdown / cancel)
 # ---------------------------------------------------------------------------
 

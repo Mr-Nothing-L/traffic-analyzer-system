@@ -5,7 +5,7 @@ import { $, $$, esc, fmtBytes, toast } from './util.js';
 import { state } from './state.js';
 import { api } from './api.js';
 import { selectVideo } from './preview.js';
-import { retryInfer } from './jobs.js';
+import { retryInfer, cancelJob } from './jobs.js';
 
 export function latestJobForStem(stem) {
   for (let i = state.jobs.length - 1; i >= 0; i--) {
@@ -110,10 +110,16 @@ function treeRowsHtml(entries, depth) {
         stem: e.stem || e.name.replace(/\.[^.]+$/, ''), rel: rel, has_results: !!e.has_results,
       };
       const st = videoStatus(v);
-      // 运行中:视频名右侧渲染旋转 spinner 替代文字徽标;排队/完成/失败保持徽标
+      // 运行中:视频名右侧渲染迷你进度条(fraction 驱动宽度;fraction 为 null 时不定态 shimmer)
+      //   + 行内停止键(■);排队/完成/失败保持徽标
       // 已完成:徽标内嵌 ✓ SVG(描边动画);失败:徽标旁附重试按钮(↻),点击仅对该视频重新提交推理
+      const job = latestJobForStem(v.stem);
+      const frac = job && job.progress ? job.progress.fraction : null;
       const statusHtml = st.cls === 'st-running'
-        ? '<span class="spinner" title="推理中"></span>'
+        ? '<span class="mini-prog" data-prog-stem="' + esc(v.stem) + '" title="推理中">'
+          + '<span class="mini-prog-fill' + (frac == null ? ' indet' : '') + '"'
+          + (frac != null ? ' style="width:' + Math.round(frac * 100) + '%"' : '') + '></span></span>'
+          + '<button class="stop-btn" data-stop="' + esc(job.id) + '" title="停止推理">■</button>'
         : (st.cls === 'st-done'
             ? '<span class="badge st-done">' + CHECK_SVG + esc(st.text) + '</span>'
             : '<span class="badge ' + st.cls + '">' + st.text + '</span>')
@@ -139,6 +145,23 @@ function treeRowsHtml(entries, depth) {
   return html;
 }
 
+// 仅进度数值变化时快照不变:原地刷新迷你进度条宽度/不定态,避免整树重建打断交互
+function updateMiniProgress() {
+  $$('#video-list .mini-prog[data-prog-stem]').forEach(el => {
+    const job = latestJobForStem(el.dataset.progStem);
+    const fill = el.firstElementChild;
+    if (!fill) return;
+    const frac = job && job.progress ? job.progress.fraction : null;
+    if (frac == null) {
+      fill.classList.add('indet');
+      fill.style.width = '';
+    } else {
+      fill.classList.remove('indet');
+      fill.style.width = Math.round(frac * 100) + '%';
+    }
+  });
+}
+
 export function renderSidebar() {
   const list = $('#video-list');
   if (!state.workspace || !state.workspace.path) {
@@ -158,7 +181,10 @@ export function renderSidebar() {
     state.videos.map(v => [v.rel, v.has_results, videoStatus(v).text,
       state.checked.has(v.rel), state.currentRel === v.rel]),
   ]);
-  if (snap === sidebarSnapshot) return;
+  if (snap === sidebarSnapshot) {
+    updateMiniProgress(); // 快照不含 fraction:原地更新迷你进度条,避免重建整棵侧栏
+    return;
+  }
   sidebarSnapshot = snap;
 
   if (!state.tree.root.length) {
@@ -188,6 +214,12 @@ export function renderSidebar() {
     btn.addEventListener('click', e => {
       e.stopPropagation(); // 不触发所在行的视频选中
       retryInfer(btn.dataset.retry);
+    });
+  });
+  $$('#video-list .stop-btn').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation(); // 不触发所在行的视频选中
+      cancelJob(btn.dataset.stop);
     });
   });
   $$('#video-list .video-item').forEach(item => {

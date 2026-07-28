@@ -2,7 +2,6 @@
    Mock 数据层(?mock=1)
    ================================================================ */
 import { ApiError } from './util.js';
-import { STEP_LABELS } from './state.js';
 
 const mockDb = {
   workspace: { path: '/mock/workspace' },
@@ -165,6 +164,47 @@ export function mockImageUrl(stem, name) {
   return url;
 }
 
+/* ------------------------------------------------------------ 专家泳道慢速模拟 */
+// 与 config 中 8 个激活类别一致 + 最后的「裁决」泳道;label 为各阶段中文短文案
+const MOCK_EXPERT_DEFS = [
+  ['违法停车', ['扫描路肩与车道边缘', '比对目标静止时长', '排除缓行车流误报']],
+  ['应急车道占用', ['标定应急车道区域', '检测车道内停留目标', '核对特种车辆豁免特征']],
+  ['交通事故', ['检测车辆异常姿态', '识别碎片与散落痕迹', '分析车流速度突变']],
+  ['高速公路行人出现', ['扫描人体轮廓特征', '追踪目标移动轨迹', '排除护栏阴影干扰']],
+  ['摩托车出现', ['检测两轮目标', '核对车型长宽比例', '评估行驶车道合法性']],
+  ['拥堵', ['统计车道车流密度', '估算区间平均车速', '定位缓行队列尾部']],
+  ['道路施工', ['识别锥桶与围挡', '检测施工机械特征', '核对车道封闭标志']],
+  ['车辆逆行/倒车', ['估计车辆行驶方向', '比对断面车流主流向', '确认逆向持续时长']],
+  ['裁决', ['汇总各专家结论', '仲裁冲突证据', '生成最终判定']],
+];
+// /api/expert-phases 的 mock 应答:里程碑取 (i+1)/(n+1),不含 1.0,给前端缓行封顶留出余量
+const MOCK_EXPERT_PHASES = {};
+MOCK_EXPERT_DEFS.forEach(([name, labels]) => {
+  MOCK_EXPERT_PHASES[name] = labels.map((label, i) => ({
+    fraction: +(((i + 1) / (labels.length + 1)).toFixed(2)), label: label,
+  }));
+});
+
+function initMockExperts() {
+  return MOCK_EXPERT_DEFS.map(([name]) => ({
+    name: name, status: 'queued', detected: null, fraction: 0, label: '等待调度',
+  }));
+}
+
+// 推进一条泳道 0.05-0.2,并按里程碑刷新阶段文案;到 1.0 置 done
+function advanceLane(lane) {
+  lane.fraction = Math.min(1, +(lane.fraction + 0.05 + Math.random() * 0.15).toFixed(3));
+  const phases = MOCK_EXPERT_PHASES[lane.name];
+  const idx = phases.findIndex(s => s.fraction > lane.fraction);
+  lane.label = phases[idx >= 0 ? idx : phases.length - 1].label;
+  if (lane.fraction >= 1) {
+    lane.status = 'done';
+    // 与 mock 结果集一致:仅「应急车道占用」检出;裁决泳道视为有结论
+    lane.detected = lane.name === '应急车道占用' || lane.name === '裁决';
+    lane.label = lane.detected ? '检出疑似目标' : '未发现相关迹象';
+  }
+}
+
 export function mockTick() {
   mockDb.tickCount++;
   // 推理 job:串行推进
@@ -175,18 +215,52 @@ export function mockTick() {
   }
   if (running) {
     if (running.kind === 'infer') {
-      const step = (running.progress.step_index || 0) + 1;
-      if (step > 5) {
+      // 8 个类别专家泳道 + 「裁决」泳道的慢速 staggered 步进
+      if (!running._experts) running._experts = initMockExperts();
+      const experts = running._experts;
+      const lanes = experts.filter(e => e.name !== '裁决');
+      const verdict = experts[experts.length - 1];
+      // 4 并发上限的假象:running 不足 4 条时启动下一条排队泳道
+      const runningLanes = lanes.filter(e => e.status === 'running');
+      if (runningLanes.length < 4) {
+        const nextLane = lanes.find(e => e.status === 'queued');
+        if (nextLane) {
+          nextLane.status = 'running';
+          nextLane.label = MOCK_EXPERT_PHASES[nextLane.name][0].label;
+          runningLanes.push(nextLane);
+        }
+      }
+      // 每 tick 随机挑 1-2 条 running 泳道推进
+      const pool = runningLanes.slice();
+      const picks = Math.min(pool.length, 1 + Math.floor(Math.random() * 2));
+      for (let i = 0; i < picks; i++) {
+        advanceLane(pool.splice(Math.floor(Math.random() * pool.length), 1)[0]);
+      }
+      // 全部类别 done 后才推进裁决泳道
+      if (lanes.every(e => e.status === 'done')) {
+        if (verdict.status === 'queued') {
+          verdict.status = 'running';
+          verdict.label = MOCK_EXPERT_PHASES['裁决'][0].label;
+        } else if (verdict.status === 'running') {
+          advanceLane(verdict);
+        }
+      }
+      const frac = experts.reduce((s, e) => s + (e.fraction || 0), 0) / experts.length;
+      running.progress = {
+        step_label: verdict.status === 'queued' ? '专家分析' : '裁决',
+        step_index: verdict.status === 'queued' ? 2 : 3,
+        total_steps: 5,
+        fraction: +frac.toFixed(3),
+        experts: experts,
+      };
+      running.log_tail = '[mock] 专家泳道完成 '
+        + experts.filter(e => e.status === 'done').length + '/' + experts.length;
+      if (verdict.status === 'done') {
         running.status = 'done';
-        running.progress = { step_label: '完成', step_index: 5, total_steps: 5, fraction: 1 };
+        running.progress = { step_label: '完成', step_index: 5, total_steps: 5, fraction: 1, experts: experts };
         running.returncode = 0;
         const v = mockDb.videos.find(v => v.stem === running.stem);
         if (v) v.has_results = true;
-      } else {
-        running.progress = {
-          step_label: STEP_LABELS[step], step_index: step, total_steps: 5, fraction: step / 5,
-        };
-        running.log_tail = '[mock] [' + step + '/4] ' + STEP_LABELS[step] + '...';
       }
     } else {
       running._ticks = (running._ticks || 0) + 1;
@@ -274,7 +348,7 @@ export async function mockApi(path, opts) {
       const job = {
         id: mockDb.nextJobId++, kind: 'infer', stem: v ? v.stem : rel.replace(/\.[^.]+$/, ''),
         rel: rel, status: 'queued',
-        progress: { step_label: '排队中', step_index: 0, total_steps: 5, fraction: 0 },
+        progress: { step_label: '排队中', step_index: 0, total_steps: 5, fraction: 0, experts: [] },
         log_tail: '',
       };
       mockDb.jobs.push(job);
@@ -300,6 +374,22 @@ export async function mockApi(path, opts) {
   }
 
   if (path === '/api/jobs') return mockDb.jobs;
+
+  // 取消任务:running/queued → failed(rc=-15 表示被终止)
+  const cm = path.match(/^\/api\/jobs\/(\d+)\/cancel$/);
+  if (cm && method === 'POST') {
+    const job = mockDb.jobs.find(j => j.id === +cm[1]);
+    if (!job) throw new ApiError(404, '任务不存在');
+    if (job.status === 'running' || job.status === 'queued') {
+      job.status = 'failed';
+      job.returncode = -15;
+      job.progress = Object.assign({}, job.progress, { step_label: '已停止' });
+    }
+    return { ok: true, status: job.status };
+  }
+
+  // 专家阶段定义:供前端计算泳道缓行的下一个里程碑封顶
+  if (path === '/api/expert-phases' && method === 'GET') return MOCK_EXPERT_PHASES;
 
   let m = path.match(/^\/api\/results\/([^/]+)$/);
   if (m && method === 'GET') {

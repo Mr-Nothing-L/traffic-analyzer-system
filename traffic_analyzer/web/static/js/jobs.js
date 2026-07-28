@@ -136,6 +136,7 @@ export async function startInfer() {
     try {
       await api('/api/infer', { method: 'POST', body: { rels: rels } });
       toast('已提交 ' + rels.length + ' 个推理任务');
+      selectVideo(rels[0]); // 自动切到第一个视频,预览区立即呈现推理动效
       pollJobs().then(schedulePoll); // 提交后立即进入活动任务的 1.5s 轮询
     } catch (e) {
       toast('推理提交失败(' + e.status + '):' + e.message, 'err');
@@ -161,6 +162,31 @@ export async function retryInfer(rel) {
   } finally {
     inferPosting = false;
   }
+}
+
+// 停止推理:调用后端取消端点;成功后本地立即把任务标记为失败态,
+// 避免专家面板/侧栏在下次轮询对齐前闪跳;prevJobStatus 同步置位,跳过「推理失败」toast(用户主动停止)
+export async function cancelJob(id) {
+  try {
+    await api('/api/jobs/' + encodeURIComponent(id) + '/cancel', { method: 'POST' });
+  } catch (e) {
+    toast('停止推理失败(' + e.status + '):' + e.message, 'err');
+    return;
+  }
+  const jid = Number(id); // tree 的 data-stop 是字符串、preview 传数字,统一归一
+  // 无条件记录:抑制紧随的轮询把「用户主动停止」报成「推理失败」toast。
+  // 不能放在下面的条件块里——await 期间本地 job 对象可能已被并发轮询/mock 改写。
+  state.prevJobStatus[jid] = 'failed';
+  const job = state.jobs.find(j => j.id === jid);
+  if (job && (job.status === 'running' || job.status === 'queued')) {
+    job.status = 'failed';
+    job.returncode = -15;
+    job.progress = Object.assign({}, job.progress, { step_label: '已停止' });
+  }
+  toast('已请求停止推理');
+  renderSidebar();
+  syncButtons();
+  pollJobs().then(schedulePoll); // 立即轮询一次,尽快与后端真实状态对齐
 }
 
 /* ================================================================
@@ -202,6 +228,11 @@ export async function pollJobs() {
         if (j.kind === 'infer' && j.status === 'failed') {
           toast('推理失败:' + (j.rel || j.stem || '') + ' (rc=' + j.returncode + ')', 'err');
         }
+      }
+      // 当前选中视频的任务 queued→running:重渲染主区,让专家工作间面板补上
+      if (j.kind === 'infer' && j.status === 'running' && was && was !== j.status
+          && (j.rel || j.stem) === state.currentRel && !reloadRel) {
+        reloadRel = j.rel || j.stem;
       }
       if (j.kind === 'evaluate' && (j.status === 'running' || j.status === 'queued')) {
         renderEvalCard(); // 更新评估卡进度

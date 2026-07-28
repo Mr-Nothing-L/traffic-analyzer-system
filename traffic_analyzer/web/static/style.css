@@ -1340,6 +1340,108 @@ body.hsplit-dragging { cursor: row-resize; user-select: none; }
   padding: 24px 0;
 }
 
+/* ---------- 推理进度:迷你进度条 / 专家工作间 ---------- */
+.progress-track {
+  position: relative;
+  overflow: hidden;
+  height: 6px;
+  border-radius: 3px;
+  background: #EFEAE0; /* 与 .badge.st-none 同色的浅灰轨道 */
+}
+.progress-fill {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: 3px;
+  background: var(--accent);
+  transition: width 0.3s linear;
+}
+/* 不定态(fraction 为 null):主色扫光 shimmer,纯 CSS 实现 */
+.progress-fill.indet,
+.mini-prog-fill.indet {
+  width: 40%;
+  background: linear-gradient(90deg, var(--accent-soft), var(--accent), var(--accent-soft));
+  background-size: 200% 100%;
+  animation: prog-shimmer 1.2s linear infinite;
+}
+@keyframes prog-shimmer {
+  0% { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
+}
+
+/* 侧栏 running 行:56px 迷你进度条 + 行内停止键 */
+.mini-prog {
+  flex: 0 0 auto;
+  align-self: center;
+  width: 56px;
+  height: 6px;
+  border-radius: 3px;
+  background: #EFEAE0;
+  overflow: hidden;
+}
+.mini-prog-fill {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: 3px;
+  background: var(--accent);
+}
+.stop-btn {
+  flex: 0 0 auto;
+  align-self: center;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--text2);
+  border-radius: 4px;
+  font-size: 9px;
+  line-height: 1;
+  padding: 3px 4px;
+  cursor: pointer;
+}
+.stop-btn:hover { border-color: var(--red); color: var(--red); background: var(--red-soft); }
+
+/* 专家工作间面板 */
+.expert-panel { display: flex; flex-direction: column; gap: 12px; }
+.expert-head { display: flex; align-items: center; gap: 12px; }
+.expert-head .expert-total { flex: 1; }
+.expert-step { font-size: 12.5px; color: var(--text2); white-space: nowrap; }
+.expert-lanes { display: flex; flex-direction: column; gap: 8px; }
+.expert-lane { display: flex; align-items: center; gap: 10px; font-size: 12px; }
+.expert-name {
+  flex: 0 0 110px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+.expert-lane .progress-track { flex: 1; }
+.expert-phase {
+  flex: 0 0 160px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+  font-size: 11.5px;
+  color: var(--text2);
+}
+/* 泳道状态色:queued 灰 / running 橙(--accent)/ done+detected 绿 / done+undetected 灰绿 / error 红 */
+.expert-lane.lane-queued .progress-fill { background: #D8D1C2; }
+.expert-lane.lane-queued .expert-name,
+.expert-lane.lane-queued .expert-phase { color: var(--text2); }
+.expert-lane.lane-running .progress-fill { background: var(--accent); }
+.expert-lane.lane-detected .progress-fill { background: var(--sage); }
+.expert-lane.lane-clear .progress-fill { background: var(--sage); opacity: 0.45; }
+.expert-lane.lane-error .progress-fill { background: var(--red); }
+.expert-lane.lane-error .expert-name { color: var(--red); }
+
+@media (prefers-reduced-motion: reduce) {
+  .progress-fill { transition: none; }
+  .progress-fill.indet,
+  .mini-prog-fill.indet { animation: none; width: 40%; }
+}
+
 /* ---------- reduced motion ---------- */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {

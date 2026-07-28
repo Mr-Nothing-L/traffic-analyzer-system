@@ -19,6 +19,9 @@ google-generativeai>=0.8.0,<1.0.0
 # HTTP
 httpx>=0.27.0,<0.29.0
 
+# CLI progress panel
+rich>=13.0.0,<16.0
+
 # Web UI
 fastapi>=0.110.0,<1.0.0
 uvicorn>=0.29.0,<1.0.0
