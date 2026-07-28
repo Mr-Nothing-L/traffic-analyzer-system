@@ -193,8 +193,7 @@ function expertLaneCls(ex) {
 
 const EXPERT_CATCH_RATE = 0.9;  // displayed 线性逼近 target 的恒定速率(fraction/秒)
 const EXPERT_CREEP_RATE = 0.04; // 到达 target 且仍 running 时,向下个里程碑缓行的速率
-const LANE_CELLS = 16;  // 每条泳道的像素列数(3×N 网格,列随卡宽拉伸铺满)
-const TOTAL_CELLS = 18; // 顶部总条的像素列数
+const LANE_CELLS = 16;  // 每条泳道的像素列数(3×N 网格,方块间拉开间隔铺满卡宽)
 
 // 分段像素条 HTML:cells 列,每列 3 个均等方块像素(从上到下堆叠,点亮顺序亦从上到下)
 function pixelBarHtml(cells) {
@@ -231,7 +230,6 @@ function mountExpertPanel(job) {
   body.innerHTML =
     '<div class="expert-panel">'
     + '<div class="expert-head">'
-    + '<div class="pixel-bar expert-total" id="exp-total">' + pixelBarHtml(TOTAL_CELLS) + '</div>'
     + '<span class="expert-step" id="exp-step"></span>'
     + '<button class="btn btn-ghost btn-sm stop-btn" id="exp-stop" title="停止推理">■ 停止推理</button>'
     + '</div>'
@@ -242,15 +240,12 @@ function mountExpertPanel(job) {
   const panelEl = body.firstElementChild;
   requestAnimationFrame(() => { if (panelEl) panelEl.style.opacity = '1'; });
 
-  const totalCells = Array.from($('#exp-total').children);
-
   const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   let phases = null;
   loadExpertPhases().then(d => { phases = d; });
 
   const lanes = new Map(); // name -> {displayed, row, cells, phaseEl, cls}
   let laneSig = '';
-  let totalDisplayed = 0;
   let lastT = performance.now();
   let rafId = 0;
 
@@ -331,11 +326,6 @@ function mountExpertPanel(job) {
         lane.row.className = 'expert-lane ' + cls + (lane.judge ? ' lane-judge' : '');
       }
     });
-    // 总进度条:同样的线性逼近,但不缓行
-    const tf = typeof cp.fraction === 'number' ? cp.fraction : 0;
-    totalDisplayed = reduced || totalDisplayed >= tf ? tf
-      : Math.min(tf, totalDisplayed + EXPERT_CATCH_RATE * dt);
-    paintPixelBar(totalCells, totalDisplayed, { running: true });
     const stepEl = $('#exp-step');
     if (stepEl) stepEl.textContent = jobStepText(cur);
     rafId = requestAnimationFrame(frame);
