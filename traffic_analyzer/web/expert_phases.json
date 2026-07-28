@@ -38,16 +38,10 @@
     "reclassify":  { "fraction": 0.45, "label": "排除自行车误判" },
     "reflect":     { "fraction": 0.70, "label": "复核骑手与车型特征" }
   },
-  "严重拥堵": {
-    "main_detect": { "fraction": 0.15, "label": "评估车流密度" },
-    "evidence":    { "fraction": 0.30, "label": "统计车道排队长度" },
-    "reclassify":  { "fraction": 0.45, "label": "区分缓行与严重拥堵" },
-    "reflect":     { "fraction": 0.70, "label": "复核拥堵区间范围" }
-  },
   "拥堵": {
     "main_detect": { "fraction": 0.15, "label": "评估车流密度" },
     "evidence":    { "fraction": 0.30, "label": "统计车道排队长度" },
-    "reclassify":  { "fraction": 0.45, "label": "区分缓行与严重拥堵" },
+    "reclassify":  { "fraction": 0.45, "label": "区分缓行与拥堵" },
     "reflect":     { "fraction": 0.70, "label": "复核拥堵区间范围" }
   },
   "道路施工": {

@@ -68,7 +68,7 @@ class TestThreadLocalPhase:
         assert "EXPERT_PROGRESS|phase|应急车道占用|0.30|标注占道车辆与压线" in out
 
     def test_phase_without_name_on_fresh_thread_is_noop(self, reporter, capsys):
-        reporter.register(["严重拥堵", "裁决"])
+        reporter.register(["拥堵", "裁决"])
 
         def _worker():
             reporter.phase("prepare")  # no thread-local name -> no output
