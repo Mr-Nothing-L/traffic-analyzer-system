@@ -193,7 +193,7 @@ function expertLaneCls(ex) {
 
 const EXPERT_CATCH_RATE = 0.9;  // displayed 线性逼近 target 的恒定速率(fraction/秒)
 const EXPERT_CREEP_RATE = 0.04; // 到达 target 且仍 running 时,向下个里程碑缓行的速率
-const LANE_CELLS = 16;  // 每条泳道的像素列数(3×N 网格,方块间拉开间隔铺满卡宽)
+const LANE_CELLS = 18;  // 每条泳道的像素列数(3×N 网格,大方块窄间隔铺满卡宽)
 
 // 分段像素条 HTML:cells 列,每列 3 个均等方块像素(从上到下堆叠,点亮顺序亦从上到下)
 function pixelBarHtml(cells) {

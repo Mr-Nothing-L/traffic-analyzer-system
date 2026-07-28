@@ -1346,15 +1346,15 @@ body.hsplit-dragging { cursor: row-resize; user-select: none; }
 .pixel-bar { display: flex; gap: 3px; }
 .pixel-cell {
   flex: 0 0 auto;
-  width: 8px;
+  width: 10px;
   display: flex;
   flex-direction: column;
   gap: 2px;
 }
 .pixel-sub {
   display: block;
-  width: 8px;
-  height: 8px;
+  width: 10px;
+  height: 10px;
   border-radius: 1px;
   background: #EFEAE0; /* 空像素 */
 }
