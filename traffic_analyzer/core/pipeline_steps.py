@@ -323,7 +323,11 @@ class AdjudicationStep(PipelineStep):
             spec_path = self.config_manager.config_dir / "annotation_spec.yaml"
             if spec_path.exists():
                 spec_loader = AnnotationSpecLoader(str(spec_path))
-                annotation_spec_text = spec_loader.to_prompt_text()
+                active_ids = {
+                    cat.event_id
+                    for cat in self.config_manager.get_active_event_categories()
+                }
+                annotation_spec_text = spec_loader.to_prompt_text(active_event_ids=active_ids)
             else:
                 logger.warning("annotation_spec.yaml not found at %s", spec_path)
         except Exception as exc:

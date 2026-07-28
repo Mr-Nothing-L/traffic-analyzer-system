@@ -38,8 +38,14 @@ class AnnotationSpecLoader:
     # Public API
     # ------------------------------------------------------------------
 
-    def to_prompt_text(self) -> str:
-        """Generate a single prompt-ready text block from the annotation spec."""
+    def to_prompt_text(self, active_event_ids: Optional[set] = None) -> str:
+        """Generate a single prompt-ready text block from the annotation spec.
+
+        Args:
+            active_event_ids: When given, only events whose ``event_id`` is in
+                this set are included (global guidelines are always kept).
+                ``None`` keeps the legacy behaviour of emitting every event.
+        """
         parts: List[str] = []
         spec = self._data.get("annotation_spec", {}) if self._data else {}
 
@@ -63,6 +69,8 @@ class AnnotationSpecLoader:
 
             for ev in events:
                 eid = ev.get("event_id", "?")
+                if active_event_ids is not None and eid not in active_event_ids:
+                    continue  # 未激活事件不进入裁决 prompt
                 label = ev.get("action_label", "未知")
                 desc = ev.get("description", "").strip()
                 boundaries = ev.get("boundary_conditions", [])
