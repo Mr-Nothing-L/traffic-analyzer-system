@@ -193,7 +193,7 @@ function expertLaneCls(ex) {
 
 const EXPERT_CATCH_RATE = 0.9;  // displayed 线性逼近 target 的恒定速率(fraction/秒)
 const EXPERT_CREEP_RATE = 0.04; // 到达 target 且仍 running 时,向下个里程碑缓行的速率
-const LANE_CELLS = 12;  // 每条泳道的像素列数(3×N 网格)
+const LANE_CELLS = 16;  // 每条泳道的像素列数(3×N 网格,列随卡宽拉伸铺满)
 const TOTAL_CELLS = 18; // 顶部总条的像素列数
 
 // 分段像素条 HTML:cells 列,每列 3 个均等方块像素(从上到下堆叠,点亮顺序亦从上到下)
@@ -264,8 +264,10 @@ function mountExpertPanel(job) {
     if (!wrap) return;
     wrap.innerHTML = list.length
       ? list.map(ex =>
-          '<div class="expert-lane lane-queued" data-lane="' + esc(ex.name) + '">'
+          '<div class="expert-lane lane-queued' + (ex.name === '裁决' ? ' lane-judge' : '')
+          + '" data-lane="' + esc(ex.name) + '">'
           + '<div class="lane-top">'
+          + '<span class="lane-dot"></span>'
           + '<span class="expert-name" title="' + esc(ex.name) + '">' + esc(ex.name) + '</span>'
           + '<span class="expert-phase"></span>'
           + '</div>'
@@ -277,6 +279,7 @@ function mountExpertPanel(job) {
       if (row) {
         lanes.set(ex.name, {
           displayed: 0, cls: 'lane-queued', row: row,
+          judge: ex.name === '裁决',
           cells: Array.from(row.querySelector('.pixel-bar').children),
           phaseEl: row.querySelector('.expert-phase'),
         });
@@ -323,7 +326,10 @@ function mountExpertPanel(job) {
       lane.phaseEl.textContent = ex.label || '';
       lane.phaseEl.title = ex.label || '';
       const cls = expertLaneCls(ex);
-      if (cls !== lane.cls) { lane.cls = cls; lane.row.className = 'expert-lane ' + cls; }
+      if (cls !== lane.cls) {
+        lane.cls = cls;
+        lane.row.className = 'expert-lane ' + cls + (lane.judge ? ' lane-judge' : '');
+      }
     });
     // 总进度条:同样的线性逼近,但不缓行
     const tf = typeof cp.fraction === 'number' ? cp.fraction : 0;

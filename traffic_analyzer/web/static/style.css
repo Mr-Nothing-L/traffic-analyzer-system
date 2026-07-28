@@ -1416,19 +1416,51 @@ body.hsplit-dragging { cursor: row-resize; user-select: none; }
 .expert-head { display: flex; align-items: center; gap: 12px; }
 .expert-head .expert-total { flex: 1; }
 .expert-step { font-size: 12.5px; color: var(--text2); white-space: nowrap; }
-/* 泳道两列分布:避免名称/进度条/文字三栏横向拉撑导致的空间浪费 */
-.expert-lanes { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; }
-.expert-lane { display: flex; flex-direction: column; gap: 5px; font-size: 12px; min-width: 0; }
-.lane-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
+/* 专家卡片墙:列数随卡宽与专家数量自适应(auto-fit),每专家一张小卡 */
+.expert-lanes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 10px;
+}
+.expert-lane {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 12px;
+  min-width: 0;
+  background: #FCFAF5;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+/* 裁决卡:虚线框区分"汇总者"角色 */
+.expert-lane.lane-judge { border-style: dashed; }
+.lane-top { display: flex; align-items: center; gap: 7px; min-width: 0; }
+/* 状态点:颜色即泳道状态,running 时呼吸脉冲 */
+.lane-dot { flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%; background: #D8D1C2; }
+.expert-lane.lane-running .lane-dot { background: var(--accent); animation: dot-pulse 1.2s ease-in-out infinite; }
+.expert-lane.lane-detected .lane-dot { background: var(--sage); }
+.expert-lane.lane-clear .lane-dot { background: var(--sage); opacity: 0.45; }
+.expert-lane.lane-error .lane-dot { background: var(--red); }
+@keyframes dot-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+/* 面板文字统一等宽栈,呼应像素终端风;中文自动回退系统中黑 */
+.expert-panel .expert-name,
+.expert-panel .expert-phase,
+.expert-panel .expert-step {
+  font-family: ui-monospace, "Cascadia Mono", "Noto Sans Mono CJK SC", "Sarasa Mono SC", Consolas, monospace;
+}
 .expert-name {
   flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-weight: 600;
   color: var(--text);
 }
-/* 行为文字 chip:浅色背景 + 细框,与进度条框呼应 */
 .expert-phase {
   flex: 1 1 auto;
   min-width: 0;
@@ -1438,21 +1470,19 @@ body.hsplit-dragging { cursor: row-resize; user-select: none; }
   text-align: right;
   font-size: 11.5px;
   color: var(--text2);
-  background: #F3EEE4;
-  border: 1px solid var(--border);
-  border-radius: 3px;
-  padding: 1px 6px;
 }
-/* 进度条外框:呼应 Kimi 集群的 [▓▓……] 括号感 */
-.expert-lane .pixel-bar,
+/* 像素矩阵铺满卡宽:列随卡宽拉伸 */
+.expert-lane .pixel-cell { flex: 1 1 0; }
+.expert-lane .pixel-sub { width: 100%; height: 7px; }
+/* 顶部总条:保留外框,列拉伸铺满 */
 .expert-head .expert-total {
   border: 1px solid var(--border);
   border-radius: 3px;
   background: #FCFAF5;
   padding: 3px 5px;
-  width: fit-content;
-  max-width: 100%;
 }
+.expert-total .pixel-cell { flex: 1 1 0; }
+.expert-total .pixel-sub { width: 100%; height: 7px; }
 /* 泳道状态色:queued 灰 / running 橙(--accent)/ done+detected 绿 / done+undetected 灰绿 / error 红 */
 .expert-lane.lane-queued .pixel-sub.on { background: #D8D1C2; }
 .expert-lane.lane-queued .expert-name,
