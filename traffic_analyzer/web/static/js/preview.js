@@ -17,6 +17,7 @@ export function runCleanups() {
 export function renderWelcome() {
   runCleanups();
   const main = $('#main');
+  delete main.dataset.renderedStem; // 离开分析视图,下次 renderResults 需整体重建
   main.innerHTML =
     '<div class="welcome">'
     + '<div class="hero">'
@@ -54,7 +55,12 @@ export async function selectVideo(rel) {
   state.sftSavedSig = '';
   invalidateSidebar(); renderSidebar();
   runCleanups();
-  $('#main').innerHTML = skeletons();
+  const main = $('#main');
+  if (main.dataset.renderedStem !== v.stem) {
+    // 同 stem 重进(queued→running/完成后自动重载):保留现有 DOM(含视频预览),
+    // 不铺骨架,避免全屏闪白;renderResults 会只重建卡片区
+    main.innerHTML = skeletons();
+  }
   try {
     const results = await api('/api/results/' + encodeURIComponent(v.stem));
     if (state.currentRel !== rel) return; // 期间切换了视频,过期响应不得写入共享状态
@@ -75,7 +81,15 @@ function renderResults() {
   const r = state.results || {};
   const hasResults = !!(r.sft_label || r.report_md || r.evidence);
   const main = $('#main');
-  let html =
+
+  // stem 未变且骨架仍在:保留 #pane-top 视频预览 DOM(不重载视频,避免闪白),
+  // 仅重建下方卡片区;stem 变了(或骨架被其他视图替换)才整体重建
+  if (main.dataset.renderedStem === stem && $('#pane-top') && $('#pane-cards')) {
+    renderResultCards(stem, source, r, hasResults);
+    return;
+  }
+  main.dataset.renderedStem = stem;
+  main.innerHTML =
     '<div class="split-col">'
     + '<div class="pane-top" id="pane-top">'
     + '<div class="card" id="card-preview"><div class="card-head"><span class="card-title">视频预览</span>'
@@ -84,8 +98,19 @@ function renderResults() {
     + '</div>'
     + '<div class="hsplit" id="hsplit" title="拖动调整预览高度,双击复位"><span></span></div>'
     + '<div class="pane-bottom" id="pane-bottom">'
-    + '<div class="cards">';
+    + '<div class="cards" id="pane-cards"></div></div>'
+    + '</div>';
 
+  mountPreview(source, r.evidence && r.evidence.video);
+  initHSplit(); // hsplit 分隔条只在整体重建时初始化
+  renderResultCards(stem, source, r, hasResults);
+}
+
+// 重建 #pane-cards 卡片区(SFT/报告/证据/专家工作间/评估卡),并重新挂载各卡内容
+function renderResultCards(stem, source, r, hasResults) {
+  const cards = $('#pane-cards');
+  if (!cards) return;
+  let html = '';
   if (hasResults) {
     html +=
       '<div class="card" id="card-sft"><div class="card-head"><span class="card-title">SFT 标注详情</span>'
@@ -119,11 +144,9 @@ function renderResults() {
       html += '<div class="card"><div class="card-body empty-note">' + esc(note) + '</div></div>';
     }
   }
+  html += '<div id="eval-card-slot"></div>';
+  cards.innerHTML = html;
 
-  html += '<div id="eval-card-slot"></div></div></div></div>';
-  main.innerHTML = html;
-
-  mountPreview(source, r.evidence && r.evidence.video);
   if (hasResults) {
     renderSftBody(r.sft_label);
     renderReportBody(r.report_md, stem);
@@ -133,7 +156,6 @@ function renderResults() {
     if (job && job.status === 'running') mountExpertPanel(job);
   }
   renderEvalCard();
-  initHSplit();
 }
 
 /* ------------------------------------------------------------ 专家工作间(推理进行面板) */
@@ -171,6 +193,36 @@ function expertLaneCls(ex) {
 
 const EXPERT_CATCH_RATE = 0.9;  // displayed 线性逼近 target 的恒定速率(fraction/秒)
 const EXPERT_CREEP_RATE = 0.04; // 到达 target 且仍 running 时,向下个里程碑缓行的速率
+const LANE_CELLS = 14;  // 每条泳道的像素格数
+const TOTAL_CELLS = 18; // 顶部总条的像素格数
+
+// 分段像素条 HTML:cells 格,每格 4 条子像素(从上到下堆叠,点亮顺序亦从上到下)
+function pixelBarHtml(cells) {
+  const cell = '<span class="pixel-cell">'
+    + '<span class="pixel-sub"></span>'.repeat(4) + '</span>';
+  return cell.repeat(cells);
+}
+
+// 按 displayed(0..1)点亮像素条:displayed×格数 = 整格数 + 格内小数;
+// 整格 4 子像素全亮,frontier 格按小数×4 从上到下点亮子像素;
+// 下一条待点亮子像素加 .frontier 明暗脉冲(仅 opts.running 时)
+function paintPixelBar(cells, displayed, opts) {
+  const n = cells.length;
+  if (!n) return;
+  const pos = Math.max(0, Math.min(1, displayed)) * n;
+  const full = Math.min(n, Math.floor(pos));
+  const litInFrontier = Math.min(3, Math.floor((pos - full) * 4));
+  const running = !!(opts && opts.running);
+  for (let i = 0; i < n; i++) {
+    const lit = i < full ? 4 : (i === full ? litInFrontier : 0);
+    const subs = cells[i].children;
+    for (let s = 0; s < subs.length; s++) {
+      const frontier = running && i === full && full < n && s === lit;
+      subs[s].classList.toggle('on', s < lit || frontier);
+      subs[s].classList.toggle('frontier', frontier);
+    }
+  }
+}
 
 function mountExpertPanel(job) {
   const body = $('#experts-body');
@@ -179,19 +231,24 @@ function mountExpertPanel(job) {
   body.innerHTML =
     '<div class="expert-panel">'
     + '<div class="expert-head">'
-    + '<div class="progress-track expert-total"><div class="progress-fill" id="exp-total-fill"></div></div>'
+    + '<div class="pixel-bar expert-total" id="exp-total">' + pixelBarHtml(TOTAL_CELLS) + '</div>'
     + '<span class="expert-step" id="exp-step"></span>'
     + '<button class="btn btn-ghost btn-sm stop-btn" id="exp-stop" title="停止推理">■ 停止推理</button>'
     + '</div>'
     + '<div class="expert-lanes" id="exp-lanes"></div>'
     + '</div>';
   $('#exp-stop').addEventListener('click', () => cancelJob(job.id));
+  // 初次插入淡入(CSS opacity 0 → 1,transition 见 .expert-panel)
+  const panelEl = body.firstElementChild;
+  requestAnimationFrame(() => { if (panelEl) panelEl.style.opacity = '1'; });
+
+  const totalCells = Array.from($('#exp-total').children);
 
   const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   let phases = null;
   loadExpertPhases().then(d => { phases = d; });
 
-  const lanes = new Map(); // name -> {displayed, row, fill, phaseEl, cls}
+  const lanes = new Map(); // name -> {displayed, row, cells, phaseEl, cls}
   let laneSig = '';
   let totalDisplayed = 0;
   let lastT = performance.now();
@@ -209,7 +266,7 @@ function mountExpertPanel(job) {
       ? list.map(ex =>
           '<div class="expert-lane lane-queued" data-lane="' + esc(ex.name) + '">'
           + '<span class="expert-name" title="' + esc(ex.name) + '">' + esc(ex.name) + '</span>'
-          + '<div class="progress-track"><div class="progress-fill"></div></div>'
+          + '<div class="pixel-bar">' + pixelBarHtml(LANE_CELLS) + '</div>'
           + '<span class="expert-phase"></span>'
           + '</div>').join('')
       : '<div class="empty-note">等待后端推送专家进度…</div>';
@@ -218,7 +275,7 @@ function mountExpertPanel(job) {
       if (row) {
         lanes.set(ex.name, {
           displayed: 0, cls: 'lane-queued', row: row,
-          fill: row.querySelector('.progress-fill'),
+          cells: Array.from(row.querySelector('.pixel-bar').children),
           phaseEl: row.querySelector('.expert-phase'),
         });
       }
@@ -260,7 +317,7 @@ function mountExpertPanel(job) {
         if (d < cap) d = Math.min(cap, d + EXPERT_CREEP_RATE * dt);
       }
       lane.displayed = d;
-      lane.fill.style.width = (d * 100).toFixed(1) + '%';
+      paintPixelBar(lane.cells, d, { running: ex.status === 'running' });
       lane.phaseEl.textContent = ex.label || '';
       lane.phaseEl.title = ex.label || '';
       const cls = expertLaneCls(ex);
@@ -270,8 +327,7 @@ function mountExpertPanel(job) {
     const tf = typeof cp.fraction === 'number' ? cp.fraction : 0;
     totalDisplayed = reduced || totalDisplayed >= tf ? tf
       : Math.min(tf, totalDisplayed + EXPERT_CATCH_RATE * dt);
-    const totalFill = $('#exp-total-fill');
-    if (totalFill) totalFill.style.width = (totalDisplayed * 100).toFixed(1) + '%';
+    paintPixelBar(totalCells, totalDisplayed, { running: true });
     const stepEl = $('#exp-step');
     if (stepEl) stepEl.textContent = jobStepText(cur);
     rafId = requestAnimationFrame(frame);
@@ -298,7 +354,7 @@ function initHSplit() {
   if (!hsplit || !paneTop) return;
   const main = $('#main');
 
-  // renderResults 每次重建 innerHTML,需重新应用持久化比例(存比例而非像素,窗口缩放按比例重算)
+  // 整体重建(切换 stem)后需重新应用持久化比例(存比例而非像素,窗口缩放按比例重算)
   const saved = parseFloat(localStorage.getItem(HSPLIT_KEY));
   applyPaneTopRatio(!isNaN(saved) && saved > 0 && saved <= 1 ? saved : HSPLIT_DEFAULT);
 

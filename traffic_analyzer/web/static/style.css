@@ -1340,51 +1340,56 @@ body.hsplit-dragging { cursor: row-resize; user-select: none; }
   padding: 24px 0;
 }
 
-/* ---------- 推理进度:迷你进度条 / 专家工作间 ---------- */
-.progress-track {
-  position: relative;
-  overflow: hidden;
-  height: 6px;
-  border-radius: 3px;
-  background: #EFEAE0; /* 与 .badge.st-none 同色的浅灰轨道 */
+/* ---------- 推理进度:像素块进度条 / 专家工作间 ---------- */
+/* 分段像素条:.pixel-cell 为竖向容器,内含 4 条 .pixel-sub 细横条(从上到下堆叠);
+   未点亮子像素为空像素底色 #EFEAE0,.on 点亮(颜色随泳道状态类) */
+.pixel-bar { display: flex; gap: 3px; }
+.pixel-cell {
+  flex: 0 0 auto;
+  width: 12px;
+  height: 16px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
 }
-.progress-fill {
+.pixel-sub {
   display: block;
-  height: 100%;
-  width: 0;
-  border-radius: 3px;
-  background: var(--accent);
-  transition: width 0.3s linear;
+  height: 2.5px;
+  border-radius: 1px;
+  background: #EFEAE0; /* 空像素 */
 }
-/* 不定态(fraction 为 null):主色扫光 shimmer,纯 CSS 实现 */
-.progress-fill.indet,
-.mini-prog-fill.indet {
-  width: 40%;
-  background: linear-gradient(90deg, var(--accent-soft), var(--accent), var(--accent-soft));
-  background-size: 200% 100%;
-  animation: prog-shimmer 1.2s linear infinite;
-}
-@keyframes prog-shimmer {
-  0% { background-position: 100% 0; }
-  100% { background-position: -100% 0; }
+.pixel-sub.on { background: var(--accent); }
+/* frontier:格内下一条待点亮子像素的明暗脉冲(仅 running 时由 JS 打上) */
+.pixel-sub.frontier { animation: pixel-frontier 0.9s ease-in-out infinite; }
+@keyframes pixel-frontier {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
 }
 
-/* 侧栏 running 行:56px 迷你进度条 + 行内停止键 */
+/* 侧栏 running 行:8 格迷你像素条(格内 4 子条,尺寸更小) + 行内停止键 */
 .mini-prog {
   flex: 0 0 auto;
   align-self: center;
-  width: 56px;
-  height: 6px;
-  border-radius: 3px;
-  background: #EFEAE0;
-  overflow: hidden;
+  gap: 2px;
 }
-.mini-prog-fill {
-  display: block;
-  height: 100%;
-  width: 0;
-  border-radius: 3px;
+.mini-prog .pixel-cell { width: 5px; height: 8px; }
+.mini-prog .pixel-sub { height: 1px; }
+/* 不定态(fraction 为 null):子像素波浪循环点亮,替代旧渐变扫光 */
+.mini-prog.indet .pixel-sub {
   background: var(--accent);
+  animation: pixel-wave 1.1s linear infinite;
+}
+.mini-prog.indet .pixel-cell:nth-child(1) .pixel-sub { animation-delay: 0s; }
+.mini-prog.indet .pixel-cell:nth-child(2) .pixel-sub { animation-delay: 0.12s; }
+.mini-prog.indet .pixel-cell:nth-child(3) .pixel-sub { animation-delay: 0.24s; }
+.mini-prog.indet .pixel-cell:nth-child(4) .pixel-sub { animation-delay: 0.36s; }
+.mini-prog.indet .pixel-cell:nth-child(5) .pixel-sub { animation-delay: 0.48s; }
+.mini-prog.indet .pixel-cell:nth-child(6) .pixel-sub { animation-delay: 0.6s; }
+.mini-prog.indet .pixel-cell:nth-child(7) .pixel-sub { animation-delay: 0.72s; }
+.mini-prog.indet .pixel-cell:nth-child(8) .pixel-sub { animation-delay: 0.84s; }
+@keyframes pixel-wave {
+  0%, 100% { opacity: 0.12; }
+  50% { opacity: 1; }
 }
 .stop-btn {
   flex: 0 0 auto;
@@ -1400,8 +1405,14 @@ body.hsplit-dragging { cursor: row-resize; user-select: none; }
 }
 .stop-btn:hover { border-color: var(--red); color: var(--red); background: var(--red-soft); }
 
-/* 专家工作间面板 */
-.expert-panel { display: flex; flex-direction: column; gap: 12px; }
+/* 专家工作间面板(初次插入时由 JS 将 opacity 置 1,产生淡入) */
+.expert-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  opacity: 0;
+  transition: opacity 0.18s ease;
+}
 .expert-head { display: flex; align-items: center; gap: 12px; }
 .expert-head .expert-total { flex: 1; }
 .expert-step { font-size: 12.5px; color: var(--text2); white-space: nowrap; }
@@ -1415,7 +1426,7 @@ body.hsplit-dragging { cursor: row-resize; user-select: none; }
   white-space: nowrap;
   color: var(--text);
 }
-.expert-lane .progress-track { flex: 1; }
+.expert-lane .pixel-bar { flex: 1; }
 .expert-phase {
   flex: 0 0 160px;
   min-width: 0;
@@ -1427,19 +1438,19 @@ body.hsplit-dragging { cursor: row-resize; user-select: none; }
   color: var(--text2);
 }
 /* 泳道状态色:queued 灰 / running 橙(--accent)/ done+detected 绿 / done+undetected 灰绿 / error 红 */
-.expert-lane.lane-queued .progress-fill { background: #D8D1C2; }
+.expert-lane.lane-queued .pixel-sub.on { background: #D8D1C2; }
 .expert-lane.lane-queued .expert-name,
 .expert-lane.lane-queued .expert-phase { color: var(--text2); }
-.expert-lane.lane-running .progress-fill { background: var(--accent); }
-.expert-lane.lane-detected .progress-fill { background: var(--sage); }
-.expert-lane.lane-clear .progress-fill { background: var(--sage); opacity: 0.45; }
-.expert-lane.lane-error .progress-fill { background: var(--red); }
+.expert-lane.lane-running .pixel-sub.on { background: var(--accent); }
+.expert-lane.lane-detected .pixel-sub.on { background: var(--sage); }
+.expert-lane.lane-clear .pixel-sub.on { background: var(--sage); opacity: 0.45; }
+.expert-lane.lane-error .pixel-sub.on { background: var(--red); }
 .expert-lane.lane-error .expert-name { color: var(--red); }
 
 @media (prefers-reduced-motion: reduce) {
-  .progress-fill { transition: none; }
-  .progress-fill.indet,
-  .mini-prog-fill.indet { animation: none; width: 40%; }
+  .pixel-sub.frontier,
+  .mini-prog.indet .pixel-sub { animation: none; }
+  .mini-prog.indet .pixel-sub { opacity: 0.45; }
 }
 
 /* ---------- reduced motion ---------- */

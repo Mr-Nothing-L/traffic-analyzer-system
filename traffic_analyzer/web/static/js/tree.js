@@ -82,6 +82,29 @@ function viewEntries(entries) {
 const CHECK_SVG = '<svg class="badge-check" viewBox="0 0 12 12" aria-hidden="true">'
   + '<path d="M2.5 6.4 5 8.9 9.5 3.6"/></svg>';
 
+// 8 格迷你像素条 HTML(格内 4 子条,与主区像素条同构;内联 helper,不跨模块 import)
+const MINI_CELLS = 8;
+function miniPixelHtml() {
+  const cell = '<span class="pixel-cell">'
+    + '<span class="pixel-sub"></span>'.repeat(4) + '</span>';
+  return cell.repeat(MINI_CELLS);
+}
+
+// 与 preview.js paintPixelBar 同构的点亮逻辑(无 frontier 脉冲):整格全亮,frontier 格按小数×4 点亮子像素
+function paintMiniProgress(el, frac) {
+  const cells = el.children;
+  const n = cells.length;
+  if (!n) return;
+  const pos = Math.max(0, Math.min(1, frac)) * n;
+  const full = Math.min(n, Math.floor(pos));
+  const litInFrontier = Math.min(3, Math.floor((pos - full) * 4));
+  for (let i = 0; i < n; i++) {
+    const lit = i < full ? 4 : (i === full ? litInFrontier : 0);
+    const subs = cells[i].children;
+    for (let s = 0; s < subs.length; s++) subs[s].classList.toggle('on', s < lit);
+  }
+}
+
 // 递归渲染一层树节点;depth 控制缩进(每级 14px)
 function treeRowsHtml(entries, depth) {
   let html = '';
@@ -110,15 +133,15 @@ function treeRowsHtml(entries, depth) {
         stem: e.stem || e.name.replace(/\.[^.]+$/, ''), rel: rel, has_results: !!e.has_results,
       };
       const st = videoStatus(v);
-      // 运行中:视频名右侧渲染迷你进度条(fraction 驱动宽度;fraction 为 null 时不定态 shimmer)
+      // 运行中:视频名右侧渲染迷你像素进度条(fraction 点亮格数;fraction 为 null 时不定态波浪)
       //   + 行内停止键(■);排队/完成/失败保持徽标
       // 已完成:徽标内嵌 ✓ SVG(描边动画);失败:徽标旁附重试按钮(↻),点击仅对该视频重新提交推理
       const job = latestJobForStem(v.stem);
       const frac = job && job.progress ? job.progress.fraction : null;
       const statusHtml = st.cls === 'st-running'
-        ? '<span class="mini-prog" data-prog-stem="' + esc(v.stem) + '" title="推理中">'
-          + '<span class="mini-prog-fill' + (frac == null ? ' indet' : '') + '"'
-          + (frac != null ? ' style="width:' + Math.round(frac * 100) + '%"' : '') + '></span></span>'
+        ? '<span class="mini-prog pixel-bar' + (frac == null ? ' indet' : '')
+          + '" data-prog-stem="' + esc(v.stem) + '" title="推理中">'
+          + miniPixelHtml() + '</span>'
           + '<button class="stop-btn" data-stop="' + esc(job.id) + '" title="停止推理">■</button>'
         : (st.cls === 'st-done'
             ? '<span class="badge st-done">' + CHECK_SVG + esc(st.text) + '</span>'
@@ -145,19 +168,16 @@ function treeRowsHtml(entries, depth) {
   return html;
 }
 
-// 仅进度数值变化时快照不变:原地刷新迷你进度条宽度/不定态,避免整树重建打断交互
+// 仅进度数值变化时快照不变:原地刷新迷你像素条点亮态/不定态,避免整树重建打断交互
 function updateMiniProgress() {
   $$('#video-list .mini-prog[data-prog-stem]').forEach(el => {
     const job = latestJobForStem(el.dataset.progStem);
-    const fill = el.firstElementChild;
-    if (!fill) return;
     const frac = job && job.progress ? job.progress.fraction : null;
     if (frac == null) {
-      fill.classList.add('indet');
-      fill.style.width = '';
+      el.classList.add('indet');
     } else {
-      fill.classList.remove('indet');
-      fill.style.width = Math.round(frac * 100) + '%';
+      el.classList.remove('indet');
+      paintMiniProgress(el, frac);
     }
   });
 }
@@ -225,6 +245,7 @@ export function renderSidebar() {
   $$('#video-list .video-item').forEach(item => {
     item.addEventListener('click', () => selectVideo(item.dataset.rel));
   });
+  updateMiniProgress(); // 重建后像素条初始为全暗,立即按当前 fraction 点亮
   $('#check-all').checked = state.videos.length > 0 && state.videos.every(v => state.checked.has(v.rel));
 }
 
