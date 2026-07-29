@@ -272,7 +272,10 @@ export function mockTick() {
           advanceLane(verdict, running._detected);
         }
       }
-      const frac = experts.reduce((s, e) => s + (e.fraction || 0), 0) / experts.length;
+      // 总进度均值只算类别泳道 + 裁决,不含阶段泳道(SFT 标注/报告),
+      // 否则阶段泳道低 fraction 会拉低均值造成总进度倒退
+      const mainLanes = experts.filter(e => ['SFT 标注', '报告'].indexOf(e.name) < 0);
+      const frac = mainLanes.reduce((s, e) => s + (e.fraction || 0), 0) / mainLanes.length;
       running.progress = {
         step_label: verdict.status === 'queued' ? '专家分析' : '裁决',
         step_index: verdict.status === 'queued' ? 2 : 3,
@@ -283,18 +286,38 @@ export function mockTick() {
       running.log_tail = '[mock] 专家泳道完成 '
         + experts.filter(e => e.status === 'done').length + '/' + experts.length;
       if (verdict.status === 'done') {
-        // 裁决后补两条阶段泳道:SFT 标注 → 报告,各停一拍,与真实任务周期对齐
-        if (!running._stage) running._stage = 1;
-        if (running._stage === 1) {
-          experts.push({ name: 'SFT 标注', status: 'running', detected: null, fraction: 0.5, label: 'SFT 标签改写' });
-          running.progress = { step_label: 'SFT', step_index: 4, total_steps: 5, fraction: 0.8, experts: experts };
-          running._stage = 2;
-        } else if (running._stage === 2) {
-          const sft = experts.find(e => e.name === 'SFT 标注');
-          if (sft) Object.assign(sft, { status: 'done', fraction: 1, label: 'SFT 完成' });
-          experts.push({ name: '报告', status: 'running', detected: null, fraction: 0.5, label: '生成报告' });
-          running.progress = { step_label: '报告', step_index: 5, total_steps: 5, fraction: 0.9, experts: experts };
-          running._stage = 3;
+        // 裁决后补两条阶段泳道:SFT 标注 → 报告,各 3 拍生命周期且 fraction 分拍递进。
+        // 前端轮询 1.5s/次,每拍 0.7s,3 拍可保证两条泳道稳定可见,与真实任务周期对齐
+        const STAGE_STEPS = [
+          ['SFT 标注', 0.2, '读取裁决结论', 'SFT', 4],
+          ['SFT 标注', 0.5, 'SFT 标签改写', 'SFT', 4],
+          ['SFT 标注', 0.85, '校验 SFT 样本', 'SFT', 4],
+          ['报告', 0.2, '汇总检测结果', '报告', 5],
+          ['报告', 0.5, '生成分析报告', '报告', 5],
+          ['报告', 0.85, '润色报告结论', '报告', 5],
+        ];
+        const stageIdx = running._stage || 0;
+        running._stage = stageIdx + 1;
+        if (stageIdx < STAGE_STEPS.length) {
+          const st = STAGE_STEPS[stageIdx];
+          let lane = experts.find(e => e.name === st[0]);
+          if (!lane) {
+            // 新阶段启动:收口上一条阶段泳道
+            experts.forEach(e => {
+              if ((e.name === 'SFT 标注' || e.name === '报告') && e.status === 'running') {
+                Object.assign(e, { status: 'done', fraction: 1, label: e.name + '完成' });
+              }
+            });
+            lane = { name: st[0], status: 'running', detected: null, fraction: st[1], label: st[2] };
+            experts.push(lane);
+          } else {
+            lane.fraction = st[1];
+            lane.label = st[2];
+          }
+          running.progress = {
+            step_label: st[3], step_index: st[4], total_steps: 5,
+            fraction: +(0.82 + stageIdx * 0.025).toFixed(3), experts: experts,
+          };
         } else {
           const rep = experts.find(e => e.name === '报告');
           if (rep) Object.assign(rep, { status: 'done', fraction: 1, label: '报告完成' });

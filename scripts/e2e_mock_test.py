@@ -211,6 +211,17 @@ def run_pass(page, p: Pass, shot: Path) -> None:
         row = page.locator("#video-list .video-item", has_text=V)
         row.locator(".retry-btn").click()
         sel("#card-experts")
+        # 阶段泳道断言:先等裁决泳道完成(类别泳道随机推进,耗时不定),
+        # 之后 1 tick(0.7s)内 mock 推入「SFT 标注」泳道,轮询 1.5s 内必然可见
+        page.wait_for_function(
+            "() => { const r = document.querySelector("
+            "'#exp-lanes .expert-lane[data-lane=\"裁决\"]');"
+            " return r && !/lane-(queued|running)/.test(r.className); }",
+            timeout=180_000)
+        page.wait_for_selector(
+            '#exp-lanes .expert-lane[data-lane="SFT 标注"]', timeout=30_000)
+        page.wait_for_selector(
+            '#exp-lanes .expert-lane[data-lane="报告"]', timeout=30_000)
         # 徽章必须限定在该视频行内(其他视频可能早已是已完成)
         row.locator(".badge.st-done").wait_for(timeout=180_000)
         # 完成后轮询会自动重载当前视频;若 3s 内结果卡未出现,手动再点一次视频名兜底
@@ -221,7 +232,18 @@ def run_pass(page, p: Pass, shot: Path) -> None:
         page.wait_for_selector("#card-sft", timeout=20_000)
         page.wait_for_selector("#card-report", timeout=20_000)
         page.wait_for_selector("#card-evidence", timeout=20_000)
-    p.step("↻ 重试 → 推理完成 → SFT/报告/证据卡", t_retry_done)
+    p.step("↻ 重试 → 推理完成(断言 SFT 标注/报告泳道)→ SFT/报告/证据卡", t_retry_done)
+
+    # ---------- 8b. 演示停留:SFT 标注详情卡 / 分析报告卡各停 3 秒(fast 模式不停) ----------
+    def t_sft_card_demo():
+        page.locator("#card-sft").scroll_into_view_if_needed()
+        demo(3000)  # 展示真实 sft 样本输出
+    p.step("SFT 标注详情卡滚动可视区停留 3s", t_sft_card_demo)
+
+    def t_report_card_demo():
+        page.locator("#card-report").scroll_into_view_if_needed()
+        demo(3000)  # 展示分析报告输出
+    p.step("分析报告卡滚动可视区停留 3s", t_report_card_demo)
 
     # ---------- 9. SFT 选项联动(核心演示;无 chips 时 SKIP 不算失败) ----------
     # 选择器依据 traffic_analyzer/web/static/js/sft.js:
