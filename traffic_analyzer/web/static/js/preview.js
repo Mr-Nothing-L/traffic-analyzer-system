@@ -7,7 +7,7 @@ import { api, videoSource, metaUrl, sourceFrameUrl, imageUrl } from './api.js';
 import { latestJobForStem, renderSidebar, invalidateSidebar } from './tree.js';
 import { renderSftBody } from './sft.js';
 import { renderEvidenceCard } from './evidence.js';
-import { renderEvalCard, cancelJob, jobStepText } from './jobs.js';
+import { renderEvalCard, cancelJob } from './jobs.js';
 
 export function runCleanups() {
   state.cleanups.forEach(fn => { try { fn(); } catch (e) { /* ignore */ } });
@@ -231,6 +231,7 @@ function mountExpertPanel(job) {
     '<div class="expert-panel">'
     + '<div class="expert-head">'
     + '<span class="expert-step" id="exp-step"></span>'
+    + '<span class="mini-prog pixel-bar" id="exp-mini" title="总进度">' + pixelBarHtml(8) + '</span>'
     + '<button class="btn btn-ghost btn-sm stop-btn" id="exp-stop" title="停止推理">■ 停止推理</button>'
     + '</div>'
     + '<div class="expert-lanes" id="exp-lanes"></div>'
@@ -243,6 +244,8 @@ function mountExpertPanel(job) {
   const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   let phases = null;
   loadExpertPhases().then(d => { phases = d; });
+
+  const miniCells = Array.from($('#exp-mini').children);
 
   const lanes = new Map(); // name -> {displayed, row, cells, phaseEl, cls}
   let laneSig = '';
@@ -331,7 +334,8 @@ function mountExpertPanel(job) {
       }
     });
     const stepEl = $('#exp-step');
-    if (stepEl) stepEl.textContent = jobStepText(cur);
+    if (stepEl) stepEl.textContent = cp.step_label || '';
+    paintPixelBar(miniCells, typeof cp.fraction === 'number' ? cp.fraction : 0, { running: true });
     rafId = requestAnimationFrame(frame);
   }
 
