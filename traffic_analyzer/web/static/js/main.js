@@ -14,7 +14,7 @@ import { renderWelcome } from './preview.js';
 import { loadEvalLatest, pollJobs, schedulePoll, startInfer, runEvaluate } from './jobs.js';
 import {
   browseWorkspace, closeDirModal, confirmDir, showDirInput,
-  onDirRecentChange, dirModalKeys, navDir,
+  onDirRecentChange, dirModalKeys, navDir, setWorkspaceLabel,
 } from './workspace.js';
 
 /* ================================================================
@@ -139,7 +139,7 @@ async function init() {
   try {
     state.workspace = await api('/api/workspace');
     if (state.workspace && state.workspace.path) {
-      $('#ws-path').textContent = state.workspace.path;
+      setWorkspaceLabel(state.workspace);
       await Promise.all([loadTree(), loadEvalLatest(), pollJobs()]);
     }
   } catch (e) {

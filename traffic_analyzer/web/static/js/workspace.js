@@ -8,10 +8,23 @@ import { loadTree, renderSidebar, syncButtons } from './tree.js';
 import { loadEvalLatest } from './jobs.js';
 import { renderWelcome } from './preview.js';
 
+// 顶栏工作区按钮两段式:主标签「工作区」+ 次级详细路径(未选择时只有「选择工作区…」)
+export function setWorkspaceLabel(ws) {
+  const label = $('#ws-label');
+  const pathEl = $('#ws-path');
+  const path = ws && ws.path;
+  label.textContent = path ? '工作区' : '选择工作区…';
+  pathEl.hidden = !path;
+  if (path) {
+    pathEl.textContent = path;
+    pathEl.title = path;
+  }
+}
+
 // 工作区已切换后的统一刷新(目录弹窗确认后调用)
 export async function applyWorkspace(ws) {
   state.workspace = ws;
-  $('#ws-path').textContent = ws.path;
+  setWorkspaceLabel(ws);
   state.currentStem = null;
   state.currentRel = null;
   state.checked.clear();
