@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-"""mock 模式全按键循环自测脚本。
+"""mock 模式全按键循环自测脚本(演示版:带节奏停顿)。
 
 用法(项目根目录):
     python3 scripts/e2e_mock_test.py              # 有头浏览器,无限循环,Ctrl+C 停止
     python3 scripts/e2e_mock_test.py --headless   # 无头模式
     python3 scripts/e2e_mock_test.py --passes 3   # 只跑 3 轮
-    python3 scripts/e2e_mock_test.py --fast       # 不做慢速演示延迟
+    python3 scripts/e2e_mock_test.py --pause 3.5  # 每步之间停顿 3.5 秒(默认 2.5)
+    python3 scripts/e2e_mock_test.py --fast       # 不做任何演示延迟(pause=0, slow_mo=0)
 
 行为:自动确保 web 服务(127.0.0.1:8600)在运行(不在则启动,退出时不杀);
-打开 ?mock=1 页面,对界面所有按键/页面做一轮完整遍历(工作区弹窗、过滤、
-排序、全选、勾选、预览、推理、停止、重试、完成、证据 Tab、评估),打印每项
-PASS/FAIL;不 Ctrl+C 就一直循环。每轮结束截图存到 output/e2e_screenshots/。
+打开 ?mock=1 页面,对界面所有按键/页面做一轮完整遍历(工作区弹窗基础/进阶、
+切换工作区、过滤、排序、全选、目录展开折叠、勾选、预览、推理、停止、重试、
+完成、SFT 选项联动、证据编辑、评估),打印每项 PASS/FAIL,单步失败不中断整轮。
+不 Ctrl+C 就一直循环。每轮结束截图存到 output/e2e_screenshots/。
 """
 
 import argparse
@@ -54,10 +56,11 @@ def ensure_server() -> None:
 
 
 class Pass:
-    """一轮遍历的步骤记录器。"""
+    """一轮遍历的步骤记录器。pause 为每步之间的演示停顿(秒),0 表示不停。"""
 
-    def __init__(self, idx: int) -> None:
+    def __init__(self, idx: int, pause: float = 0.0) -> None:
         self.idx = idx
+        self.pause = pause
         self.failures = []
 
     def step(self, name: str, fn) -> None:
@@ -67,6 +70,8 @@ class Pass:
         except Exception as exc:  # noqa: BLE001 - 测试脚本要兜住一切继续跑
             self.failures.append(name)
             print(f"  [FAIL] {name}: {type(exc).__name__}: {str(exc)[:160]}")
+        if self.pause > 0:
+            time.sleep(self.pause)  # 步骤间停顿,让观众看清上一结果
 
 
 def run_pass(page, p: Pass, shot: Path) -> None:
@@ -76,7 +81,12 @@ def run_pass(page, p: Pass, shot: Path) -> None:
     def sel(s):
         return page.wait_for_selector(s, timeout=8000)
 
-    # ---------- 1. 工作区弹窗 ----------
+    def demo(ms: int) -> None:
+        """关键演示点额外停留(毫秒);--fast 时不停。"""
+        if p.pause > 0:
+            page.wait_for_timeout(ms)
+
+    # ---------- 1. 工作区弹窗基础 ----------
     def t_workspace_modal():
         page.click("#btn-workspace")
         sel("#dir-modal:not([hidden])")
@@ -90,7 +100,56 @@ def run_pass(page, p: Pass, shot: Path) -> None:
         page.wait_for_selector("#dir-modal", state="hidden", timeout=8000)
     p.step("工作区弹窗(打开/输入路径/取消/✕关闭)", t_workspace_modal)
 
-    # ---------- 2. 侧栏:过滤 / 排序 / 全选 ----------
+    # ---------- 2. 弹窗进阶:最近使用快速跳转 + 手动输入路径回车 ----------
+    def t_modal_advanced():
+        page.click("#btn-workspace")
+        sel("#dir-modal:not([hidden])")
+        # 快速跳转:下拉里任选一个可用项(当前工作区/历史路径/主目录,必然非空)
+        values = page.eval_on_selector_all(
+            "#dir-recent-select option", "els => els.map(e => e.value).filter(v => v)")
+        assert values, "最近使用下拉应至少有一个可跳转项"
+        page.select_option("#dir-recent-select", value=values[0])
+        page.wait_for_selector("#dir-list .dir-row", timeout=8000)
+        demo(1000)
+        # 手动输入路径回车跳转(只看不选,最后取消,不换工作区)
+        page.click("#dir-edit")
+        sel("#dir-input:not([hidden])")
+        page.fill("#dir-input", "/mock")
+        page.press("#dir-input", "Enter")
+        page.wait_for_selector('#dir-list .dir-row[data-path="/mock/datasets"]', timeout=8000)
+        demo(1000)
+        page.click("#dir-cancel")
+        page.wait_for_selector("#dir-modal", state="hidden", timeout=8000)
+    p.step("弹窗进阶(快速跳转/输入路径回车/取消)", t_modal_advanced)
+
+    # ---------- 3. 切换工作区:切到 /mock/datasets 再切回 /mock/workspace ----------
+    def t_switch_workspace():
+        old = page.text_content("#ws-path").strip()
+        assert old, "顶栏应已显示当前工作区路径"
+
+        def switch_to(rel_path: str, expect: str) -> None:
+            page.click("#btn-workspace")
+            sel("#dir-modal:not([hidden])")
+            page.wait_for_selector("#dir-list .dir-row", timeout=8000)
+            page.click("#dir-list .dir-row.dir-up")  # 「..」进入上级 /mock
+            page.wait_for_selector(
+                f'#dir-list .dir-row[data-path="{rel_path}"]', timeout=8000)
+            page.click(f'#dir-list .dir-row[data-path="{rel_path}"]')  # 单击选中
+            demo(800)
+            page.click("#dir-confirm")
+            page.wait_for_function(
+                "(exp) => document.querySelector('#ws-path')"
+                " && document.querySelector('#ws-path').textContent.trim() === exp",
+                arg=expect, timeout=10_000)
+            page.wait_for_selector("#dir-modal", state="hidden", timeout=8000)
+            page.wait_for_selector("#video-list .video-item", timeout=10_000)
+
+        switch_to("/mock/datasets", "/mock/datasets")
+        demo(1500)
+        switch_to("/mock/workspace", old)  # 原路切回,后续步骤不受影响
+    p.step("切换工作区(切走 → 断言路径变化 → 切回)", t_switch_workspace)
+
+    # ---------- 4. 侧栏:过滤 / 排序 / 全选 ----------
     def t_filter_sort():
         page.fill("#side-filter-input", "03")
         page.wait_for_timeout(300)
@@ -114,7 +173,21 @@ def run_pass(page, p: Pass, shot: Path) -> None:
         page.wait_for_timeout(200)
     p.step("全选/取消全选", t_check_all)
 
-    # ---------- 3. 目录展开/折叠 + 视频预览 ----------
+    # ---------- 5. 目录展开/折叠 ----------
+    def t_tree_dirs():
+        for rel in ("analysis", "clips"):
+            row = f'#video-list .tree-dir[data-dir="{rel}"]'
+            page.click(row)  # 展开
+            page.wait_for_selector(f"{row} + .tree-kids", timeout=8000)
+            if rel == "clips":  # clips 下有嵌套视频,确认子项真实渲染
+                page.wait_for_selector(
+                    '#video-list .video-item[data-rel="clips/nested_clip.mp4"]', timeout=8000)
+            demo(1200)
+            page.click(row)  # 折叠(收起动画结束后整树重渲染,子容器被移除)
+            page.wait_for_selector(f"{row} + .tree-kids", state="detached", timeout=8000)
+    p.step("目录展开/折叠(analysis、clips)", t_tree_dirs)
+
+    # ---------- 6. 勾选视频 + 预览 ----------
     def t_tree_preview():
         row = page.locator("#video-list .video-item", has_text=V)
         row.locator("input[data-check]").check()
@@ -122,18 +195,18 @@ def run_pass(page, p: Pass, shot: Path) -> None:
         sel("#pane-top")
     p.step("勾选视频 + 点开预览", t_tree_preview)
 
-    # ---------- 4. 推理 → 专家面板 → 停止 ----------
+    # ---------- 7. 推理 → 专家面板 → 停止 ----------
     def t_infer_stop():
         row = page.locator("#video-list .video-item", has_text=V)
         page.click("#btn-infer")
         sel("#card-experts")
         sel("#exp-lanes .expert-lane")
-        page.wait_for_timeout(2500)  # 让泳道跑起来
+        page.wait_for_timeout(3000 if p.pause > 0 else 2500)  # 关键演示点:专家面板停留
         page.click("#exp-stop")
         row.locator(".badge.st-failed").wait_for(timeout=15_000)
     p.step("开始推理 → 专家工作间 → ■ 停止", t_infer_stop)
 
-    # ---------- 5. ↻ 重试 → 等完成 → 结果页 ----------
+    # ---------- 8. ↻ 重试 → 等完成 → 结果页 ----------
     def t_retry_done():
         row = page.locator("#video-list .video-item", has_text=V)
         row.locator(".retry-btn").click()
@@ -150,24 +223,128 @@ def run_pass(page, p: Pass, shot: Path) -> None:
         page.wait_for_selector("#card-evidence", timeout=20_000)
     p.step("↻ 重试 → 推理完成 → SFT/报告/证据卡", t_retry_done)
 
-    # ---------- 6. 证据 Tab + 编辑按钮 ----------
+    # ---------- 9. SFT 选项联动(核心演示;无 chips 时 SKIP 不算失败) ----------
+    # 选择器依据 traffic_analyzer/web/static/js/sft.js:
+    #   chip: button.sft-chip[data-ev-chip][data-attr][data-value](.selected 为选中态)
+    #   token: .sft-tok[data-attr];hover 联动类 .sft-tok-link;检出框 input[data-ev-check]
+    #   未保存标记 #sft-dirty-flag;保存按钮 #btn-sft-save
+    def t_sft_chips():
+        if page.locator("#card-sft .sft-chip").count() == 0:
+            # 当前 mock 样本无 attr_mentions,chips 不渲染(纯文本卡),跳过不算失败
+            print("  [SKIP] SFT 选项联动:该样本无 attr_mentions,未渲染 chips")
+            return
+        card = page.locator("#card-sft .sft-ev", has=page.locator(".sft-chip")).first
+
+        # 单选组:点未选中的 chip → 同卡同组 .sft-tok 文本变化 + 出现「● 未保存」
+        # 多选组:切换一个 chip 的选中态(同组其余选中 chip 不丢失即判定为多选)
+        single_done = multi_done = False
+        rows = card.locator(".sft-attr-row")
+        for i in range(rows.count()):
+            if single_done and multi_done:
+                break
+            row = rows.nth(i)
+            chips = row.locator(".sft-chip")
+            if chips.count() < 2 or row.locator(".sft-chip.selected").count() == 0:
+                continue
+            attr = chips.first.get_attribute("data-attr")
+            toks = card.locator(f'.sft-tok[data-attr="{attr}"]')
+            before = toks.all_inner_texts()
+            target = row.locator(".sft-chip:not(.selected)").first
+            target.click()
+            demo(2000)  # 让观众看清 chip → 文本联动
+            if not single_done and toks.count() and toks.all_inner_texts() != before:
+                single_done = True
+                assert page.is_visible("#sft-dirty-flag"), "点 chip 后应出现「● 未保存」"
+            elif not multi_done and row.locator(".sft-chip.selected").count() > 1:
+                multi_done = True  # 点击后同组仍有多个选中 → 多选组,已完成一次切换
+
+        # hover 一个 chip → 同事件卡内同组 .sft-tok 出现 .sft-tok-link 高亮类
+        chip = card.locator(".sft-chip").first
+        attr = chip.get_attribute("data-attr")
+        chip.hover()
+        page.wait_for_timeout(300)
+        n_link = card.locator(f'.sft-tok.sft-tok-link[data-attr="{attr}"]').count()
+        assert n_link > 0, "hover chip 后同组 token 应出现 .sft-tok-link"
+        demo(2000)
+
+        # 「检出」checkbox 切换一次再切回(结论预览联动)
+        card.locator("input[data-ev-check]").click()
+        demo(1500)
+        card.locator("input[data-ev-check]").click()
+        demo(1500)
+
+        # 保存 → 「● 未保存」消失
+        page.click("#btn-sft-save")
+        page.wait_for_selector("#sft-dirty-flag", state="hidden", timeout=10_000)
+    p.step("SFT 选项联动(chip/token/hover/检出/保存)", t_sft_chips)
+
+    # ---------- 10. 证据编辑:拖拽应急车道多边形端点 → 保存 ----------
+    # 选择器依据 traffic_analyzer/web/static/js/evidence.js:
+    #   画布 .ev-canvas;顶点命中半径 HIT_R=8(CSS px,kind:'vertex');
+    #   未保存标记 #dirty-flag;保存按钮 #btn-ev-save
+    def t_evidence_edit():
+        page.locator("#ev-tabs .ev-tab", has_text="应急车道占用").click()
+        page.wait_for_selector(".ev-canvas", timeout=10_000)
+        # 帧图加载后 fit() 才会给 canvas 设置 CSS 尺寸,否则端点像素换算无意义
+        page.wait_for_function(
+            "() => { const c = document.querySelector('.ev-canvas');"
+            " return !!(c && c.style.width && c.style.width !== '0px'); }", timeout=10_000)
+        # 画布在首屏视口之下,须先滚动进视口,否则 mouse 事件落在视口外不生效
+        page.locator(".ev-canvas").scroll_into_view_if_needed()
+        rect = page.locator(".ev-canvas").bounding_box()
+        # mock 证据 emergency_polygon_rel 端点 0 = [0.72, 0.35],按画布 rect 换算像素
+        vx = rect["x"] + 0.72 * rect["width"]
+        vy = rect["y"] + 0.35 * rect["height"]
+        page.mouse.move(vx, vy)  # 先 hover 到端点附近(命中后光标变 pointer)
+        page.wait_for_timeout(300)
+        page.mouse.down()
+        for i in range(1, 6):    # 分 5 步拖动,演示拖轨迹
+            page.mouse.move(vx - i * 8, vy + i * 6)
+            page.wait_for_timeout(60)
+        page.mouse.up()
+        demo(2000)  # 关键演示点:拖拽后停留
+        assert page.is_visible("#dirty-flag"), "拖拽端点后应出现「● 未保存」"
+        page.click("#btn-ev-save")
+        page.wait_for_selector("#dirty-flag", state="hidden", timeout=10_000)
+    p.step("证据编辑(拖拽多边形端点 → 未保存 → 保存)", t_evidence_edit)
+
+    # ---------- 11. 证据 Tab + 保存/重置键 ----------
     def t_evidence():
         tabs = page.locator("#ev-tabs .ev-tab")
         if tabs.count() > 1:
-            tabs.nth(1).click()
-            page.wait_for_timeout(300)
             tabs.nth(0).click()
+            page.wait_for_timeout(300)
         page.wait_for_selector("#btn-ev-save[disabled]", timeout=15_000)  # 无修改时保存键应禁用
         page.wait_for_selector("#btn-ev-reset", timeout=15_000)
     p.step("证据 Tab 切换 + 保存/重置键", t_evidence)
 
-    # ---------- 7. 精度评估 ----------
+    # ---------- 12. 预览区:重试播放 + 上下分隔条拖动 ----------
+    def t_preview_pane():
+        page.click("#pv-retry")  # mock 预览为逐帧模式,点「重试播放」重建一次
+        page.wait_for_selector("#pv-slider", timeout=10_000)
+        hs = page.locator("#hsplit").bounding_box()
+        cx, cy = hs["x"] + hs["width"] / 2, hs["y"] + hs["height"] / 2
+        h0 = page.locator("#pane-top").bounding_box()["height"]
+        page.mouse.move(cx, cy)
+        page.mouse.down()
+        page.mouse.move(cx, cy + 40, steps=4)  # 往下拖 40px
+        page.mouse.up()
+        h1 = page.locator("#pane-top").bounding_box()["height"]
+        assert abs((h1 - h0) - 40) < 8, f"分隔条下拖后预览高度应 +40px,实际 {h1 - h0:+.0f}px"
+        demo(800)
+        page.mouse.move(cx, cy + 40)
+        page.mouse.down()
+        page.mouse.move(cx, cy, steps=4)       # 拖回原位
+        page.mouse.up()
+    p.step("预览区(重试播放 + 分隔条拖动复位)", t_preview_pane)
+
+    # ---------- 13. 精度评估 ----------
     def t_eval():
         page.click("#btn-eval-run")
         page.wait_for_selector(".eval-table", timeout=60_000)
     p.step("运行评估 → 评估表", t_eval)
 
-    # ---------- 8. 工具栏「精度评估」按钮 ----------
+    # ---------- 14. 工具栏「精度评估」按钮 ----------
     def t_eval_toolbar():
         page.click("#btn-evaluate")
         page.wait_for_timeout(300)
@@ -181,8 +358,14 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--headless", action="store_true", help="无头模式")
     ap.add_argument("--passes", type=int, default=0, help="轮数,0=无限循环(Ctrl+C 停止)")
-    ap.add_argument("--fast", action="store_true", help="不做演示用慢速延迟")
+    ap.add_argument("--fast", action="store_true",
+                    help="不做演示用慢速延迟(pause=0、slow_mo=0)")
+    ap.add_argument("--pause", type=float, default=2.5,
+                    help="每个步骤之间的停顿秒数(默认 2.5;--fast 时强制为 0)")
     args = ap.parse_args()
+
+    pause = 0.0 if args.fast else max(0.0, args.pause)
+    slow_mo = 0 if args.fast else 250
 
     ensure_server()
     SHOT_DIR.mkdir(parents=True, exist_ok=True)
@@ -193,7 +376,7 @@ def main() -> int:
     with sync_playwright() as pw:
         browser = pw.chromium.launch(
             channel="chrome", headless=args.headless,
-            slow_mo=0 if args.fast else 120,
+            slow_mo=slow_mo,
         )
         page = browser.new_page(viewport={"width": 1600, "height": 900})
         js_errors = []
@@ -201,13 +384,15 @@ def main() -> int:
         try:
             while True:
                 idx += 1
+                t0 = time.time()
                 print(f"\n===== 第 {idx} 轮 =====")
                 page.goto(BASE + "/?mock=1", wait_until="domcontentloaded")
                 page.wait_for_selector("#toolbar", timeout=10_000)
-                p = Pass(idx)
+                p = Pass(idx, pause=pause)
                 run_pass(page, p, SHOT_DIR / f"pass_{idx:03d}.png")
+                elapsed = time.time() - t0
                 verdict = "FAIL" if (p.failures or js_errors) else "PASS"
-                print(f"===== 第 {idx} 轮 {verdict} =====")
+                print(f"===== 第 {idx} 轮 {verdict}(耗时 {elapsed:.0f}s) =====")
                 if js_errors:
                     print(f"  [FAIL] 页面 JS 错误: {js_errors[:3]}")
                 if args.passes and idx >= args.passes:
