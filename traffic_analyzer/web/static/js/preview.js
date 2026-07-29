@@ -191,8 +191,8 @@ function expertLaneCls(ex) {
   return 'lane-queued';
 }
 
-const EXPERT_CATCH_RATE = 0.9;  // displayed 线性逼近 target 的恒定速率(fraction/秒)
-const EXPERT_CREEP_RATE = 0.04; // 到达 target 且仍 running 时,向下个里程碑缓行的速率
+const EXPERT_CATCH_RATE = 0.3;  // displayed 线性逼近 target 的恒定速率(fraction/秒);缓存命中秒回的推理也能看清推进
+const EXPERT_CREEP_RATE = 0.015; // 到达 target 且仍 running 时,向下个里程碑缓行的速率
 const LANE_CELLS = 18;  // 每条泳道的像素列数(3×N 网格,大方块窄间隔铺满卡宽)
 
 // 分段像素条 HTML:cells 列,每列 3 个均等方块像素(从上到下堆叠,点亮顺序亦从上到下)
