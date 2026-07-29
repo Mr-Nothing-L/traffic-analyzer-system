@@ -45,10 +45,8 @@ TOTAL_STEPS = 5
 
 _LOG_TAIL_LINES = 30
 
-# Analyzer stdout also emits EXPERT_PROGRESS|<kind>|... lanes markers; the
-# last registered lane is the adjudication (裁决) lane.
+# Analyzer stdout also emits EXPERT_PROGRESS|<kind>|... lanes markers.
 _EXPERT_MARKER = "EXPERT_PROGRESS|"
-_JUDGE_NAME = "裁决"
 
 # stdout step marker -> (step_index, step_label). "[3.5/4]" must be matched
 # before "[3/4]".
@@ -340,7 +338,6 @@ def _apply_expert_progress(job: Job, line: str) -> None:
 # 让泳道覆盖整个任务周期(此前裁决完成后泳道全满,但任务仍在 SFT/报告阶段)
 _SFT_LANE = "SFT 标注"
 _REPORT_LANE = "报告"
-_NON_CATEGORY_LANES = (_JUDGE_NAME, _SFT_LANE, _REPORT_LANE)
 
 
 def _stage_lane(job: Job, name: str) -> Dict[str, Any]:
@@ -384,23 +381,18 @@ def _finish_stage_lanes(job: Job) -> None:
 
 
 def _recompute_fraction(job: Job) -> None:
-    """Overall fraction on the 5-step scale, refined by expert lane progress.
+    """Overall fraction = mean of ALL lane fractions (类别 + 裁决 + SFT/报告
+    阶段泳道),与「专家工作间」面板同刻度:侧栏迷你条满格 ⟺ 全部泳道完成。
 
-    Expert step (2): (2 + mean of category lane fractions) / 5 — 类别泳道是
-    除裁决外的泳道。Adjudication step (3): (3 + 裁决 lane fraction) / 5.
-    Everything else stays step_index / 5. Caller must hold the job lock.
+    Monotonic guard: register 初期均值远低于 [x/4] 阶段估算值,因此
+    fraction 只升不降。No lanes (legacy children): step_index / 5.
+    Caller must hold the job lock.
     """
-    if job.step_index == 2:
-        lanes = [e for e in job.experts if e["name"] not in _NON_CATEGORY_LANES]
-        if lanes:
-            mean = sum(e["fraction"] for e in lanes) / len(lanes)
-            job.fraction = (2 + mean) / TOTAL_STEPS
-            return
-    if job.step_index == 3:
-        judge = _expert_lane(job, _JUDGE_NAME)
-        if judge is not None:
-            job.fraction = (3 + judge["fraction"]) / TOTAL_STEPS
-            return
+    if job.experts:
+        mean = sum(e["fraction"] for e in job.experts) / len(job.experts)
+        base = job.fraction if job.fraction is not None else 0.0
+        job.fraction = max(base, mean)
+        return
     job.fraction = job.step_index / TOTAL_STEPS
 
 

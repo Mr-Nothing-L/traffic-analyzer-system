@@ -249,11 +249,14 @@ function mountExpertPanel(job) {
   let lastT = performance.now();
   let rafId = 0;
 
-  // 泳道 DOM 按专家名单签名重建(后端首次透出 experts 前可能为空)
+  // 泳道 DOM 按专家名单签名重建(后端首次透出 experts 前可能为空);
+  // 重建时保留已有泳道的 displayed(阶段泳道追加不该让全局面值归零重爬,
+  // 否则与侧栏迷你条在 SFT/报告阶段视觉脱节)
   function syncLanes(list) {
     const sig = list.map(e => e.name).join('|');
     if (sig === laneSig) return;
     laneSig = sig;
+    const prev = new Map(lanes);
     lanes.clear();
     const wrap = $('#exp-lanes');
     if (!wrap) return;
@@ -272,8 +275,9 @@ function mountExpertPanel(job) {
     list.forEach(ex => {
       const row = wrap.querySelector('[data-lane="' + CSS.escape(ex.name) + '"]');
       if (row) {
+        const old = prev.get(ex.name);
         lanes.set(ex.name, {
-          displayed: 0, cls: 'lane-queued', row: row,
+          displayed: old ? old.displayed : 0, cls: 'lane-queued', row: row,
           judge: ex.name === '裁决',
           cells: Array.from(row.querySelector('.pixel-bar').children),
           phaseEl: row.querySelector('.expert-phase'),

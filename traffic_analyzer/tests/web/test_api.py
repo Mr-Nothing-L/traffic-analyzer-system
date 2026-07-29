@@ -1140,7 +1140,8 @@ class TestExpertProgress:
     def test_lanes_and_fraction_climb(self) -> None:
         job = self._submit(_FAKE_EXPERT_SCRIPT)
 
-        # Mid expert phase: category lanes (all but 裁决) mean drives fraction.
+        # Mid expert phase: fraction = mean of ALL lane fractions, never
+        # regressing below the step estimate (register-time mean is 0).
         assert _wait_until(
             lambda: len(job.experts) == 3
             and job.experts[0]["fraction"] == 0.5
@@ -1152,9 +1153,11 @@ class TestExpertProgress:
         }
         assert job.experts[2]["status"] == "queued"
         assert job.step_index == 2
-        assert job.fraction == pytest.approx((2 + (0.5 + 0.25) / 2) / 5)
+        lane_mean = (0.5 + 0.25 + 0.0) / 3
+        assert job.fraction == pytest.approx(max(2 / 5, lane_mean))
 
-        # Adjudication phase: the 裁决 lane drives the fraction.
+        # Adjudication phase: once the all-lane mean passes the step
+        # estimate, the fraction IS the mean (sidebar == lanes scale).
         assert _wait_until(
             lambda: job.step_index == 3 and job.experts[2]["fraction"] == 0.5
         )
@@ -1165,7 +1168,7 @@ class TestExpertProgress:
         assert job.experts[1]["detected"] is False
         assert job.experts[2]["status"] == "running"
         assert job.experts[2]["label"] == "汇总"
-        assert job.fraction == pytest.approx((3 + 0.5) / 5)
+        assert job.fraction == pytest.approx((1.0 + 1.0 + 0.5) / 3)
 
         assert _wait_until(lambda: job.status in ("done", "failed"))
         assert job.status == "done"

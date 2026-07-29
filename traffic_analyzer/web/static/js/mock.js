@@ -272,10 +272,9 @@ export function mockTick() {
           advanceLane(verdict, running._detected);
         }
       }
-      // 总进度均值只算类别泳道 + 裁决,不含阶段泳道(SFT 标注/报告),
-      // 否则阶段泳道低 fraction 会拉低均值造成总进度倒退
-      const mainLanes = experts.filter(e => ['SFT 标注', '报告'].indexOf(e.name) < 0);
-      const frac = mainLanes.reduce((s, e) => s + (e.fraction || 0), 0) / mainLanes.length;
+      // 总进度 = 全体泳道均值,与后端 jobs.py _recompute_fraction 同刻度
+      // (专家阶段尚无阶段泳道,均值天然只含类别+裁决)
+      const frac = experts.reduce((s, e) => s + (e.fraction || 0), 0) / experts.length;
       running.progress = {
         step_label: verdict.status === 'queued' ? '专家分析' : '裁决',
         step_index: verdict.status === 'queued' ? 2 : 3,
@@ -316,7 +315,9 @@ export function mockTick() {
           }
           running.progress = {
             step_label: st[3], step_index: st[4], total_steps: 5,
-            fraction: +(0.82 + stageIdx * 0.025).toFixed(3), experts: experts,
+            // 与后端一致:全体泳道均值(此时类别+裁决已全 1.0,天然单调)
+            fraction: +(experts.reduce((s, e) => s + (e.fraction || 0), 0) / experts.length).toFixed(3),
+            experts: experts,
           };
         } else {
           const rep = experts.find(e => e.name === '报告');
