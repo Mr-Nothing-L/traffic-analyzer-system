@@ -2150,10 +2150,10 @@ class TestFrameCacheMtime:
 # ---------------------------------------------------------------------------
 
 _MP4TEST_MPEG4 = (
-    Path(__file__).resolve().parents[3] / "MP4TEST" / "02_ch1_20260401_142812_2.mp4"
+    Path(__file__).resolve().parents[3] / "演示区" / "01-02-04_Event_2048_1750664210002_1.mp4"
 )
 requires_mp4test = pytest.mark.skipif(
-    not _MP4TEST_MPEG4.is_file(), reason="MP4TEST clip not available"
+    not _MP4TEST_MPEG4.is_file(), reason="demo clip not available"
 )
 
 
