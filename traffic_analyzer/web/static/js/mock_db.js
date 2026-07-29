@@ -1,12 +1,30 @@
 /* ================================================================
    Mock 数据层(?mock=1)—— 数据库部分:mockDb 状态与结果/配置数据
    ================================================================ */
+import { MOCK } from './state.js';
 
 // 真实推理结果(scripts/build_mock_data.py 生成);不存在时回退下方合成数据
 let REAL = null;
 try {
   REAL = (await import('./mock_data.js')).REAL_MOCK;
 } catch (e) { /* 无 mock_data.js:完全走合成兜底 */ }
+
+// mock + 真实数据:演示视频的 <video src> 直连真实后端 /api/workspace/stream
+// (不经过 mockApi),因此先把后端工作区切到演示区。用原生 fetch 而非 api(),
+// 避免被 mockApi 拦截;失败静默(流不可用时前端有逐帧预览兜底)
+if (MOCK && REAL && REAL.workspacePath) {
+  try {
+    const res = await fetch('/api/workspace');
+    const cur = res.ok ? await res.json() : null;
+    if (!cur || cur.path !== REAL.workspacePath) {
+      await fetch('/api/workspace', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: REAL.workspacePath }),
+      });
+    }
+  } catch (e) { /* 后端不可用:静默 */ }
+}
 
 const mockDb = {
   workspace: { path: '/mock/workspace' },

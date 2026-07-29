@@ -367,8 +367,14 @@ def run_pass(page, p: Pass, shot: Path) -> None:
 
     # ---------- 12. 预览区:重试播放 + 上下分隔条拖动 ----------
     def t_preview_pane():
-        page.click("#pv-retry")  # mock 预览为逐帧模式,点「重试播放」重建一次
-        page.wait_for_selector("#pv-slider", timeout=10_000)
+        # mock 演示视频优先走真实后端流(readyState>0);流不可用时前端回退逐帧预览
+        try:
+            page.wait_for_function(
+                "() => { const v = document.querySelector('#pv-video');"
+                " return v && v.readyState > 0; }", timeout=10_000)
+        except Exception:
+            page.click("#pv-retry")  # 逐帧兜底模式:点「重试播放」重建一次
+            page.wait_for_selector("#pv-slider", timeout=10_000)
         hs = page.locator("#hsplit").bounding_box()
         cx, cy = hs["x"] + hs["width"] / 2, hs["y"] + hs["height"] / 2
         h0 = page.locator("#pane-top").bounding_box()["height"]

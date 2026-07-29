@@ -2,9 +2,16 @@
 import { $, esc } from './util.js';
 import { MOCK } from './state.js';
 import { api, metaUrl, sourceFrameUrl } from './api.js';
+import { REAL } from './mock_db.js';
 
 export function streamUrl(source, ss) {
-  if (MOCK) return null; // mock 模式无真实视频流,直接走逐帧预览
+  if (MOCK) {
+    // mock + 真实数据:演示视频直连真实后端流(工作区已由 mock_db.js 切到演示区);
+    // 无真实数据或合成视频(如 clips/nested_clip.mp4)保持 null,走逐帧预览
+    const v = REAL && REAL.videos && REAL.videos.find(v => v.stem === source.stem);
+    if (!v) return null;
+    return '/api/workspace/stream?path=' + encodeURIComponent(v.rel);
+  }
   let url = source.rel != null
     ? '/api/workspace/stream?path=' + encodeURIComponent(source.rel)
     : '/api/videos/' + encodeURIComponent(source.stem) + '/stream';

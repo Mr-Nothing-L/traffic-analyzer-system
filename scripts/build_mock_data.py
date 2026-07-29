@@ -91,6 +91,8 @@ def main() -> int:
         })
 
     real_mock = {
+        # 演示区绝对路径:mock 初始化时把后端工作区切到这里,/api/workspace/stream 才能服务真实视频流
+        "workspacePath": str(DEMO_DIR),
         "videos": videos,
         "eventConfig": load_event_config(),
         "detectedMap": detected,
