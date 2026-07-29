@@ -57,7 +57,15 @@ def require_workspace(request: Request) -> Path:
 
 def validate_stem(stem: str) -> str:
     """Reject path-traversal stems; return the stem unchanged when safe."""
-    if not stem or stem in (".", "..") or "/" in stem or "\\" in stem or ".." in stem:
+    if (
+        not stem
+        or stem in (".", "..")
+        or "/" in stem
+        or "\\" in stem
+        or ".." in stem
+        # 控制字符(含 \x00、换行):会污染日志/子进程 argv/HTTP 头,一并拒绝
+        or any(ord(c) < 32 or ord(c) == 127 for c in stem)
+    ):
         raise HTTPException(status_code=404, detail="Unknown video stem")
     return stem
 

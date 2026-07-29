@@ -1,18 +1,16 @@
 /* ================================================================
-   主区
+   主区(编排:欢迎页/分析视图骨架与各卡挂载)
    ================================================================ */
 import { $, esc } from './util.js';
-import { MOCK, state } from './state.js';
-import { api, videoSource, metaUrl, sourceFrameUrl, imageUrl } from './api.js';
+import { state, runCleanups } from './state.js';
+import { api, videoSource } from './api.js';
 import { latestJobForStem, renderSidebar, invalidateSidebar } from './tree.js';
 import { renderSftBody } from './sft.js';
 import { renderEvidenceCard } from './evidence.js';
-import { renderEvalCard, cancelJob } from './jobs.js';
-
-export function runCleanups() {
-  state.cleanups.forEach(fn => { try { fn(); } catch (e) { /* ignore */ } });
-  state.cleanups = [];
-}
+import { renderEvalCard } from './jobs.js';
+import { mountExpertPanel } from './expert_panel.js';
+import { mountPreview } from './video_preview.js';
+import { renderReportBody } from './markdown.js';
 
 export function renderWelcome() {
   runCleanups();
@@ -45,6 +43,7 @@ function skeletons() {
 export async function selectVideo(rel) {
   const v = state.videos.find(v => v.rel === rel);
   if (!v) return;
+  const prevRel = state.currentRel;
   state.currentStem = v.stem;
   state.currentRel = v.rel;
   state.evTabIdx = 0;
@@ -56,6 +55,10 @@ export async function selectVideo(rel) {
   invalidateSidebar(); renderSidebar();
   runCleanups();
   const main = $('#main');
+  // 跨目录同 stem 切换(rel 不同):旧 contenteditable 残留绑定的是已丢弃草稿,
+  // 复用 DOM 会空指针——清 renderedStem 强制整体重建(同 rel 重进仍保留 DOM 防闪白)
+  if (prevRel && prevRel !== v.rel) delete main.dataset.renderedStem;
+  // 注:跨目录同 stem 时草稿按 rel 键迁移暂不做,切换即丢弃草稿
   if (main.dataset.renderedStem !== v.stem) {
     // 同 stem 重进(queued→running/完成后自动重载):保留现有 DOM(含视频预览),
     // 不铺骨架,避免全屏闪白;renderResults 会只重建卡片区
@@ -158,191 +161,6 @@ function renderResultCards(stem, source, r, hasResults) {
   renderEvalCard();
 }
 
-/* ------------------------------------------------------------ 专家工作间(推理进行面板) */
-// GET /api/expert-phases 的阶段定义缓存(每类别 [{fraction, label}]);404 时记 null,走内置 fallback 封顶
-let expertPhasesPromise = null;
-function loadExpertPhases() {
-  if (!expertPhasesPromise) {
-    expertPhasesPromise = api('/api/expert-phases')
-      .then(d => (d && d.categories) || d || null)
-      .catch(() => null);
-  }
-  return expertPhasesPromise;
-}
-
-// 泳道 displayed 到达 target 后的缓行封顶:阶段序列中 displayed 之后的下一个里程碑(绝不越过);
-// 无阶段定义(/api/expert-phases 404)时封顶在当前 fraction+0.1 或 1.0
-function nextMilestone(phases, name, displayed, target) {
-  const seq = phases && phases[name];
-  if (Array.isArray(seq)) {
-    const next = seq.map(s => s.fraction)
-      .filter(f => typeof f === 'number' && f > displayed + 0.005)
-      .sort((a, b) => a - b)[0];
-    if (next != null) return Math.min(next, 1);
-  }
-  return Math.min(Math.max(target, displayed) + 0.1, 1);
-}
-
-// 泳道状态 → 样式类:queued 灰 / running 橙 / done+detected 绿 / done+undetected 灰绿 / error 红
-function expertLaneCls(ex) {
-  if (ex.status === 'running') return 'lane-running';
-  if (ex.status === 'done') return ex.detected ? 'lane-detected' : 'lane-clear';
-  if (ex.status === 'error') return 'lane-error';
-  return 'lane-queued';
-}
-
-const EXPERT_CATCH_RATE = 0.3;  // displayed 线性逼近 target 的恒定速率(fraction/秒);缓存命中秒回的推理也能看清推进
-const EXPERT_CREEP_RATE = 0.015; // 到达 target 且仍 running 时,向下个里程碑缓行的速率
-const LANE_CELLS = 18;  // 每条泳道的像素列数(3×N 网格,大方块窄间隔铺满卡宽)
-
-// 分段像素条 HTML:cells 列,每列 3 个均等方块像素(从上到下堆叠,点亮顺序亦从上到下)
-function pixelBarHtml(cells) {
-  const cell = '<span class="pixel-cell">'
-    + '<span class="pixel-sub"></span>'.repeat(3) + '</span>';
-  return cell.repeat(cells);
-}
-
-// 按 displayed(0..1)点亮像素条:displayed×列数 = 整列数 + 列内小数;
-// 整列 3 像素全亮,frontier 列按小数×3 从上到下点亮;
-// 下一个待点亮像素加 .frontier 明暗脉冲(仅 opts.running 时)
-function paintPixelBar(cells, displayed, opts) {
-  const n = cells.length;
-  if (!n) return;
-  const pos = Math.max(0, Math.min(1, displayed)) * n;
-  const full = Math.min(n, Math.floor(pos));
-  const litInFrontier = Math.min(2, Math.floor((pos - full) * 3));
-  const running = !!(opts && opts.running);
-  for (let i = 0; i < n; i++) {
-    const lit = i < full ? 3 : (i === full ? litInFrontier : 0);
-    const subs = cells[i].children;
-    for (let s = 0; s < subs.length; s++) {
-      const frontier = running && i === full && full < n && s === lit;
-      subs[s].classList.toggle('on', s < lit || frontier);
-      subs[s].classList.toggle('frontier', frontier);
-    }
-  }
-}
-
-function mountExpertPanel(job) {
-  const body = $('#experts-body');
-  if (!body) return;
-  const stem = job.stem;
-  body.innerHTML =
-    '<div class="expert-panel">'
-    + '<div class="expert-head">'
-    + '<span class="expert-step" id="exp-step"></span>'
-    + '<span class="mini-prog pixel-bar" id="exp-mini" title="总进度">' + pixelBarHtml(8) + '</span>'
-    + '<button class="btn btn-ghost btn-sm stop-btn" id="exp-stop" title="停止推理">■ 停止推理</button>'
-    + '</div>'
-    + '<div class="expert-lanes" id="exp-lanes"></div>'
-    + '</div>';
-  $('#exp-stop').addEventListener('click', () => cancelJob(job.id));
-  // 初次插入淡入(CSS opacity 0 → 1,transition 见 .expert-panel)
-  const panelEl = body.firstElementChild;
-  requestAnimationFrame(() => { if (panelEl) panelEl.style.opacity = '1'; });
-
-  const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  let phases = null;
-  loadExpertPhases().then(d => { phases = d; });
-
-  const miniCells = Array.from($('#exp-mini').children);
-
-  const lanes = new Map(); // name -> {displayed, row, cells, phaseEl, cls}
-  let laneSig = '';
-  let lastT = performance.now();
-  let rafId = 0;
-
-  // 泳道 DOM 按专家名单签名重建(后端首次透出 experts 前可能为空);
-  // 重建时保留已有泳道的 displayed(阶段泳道追加不该让全局面值归零重爬,
-  // 否则与侧栏迷你条在 SFT/报告阶段视觉脱节)
-  function syncLanes(list) {
-    const sig = list.map(e => e.name).join('|');
-    if (sig === laneSig) return;
-    laneSig = sig;
-    const prev = new Map(lanes);
-    lanes.clear();
-    const wrap = $('#exp-lanes');
-    if (!wrap) return;
-    wrap.innerHTML = list.length
-      ? list.map(ex =>
-          '<div class="expert-lane lane-queued' + (ex.name === '裁决' ? ' lane-judge' : '')
-          + '" data-lane="' + esc(ex.name) + '">'
-          + '<div class="lane-top">'
-          + '<span class="lane-dot"></span>'
-          + '<span class="expert-name" title="' + esc(ex.name) + '">' + esc(ex.name) + '</span>'
-          + '<span class="expert-phase"></span>'
-          + '</div>'
-          + '<div class="pixel-bar">' + pixelBarHtml(LANE_CELLS) + '</div>'
-          + '</div>').join('')
-      : '<div class="empty-note">等待后端推送专家进度…</div>';
-    list.forEach(ex => {
-      const row = wrap.querySelector('[data-lane="' + CSS.escape(ex.name) + '"]');
-      if (row) {
-        const old = prev.get(ex.name);
-        lanes.set(ex.name, {
-          displayed: old ? old.displayed : 0, cls: 'lane-queued', row: row,
-          judge: ex.name === '裁决',
-          cells: Array.from(row.querySelector('.pixel-bar').children),
-          phaseEl: row.querySelector('.expert-phase'),
-        });
-      }
-    });
-  }
-
-  function stopLoop() {
-    if (rafId) cancelAnimationFrame(rafId);
-    rafId = 0;
-  }
-
-  function frame(now) {
-    const dt = Math.min(0.1, (now - lastT) / 1000);
-    lastT = now;
-    const cur = latestJobForStem(stem); // 轮询写入的 state.jobs 是进度的唯一来源
-    if (!cur || cur.status !== 'running' || !document.body.contains(body)) {
-      stopLoop();
-      // 失败(含用户停止):原地换成失败提示;done 由轮询触发的 selectVideo 重载为结果卡
-      if (cur && cur.status === 'failed' && document.body.contains(body)) {
-        body.innerHTML = '<div class="empty-note">推理已停止或失败,暂无分析结果。'
-          + '可在左侧点击 ↻ 重试,或重新勾选后点击「开始推理」。</div>';
-      }
-      return;
-    }
-    const cp = cur.progress || {};
-    const list = Array.isArray(cp.experts) ? cp.experts : [];
-    syncLanes(list);
-    list.forEach(ex => {
-      const lane = lanes.get(ex.name);
-      if (!lane) return;
-      const target = ex.status === 'queued' ? 0
-        : (typeof ex.fraction === 'number' ? ex.fraction : (ex.status === 'done' ? 1 : 0));
-      let d = lane.displayed;
-      if (ex.status === 'queued') d = 0;
-      else if (reduced) d = target; // reduced-motion:无动画,直接到位
-      else if (d < target) d = Math.min(target, d + EXPERT_CATCH_RATE * dt);
-      else if (ex.status === 'running') {
-        const cap = nextMilestone(phases, ex.name, d, target);
-        if (d < cap) d = Math.min(cap, d + EXPERT_CREEP_RATE * dt);
-      }
-      lane.displayed = d;
-      paintPixelBar(lane.cells, d, { running: ex.status === 'running' });
-      lane.phaseEl.textContent = ex.label || '';
-      lane.phaseEl.title = ex.label || '';
-      const cls = expertLaneCls(ex);
-      if (cls !== lane.cls) {
-        lane.cls = cls;
-        lane.row.className = 'expert-lane ' + cls + (lane.judge ? ' lane-judge' : '');
-      }
-    });
-    const stepEl = $('#exp-step');
-    if (stepEl) stepEl.textContent = cp.step_label || '';
-    paintPixelBar(miniCells, typeof cp.fraction === 'number' ? cp.fraction : 0, { running: true });
-    rafId = requestAnimationFrame(frame);
-  }
-
-  state.cleanups.push(stopLoop); // 主区重渲染前自动停帧
-  rafId = requestAnimationFrame(frame);
-}
-
 /* ------------------------------------------------------------ 上下分隔条(预览常驻) */
 const HSPLIT_KEY = 'ta_preview_split';
 const HSPLIT_DEFAULT = 0.46;
@@ -383,6 +201,7 @@ function initHSplit() {
   }
 
   hsplit.addEventListener('mousedown', e => {
+    if (!hsplit.isConnected) return; // 主区已重建,残留节点不再响应拖拽
     startY = e.clientY;
     startHeight = paneTop.getBoundingClientRect().height;
     hsplit.classList.add('dragging');
@@ -392,175 +211,14 @@ function initHSplit() {
     e.preventDefault();
   });
 
+  // 主区重渲染时兜底摘除 document 级监听(拖拽中途视图被替换的场景;未注册时为 no-op)
+  state.cleanups.push(() => {
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+  });
+
   hsplit.addEventListener('dblclick', () => {
     applyPaneTopRatio(HSPLIT_DEFAULT); // 双击复位默认比例
     localStorage.setItem(HSPLIT_KEY, String(HSPLIT_DEFAULT));
   });
-}
-
-/* ------------------------------------------------------------ 视频预览卡 */
-function streamUrl(source, ss) {
-  if (MOCK) return null; // mock 模式无真实视频流,直接走逐帧预览
-  let url = source.rel != null
-    ? '/api/workspace/stream?path=' + encodeURIComponent(source.rel)
-    : '/api/videos/' + encodeURIComponent(source.stem) + '/stream';
-  if (ss != null && ss > 0) url += (url.indexOf('?') >= 0 ? '&' : '?') + 'ss=' + ss.toFixed(2);
-  return url;
-}
-
-function mountPreview(source, videoInfo) {
-  const body = $('#preview-body');
-  if (!body) return;
-  const url = streamUrl(source);
-  body.innerHTML =
-    '<div class="pv-wrap" id="pv-wrap">'
-    + '<video id="pv-video" controls preload="metadata" playsinline></video></div>'
-    + '<div id="pv-stepper" hidden></div>';
-
-  const showStepper = hint => {
-    $('#pv-wrap').hidden = true;
-    mountFrameStepper($('#pv-stepper'), source, hint,
-      () => mountPreview(source, videoInfo), videoInfo);
-  };
-
-  if (!url) { showStepper('模拟模式下无真实视频流,以下为逐帧预览。'); return; }
-
-  const video = $('#pv-video');
-  video.addEventListener('error', () => {
-    showStepper('浏览器无法直接播放该视频(编码不受支持或转码服务不可用),已切换为逐帧预览。');
-  });
-  video.src = url;
-}
-
-// 逐帧预览:先取真实帧数元数据,失败则显示错误态(不出现滑块/黑框)
-function mountFrameStepper(mount, source, hint, onRetry, videoInfo) {
-  mount.hidden = false;
-  if (MOCK) {
-    // mock 模式无元数据接口:沿用 evidence 估算帧数的画布帧
-    const total = videoInfo && videoInfo.duration_sec && videoInfo.fps
-      ? Math.max(1, Math.round(videoInfo.duration_sec * videoInfo.fps)) : 300;
-    buildStepper(mount, source, total, hint, onRetry);
-    return;
-  }
-  mount.innerHTML = '<div class="pv-hint"><span>' + esc(hint) + '</span></div>'
-    + '<div class="empty-note">读取视频信息…</div>';
-  api(metaUrl(source)).then(meta => {
-    if (!mount.isConnected) return; // 期间切换了视图
-    buildStepper(mount, source, meta.frame_count, hint, onRetry);
-  }).catch(() => {
-    if (!mount.isConnected) return;
-    mount.innerHTML =
-      '<div class="pv-hint"><span>无法读取该视频的帧(文件损坏或编码无法识别)</span>'
-      + '<button class="btn btn-ghost btn-sm" id="pv-retry">重试播放</button></div>';
-    $('#pv-retry', mount).addEventListener('click', onRetry);
-  });
-}
-
-function buildStepper(mount, source, total, hint, onRetry) {
-  mount.innerHTML =
-    '<div class="pv-hint"><span>' + esc(hint) + '</span>'
-    + '<button class="btn btn-ghost btn-sm" id="pv-retry">重试播放</button></div>'
-    + '<div class="pv-stage"><img id="pv-img" alt="帧预览">'
-    + '<span class="pv-frame-err" id="pv-frame-err" hidden>帧读取失败</span></div>'
-    + '<div class="pv-slider-row">'
-    + '<input type="range" id="pv-slider" min="0" max="' + (total - 1) + '" value="0" step="1">'
-    + '<span class="pv-idx" id="pv-idx">0 / ' + (total - 1) + '</span></div>';
-
-  const img = $('#pv-img', mount);
-  const frameErr = $('#pv-frame-err', mount);
-  const slider = $('#pv-slider', mount);
-  const idxLabel = $('#pv-idx', mount);
-  img.src = sourceFrameUrl(source, 0);
-  slider.addEventListener('input', () => {
-    const idx = +slider.value;
-    idxLabel.textContent = idx + ' / ' + slider.max;
-    img.src = sourceFrameUrl(source, idx);
-  });
-  // 单帧读取失败:仅显示占位提示,不改动滑块范围
-  img.addEventListener('load', () => { img.hidden = false; frameErr.hidden = true; });
-  img.addEventListener('error', () => { img.hidden = true; frameErr.hidden = false; });
-  $('#pv-retry', mount).addEventListener('click', onRetry);
-}
-
-/* ------------------------------------------------------------ 报告卡 */
-/* 极小 markdown → html:标题/加粗/表格/列表/代码块/图片/引用/分割线 */
-function mdInline(text, resolveImg) {
-  let s = esc(text);
-  s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (m, alt, src) => {
-    const url = /^https?:|^data:/.test(src) ? src : (resolveImg ? resolveImg(src) : src);
-    return '<img alt="' + alt + '" src="' + esc(url) + '">';
-  });
-  s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
-  s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-  s = s.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
-  return s;
-}
-
-function mdToHtml(md, resolveImg) {
-  const lines = String(md || '').split('\n');
-  const out = [];
-  let i = 0;
-  let listStack = null; // 'ul' | 'ol'
-  const closeList = () => { if (listStack) { out.push('</' + listStack + '>'); listStack = null; } };
-
-  while (i < lines.length) {
-    const line = lines[i];
-
-    // 代码块
-    if (/^```/.test(line)) {
-      closeList();
-      const buf = [];
-      i++;
-      while (i < lines.length && !/^```/.test(lines[i])) { buf.push(lines[i]); i++; }
-      i++;
-      out.push('<pre><code>' + esc(buf.join('\n')) + '</code></pre>');
-      continue;
-    }
-    // 表格
-    if (/^\s*\|.*\|\s*$/.test(line) && i + 1 < lines.length && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i + 1])) {
-      closeList();
-      const parseRow = l => l.trim().replace(/^\||\|$/g, '').split('|').map(c => c.trim());
-      const head = parseRow(line);
-      i += 2;
-      const rows = [];
-      while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) { rows.push(parseRow(lines[i])); i++; }
-      out.push('<table><thead><tr>' + head.map(h => '<th>' + mdInline(h, resolveImg) + '</th>').join('')
-        + '</tr></thead><tbody>'
-        + rows.map(r => '<tr>' + r.map(c => '<td>' + mdInline(c, resolveImg) + '</td>').join('') + '</tr>').join('')
-        + '</tbody></table>');
-      continue;
-    }
-    // 标题
-    const h = line.match(/^(#{1,4})\s+(.*)$/);
-    if (h) { closeList(); out.push('<h' + h[1].length + '>' + mdInline(h[2], resolveImg) + '</h' + h[1].length + '>'); i++; continue; }
-    // 分割线
-    if (/^\s*(-{3,}|\*{3,})\s*$/.test(line)) { closeList(); out.push('<hr>'); i++; continue; }
-    // 引用
-    if (/^>\s?/.test(line)) { closeList(); out.push('<blockquote>' + mdInline(line.replace(/^>\s?/, ''), resolveImg) + '</blockquote>'); i++; continue; }
-    // 列表
-    let m = line.match(/^\s*[-*+]\s+(.*)$/);
-    if (m) {
-      if (listStack !== 'ul') { closeList(); out.push('<ul>'); listStack = 'ul'; }
-      out.push('<li>' + mdInline(m[1], resolveImg) + '</li>'); i++; continue;
-    }
-    m = line.match(/^\s*\d+[.)]\s+(.*)$/);
-    if (m) {
-      if (listStack !== 'ol') { closeList(); out.push('<ol>'); listStack = 'ol'; }
-      out.push('<li>' + mdInline(m[1], resolveImg) + '</li>'); i++; continue;
-    }
-    // 空行 / 段落
-    closeList();
-    if (line.trim() === '') { i++; continue; }
-    out.push('<p>' + mdInline(line, resolveImg) + '</p>');
-    i++;
-  }
-  closeList();
-  return '<div class="md">' + out.join('\n') + '</div>';
-}
-
-function renderReportBody(reportMd, stem) {
-  const body = $('#report-body');
-  if (!body) return;
-  if (!reportMd) { body.innerHTML = '<div class="empty-note">无分析报告</div>'; return; }
-  body.innerHTML = mdToHtml(reportMd, src => imageUrl(stem, src));
 }

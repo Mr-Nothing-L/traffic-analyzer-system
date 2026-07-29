@@ -6,6 +6,7 @@ import { state } from './state.js';
 import { api } from './api.js';
 import { selectVideo } from './preview.js';
 import { retryInfer, cancelJob } from './jobs.js';
+import { pixelBarHtml, paintPixelBar } from './pixel_bar.js';
 
 export function latestJobForStem(stem) {
   for (let i = state.jobs.length - 1; i >= 0; i--) {
@@ -82,28 +83,8 @@ function viewEntries(entries) {
 const CHECK_SVG = '<svg class="badge-check" viewBox="0 0 12 12" aria-hidden="true">'
   + '<path d="M2.5 6.4 5 8.9 9.5 3.6"/></svg>';
 
-// 8 格迷你像素条 HTML(格内 4 子条,与主区像素条同构;内联 helper,不跨模块 import)
+// 8 格迷你像素条(格内 3 子条,与主区像素条同构;实现见公共模块 pixel_bar.js)
 const MINI_CELLS = 8;
-function miniPixelHtml() {
-  const cell = '<span class="pixel-cell">'
-    + '<span class="pixel-sub"></span>'.repeat(3) + '</span>';
-  return cell.repeat(MINI_CELLS);
-}
-
-// 与 preview.js paintPixelBar 同构的点亮逻辑(无 frontier 脉冲):整列全亮,frontier 列按小数×3 点亮
-function paintMiniProgress(el, frac) {
-  const cells = el.children;
-  const n = cells.length;
-  if (!n) return;
-  const pos = Math.max(0, Math.min(1, frac)) * n;
-  const full = Math.min(n, Math.floor(pos));
-  const litInFrontier = Math.min(2, Math.floor((pos - full) * 3));
-  for (let i = 0; i < n; i++) {
-    const lit = i < full ? 3 : (i === full ? litInFrontier : 0);
-    const subs = cells[i].children;
-    for (let s = 0; s < subs.length; s++) subs[s].classList.toggle('on', s < lit);
-  }
-}
 
 // 递归渲染一层树节点;depth 控制缩进(每级 14px)
 function treeRowsHtml(entries, depth) {
@@ -141,7 +122,7 @@ function treeRowsHtml(entries, depth) {
       const statusHtml = st.cls === 'st-running'
         ? '<span class="mini-prog pixel-bar' + (frac == null ? ' indet' : '')
           + '" data-prog-stem="' + esc(v.stem) + '" title="推理中">'
-          + miniPixelHtml() + '</span>'
+          + pixelBarHtml(MINI_CELLS) + '</span>'
           + '<button class="stop-btn" data-stop="' + esc(job.id) + '" title="停止推理">■</button>'
         : (st.cls === 'st-done'
             ? '<span class="badge st-done">' + CHECK_SVG + esc(st.text) + '</span>'
@@ -177,7 +158,7 @@ function updateMiniProgress() {
       el.classList.add('indet');
     } else {
       el.classList.remove('indet');
-      paintMiniProgress(el, frac);
+      paintPixelBar(el.children, frac); // 不传 opts:无 frontier 脉冲
     }
   });
 }
@@ -195,11 +176,14 @@ export function renderSidebar() {
     return;
   }
   // 快照对比,避免每次轮询重建 DOM(防止打断勾选/展开);过滤/排序也计入快照
+  // latestJobForStem 的 job id 一并纳入:任务更替(重试/重提交)时 id 变化触发重建,
+  // 行内停止键(■)不会持过期 id
   const snap = JSON.stringify([
     state.tree.root, state.tree.children, Array.from(state.tree.expanded),
     state.filter, state.sort,
     state.videos.map(v => [v.rel, v.has_results, videoStatus(v).text,
-      state.checked.has(v.rel), state.currentRel === v.rel]),
+      state.checked.has(v.rel), state.currentRel === v.rel,
+      (latestJobForStem(v.stem) || {}).id || 0]),
   ]);
   if (snap === sidebarSnapshot) {
     updateMiniProgress(); // 快照不含 fraction:原地更新迷你进度条,避免重建整棵侧栏

@@ -104,15 +104,20 @@ export function closeDirModal() {
   $('#btn-workspace').focus();
 }
 
+// 目录导航竞态防护:并发 navDir 时只落地最后一次响应(参照 selectVideo 的 currentRel 模式)
+let navSeq = 0;
+
 export async function navDir(path) {
+  const seq = ++navSeq;
   dirModal.loading = true;
   renderDirList();
   let data = null;
   try {
     data = await api(path ? '/api/fs/list?path=' + encodeURIComponent(path) : '/api/fs/list');
   } catch (e) {
-    toast('读取目录失败(' + e.status + '):' + e.message, 'err');
+    if (seq === navSeq) toast('读取目录失败(' + e.status + '):' + e.message, 'err');
   }
+  if (seq !== navSeq) return; // 已有更新的导航请求:过期响应丢弃
   dirModal.loading = false;
   if (data) {
     dirModal.cwd = data.path;

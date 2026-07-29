@@ -9,18 +9,27 @@ log tail (~30 lines).
 [文件说明]
 作用:单工作线程串行子进程任务队列(JobManager)。build_infer_command 构造
 ``python -m traffic_analyzer analyze`` 命令(带 --sft-label),build_evaluate_command 构造
-scripts/batch_evaluate.py 评估命令;解析子进程输出的 [x/4] 步骤标记及
-EXPERT_PROGRESS| 专家泳道标记(register/start/phase/done)更新进度,
-提供 /api/infer、/api/jobs、/api/jobs/{id}/cancel 接口;shutdown/cancel 先 SIGTERM 后
-SIGKILL,避免遗留子进程。
+scripts/batch_evaluate.py 评估命令;worker 按行解析子进程输出并委托
+web/progress.py 的泳道状态机更新进度;提供 /api/infer(同 stem 的
+queued/running infer 去重,重复 409;提交前持 evidence_api._put_locks[stem],
+与 PUT 同一把锁、统一锁顺序 _put_locks → JobManager._lock)、/api/jobs、
+/api/jobs/{id}/cancel 接口;cancel/shutdown 先 SIGTERM 后 SIGKILL;
+cancel 竞态处理:锁内读 job.proc,worker 挂上 proc 后复查 status(非 running
+立即 terminate),收尾块只在 status=='running' 时改写 status/returncode;
+任务超时(默认 4 小时,TRAFFIC_ANALYZER_JOB_TIMEOUT_SECONDS 可调,<=0 禁用)
+到点 terminate 并标 failed;shutdown 后置 _shutdown 标志,submit 拒绝新任务。
 上游:web/app.py(挂载路由,lifespan/atexit 时调用 shutdown);web/evaluate.py(复用
-build_evaluate_command);web/evidence_api.py(检查同 stem 的在跑 infer 任务)。
+build_evaluate_command);web/evidence_api.py(PUT 检查同 stem 在跑 infer;
+本模块 post_infer 复用其 _put_locks)。
 下游:traffic_analyzer CLI(python -m traffic_analyzer analyze)、scripts/batch_evaluate.py、
-web/workspace.py 的 analysis/<stem>/ 路径契约。
+web/workspace.py 的 analysis/<stem>/ 路径契约、web/progress.py(进度状态机)。
 """
 
 from __future__ import annotations
 
+import contextlib
+import logging
+import os
 import queue
 import subprocess
 import sys
@@ -33,7 +42,19 @@ from typing import Any, Deque, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from traffic_analyzer.web import evidence_api as evidence_api_mod
 from traffic_analyzer.web import workspace as workspace_mod
+from traffic_analyzer.web.progress import (
+    TOTAL_STEPS,
+    _EXPERT_MARKER,
+    _STEP_MARKERS,
+    _advance_stage_lanes,
+    _apply_expert_progress,
+    _finish_stage_lanes,
+    _recompute_fraction,
+)
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -41,22 +62,11 @@ router = APIRouter()
 # resolves its default --config-dir relative to this directory.
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-TOTAL_STEPS = 5
-
 _LOG_TAIL_LINES = 30
 
-# Analyzer stdout also emits EXPERT_PROGRESS|<kind>|... lanes markers.
-_EXPERT_MARKER = "EXPERT_PROGRESS|"
-
-# stdout step marker -> (step_index, step_label). "[3.5/4]" must be matched
-# before "[3/4]".
-_STEP_MARKERS = (
-    ("[3.5/4]", 4, "SFT"),
-    ("[1/4]", 1, "预处理"),
-    ("[2/4]", 2, "专家"),
-    ("[3/4]", 3, "裁决"),
-    ("[4/4]", 5, "报告"),
-)
+# 任务超时:默认 4 小时,环境变量可调(<=0 禁用)。
+_JOB_TIMEOUT_ENV = "TRAFFIC_ANALYZER_JOB_TIMEOUT_SECONDS"
+_DEFAULT_JOB_TIMEOUT_SEC = 4 * 3600.0
 
 
 def build_infer_command(workspace: Path, video_rel: str, stem: str) -> List[str]:
@@ -129,13 +139,34 @@ class Job:
 
 
 class JobManager:
-    """Single-worker serial queue; job ids auto-increment from 1."""
+    """Single-worker serial queue; job ids auto-increment from 1.
 
-    def __init__(self) -> None:
+    ``timeout_sec``: per-job wall-clock limit; ``None`` reads
+    ``TRAFFIC_ANALYZER_JOB_TIMEOUT_SECONDS`` (default 4h), <=0 disables.
+    A timed-out job is terminated (SIGTERM→SIGKILL) and marked failed.
+    """
+
+    def __init__(self, timeout_sec: Optional[float] = None) -> None:
+        if timeout_sec is None:
+            try:
+                timeout_sec = float(
+                    os.environ.get(_JOB_TIMEOUT_ENV, _DEFAULT_JOB_TIMEOUT_SEC)
+                )
+            except ValueError:
+                logger.warning(
+                    "Invalid %s=%r, falling back to default %ss",
+                    _JOB_TIMEOUT_ENV, os.environ.get(_JOB_TIMEOUT_ENV),
+                    _DEFAULT_JOB_TIMEOUT_SEC,
+                )
+                timeout_sec = _DEFAULT_JOB_TIMEOUT_SEC
+        self._timeout_sec: Optional[float] = (
+            timeout_sec if timeout_sec and timeout_sec > 0 else None
+        )
         self._lock = threading.Lock()
         self._jobs: Dict[int, Job] = {}
         self._queue: "queue.Queue[Job]" = queue.Queue()
         self._next_id = 1
+        self._shutdown = False
         self._worker = threading.Thread(
             target=self._worker_loop, daemon=True, name="traffic-web-jobs"
         )
@@ -150,6 +181,8 @@ class JobManager:
         cwd: Path = REPO_ROOT,
     ) -> int:
         with self._lock:
+            if self._shutdown:
+                raise RuntimeError("JobManager is shut down; not accepting new jobs")
             job_id = self._next_id
             self._next_id += 1
             self._jobs[job_id] = Job(
@@ -169,6 +202,7 @@ class JobManager:
             try:
                 self._run(job)
             except Exception:  # never let the worker thread die
+                logger.exception("job #%s runner crashed", job.id)
                 with self._lock:
                     job.status = "failed"
                     job.log_tail.append("job runner crashed")
@@ -203,37 +237,78 @@ class JobManager:
 
         with self._lock:
             job.proc = proc
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            line = line.rstrip("\n")
+            still_running = job.status == "running"
+        if not still_running:
+            # cancel/timeout/shutdown landed while Popen was starting: kill the
+            # child we just spawned instead of letting it run unattached.
+            _terminate_proc(proc)
             with self._lock:
-                job.log_tail.append(line)
-                if line.startswith(_EXPERT_MARKER):
-                    _apply_expert_progress(job, line)
-                    continue
-                for marker, step_index, step_label in _STEP_MARKERS:
-                    if marker in line:
-                        job.step_index = step_index
-                        job.step_label = step_label
-                        _advance_stage_lanes(job, step_index)
-                        _recompute_fraction(job)
-                        break
-        returncode = proc.wait()
+                job.returncode = proc.returncode
+            return
+
+        timer: Optional[threading.Timer] = None
+        if self._timeout_sec is not None:
+            timer = threading.Timer(self._timeout_sec, self._on_job_timeout, args=(job,))
+            timer.daemon = True
+            timer.start()
+        try:
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                line = line.rstrip("\n")
+                with self._lock:
+                    job.log_tail.append(line)
+                    if line.startswith(_EXPERT_MARKER):
+                        _apply_expert_progress(job, line)
+                        continue
+                    for marker, step_index, step_label in _STEP_MARKERS:
+                        if marker in line:
+                            job.step_index = step_index
+                            job.step_label = step_label
+                            _advance_stage_lanes(job, step_index)
+                            _recompute_fraction(job)
+                            break
+            returncode = proc.wait()
+        finally:
+            if timer is not None:
+                timer.cancel()
         with self._lock:
-            job.returncode = returncode
-            job.status = "done" if returncode == 0 else "failed"
-            if returncode == 0:
-                _finish_stage_lanes(job)
-                job.fraction = 1.0
+            # cancel/timeout/shutdown may have marked the job failed while we
+            # were reading stdout; only a still-running job gets its final
+            # status from the exit code.
+            if job.status == "running":
+                job.returncode = returncode
+                job.status = "done" if returncode == 0 else "failed"
+                if returncode == 0:
+                    _finish_stage_lanes(job)
+                    job.fraction = 1.0
+
+    def _on_job_timeout(self, job: Job) -> None:
+        """Timer callback: terminate the child and mark the job failed."""
+        with self._lock:
+            if job.status != "running":
+                return
+            proc = job.proc
+            job.log_tail.append(
+                f"job timed out after {self._timeout_sec:.0f}s, terminating"
+            )
+        if proc is not None and proc.poll() is None:
+            _terminate_proc(proc)
+        with self._lock:
+            if job.status == "running":
+                job.returncode = proc.returncode if proc is not None else job.returncode
+                job.status = "failed"
 
     def shutdown(self) -> None:
         """Stop all queued/running jobs (server shutdown; safe to call twice).
 
         Queued jobs are failed without being started (the worker skips them
         when it later dequeues them); running children get SIGTERM, then
-        SIGKILL after ~3s.
+        SIGKILL after ~3s. After shutdown, ``submit`` refuses new jobs.
         """
         with self._lock:
+            if self._shutdown:
+                return
+            self._shutdown = True
             jobs = list(self._jobs.values())
             for job in jobs:
                 if job.status == "queued":
@@ -266,7 +341,10 @@ class JobManager:
                 job.status = "failed"
                 job.log_tail.append("cancelled by user")
                 return job
-        proc = job.proc
+            # 锁内读 job.proc:worker 可能正在 Popen 与「挂上 proc」之间,
+            # 此时 proc 为 None —— 不在这里误读旧值/漏读新值;worker 挂上
+            # proc 后会复查 status,看到非 running 立即自行 terminate。
+            proc = job.proc
         if proc is not None and proc.poll() is None:
             _terminate_proc(proc)
         with self._lock:
@@ -275,131 +353,6 @@ class JobManager:
                 job.status = "failed"
             job.log_tail.append("cancelled by user")
         return job
-
-
-def _expert_lane(job: Job, name: str) -> Optional[Dict[str, Any]]:
-    for lane in job.experts:
-        if lane["name"] == name:
-            return lane
-    return None
-
-
-def _apply_expert_progress(job: Job, line: str) -> None:
-    """Update ``job.experts`` from one ``EXPERT_PROGRESS|...`` stdout line.
-
-    Contract (emitted by the analyzer child)::
-
-        EXPERT_PROGRESS|register|<total>|<name1>,<name2>,…   (last is 裁决)
-        EXPERT_PROGRESS|start|<name>
-        EXPERT_PROGRESS|phase|<name>|<fraction 0-1>|<label>
-        EXPERT_PROGRESS|done|<done>/<total>|<name>|<detected|undetected|error>
-
-    Malformed lines are ignored. Caller must hold the job lock.
-    """
-    parts = line[len(_EXPERT_MARKER):].split("|")
-    try:
-        kind = parts[0]
-        if kind == "register" and len(parts) >= 3:
-            job.experts = [
-                {"name": name, "status": "queued", "detected": None,
-                 "fraction": 0.0, "label": ""}
-                for name in parts[2].split(",")
-                if name
-            ]
-            # 阶段泳道从一开始就占位(排队态),面板即刻展示完整流水线
-            for stage in (_SFT_LANE, _REPORT_LANE):
-                job.experts.append(
-                    {"name": stage, "status": "queued", "detected": None,
-                     "fraction": 0.0, "label": ""}
-                )
-        elif kind == "start" and len(parts) >= 2:
-            lane = _expert_lane(job, parts[1])
-            if lane is not None:
-                lane["status"] = "running"
-        elif kind == "phase" and len(parts) >= 4:
-            lane = _expert_lane(job, parts[1])
-            if lane is not None:
-                lane["fraction"] = float(parts[2])
-                lane["label"] = parts[3]
-        elif kind == "done" and len(parts) >= 4:
-            lane = _expert_lane(job, parts[2])
-            if lane is not None:
-                if parts[3] == "error":
-                    lane["status"] = "error"
-                else:
-                    lane["status"] = "done"
-                    # "done" token(裁决收尾)→ detected 保持 None(无检出语义)
-                    lane["detected"] = (
-                        True if parts[3] == "detected"
-                        else False if parts[3] == "undetected"
-                        else None
-                    )
-                lane["fraction"] = 1.0
-    except ValueError:
-        return
-    _recompute_fraction(job)
-
-
-# 专家/裁决之后的流水线阶段泳道(SFT 标注、报告):由 [3.5/4]、[4/4] 步骤标记驱动,
-# 让泳道覆盖整个任务周期(此前裁决完成后泳道全满,但任务仍在 SFT/报告阶段)
-_SFT_LANE = "SFT 标注"
-_REPORT_LANE = "报告"
-
-
-def _stage_lane(job: Job, name: str) -> Dict[str, Any]:
-    lane = _expert_lane(job, name)
-    if lane is None:
-        lane = {"name": name, "status": "queued", "detected": None,
-                "fraction": 0.0, "label": ""}
-        job.experts.append(lane)
-    return lane
-
-
-def _advance_stage_lanes(job: Job, step_index: int) -> None:
-    """Sync the SFT/report lanes from the coarse step markers. Caller holds lock."""
-    if not job.experts:
-        return
-    if step_index >= 4:
-        sft = _stage_lane(job, _SFT_LANE)
-        if sft["status"] not in ("done",):
-            sft["status"] = "running"
-            sft["fraction"] = 0.5
-            sft["label"] = "SFT 标签改写"
-    if step_index >= 5:
-        sft = _stage_lane(job, _SFT_LANE)
-        sft.update(status="done", fraction=1.0, label="SFT 完成")
-        rep = _stage_lane(job, _REPORT_LANE)
-        if rep["status"] not in ("done",):
-            rep["status"] = "running"
-            rep["fraction"] = 0.5
-            rep["label"] = "生成报告"
-
-
-def _finish_stage_lanes(job: Job) -> None:
-    """rc==0: mark every stage lane done. Caller holds lock."""
-    for name in (_SFT_LANE, _REPORT_LANE):
-        lane = _expert_lane(job, name)
-        if lane is not None:
-            lane.update(status="done", fraction=1.0)
-    rep = _expert_lane(job, _REPORT_LANE)
-    if rep is not None:
-        rep["label"] = "报告完成"
-
-
-def _recompute_fraction(job: Job) -> None:
-    """Overall fraction = mean of ALL lane fractions (类别 + 裁决 + SFT/报告
-    阶段泳道),与「专家工作间」面板同刻度:侧栏迷你条满格 ⟺ 全部泳道完成。
-
-    Monotonic guard: register 初期均值远低于 [x/4] 阶段估算值,因此
-    fraction 只升不降。No lanes (legacy children): step_index / 5.
-    Caller must hold the job lock.
-    """
-    if job.experts:
-        mean = sum(e["fraction"] for e in job.experts) / len(job.experts)
-        base = job.fraction if job.fraction is not None else 0.0
-        job.fraction = max(base, mean)
-        return
-    job.fraction = job.step_index / TOTAL_STEPS
 
 
 def _terminate_proc(proc: subprocess.Popen, timeout: float = 3.0) -> None:
@@ -411,12 +364,28 @@ def _terminate_proc(proc: subprocess.Popen, timeout: float = 3.0) -> None:
         proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         proc.kill()
-        proc.wait(timeout=timeout)
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            # SIGKILL 后仍不退出(如 D 状态):不再无限阻塞调用方。
+            logger.warning("pid %s did not exit after SIGKILL", proc.pid)
 
 
 class InferRequest(BaseModel):
     stems: Optional[List[str]] = None  # legacy: top-level video stems
     rels: Optional[List[str]] = None   # workspace-relative video paths (any depth)
+
+
+def _active_infer_job(request: Request, stem: str) -> Optional[Dict[str, Any]]:
+    """The queued/running infer job for ``stem``, if any (caller holds put lock)."""
+    for job in request.app.state.jobs.list_jobs():
+        if (
+            job.get("kind") == "infer"
+            and job.get("stem") == stem
+            and job.get("status") in ("queued", "running")
+        ):
+            return job
+    return None
 
 
 @router.post("/api/infer")
@@ -451,11 +420,27 @@ def post_infer(body: InferRequest, request: Request) -> Dict[str, Any]:
         seen_stems[stem] = rel
         videos.append((stem, rel))
 
-    job_ids: List[int] = []
-    for stem, rel in videos:
-        workspace_mod.analysis_dir(workspace, stem).mkdir(parents=True, exist_ok=True)
-        argv = build_infer_command(workspace, rel, stem)
-        job_ids.append(request.app.state.jobs.submit("infer", argv, stem=stem, rel=rel))
+    # 与 PUT 同一把 per-stem 锁(evidence_api._put_locks),锁顺序统一为
+    # _put_locks[stem] → JobManager._lock,闭合「检查无在跑 infer」与
+    # 「提交 infer」之间的 TOCTOU 窗口;多 stem 按字典序取锁避免互相死锁。
+    with contextlib.ExitStack() as stack:
+        for stem in sorted(seen_stems):
+            stack.enter_context(evidence_api_mod._put_locks[stem])
+        for stem in seen_stems:
+            active = _active_infer_job(request, stem)
+            if active is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Inference job #{active.get('id')} for '{stem}' is "
+                        f"{active.get('status')}; retry after it finishes"
+                    ),
+                )
+        job_ids: List[int] = []
+        for stem, rel in videos:
+            workspace_mod.analysis_dir(workspace, stem).mkdir(parents=True, exist_ok=True)
+            argv = build_infer_command(workspace, rel, stem)
+            job_ids.append(request.app.state.jobs.submit("infer", argv, stem=stem, rel=rel))
     return {"job_ids": job_ids}
 
 

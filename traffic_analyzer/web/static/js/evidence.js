@@ -1,8 +1,7 @@
 /* ------------------------------------------------------------ 证据编辑卡 */
 import { $, $$, esc, toast, flashSaveBtn } from './util.js';
-import { state } from './state.js';
+import { state, runCleanups } from './state.js';
 import { api, videoSource, sourceFrameUrl, imageUrl } from './api.js';
-import { runCleanups } from './preview.js';
 
 function markDirty() {
   state.evidenceDirty = true;
@@ -54,13 +53,17 @@ async function saveEvidence() {
   if (!stem || !state.evidenceDraft) return;
   const btn = $('#btn-ev-save');
   if (btn) btn.disabled = true;
+  // 在途草稿签名(与 sft.js saveSft 的 inFlightSig 同模式):识别保存期间的继续编辑
+  const inFlightSig = JSON.stringify(state.evidenceDraft);
   try {
     await api('/api/results/' + encodeURIComponent(stem) + '/evidence', {
       method: 'PUT', body: state.evidenceDraft,
     });
     if (state.currentStem !== stem) return; // 期间切换了视频
     state.results.evidence = JSON.parse(JSON.stringify(state.evidenceDraft));
-    clearDirty();
+    if (JSON.stringify(state.evidenceDraft) === inFlightSig) {
+      clearDirty(); // 保存期间无新编辑:落盘即清 dirty
+    } // 保存期间继续编辑:保留 dirty,仅重算上面的 results 副本
     toast('证据已保存', 'ok');
     flashSaveBtn($('#btn-ev-save')); // 按钮短暂显示 ✓
   } catch (e) {
@@ -374,8 +377,9 @@ function mountEvidencePane(mount, stem, source, ev, videoInfo) {
       return;
     }
     const hit = hitTest(p);
-    const changed = JSON.stringify(hit && { k: hit.kind, i: hit.idx, s: shapes.indexOf(hit.shape) })
-      !== JSON.stringify(hover && { k: hover.kind, i: hover.idx, s: shapes.indexOf(hover.shape) });
+    // 直接字段比较(不做 JSON.stringify):shape 用引用同一性,等价于原 indexOf 比较
+    const changed = !hit !== !hover
+      || !!(hit && hover && (hit.kind !== hover.kind || hit.idx !== hover.idx || hit.shape !== hover.shape));
     hover = hit;
     canvas.style.cursor = hit ? (hit.kind === 'body' ? 'move' : 'pointer') : 'crosshair';
     if (changed) draw();

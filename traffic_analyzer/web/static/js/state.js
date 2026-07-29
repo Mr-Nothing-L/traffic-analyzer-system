@@ -25,5 +25,12 @@ export const state = {
   sort: 'name',             // 侧栏排序键:name / mtime / size / status
 };
 
+// 主区重渲染前的清理:执行并清空 state.cleanups(帧循环/全局监听等)
+// 定义在 state.js(叶子模块),供 preview/evidence 等使用,避免模块间循环依赖
+export function runCleanups() {
+  state.cleanups.forEach(fn => { try { fn(); } catch (e) { /* ignore */ } });
+  state.cleanups = [];
+}
+
 // 调试与既有检查脚本依赖的全局句柄
 window.state = state;

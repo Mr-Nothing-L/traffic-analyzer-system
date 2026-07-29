@@ -6,7 +6,7 @@ import { state, STEP_LABELS } from './state.js';
 import { api } from './api.js';
 import { loadTree, renderSidebar, syncButtons } from './tree.js';
 import { selectVideo } from './preview.js';
-import { sftSignature } from './sft.js';
+import { sftSignature } from './sft_model.js';
 
 export function jobStepText(job) {
   const p = job.progress || {};
@@ -21,11 +21,23 @@ export function jobStepText(job) {
 }
 
 /* ------------------------------------------------------------ 精度评估卡 */
+let evalCardSnap = ''; // 整卡快照:内容未变时跳过重建,避免每轮询整卡 innerHTML 替换
 export function renderEvalCard() {
   const slot = $('#eval-card-slot');
   if (!slot) return;
   const evalJob = [...state.jobs].reverse().find(j => j.kind === 'evaluate');
   const running = evalJob && (evalJob.status === 'running' || evalJob.status === 'queued');
+  // 运行中 body 展示 log_tail,快照需含之;evalData 对象小,整体入快照
+  const lt = running
+    ? (Array.isArray(evalJob.log_tail) ? evalJob.log_tail.join('\n') : (evalJob.log_tail || ''))
+    : '';
+  const snap = JSON.stringify([
+    !!running, running ? jobStepText(evalJob) : '', lt,
+    !!(state.workspace && state.workspace.path), state.evalData,
+  ]);
+  // slot.firstChild 为空说明宿主视图刚重建(快照失效),必须重渲染
+  if (snap === evalCardSnap && slot.firstChild) return;
+  evalCardSnap = snap;
 
   let inner = '<div class="card" id="card-eval"><div class="card-head">'
     + '<span class="card-title">精度评估</span>'
@@ -42,8 +54,7 @@ export function renderEvalCard() {
 
   const body = $('#eval-body');
   if (running) {
-    // 后端 log_tail 是字符串数组(逐行);归一化为多行文本,空数组不渲染 pre 块
-    const lt = Array.isArray(evalJob.log_tail) ? evalJob.log_tail.join('\n') : (evalJob.log_tail || '');
+    // log_tail 已在快照处归一化为多行文本,空串不渲染 pre 块
     body.innerHTML = '<div class="eval-running"><span class="spinner"></span><span>'
       + jobStepText(evalJob) + '</span></div>'
       + (lt ? '<pre class="md" style="margin-top:10px"><code>' + esc(lt) + '</code></pre>' : '');

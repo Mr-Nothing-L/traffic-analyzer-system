@@ -21,16 +21,19 @@ on-disk value as-is (legacy samples stay without the key, annotated samples
 keep their annotations); an explicit ``null`` deletes the key.
 
 [文件说明]
-作用:结果读取与证据/SFT 编辑接口。GET 读取 <workspace>/analysis/<stem>/ 下的
-report.md、<stem>.json(SFT 样本)、<stem>_evidence.json 及图片;evidence PUT 仅允许修改
-标定多边形与证据框/标签,SFT PUT 仅允许 description/action/event_attributes/attr_mentions
-(event_attributes 按 event_options.yaml 封闭枚举校验;attr_mentions 的每个提及串
-必须出现在对应事件的 think 段落正文中),其余字段与磁盘版本比对
-不一致即 422;event_attributes/attr_mentions 区分「未提交」(保留磁盘原值,
-旧格式样本不新增字段)与「显式 null」(删除该键);写入采用 tmp+os.replace
-原子写并按 stem 加锁(409 在跑 infer 检查在锁内复查,消除 TOCTOU)。
+作用:结果读取与证据/SFT 编辑接口(端点 + 原子写 + per-stem PUT 锁;pydantic
+模型在 web/evidence_schema.py,yaml 缓存索引在 web/event_config.py)。GET 读取
+<workspace>/analysis/<stem>/ 下的 report.md、<stem>.json(SFT 样本)、
+<stem>_evidence.json 及图片;evidence PUT 仅允许修改标定多边形与证据框/标签,
+SFT PUT 仅允许 description/action/event_attributes/attr_mentions,其余字段与
+磁盘版本比对不一致即 422;event_attributes/attr_mentions 区分「未提交」(保留
+磁盘原值)与「显式 null」(删除该键);写入采用 tmp+os.replace 原子写(写后
+fsync)并按 stem 加锁(409 在跑 infer 检查在锁内复查,消除 TOCTOU)。
+_read_json 区分「文件不存在」(GET → null / PUT → 404)与「文件损坏」
+(GET → 500 / PUT → 422,绝不静默当作不存在)。
 上游:web/app.py(挂载路由);web/static 前端(结果查看与标注编辑)。
-下游:web/workspace.py(路径与 stem 校验)、web/jobs.py(在跑任务检查)、
+下游:web/workspace.py(路径与 stem 校验)、web/jobs.py(在跑任务检查,
+jobs.post_infer 反向复用本模块的 _put_locks 消除 infer-vs-PUT 的 TOCTOU)、
 config/event_categories.yaml 与 config/event_options.yaml
 (/api/config/events 供 SFT 编辑器按事件分框与渲染结构化选项)。
 """
@@ -39,355 +42,35 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import threading
 from collections import defaultdict
-from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import yaml
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, ConfigDict, ValidationInfo, field_validator
 
+from traffic_analyzer.web import event_config
 from traffic_analyzer.web import workspace as workspace_mod
+from traffic_analyzer.web.evidence_schema import Evidence, SftSample
 
 router = APIRouter()
 
-# Repository root (traffic_analyzer/web/evidence_api.py -> parents[2]).
-_EVENT_CATEGORIES_YAML = (
-    Path(__file__).resolve().parents[2]
-    / "traffic_analyzer"
-    / "config"
-    / "event_categories.yaml"
-)
-_EVENT_OPTIONS_YAML = (
-    Path(__file__).resolve().parents[2]
-    / "traffic_analyzer"
-    / "config"
-    / "event_options.yaml"
-)
-
-
-def _yaml_mtime_ns(path: Path) -> int:
-    """文件 mtime(纳秒);缺失时返回 -1(后续 read_text 仍按原样抛错)。"""
-    try:
-        return path.stat().st_mtime_ns
-    except OSError:
-        return -1
-
-
-@lru_cache(maxsize=8)
-def _event_options_index_cached(
-    path: str, mtime_ns: int
-) -> Dict[int, List[Dict[str, Any]]]:
-    data = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
-    index: Dict[int, List[Dict[str, Any]]] = {}
-    for ev in data.get("event_options") or []:
-        groups = [
-            {
-                "key": str(g["key"]),
-                "label": str(g.get("label") or g["key"]),
-                "options": [str(o) for o in g.get("options") or []],
-                "required": bool(g.get("required", False)),
-                "multi": bool(g.get("multi", False)),
-            }
-            for g in ev.get("groups") or []
-            if "key" in g
-        ]
-        if "event_id" in ev:
-            index[int(ev["event_id"])] = groups
-    return index
+# 路径常量的规范定义在 event_config;在此重新绑定为模块全局,供端点与包装
+# 函数读取(测试 monkeypatch evidence_api._EVENT_*_YAML 后即生效)。
+_EVENT_CATEGORIES_YAML = event_config._EVENT_CATEGORIES_YAML
+_EVENT_OPTIONS_YAML = event_config._EVENT_OPTIONS_YAML
 
 
 def _event_options_index() -> Dict[int, List[Dict[str, Any]]]:
-    """event_options.yaml 的封闭枚举定义:{event_id: [属性组, ...]}(保持声明顺序)。
-
-    按 (路径, mtime) 缓存:运行中编辑 yaml 后下一次读取自动失效,无需重启。
-    """
-    return _event_options_index_cached(
-        str(_EVENT_OPTIONS_YAML), _yaml_mtime_ns(_EVENT_OPTIONS_YAML)
-    )
-
-
-@lru_cache(maxsize=8)
-def _event_name_index_cached(path: str, mtime_ns: int) -> Dict[str, int]:
-    data = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
-    return {
-        str(cat["name_zh"]): int(cat["event_id"])
-        for cat in data.get("event_categories") or []
-        if "event_id" in cat and "name_zh" in cat
-    }
+    """event_options.yaml 封闭枚举索引(读本模块的路径常量,monkeypatch 友好)。"""
+    return event_config.event_options_index(_EVENT_OPTIONS_YAML)
 
 
 def _event_name_index() -> Dict[str, int]:
-    """事件中文名 → event_id(用于在 description 的 think 段落中定位事件文本)。
-
-    与 _event_options_index 同口径:按 (路径, mtime) 缓存,yaml 变更自动失效。
-    """
-    return _event_name_index_cached(
-        str(_EVENT_CATEGORIES_YAML), _yaml_mtime_ns(_EVENT_CATEGORIES_YAML)
-    )
-
-
-def _think_sections(description: str) -> Dict[int, str]:
-    """description 的 <think> 按空行分段,「事件名：」前缀定位各事件段落正文。
-
-    与前端 js/sft.js 的 parseSftDescription 同一口径:重复段落取首段,
-    匹配不到事件名的段落忽略。
-    """
-    sections: Dict[int, str] = {}
-    m = re.search(r"<think>([\s\S]*?)</think>", description or "")
-    if not m:
-        return sections
-    names = _event_name_index()
-    for para in re.split(r"\n\s*\n", m.group(1).strip()):
-        p = para.strip()
-        pm = re.match(r"^([^：\n]{1,30})：", p)
-        if not pm:
-            continue
-        ev_id = names.get(pm.group(1))
-        if ev_id is not None and ev_id not in sections:
-            sections[ev_id] = p[pm.end() :].strip()
-    return sections
-
-
-# ---------------------------------------------------------------------------
-# Evidence schema v1 (coordinates normalized to [0, 1])
-# ---------------------------------------------------------------------------
-
-
-def _check_normalized(values: List[float], field_name: str) -> None:
-    if not all(0.0 <= v <= 1.0 for v in values):
-        raise ValueError(f"{field_name} coordinates must be normalized to [0, 1]")
-
-
-class Calibration(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    frame_index: Optional[int] = None
-    emergency_polygon_rel: Optional[List[List[float]]] = None
-    chevron_polygon_rel: Optional[List[List[float]]] = None
-
-    @field_validator("emergency_polygon_rel", "chevron_polygon_rel")
-    @classmethod
-    def _check_polygon(cls, value: Optional[List[List[float]]]) -> Optional[List[List[float]]]:
-        if value is not None:
-            for point in value:
-                if len(point) != 2:
-                    raise ValueError("polygon points must be [x, y]")
-                _check_normalized(point, "polygon")
-        return value
-
-
-class EvidenceRegion(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    frame_index: Optional[int] = None
-    box_rel: List[float]
-    label: str
-    image: Optional[str] = None
-
-    @field_validator("box_rel")
-    @classmethod
-    def _check_box(cls, value: List[float]) -> List[float]:
-        if len(value) != 4:
-            raise ValueError("box_rel must be [x1, y1, x2, y2]")
-        _check_normalized(value, "box_rel")
-        return value
-
-
-class EventEntry(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    event_id: int
-    name: str
-    detected: bool
-    calibration: Calibration
-    evidence_regions: List[EvidenceRegion] = []
-    gallery_images: List[str] = []
-
-
-class VideoInfo(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    file_name: Optional[str] = None
-    duration_sec: Optional[float] = None
-    fps: Optional[float] = None
-    width: Optional[int] = None
-    height: Optional[int] = None
-
-
-class Evidence(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int
-    video: VideoInfo
-    events: List[EventEntry] = []
-
-    @field_validator("schema_version")
-    @classmethod
-    def _check_version(cls, value: int) -> int:
-        if value != 1:
-            raise ValueError(f"unsupported schema_version: {value}")
-        return value
-
-
-# ---------------------------------------------------------------------------
-# SFT sample (only description / action / event_attributes / attr_mentions are user-editable)
-# ---------------------------------------------------------------------------
-
-# 标注文档 v4.5 的合法 action 编号(action 9 = 正常占位,不出现)。
-_ALLOWED_ACTION_IDS = frozenset({1, 2, 3, 4, 5, 6, 7, 8, 10, 11})
-
-
-def _check_event_attributes(value: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-    """event_attributes 严格枚举校验:event_id/属性键必须已定义,值必须在封闭选项内。"""
-    index = _event_options_index()
-    for ev_key, attrs in value.items():
-        try:
-            ev_id = int(ev_key)
-        except (TypeError, ValueError):
-            raise ValueError(f"event_attributes: invalid event id {ev_key!r}")
-        groups = {g["key"]: g for g in index.get(ev_id) or []}
-        if not groups:
-            raise ValueError(f"event_attributes: no options defined for event {ev_key!r}")
-        if not isinstance(attrs, dict):
-            raise ValueError(f"event_attributes[{ev_key!r}] must be an object")
-        for key, val in attrs.items():
-            group = groups.get(key)
-            if group is None:
-                raise ValueError(
-                    f"event_attributes[{ev_key!r}]: unknown attribute {key!r}"
-                )
-            allowed = group["options"]
-            if group["multi"]:
-                if not isinstance(val, list) or not all(
-                    isinstance(v, str) and v in allowed for v in val
-                ):
-                    raise ValueError(
-                        f"event_attributes[{ev_key!r}][{key!r}] must be a list "
-                        f"within {allowed}"
-                    )
-            elif val is not None and (not isinstance(val, str) or val not in allowed):
-                # 契约允许 null(VLM 看不清时输出 null);非 null 必须命中枚举。
-                raise ValueError(
-                    f"event_attributes[{ev_key!r}][{key!r}] must be one of {allowed}"
-                )
-    return value
-
-
-def _check_attr_mentions(
-    value: Dict[str, Dict[str, Any]], description: str
-) -> Dict[str, Dict[str, Any]]:
-    """attr_mentions 校验:event_id/属性键必须已定义;单选组值为字符串数组(可空),
-    多选组值为字符串数组(旧扁平格式)或「选项名 → 字符串数组」嵌套对象(选项名
-    必须在该组 options 内);每个提及串必须出现在对应事件的 description think
-    段落正文中(与 _strip_editable 同哲学的 best-effort 一致性检查,找不到即拒绝)。"""
-    index = _event_options_index()
-    sections: Optional[Dict[int, str]] = None  # 按需解析
-    for ev_key, groups_map in value.items():
-        try:
-            ev_id = int(ev_key)
-        except (TypeError, ValueError):
-            raise ValueError(f"attr_mentions: invalid event id {ev_key!r}")
-        groups = {g["key"]: g for g in index.get(ev_id) or []}
-        if not groups:
-            raise ValueError(f"attr_mentions: no options defined for event {ev_key!r}")
-        if not isinstance(groups_map, dict):
-            raise ValueError(f"attr_mentions[{ev_key!r}] must be an object")
-        # (属性键, 提及串) 统一收集,随后按事件 think 段落做子串校验
-        flat: List[Any] = []
-        for key, mentions in groups_map.items():
-            group = groups.get(key)
-            if group is None:
-                raise ValueError(
-                    f"attr_mentions[{ev_key!r}]: unknown attribute {key!r}"
-                )
-            if isinstance(mentions, dict):
-                # 新格式多选组:嵌套 per-option 绑定(选项名 → 字符串数组)
-                if not group["multi"]:
-                    raise ValueError(
-                        f"attr_mentions[{ev_key!r}][{key!r}] must be an array of strings"
-                    )
-                for opt, strs in mentions.items():
-                    if opt not in group["options"]:
-                        raise ValueError(
-                            f"attr_mentions[{ev_key!r}][{key!r}]: option {opt!r} "
-                            f"not in group options"
-                        )
-                    if not isinstance(strs, list) or not all(
-                        isinstance(s, str) for s in strs
-                    ):
-                        raise ValueError(
-                            f"attr_mentions[{ev_key!r}][{key!r}][{opt!r}] must be "
-                            f"an array of strings"
-                        )
-                    flat.extend((key, s) for s in strs)
-            elif isinstance(mentions, list) and all(
-                isinstance(s, str) for s in mentions
-            ):
-                flat.extend((key, s) for s in mentions)
-            else:
-                raise ValueError(
-                    f"attr_mentions[{ev_key!r}][{key!r}] must be an array of strings"
-                )
-        if flat:
-            if sections is None:
-                sections = _think_sections(description)
-            text = sections.get(ev_id, "")
-            for key, s in flat:
-                if s not in text:
-                    raise ValueError(
-                        f"attr_mentions[{ev_key!r}][{key!r}]: mention {s!r} "
-                        f"not found in event {ev_id} description think-section"
-                    )
-    return value
-
-
-class SftSample(BaseModel):
-    """完整 SFT 样本;chunk/idx/时间戳/chunk_name 与磁盘版本不一致时拒绝。"""
-
-    model_config = ConfigDict(extra="forbid")
-
-    chunk: Any
-    idx: Any
-    action: List[int]
-    description: str
-    start_timestamp: Any
-    end_timestamp: Any
-    chunk_name: Any
-    event_attributes: Optional[Dict[str, Dict[str, Any]]] = None
-    attr_mentions: Optional[Dict[str, Dict[str, Any]]] = None
-
-    @field_validator("action")
-    @classmethod
-    def _check_action_ids(cls, value: List[int]) -> List[int]:
-        if not all(a in _ALLOWED_ACTION_IDS for a in value):
-            raise ValueError(
-                f"action ids must be a subset of {sorted(_ALLOWED_ACTION_IDS)}"
-            )
-        return value
-
-    @field_validator("event_attributes")
-    @classmethod
-    def _check_attrs(
-        cls, value: Optional[Dict[str, Dict[str, Any]]]
-    ) -> Optional[Dict[str, Dict[str, Any]]]:
-        if value is None:
-            return value
-        return _check_event_attributes(value)
-
-    @field_validator("attr_mentions")
-    @classmethod
-    def _check_mentions(
-        cls, value: Optional[Dict[str, Dict[str, Any]]], info: ValidationInfo
-    ) -> Optional[Dict[str, Dict[str, Any]]]:
-        if value is None:
-            return value
-        # description 在字段顺序上先于 attr_mentions 完成校验,可直接取用
-        return _check_attr_mentions(value, str(info.data.get("description") or ""))
+    """事件中文名 → event_id(读本模块的路径常量,monkeypatch 友好)。"""
+    return event_config.event_name_index(_EVENT_CATEGORIES_YAML)
 
 
 # ---------------------------------------------------------------------------
@@ -395,11 +78,24 @@ class SftSample(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class _CorruptJsonError(ValueError):
+    """analysis JSON 文件存在但解析失败(区别于「文件不存在」)。"""
+
+
 def _read_json(path: Path) -> Optional[Any]:
+    """Read a JSON file: ``None`` when missing, raise on corrupt content.
+
+    损坏(半写/截断)与不存在必须区分开:调用方据此返回 500/422,而不是
+    静默当成「无标注」(GET null / PUT 404)。
+    """
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        text = path.read_text(encoding="utf-8")
+    except OSError:
         return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise _CorruptJsonError(f"{path.name}: {exc}") from exc
 
 
 def _atomic_write_json(path: Path, payload: Any) -> None:
@@ -407,15 +103,20 @@ def _atomic_write_json(path: Path, payload: Any) -> None:
 
     A mid-write crash can then only lose the tmp file, never truncate the
     real one (which GETs would otherwise silently show as "无标注").
+    fsync before the replace: the renamed data is durable, not just queued
+    in the page cache.
     """
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+        fh.flush()
+        os.fsync(fh.fileno())
     os.replace(tmp, path)
 
 
 # Per-stem locks closing the concurrent read-compare-write PUT window.
+# jobs.post_infer 提交同 stem 的 infer 前也持有同一把锁(锁顺序统一为
+# _put_locks[stem] → JobManager._lock,反向路径不存在,不会死锁)。
 _put_locks: "defaultdict[str, threading.Lock]" = defaultdict(threading.Lock)
 
 
@@ -491,10 +192,17 @@ def get_results(stem: str, request: Request) -> Dict[str, Any]:
     except OSError:
         pass
 
+    try:
+        sft_label = _read_json(out_dir / f"{stem}.json")
+        evidence = _read_json(out_dir / f"{stem}_evidence.json")
+    except _CorruptJsonError as exc:
+        raise HTTPException(
+            status_code=500, detail=f"Corrupt analysis JSON for '{stem}': {exc}"
+        )
     return {
         "report_md": report_md,
-        "sft_label": _read_json(out_dir / f"{stem}.json"),
-        "evidence": _read_json(out_dir / f"{stem}_evidence.json"),
+        "sft_label": sft_label,
+        "evidence": evidence,
     }
 
 
@@ -542,7 +250,13 @@ def put_evidence(stem: str, body: Evidence, request: Request) -> Dict[str, Any]:
     with _put_locks[stem]:
         # 锁内复查 409:检查与写文件之间不能再插入新的 infer 任务(TOCTOU)。
         _reject_active_infer(request, stem)
-        disk = _read_json(evidence_path)
+        try:
+            disk = _read_json(evidence_path)
+        except _CorruptJsonError as exc:
+            # 损坏 ≠ 不存在:无法与损坏基线做差异比对,明确报 422。
+            raise HTTPException(
+                status_code=422, detail=f"Existing evidence file is corrupt: {exc}"
+            )
         if disk is None:
             raise HTTPException(status_code=404, detail="Evidence file not found")
 
@@ -605,7 +319,13 @@ def put_sft(stem: str, body: SftSample, request: Request) -> Dict[str, Any]:
     with _put_locks[stem]:
         # 锁内复查 409:检查与写文件之间不能再插入新的 infer 任务(TOCTOU)。
         _reject_active_infer(request, stem)
-        disk = _read_json(sft_path)
+        try:
+            disk = _read_json(sft_path)
+        except _CorruptJsonError as exc:
+            # 损坏 ≠ 不存在:明确报 422,不能静默 404 诱导前端以为「无标注」。
+            raise HTTPException(
+                status_code=422, detail=f"Existing SFT file is corrupt: {exc}"
+            )
         if disk is None:
             raise HTTPException(status_code=404, detail="SFT file not found")
 

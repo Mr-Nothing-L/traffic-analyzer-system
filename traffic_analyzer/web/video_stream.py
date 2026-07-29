@@ -12,14 +12,17 @@ fall back to frame-stepping.
 [文件说明]
 作用:视频流播放接口。浏览器可原生播放的编码(h264/mp4、vp8/vp9/av1 等)直接
 FileResponse(支持 HTTP Range);其余监控码流(Xvid 类、H.265、MJPEG)用 ffmpeg 实时转码为
-fragmented MP4 经 StreamingResponse 输出,客户端断连即终止 ffmpeg;ffprobe 探测结果按
-path+mtime 缓存,ffmpeg/ffprobe 缺失或转码失败时返回 501,供前端降级为逐帧浏览。
+fragmented MP4 经 StreamingResponse 输出。转码为 async 生成器:每个 tick 轮询
+request.is_disconnected(),断连/流结束的 finally 里可靠回收 ffmpeg(不再依赖 GC
+触发 close);全局转码信号量上限 3(超限 503);首块探测中 ffmpeg 立即退出且
+无输出时(无论 rc 是否为 0)降级 501;ffprobe 探测结果按 path+mtime 缓存。
 上游:web/app.py(挂载路由);web/static 前端 <video> 播放。
 下游:web/workspace.py(视频路径解析);系统 ffmpeg/ffprobe 外部命令。
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import select
@@ -27,7 +30,7 @@ import shutil
 import subprocess
 import threading
 from pathlib import Path
-from typing import Dict, Iterator, Optional, Tuple
+from typing import AsyncIterator, Dict, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
@@ -60,8 +63,14 @@ _probe_cache: Dict[Tuple[str, float], Tuple[Optional[str], Optional[str]]] = {}
 _cache_lock = threading.Lock()
 
 _CHUNK = 64 * 1024
-_TICK = 0.5  # select tick; the generator suspends at yield between ticks
+_TICK = 0.5  # select tick; between ticks the async generator also polls disconnects
 _PROBE_TIMEOUT = 5.0  # first-chunk probe before answering 200
+
+# 全局转码并发上限:转码是 CPU 重活,超出直接 503,让前端稍后再试/降级逐帧。
+# 用 threading 信号量(非 asyncio.Semaphore):获取发生在同步端点线程里,
+# 与具体事件循环无绑定,TestClient / uvicorn 下行为一致。
+_MAX_TRANSCODES = 3
+_transcode_slots = threading.BoundedSemaphore(_MAX_TRANSCODES)
 
 
 def is_browser_native(codec: Optional[str], suffix: str) -> bool:
@@ -96,80 +105,99 @@ def probe_video(path: Path) -> Tuple[Optional[str], Optional[str]]:
     return result
 
 
-def _transcode_response(video: Path, ss: Optional[float]) -> StreamingResponse:
+def _transcode_response(
+    video: Path, ss: Optional[float], request: Optional[Request] = None
+) -> StreamingResponse:
     if _FFMPEG is None:
         raise HTTPException(status_code=501, detail="ffmpeg not found on server")
-    argv = [_FFMPEG, "-nostdin", "-v", "error", "-i", str(video)]
-    if ss:
-        argv += ["-ss", f"{ss:.3f}"]
-    argv += [
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "26",
-        "-pix_fmt", "yuv420p", "-movflags", "frag_keyframe+empty_moov",
-        "-an", "-f", "mp4", "-",
-    ]
-    try:
-        proc = subprocess.Popen(
-            argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+    if not _transcode_slots.acquire(blocking=False):
+        raise HTTPException(
+            status_code=503,
+            detail="Too many concurrent transcodes; retry later",
         )
-    except OSError as exc:
-        raise HTTPException(status_code=501, detail=f"ffmpeg failed to start: {exc}")
-
-    # Non-blocking pipe + select tick: the generator spends most of its time
-    # suspended at a ``yield``, so when the client disconnects starlette can
-    # actually close it and the ``finally`` below kills ffmpeg. With a blocking
-    # ``read`` the close never lands and ffmpeg transcodes to EOF (zombie).
-    assert proc.stdout is not None
-    fd = proc.stdout.fileno()
-    os.set_blocking(fd, False)
-
-    def _read_chunk(timeout: float) -> bytes:
-        """Wait up to ``timeout``s for pipe data; b"" on timeout or EOF."""
-        ready, _, _ = select.select([fd], [], [], timeout)
-        if not ready:
-            return b""
+    try:
+        argv = [_FFMPEG, "-nostdin", "-v", "error", "-i", str(video)]
+        if ss:
+            argv += ["-ss", f"{ss:.3f}"]
+        argv += [
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "26",
+            "-pix_fmt", "yuv420p", "-movflags", "frag_keyframe+empty_moov",
+            "-an", "-f", "mp4", "-",
+        ]
         try:
-            return os.read(fd, _CHUNK)
-        except BlockingIOError:
-            return b""
+            proc = subprocess.Popen(
+                argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+            )
+        except OSError as exc:
+            raise HTTPException(status_code=501, detail=f"ffmpeg failed to start: {exc}")
 
-    # First-chunk probe: if ffmpeg dies before producing anything (corrupt
-    # input, unsupported codec), answer 501 so the frontend can fall back
-    # instead of getting a 200 with an empty body.
-    first = b""
-    ready, _, _ = select.select([fd], [], [], _PROBE_TIMEOUT)
-    if ready:
-        first = _read_chunk(0)
-        if not first:
-            returncode = proc.wait()
-            if returncode != 0:
+        # Non-blocking pipe + select tick: reads happen via asyncio.to_thread so
+        # the event loop stays free and client disconnects are observed promptly.
+        assert proc.stdout is not None
+        fd = proc.stdout.fileno()
+        os.set_blocking(fd, False)
+
+        def _read_chunk(timeout: float) -> bytes:
+            """Wait up to ``timeout``s for pipe data; b"" on timeout or EOF."""
+            ready, _, _ = select.select([fd], [], [], timeout)
+            if not ready:
+                return b""
+            try:
+                return os.read(fd, _CHUNK)
+            except BlockingIOError:
+                return b""
+
+        # First-chunk probe: if ffmpeg dies before producing anything (corrupt
+        # input, unsupported codec), answer 501 so the frontend can fall back
+        # instead of getting a 200 with an empty body. rc==0 with no output is
+        # just as useless to the player — degrade the same way.
+        first = b""
+        ready, _, _ = select.select([fd], [], [], _PROBE_TIMEOUT)
+        if ready:
+            first = _read_chunk(0)
+            if not first:
+                returncode = proc.wait()
                 if proc.poll() is None:
                     proc.kill()
-                proc.wait()
+                    proc.wait()
                 raise HTTPException(
                     status_code=501,
                     detail=f"ffmpeg produced no output (exit {returncode})",
                 )
+    except BaseException:
+        _transcode_slots.release()
+        raise
 
-    def generate() -> Iterator[bytes]:
+    async def generate() -> AsyncIterator[bytes]:
         try:
             if first:
                 yield first
             while True:
-                chunk = _read_chunk(_TICK)
+                # 可靠断连检测:不再依赖 starlette 关闭生成器(GC 时机),
+                # 每个 tick 主动轮询;starlette 的 aclose/cancel 同样会走 finally。
+                if request is not None and await request.is_disconnected():
+                    break
+                chunk = await asyncio.to_thread(_read_chunk, _TICK)
                 if not chunk:
                     if proc.poll() is not None:
                         break  # EOF with the process gone
                     continue
                 yield chunk
         finally:
-            # Client disconnected or stream ended: never leave ffmpeg running.
+            # Client disconnected or stream ended: never leave ffmpeg running,
+            # and always hand the transcode slot back.
             if proc.poll() is None:
                 proc.terminate()
                 try:
                     proc.wait(timeout=2)
                 except subprocess.TimeoutExpired:
                     proc.kill()
+                    try:
+                        proc.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        pass
             proc.wait()
+            _transcode_slots.release()
 
     return StreamingResponse(generate(), media_type="video/mp4")
 
@@ -183,7 +211,7 @@ def stream_video(
     video = workspace_mod.find_video(workspace, stem)
     if video is None:
         raise HTTPException(status_code=404, detail="Video not found")
-    return _stream_response(video, ss)
+    return _stream_response(video, ss, request)
 
 
 @router.get("/api/workspace/stream")
@@ -195,12 +223,14 @@ def stream_workspace_video(
     video = workspace_mod.resolve_workspace_file(workspace, path)
     if video.suffix.lower() not in workspace_mod.VIDEO_EXTENSIONS:
         raise HTTPException(status_code=404, detail="Not a video file")
-    return _stream_response(video, ss)
+    return _stream_response(video, ss, request)
 
 
-def _stream_response(video: Path, ss: Optional[float]) -> object:
+def _stream_response(
+    video: Path, ss: Optional[float], request: Optional[Request] = None
+) -> object:
     _container, codec = probe_video(video)
     if is_browser_native(codec, video.suffix):
         media_type = _MEDIA_TYPES.get(video.suffix.lower(), "application/octet-stream")
         return FileResponse(video, media_type=media_type)
-    return _transcode_response(video, ss)
+    return _transcode_response(video, ss, request)

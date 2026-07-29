@@ -12,10 +12,11 @@
 打开 ?mock=1 页面,对界面所有按键/页面做一轮完整遍历(工作区弹窗基础/进阶、
 切换工作区、过滤、排序、全选、目录展开折叠、勾选、预览、推理、停止、重试、
 完成、SFT 选项联动、证据编辑、评估),打印每项 PASS/FAIL,单步失败不中断整轮。
-不 Ctrl+C 就一直循环。每轮结束截图存到 output/e2e_screenshots/。
+不 Ctrl+C 就一直循环。每轮结束截图存到 output/e2e_screenshots/(只保留最近 20 张)。
 """
 
 import argparse
+import json
 import subprocess
 import sys
 import time
@@ -25,12 +26,29 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BASE = "http://127.0.0.1:8600"
 SHOT_DIR = REPO_ROOT / "output" / "e2e_screenshots"
+SHOT_KEEP = 20  # 截图只保留最近 N 张,避免无限循环时磁盘膨胀
+
+# ---- 与 mock 数据耦合的常量(mock 数据变化时需同步修改) ----
+# 推理/预览/证据编辑演示所用的视频名片段,来自 scripts/build_mock_data.py 生成的
+# mock_data.js 中演示区真实结果视频 01-02_Event_129_1755579215119_1.mp4
+MOCK_VIDEO_FRAGMENT = "01-02_Event_129"
+# MOCK_VIDEO_FRAGMENT 的特征子串:侧栏过滤后应恰好剩 1 个视频
+MOCK_FILTER_TEXT = "129"
+# 证据编辑拖拽的多边形端点 0 的归一化坐标,来自真实证据 01-02_Event_129
+# 「应急车道占用」事件 calibration.emergency_polygon_rel[0]
+EVIDENCE_VERTEX0_REL = (0.823, 0.252)
+# mock 模式前端推理 tick 间隔(毫秒),见 traffic_analyzer/web/static/js/main.js
+# 的 setInterval(mockTick, 700);「裁决」完成后 1 tick 内推入「SFT 标注」泳道
+MOCK_TICK_MS = 700
 
 
 def server_up() -> bool:
+    """应用指纹校验:/api/jobs 返回 JSON 数组才是本系统的服务
+
+    (仅探测 / 会把恰好占用 8600 端口的其他服务误判为已就绪)。"""
     try:
-        urllib.request.urlopen(BASE + "/", timeout=2)
-        return True
+        with urllib.request.urlopen(BASE + "/api/jobs", timeout=2) as resp:
+            return resp.status == 200 and isinstance(json.loads(resp.read()), list)
     except Exception:
         return False
 
@@ -74,9 +92,16 @@ class Pass:
             time.sleep(self.pause)  # 步骤间停顿,让观众看清上一结果
 
 
+def _prune_screenshots(keep: int = SHOT_KEEP) -> None:
+    """只保留最近 keep 张截图(按修改时间)。"""
+    shots = sorted(SHOT_DIR.glob("*.png"), key=lambda p: p.stat().st_mtime)
+    for old in shots[: max(0, len(shots) - keep)]:
+        old.unlink(missing_ok=True)
+
+
 def run_pass(page, p: Pass, shot: Path) -> None:
     """对 mock 页面做一轮全按键/全页面遍历。page 已打开 ?mock=1。"""
-    V = "01-02_Event_129"  # mock 里用于推理流程的视频名片段(演示区真实结果)
+    V = MOCK_VIDEO_FRAGMENT
 
     def sel(s):
         return page.wait_for_selector(s, timeout=8000)
@@ -151,7 +176,7 @@ def run_pass(page, p: Pass, shot: Path) -> None:
 
     # ---------- 4. 侧栏:过滤 / 排序 / 全选 ----------
     def t_filter_sort():
-        page.fill("#side-filter-input", "129")
+        page.fill("#side-filter-input", MOCK_FILTER_TEXT)
         page.wait_for_timeout(300)
         visible = page.eval_on_selector_all(
             "#video-list .video-item", "els => els.filter(e => e.offsetParent).length")
@@ -201,7 +226,7 @@ def run_pass(page, p: Pass, shot: Path) -> None:
         page.click("#btn-infer")
         sel("#card-experts")
         sel("#exp-lanes .expert-lane")
-        page.wait_for_timeout(3000 if p.pause > 0 else 2500)  # 关键演示点:专家面板停留
+        page.wait_for_timeout(3000 if p.pause > 0 else int(MOCK_TICK_MS * 3.5))  # 关键演示点:专家面板停留(≈3.5 个 mock tick)
         page.click("#exp-stop")
         row.locator(".badge.st-failed").wait_for(timeout=15_000)
     p.step("开始推理 → 专家工作间 → ■ 停止", t_infer_stop)
@@ -212,7 +237,7 @@ def run_pass(page, p: Pass, shot: Path) -> None:
         row.locator(".retry-btn").click()
         sel("#card-experts")
         # 阶段泳道断言:先等裁决泳道完成(类别泳道随机推进,耗时不定),
-        # 之后 1 tick(0.7s)内 mock 推入「SFT 标注」泳道,轮询 1.5s 内必然可见
+        # 之后 1 tick(MOCK_TICK_MS)内 mock 推入「SFT 标注」泳道,轮询 1.5s 内必然可见
         page.wait_for_function(
             "() => { const r = document.querySelector("
             "'#exp-lanes .expert-lane[data-lane=\"裁决\"]');"
@@ -314,9 +339,9 @@ def run_pass(page, p: Pass, shot: Path) -> None:
         # 画布在首屏视口之下,须先滚动进视口,否则 mouse 事件落在视口外不生效
         page.locator(".ev-canvas").scroll_into_view_if_needed()
         rect = page.locator(".ev-canvas").bounding_box()
-        # 真实证据 01-02_Event_129 应急车道多边形端点 0 = [0.823, 0.252],按画布 rect 换算像素
-        vx = rect["x"] + 0.823 * rect["width"]
-        vy = rect["y"] + 0.252 * rect["height"]
+        # 真实证据 01-02_Event_129 应急车道多边形端点 0 的归一化坐标,按画布 rect 换算像素
+        vx = rect["x"] + EVIDENCE_VERTEX0_REL[0] * rect["width"]
+        vy = rect["y"] + EVIDENCE_VERTEX0_REL[1] * rect["height"]
         page.mouse.move(vx, vy)  # 先 hover 到端点附近(命中后光标变 pointer)
         page.wait_for_timeout(300)
         page.mouse.down()
@@ -396,22 +421,28 @@ def main() -> int:
 
     idx = 0
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(
-            channel="chrome", headless=args.headless,
-            slow_mo=slow_mo,
-        )
+        try:
+            browser = pw.chromium.launch(
+                channel="chrome", headless=args.headless,
+                slow_mo=slow_mo,
+            )
+        except Exception:
+            print("[setup] 本机 Chrome 不可用,回退到 Playwright 内置 chromium")
+            browser = pw.chromium.launch(headless=args.headless, slow_mo=slow_mo)
         page = browser.new_page(viewport={"width": 1600, "height": 900})
         js_errors = []
         page.on("pageerror", lambda e: js_errors.append(str(e)))
         try:
             while True:
                 idx += 1
+                js_errors.clear()  # 每轮只统计本轮的 JS 错误
                 t0 = time.time()
                 print(f"\n===== 第 {idx} 轮 =====")
                 page.goto(BASE + "/?mock=1", wait_until="domcontentloaded")
                 page.wait_for_selector("#toolbar", timeout=10_000)
                 p = Pass(idx, pause=pause)
                 run_pass(page, p, SHOT_DIR / f"pass_{idx:03d}.png")
+                _prune_screenshots()
                 elapsed = time.time() - t0
                 verdict = "FAIL" if (p.failures or js_errors) else "PASS"
                 print(f"===== 第 {idx} 轮 {verdict}(耗时 {elapsed:.0f}s) =====")
