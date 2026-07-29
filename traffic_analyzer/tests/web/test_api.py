@@ -1142,8 +1142,9 @@ class TestExpertProgress:
 
         # Mid expert phase: fraction = mean of ALL lane fractions, never
         # regressing below the step estimate (register-time mean is 0).
+        # Register also seeds the two stage lanes (SFT 标注/报告) as queued.
         assert _wait_until(
-            lambda: len(job.experts) == 3
+            lambda: len(job.experts) == 5
             and job.experts[0]["fraction"] == 0.5
             and job.experts[1]["fraction"] == 0.25
         )
@@ -1152,8 +1153,12 @@ class TestExpertProgress:
             "fraction": 0.5, "label": "抽帧",
         }
         assert job.experts[2]["status"] == "queued"
+        assert job.experts[3]["name"] == "SFT 标注"
+        assert job.experts[3]["status"] == "queued"
+        assert job.experts[4]["name"] == "报告"
+        assert job.experts[4]["status"] == "queued"
         assert job.step_index == 2
-        lane_mean = (0.5 + 0.25 + 0.0) / 3
+        lane_mean = (0.5 + 0.25 + 0.0 + 0.0 + 0.0) / 5
         assert job.fraction == pytest.approx(max(2 / 5, lane_mean))
 
         # Adjudication phase: once the all-lane mean passes the step
@@ -1168,7 +1173,7 @@ class TestExpertProgress:
         assert job.experts[1]["detected"] is False
         assert job.experts[2]["status"] == "running"
         assert job.experts[2]["label"] == "汇总"
-        assert job.fraction == pytest.approx((1.0 + 1.0 + 0.5) / 3)
+        assert job.fraction == pytest.approx((1.0 + 1.0 + 0.5 + 0.0 + 0.0) / 5)
 
         assert _wait_until(lambda: job.status in ("done", "failed"))
         assert job.status == "done"

@@ -306,6 +306,12 @@ def _apply_expert_progress(job: Job, line: str) -> None:
                 for name in parts[2].split(",")
                 if name
             ]
+            # 阶段泳道从一开始就占位(排队态),面板即刻展示完整流水线
+            for stage in (_SFT_LANE, _REPORT_LANE):
+                job.experts.append(
+                    {"name": stage, "status": "queued", "detected": None,
+                     "fraction": 0.0, "label": ""}
+                )
         elif kind == "start" and len(parts) >= 2:
             lane = _expert_lane(job, parts[1])
             if lane is not None:

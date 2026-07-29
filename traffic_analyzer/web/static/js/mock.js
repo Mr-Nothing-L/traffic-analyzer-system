@@ -200,9 +200,13 @@ MOCK_EXPERT_DEFS.forEach(([name, labels]) => {
 });
 
 function initMockExperts() {
-  return MOCK_EXPERT_DEFS.map(([name]) => ({
+  const lanes = MOCK_EXPERT_DEFS.map(([name]) => ({
     name: name, status: 'queued', detected: null, fraction: 0, label: '等待调度',
   }));
+  // 阶段泳道从一开始就占位(排队态),与真实后端的泳道表对齐
+  lanes.push({ name: 'SFT 标注', status: 'queued', detected: null, fraction: 0, label: '等待调度' });
+  lanes.push({ name: '报告', status: 'queued', detected: null, fraction: 0, label: '等待调度' });
+  return lanes;
 }
 
 // 推进一条泳道 0.05-0.2,并按里程碑刷新阶段文案;到 1.0 置 done
@@ -299,17 +303,16 @@ export function mockTick() {
         running._stage = stageIdx + 1;
         if (stageIdx < STAGE_STEPS.length) {
           const st = STAGE_STEPS[stageIdx];
-          let lane = experts.find(e => e.name === st[0]);
-          if (!lane) {
-            // 新阶段启动:收口上一条阶段泳道
-            experts.forEach(e => {
-              if ((e.name === 'SFT 标注' || e.name === '报告') && e.status === 'running') {
-                Object.assign(e, { status: 'done', fraction: 1, label: e.name + '完成' });
-              }
-            });
-            lane = { name: st[0], status: 'running', detected: null, fraction: st[1], label: st[2] };
-            experts.push(lane);
-          } else {
+          // 泳道在 initMockExperts 已占位;每拍先收口其他阶段泳道,再推进当前泳道
+          experts.forEach(e => {
+            if ((e.name === 'SFT 标注' || e.name === '报告') && e.name !== st[0]
+                && e.status === 'running') {
+              Object.assign(e, { status: 'done', fraction: 1, label: e.name + '完成' });
+            }
+          });
+          const lane = experts.find(e => e.name === st[0]);
+          if (lane) {
+            lane.status = 'running';
             lane.fraction = st[1];
             lane.label = st[2];
           }
