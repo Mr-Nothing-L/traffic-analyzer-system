@@ -217,6 +217,7 @@ class JobManager:
                     if marker in line:
                         job.step_index = step_index
                         job.step_label = step_label
+                        _advance_stage_lanes(job, step_index)
                         _recompute_fraction(job)
                         break
         returncode = proc.wait()
@@ -224,6 +225,7 @@ class JobManager:
             job.returncode = returncode
             job.status = "done" if returncode == 0 else "failed"
             if returncode == 0:
+                _finish_stage_lanes(job)
                 job.fraction = 1.0
 
     def shutdown(self) -> None:
@@ -334,6 +336,53 @@ def _apply_expert_progress(job: Job, line: str) -> None:
     _recompute_fraction(job)
 
 
+# 专家/裁决之后的流水线阶段泳道(SFT 标注、报告):由 [3.5/4]、[4/4] 步骤标记驱动,
+# 让泳道覆盖整个任务周期(此前裁决完成后泳道全满,但任务仍在 SFT/报告阶段)
+_SFT_LANE = "SFT 标注"
+_REPORT_LANE = "报告"
+_NON_CATEGORY_LANES = (_JUDGE_NAME, _SFT_LANE, _REPORT_LANE)
+
+
+def _stage_lane(job: Job, name: str) -> Dict[str, Any]:
+    lane = _expert_lane(job, name)
+    if lane is None:
+        lane = {"name": name, "status": "queued", "detected": None,
+                "fraction": 0.0, "label": ""}
+        job.experts.append(lane)
+    return lane
+
+
+def _advance_stage_lanes(job: Job, step_index: int) -> None:
+    """Sync the SFT/report lanes from the coarse step markers. Caller holds lock."""
+    if not job.experts:
+        return
+    if step_index >= 4:
+        sft = _stage_lane(job, _SFT_LANE)
+        if sft["status"] not in ("done",):
+            sft["status"] = "running"
+            sft["fraction"] = 0.5
+            sft["label"] = "SFT 标签改写"
+    if step_index >= 5:
+        sft = _stage_lane(job, _SFT_LANE)
+        sft.update(status="done", fraction=1.0, label="SFT 完成")
+        rep = _stage_lane(job, _REPORT_LANE)
+        if rep["status"] not in ("done",):
+            rep["status"] = "running"
+            rep["fraction"] = 0.5
+            rep["label"] = "生成报告"
+
+
+def _finish_stage_lanes(job: Job) -> None:
+    """rc==0: mark every stage lane done. Caller holds lock."""
+    for name in (_SFT_LANE, _REPORT_LANE):
+        lane = _expert_lane(job, name)
+        if lane is not None:
+            lane.update(status="done", fraction=1.0)
+    rep = _expert_lane(job, _REPORT_LANE)
+    if rep is not None:
+        rep["label"] = "报告完成"
+
+
 def _recompute_fraction(job: Job) -> None:
     """Overall fraction on the 5-step scale, refined by expert lane progress.
 
@@ -342,7 +391,7 @@ def _recompute_fraction(job: Job) -> None:
     Everything else stays step_index / 5. Caller must hold the job lock.
     """
     if job.step_index == 2:
-        lanes = [e for e in job.experts if e["name"] != _JUDGE_NAME]
+        lanes = [e for e in job.experts if e["name"] not in _NON_CATEGORY_LANES]
         if lanes:
             mean = sum(e["fraction"] for e in lanes) / len(lanes)
             job.fraction = (2 + mean) / TOTAL_STEPS

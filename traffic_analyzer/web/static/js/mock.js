@@ -218,8 +218,9 @@ export function mockTick() {
       // 8 个类别专家泳道 + 「裁决」泳道的慢速 staggered 步进
       if (!running._experts) running._experts = initMockExperts();
       const experts = running._experts;
-      const lanes = experts.filter(e => e.name !== '裁决');
-      const verdict = experts[experts.length - 1];
+      // 类别泳道(不含裁决与 SFT/报告阶段泳道,阶段泳道不参与随机推进)
+      const lanes = experts.filter(e => ['裁决', 'SFT 标注', '报告'].indexOf(e.name) < 0);
+      const verdict = experts.find(e => e.name === '裁决');
       // 4 并发上限的假象:running 不足 4 条时启动下一条排队泳道
       const runningLanes = lanes.filter(e => e.status === 'running');
       if (runningLanes.length < 4) {
@@ -256,11 +257,27 @@ export function mockTick() {
       running.log_tail = '[mock] 专家泳道完成 '
         + experts.filter(e => e.status === 'done').length + '/' + experts.length;
       if (verdict.status === 'done') {
-        running.status = 'done';
-        running.progress = { step_label: '完成', step_index: 5, total_steps: 5, fraction: 1, experts: experts };
-        running.returncode = 0;
-        const v = mockDb.videos.find(v => v.stem === running.stem);
-        if (v) v.has_results = true;
+        // 裁决后补两条阶段泳道:SFT 标注 → 报告,各停一拍,与真实任务周期对齐
+        if (!running._stage) running._stage = 1;
+        if (running._stage === 1) {
+          experts.push({ name: 'SFT 标注', status: 'running', detected: null, fraction: 0.5, label: 'SFT 标签改写' });
+          running.progress = { step_label: 'SFT', step_index: 4, total_steps: 5, fraction: 0.8, experts: experts };
+          running._stage = 2;
+        } else if (running._stage === 2) {
+          const sft = experts.find(e => e.name === 'SFT 标注');
+          if (sft) Object.assign(sft, { status: 'done', fraction: 1, label: 'SFT 完成' });
+          experts.push({ name: '报告', status: 'running', detected: null, fraction: 0.5, label: '生成报告' });
+          running.progress = { step_label: '报告', step_index: 5, total_steps: 5, fraction: 0.9, experts: experts };
+          running._stage = 3;
+        } else {
+          const rep = experts.find(e => e.name === '报告');
+          if (rep) Object.assign(rep, { status: 'done', fraction: 1, label: '报告完成' });
+          running.status = 'done';
+          running.progress = { step_label: '完成', step_index: 5, total_steps: 5, fraction: 1, experts: experts };
+          running.returncode = 0;
+          const v = mockDb.videos.find(v => v.stem === running.stem);
+          if (v) v.has_results = true;
+        }
       }
     } else {
       running._ticks = (running._ticks || 0) + 1;
