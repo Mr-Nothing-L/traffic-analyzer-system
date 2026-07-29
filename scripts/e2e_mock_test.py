@@ -76,7 +76,7 @@ class Pass:
 
 def run_pass(page, p: Pass, shot: Path) -> None:
     """对 mock 页面做一轮全按键/全页面遍历。page 已打开 ?mock=1。"""
-    V = "03_Event_102"  # mock 里用于推理流程的视频名片段
+    V = "01-02_Event_129"  # mock 里用于推理流程的视频名片段(演示区真实结果)
 
     def sel(s):
         return page.wait_for_selector(s, timeout=8000)
@@ -151,7 +151,7 @@ def run_pass(page, p: Pass, shot: Path) -> None:
 
     # ---------- 4. 侧栏:过滤 / 排序 / 全选 ----------
     def t_filter_sort():
-        page.fill("#side-filter-input", "03")
+        page.fill("#side-filter-input", "129")
         page.wait_for_timeout(300)
         visible = page.eval_on_selector_all(
             "#video-list .video-item", "els => els.filter(e => e.offsetParent).length")
@@ -292,9 +292,9 @@ def run_pass(page, p: Pass, shot: Path) -> None:
         # 画布在首屏视口之下,须先滚动进视口,否则 mouse 事件落在视口外不生效
         page.locator(".ev-canvas").scroll_into_view_if_needed()
         rect = page.locator(".ev-canvas").bounding_box()
-        # mock 证据 emergency_polygon_rel 端点 0 = [0.72, 0.35],按画布 rect 换算像素
-        vx = rect["x"] + 0.72 * rect["width"]
-        vy = rect["y"] + 0.35 * rect["height"]
+        # 真实证据 01-02_Event_129 应急车道多边形端点 0 = [0.823, 0.252],按画布 rect 换算像素
+        vx = rect["x"] + 0.823 * rect["width"]
+        vy = rect["y"] + 0.252 * rect["height"]
         page.mouse.move(vx, vy)  # 先 hover 到端点附近(命中后光标变 pointer)
         page.wait_for_timeout(300)
         page.mouse.down()

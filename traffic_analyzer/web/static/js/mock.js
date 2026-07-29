@@ -3,9 +3,15 @@
    ================================================================ */
 import { ApiError } from './util.js';
 
+// 真实推理结果(scripts/build_mock_data.py 生成);不存在时回退下方合成数据
+let REAL = null;
+try {
+  REAL = (await import('./mock_data.js')).REAL_MOCK;
+} catch (e) { /* 无 mock_data.js:完全走合成兜底 */ }
+
 const mockDb = {
   workspace: { path: '/mock/workspace' },
-  videos: [
+  videos: REAL ? REAL.videos : [
     { name: '01-02_Event_101_1756000000000_1.mp4', stem: '01-02_Event_101_1756000000000_1', rel: '01-02_Event_101_1756000000000_1.mp4', size: 8388608, mtime: 1756000100, has_results: true },
     { name: '03_Event_102_1756000001000_1.mp4', stem: '03_Event_102_1756000001000_1', rel: '03_Event_102_1756000001000_1.mp4', size: 12582912, mtime: 1756000200, has_results: false },
     { name: '05-07_Event_129_1756000002000_1.mp4', stem: '05-07_Event_129_1756000002000_1', rel: '05-07_Event_129_1756000002000_1.mp4', size: 6291456, mtime: 1756000300, has_results: false },
@@ -92,11 +98,13 @@ function mockEvidence(stem) {
 
 // 与 traffic_analyzer/config/event_categories.yaml 一致:编号 1-8 激活,10/11 未激活
 // (编号 9 为「正常」占位,不在配置中;SFT 编辑器按 event_id 匹配草稿/勾选态)
+// 有 REAL 时由 build_mock_data.py 从 yaml 生成(含 options 结构化选项组)
 const MOCK_EVENT_IDS = [1, 2, 3, 4, 5, 6, 7, 8, 10, 11];
-const MOCK_EVENT_CONFIG = EVENT_NAMES_10.map((name, i) => {
+let MOCK_EVENT_CONFIG = EVENT_NAMES_10.map((name, i) => {
   const id = MOCK_EVENT_IDS[i];
   return { event_id: id, name_zh: name, is_active: id <= 8 };
 });
+if (REAL) MOCK_EVENT_CONFIG = REAL.eventConfig;
 
 function mockSft(stem) {
   return {
@@ -119,11 +127,17 @@ function mockReport() {
 
 function mockResults(stem) {
   if (!mockDb.results[stem]) {
-    mockDb.results[stem] = {
-      report_md: mockReport(),
-      sft_label: mockSft(stem),
-      evidence: mockEvidence(stem),
-    };
+    // 有真实结果时优先用(REAL.results 由 build_mock_data.py 生成);
+    // 证据图片引用沿用 mockImageUrl 占位,不搬真实图片
+    if (REAL && REAL.results && REAL.results[stem]) {
+      mockDb.results[stem] = REAL.results[stem];
+    } else {
+      mockDb.results[stem] = {
+        report_md: mockReport(),
+        sft_label: mockSft(stem),
+        evidence: mockEvidence(stem),
+      };
+    }
   }
   return mockDb.results[stem];
 }
@@ -192,15 +206,23 @@ function initMockExperts() {
 }
 
 // 推进一条泳道 0.05-0.2,并按里程碑刷新阶段文案;到 1.0 置 done
-function advanceLane(lane) {
+// detectedIds 非空时(真实结果)按 泳道名→event_id 映射判定检出,否则走合成兜底
+function advanceLane(lane, detectedIds) {
   lane.fraction = Math.min(1, +(lane.fraction + 0.05 + Math.random() * 0.15).toFixed(3));
   const phases = MOCK_EXPERT_PHASES[lane.name];
   const idx = phases.findIndex(s => s.fraction > lane.fraction);
   lane.label = phases[idx >= 0 ? idx : phases.length - 1].label;
   if (lane.fraction >= 1) {
     lane.status = 'done';
-    // 与 mock 结果集一致:仅「应急车道占用」检出;裁决泳道视为有结论
-    lane.detected = lane.name === '应急车道占用' || lane.name === '裁决';
+    if (lane.name === '裁决') {
+      lane.detected = true; // 裁决泳道视为有结论
+    } else if (detectedIds) {
+      const ev = MOCK_EVENT_CONFIG.find(e => e.name_zh === lane.name);
+      lane.detected = !!(ev && detectedIds.indexOf(ev.event_id) >= 0);
+    } else {
+      // 与合成 mock 结果集一致:仅「应急车道占用」检出
+      lane.detected = lane.name === '应急车道占用';
+    }
     lane.label = lane.detected ? '检出疑似目标' : '未发现相关迹象';
   }
 }
@@ -217,6 +239,10 @@ export function mockTick() {
     if (running.kind === 'infer') {
       // 8 个类别专家泳道 + 「裁决」泳道的慢速 staggered 步进
       if (!running._experts) running._experts = initMockExperts();
+      // 真实结果的检出集合(首次 tick 时确定);无则回退合成逻辑
+      if (running._detected === undefined) {
+        running._detected = (REAL && REAL.detectedMap && REAL.detectedMap[running.stem]) || null;
+      }
       const experts = running._experts;
       // 类别泳道(不含裁决与 SFT/报告阶段泳道,阶段泳道不参与随机推进)
       const lanes = experts.filter(e => ['裁决', 'SFT 标注', '报告'].indexOf(e.name) < 0);
@@ -235,7 +261,7 @@ export function mockTick() {
       const pool = runningLanes.slice();
       const picks = Math.min(pool.length, 1 + Math.floor(Math.random() * 2));
       for (let i = 0; i < picks; i++) {
-        advanceLane(pool.splice(Math.floor(Math.random() * pool.length), 1)[0]);
+        advanceLane(pool.splice(Math.floor(Math.random() * pool.length), 1)[0], running._detected);
       }
       // 全部类别 done 后才推进裁决泳道
       if (lanes.every(e => e.status === 'done')) {
@@ -243,7 +269,7 @@ export function mockTick() {
           verdict.status = 'running';
           verdict.label = MOCK_EXPERT_PHASES['裁决'][0].label;
         } else if (verdict.status === 'running') {
-          advanceLane(verdict);
+          advanceLane(verdict, running._detected);
         }
       }
       const frac = experts.reduce((s, e) => s + (e.fraction || 0), 0) / experts.length;
@@ -362,6 +388,9 @@ export async function mockApi(path, opts) {
     if (!rels.length) throw new ApiError(400, 'rels 为空');
     const ids = rels.map(rel => {
       const v = mockDb.videos.find(v => v.rel === rel);
+      // 重新推理会覆盖旧结果:清掉 has_results 与缓存结果,前端才会收起结果卡、
+      // 显示「专家工作间」面板(renderResultCards 仅在无结果时渲染 #card-experts)
+      if (v) { v.has_results = false; delete mockDb.results[v.stem]; }
       const job = {
         id: mockDb.nextJobId++, kind: 'infer', stem: v ? v.stem : rel.replace(/\.[^.]+$/, ''),
         rel: rel, status: 'queued',
