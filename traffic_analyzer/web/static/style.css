@@ -1620,6 +1620,12 @@ body.hsplit-dragging { cursor: row-resize; user-select: none; }
 .dash-nowrap { white-space: nowrap; }
 /* 明细表固定列宽:人工列无数据时不塌缩,审核列容纳三个 chip 不挤压,
    表头与单元格同属一张表、同一列定义,宽度一致即对齐 */
+/* 明细表:fixed 布局 + 全列显式列宽,任何视口/缓存状态下网格都稳定对齐 */
+.dash-rows-table { table-layout: fixed; }
+.dash-rows-table th:nth-child(1) { width: 26%; }
+.dash-rows-table th:nth-child(2) { width: 21%; }
+.dash-rows-table th:nth-child(3) { width: 21%; }
+.dash-rows-table th:nth-child(4) { width: 11%; }
 .dash-rows-table th.dash-col-edit { width: 92px; }
 .dash-rows-table th.dash-col-review { width: 208px; }
 .dash-rows-table th.dash-col-open { width: 72px; }

@@ -103,6 +103,7 @@ def create_app(workspace: Optional[str] = None) -> FastAPI:
         if (
             request.url.path in ("/", "/index.html", "/style.css")
             or request.url.path.startswith("/js/")
+            or request.url.path.startswith("/fonts/")
         ):
             response.headers["Cache-Control"] = "no-cache"
         return response
