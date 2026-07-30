@@ -26,7 +26,9 @@ keep their annotations); an explicit ``null`` deletes the key.
 <workspace>/analysis/<stem>/ 下的 report.md、<stem>.json(SFT 样本)、
 <stem>_evidence.json 及图片;evidence PUT 仅允许修改标定多边形与证据框/标签,
 SFT PUT 仅允许 description/action/event_attributes/attr_mentions,其余字段与
-磁盘版本比对不一致即 422;event_attributes/attr_mentions 区分「未提交」(保留
+磁盘版本比对不一致即 422;首次 SFT 编辑落盘前把原始输出冻结为 <stem>_raw.json
+(shutil.copy,已存在则不覆盖;重推理成功由 jobs 删除);event_attributes/attr_mentions
+区分「未提交」(保留
 磁盘原值)与「显式 null」(删除该键);写入采用 tmp+os.replace 原子写(写后
 fsync)并按 stem 加锁(409 在跑 infer 检查在锁内复查,消除 TOCTOU)。
 _read_json 区分「文件不存在」(GET → null / PUT → 404)与「文件损坏」
@@ -42,6 +44,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import threading
 from collections import defaultdict
 from pathlib import Path
@@ -350,5 +353,12 @@ def put_sft(stem: str, body: SftSample, request: Request) -> Dict[str, Any]:
                 ),
             )
 
+        # 原始输出冻结:首次人工编辑落盘前,把推理原始输出复制为
+        # <stem>_raw.json(dashboard 据此计算 edited/edit_missing/edit_extra);
+        # 已存在则不覆盖(保持「首次编辑前的原始输出」语义);重推理成功时由
+        # jobs 删除该快照。
+        raw_path = sft_path.with_name(f"{stem}_raw.json")
+        if not raw_path.exists():
+            shutil.copy(sft_path, raw_path)
         _atomic_write_json(sft_path, new_payload)
     return new_payload

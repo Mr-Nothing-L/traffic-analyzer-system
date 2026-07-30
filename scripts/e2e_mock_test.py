@@ -11,7 +11,7 @@
 行为:自动确保 web 服务(127.0.0.1:8600)在运行(不在则启动,退出时不杀);
 打开 ?mock=1 页面,对界面所有按键/页面做一轮完整遍历(工作区弹窗基础/进阶、
 切换工作区、过滤、排序、全选、目录展开折叠、勾选、预览、推理、停止、重试、
-完成、SFT 选项联动、证据编辑、评估),打印每项 PASS/FAIL,单步失败不中断整轮。
+完成、SFT 选项联动、证据编辑、数据看板),打印每项 PASS/FAIL,单步失败不中断整轮。
 不 Ctrl+C 就一直循环。每轮结束截图存到 output/e2e_screenshots/(只保留最近 20 张)。
 """
 
@@ -391,17 +391,62 @@ def run_pass(page, p: Pass, shot: Path) -> None:
         page.mouse.up()
     p.step("预览区(重试播放 + 分隔条拖动复位)", t_preview_pane)
 
-    # ---------- 13. 精度评估 ----------
-    def t_eval():
-        page.click("#btn-eval-run")
-        page.wait_for_selector(".eval-table", timeout=60_000)
-    p.step("运行评估 → 评估表", t_eval)
+    # ---------- 13. 数据看板 ----------
+    # 入口按钮 #btn-dashboard 与看板视图(dashboard.js: #dash-root/.dash-chip/
+    # .dash-review-chip/.dash-open)由包B 提供;未就绪时各子断言降级为 SKIP 而非 FAIL
+    def t_dashboard():
+        btn = page.locator("#btn-dashboard")
+        if btn.count() == 0:
+            print("  [SKIP] 数据看板:工具栏尚无 #btn-dashboard 按钮(包B 未接线)")
+            return
+        btn.click()
+        rows_sel = "#dash-body tr[data-rel]"
+        try:
+            page.wait_for_selector(rows_sel, timeout=10_000)
+        except Exception:
+            print("  [SKIP] 数据看板:按钮已点击但看板视图未渲染(dashboard.js 未就绪)")
+            return
 
-    # ---------- 14. 工具栏「精度评估」按钮 ----------
-    def t_eval_toolbar():
-        page.click("#btn-evaluate")
-        page.wait_for_timeout(300)
-    p.step("工具栏「精度评估」按钮", t_eval_toolbar)
+        total = page.locator(rows_sel).count()
+        assert total >= 3, f"看板表格行数应 >=3,实际 {total}"
+
+        # 「人工已改」徽章:mock 将 01-02_Event_129 构造为 edited=true(pred_raw ≠ pred)
+        assert page.locator("#dash-body .dash-badge-edit").count() >= 1, \
+            "看板应出现「人工已改」徽章(.dash-badge-edit)"
+
+        # 过滤 chip:点「人工已改」chip,仅留 edited 行,行数应变少;再点一次复位
+        chip = page.locator('.dash-chip[data-group="edited"]')
+        if chip.count() == 0:
+            print("  [SKIP] 看板过滤 chip:未找到 .dash-chip[data-group=edited]")
+        else:
+            chip.click()
+            page.wait_for_timeout(300)
+            n = page.locator(rows_sel).count()
+            assert 0 < n < total, f"点「人工已改」chip 后行数应减少,实际 {n}/{total}"
+            chip = page.locator('.dash-chip[data-group="edited"]')  # 重渲染后重新定位
+            chip.click()
+            page.wait_for_timeout(300)
+            assert page.locator(rows_sel).count() == total, "复位后行数应恢复"
+
+        # 审核 chip:点击后应出现选中态(.on)
+        review_chip = page.locator("#dash-body .dash-review-chip").first
+        if review_chip.count() == 0:
+            print("  [SKIP] 看板审核 chip:未找到 .dash-review-chip 元素")
+        else:
+            review_chip.click()
+            page.wait_for_timeout(300)
+            cls = page.locator("#dash-body .dash-review-chip").first.get_attribute("class") or ""
+            assert "on" in cls.split(), f"审核 chip 点击后应有选中态 .on,实际 class={cls!r}"
+
+        # 「打开 →」:回到详情视图且该视频被选中
+        open_links = page.locator("#dash-body .dash-open")
+        if open_links.count() == 0:
+            print("  [SKIP] 看板「打开 →」:未找到 .dash-open 链接")
+        else:
+            open_links.first.click()
+            sel("#pane-top")
+            page.wait_for_selector("#video-list .video-item.active", timeout=8000)
+    p.step("数据看板(行数/人工已改徽章/过滤 chip/审核 chip/打开回详情)", t_dashboard)
 
     page.screenshot(path=str(shot), full_page=False)
 

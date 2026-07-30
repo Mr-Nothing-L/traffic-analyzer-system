@@ -7,7 +7,6 @@ import { api, videoSource } from './api.js';
 import { latestJobForStem, renderSidebar, invalidateSidebar } from './tree.js';
 import { renderSftBody } from './sft.js';
 import { renderEvidenceCard } from './evidence.js';
-import { renderEvalCard } from './jobs.js';
 import { mountExpertPanel } from './expert_panel.js';
 import { mountPreview } from './video_preview.js';
 import { renderReportBody } from './markdown.js';
@@ -26,9 +25,7 @@ export function renderWelcome() {
       : '<p>请先点击顶部「选择工作区…」按钮,选择包含视频文件的目录。</p>')
     + '<p>开发模式:在地址后追加 <span class="hint-kbd">?mock=1</span> 可使用内置模拟数据。</p>'
     + '</div>'
-    + '<div id="eval-card-slot"></div>'
     + '</div>';
-  renderEvalCard();
 }
 
 function skeletons() {
@@ -109,7 +106,7 @@ function renderResults() {
   renderResultCards(stem, source, r, hasResults);
 }
 
-// 重建 #pane-cards 卡片区(SFT/报告/证据/专家工作间/评估卡),并重新挂载各卡内容
+// 重建 #pane-cards 卡片区(SFT/报告/证据/专家工作间),并重新挂载各卡内容
 function renderResultCards(stem, source, r, hasResults) {
   const cards = $('#pane-cards');
   if (!cards) return;
@@ -147,7 +144,6 @@ function renderResultCards(stem, source, r, hasResults) {
       html += '<div class="card"><div class="card-body empty-note">' + esc(note) + '</div></div>';
     }
   }
-  html += '<div id="eval-card-slot"></div>';
   cards.innerHTML = html;
 
   if (hasResults) {
@@ -158,7 +154,6 @@ function renderResultCards(stem, source, r, hasResults) {
     const job = latestJobForStem(stem);
     if (job && job.status === 'running') mountExpertPanel(job);
   }
-  renderEvalCard();
 }
 
 /* ------------------------------------------------------------ 上下分隔条(预览常驻) */

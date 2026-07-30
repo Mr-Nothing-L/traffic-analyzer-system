@@ -11,7 +11,8 @@ import {
   loadTree, renderSidebar, syncButtons, invalidateSidebar,
 } from './tree.js';
 import { renderWelcome } from './preview.js';
-import { loadEvalLatest, pollJobs, schedulePoll, startInfer, runEvaluate } from './jobs.js';
+import { openDashboard, dashboardTick } from './dashboard.js';
+import { pollJobs, schedulePoll, startInfer } from './jobs.js';
 import {
   browseWorkspace, closeDirModal, confirmDir, showDirInput,
   onDirRecentChange, dirModalKeys, navDir, setWorkspaceLabel,
@@ -101,7 +102,8 @@ function initToolbar() {
   initSplitter();
 
   $('#btn-infer').addEventListener('click', startInfer);
-  $('#btn-evaluate').addEventListener('click', runEvaluate);
+  // 「精度评估」按钮元素由包C移除;评估能力并入数据看板,jobs.js 已不再导出 runEvaluate
+  $('#btn-dashboard').addEventListener('click', openDashboard);
 
   $('#check-all').addEventListener('change', e => {
     state.checked.clear();
@@ -140,7 +142,7 @@ async function init() {
     state.workspace = await api('/api/workspace');
     if (state.workspace && state.workspace.path) {
       setWorkspaceLabel(state.workspace);
-      await Promise.all([loadTree(), loadEvalLatest(), pollJobs()]);
+      await Promise.all([loadTree(), pollJobs()]);
     }
   } catch (e) {
     // 后端未就绪:保持初始界面
@@ -149,6 +151,8 @@ async function init() {
   renderSidebar();
   syncButtons();
   schedulePoll(); // setTimeout 链:活动任务 1.5s / 空闲 5s,页面隐藏时暂停
+  // 看板轮询:与任务轮询同频 1.5s;dashboardTick 内部按 state.view 门控,非看板态零开销
+  setInterval(dashboardTick, 1500);
 }
 
 init();

@@ -39,7 +39,7 @@ const mockDb = {
   jobs: [],
   nextJobId: 1,
   results: {},
-  evalLatest: null,
+  reviewStates: {}, // 数据看板人工审核状态,stem → 'unconfirmed'|'confirmed'|'needs_review'(内存态,刷新即失)
   tickCount: 0,
 };
 
@@ -171,5 +171,5 @@ function mockResults(stem) {
 
 export {
   REAL, mockDb, mockFsTree, mockTreeEntries, mockResults,
-  MOCK_EVENT_CONFIG, EVENT_NAMES_10,
+  MOCK_EVENT_CONFIG,
 };

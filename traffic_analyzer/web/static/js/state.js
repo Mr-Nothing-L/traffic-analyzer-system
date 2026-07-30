@@ -15,7 +15,6 @@ export const state = {
   evidenceDraft: null,      // 编辑中的 evidence 深拷贝
   evidenceDirty: false,
   evTabIdx: 0,
-  evalData: null,           // /api/evaluate/latest 返回
   eventConfig: null,        // /api/config/events 缓存([{event_id, name_zh, is_active}])
   sftDraft: null,           // SFT 编辑草稿 {texts, checks, attrs, skeletons, unmatched, env}
   sftSavedSig: '',          // 已保存草稿的签名(用于 dirty 判断)

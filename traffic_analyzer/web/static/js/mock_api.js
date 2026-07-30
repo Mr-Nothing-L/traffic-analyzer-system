@@ -119,23 +119,22 @@ export async function mockApi(path, opts) {
     return { job_ids: ids };
   }
 
-  if (path === '/api/evaluate' && method === 'POST') {
-    if (!mockDb.videos.some(v => v.has_results)) throw new ApiError(400, '无分析结果,请先推理');
-    const job = {
-      id: mockDb.nextJobId++, kind: 'evaluate', status: 'queued',
-      progress: { step_label: '排队中', step_index: 0, total_steps: 5, fraction: null },
-      log_tail: '',
-    };
-    mockDb.jobs.push(job);
-    return { job_id: job.id };
-  }
-
-  if (path === '/api/evaluate/latest') {
-    if (!mockDb.evalLatest) throw new ApiError(404, '尚无评估结果');
-    return mockDb.evalLatest;
-  }
-
   if (path === '/api/jobs') return mockDb.jobs;
+
+  // 数据看板:GT 按文件名解析,pred 取 SFT 标注 action,metrics 实时计算
+  if (path === '/api/dashboard' && method === 'GET') {
+    if (!mockDb.workspace.path) throw new ApiError(400, 'No workspace selected');
+    return mockDashboard();
+  }
+
+  // 人工审核结论:{stem, status};存内存(reviewStates),刷新页面即失
+  if (path === '/api/dashboard/review' && method === 'PUT') {
+    if (!body.stem || typeof body.stem !== 'string') throw new ApiError(422, 'stem 必填');
+    if (!mockDb.videos.some(v => v.stem === body.stem)) throw new ApiError(404, '视频不存在: ' + body.stem);
+    if (MOCK_REVIEW_STATUSES.indexOf(body.status) < 0) throw new ApiError(422, '非法审核状态: ' + body.status);
+    mockDb.reviewStates[body.stem] = body.status;
+    return { ok: true, stem: body.stem, status: body.status };
+  }
 
   // 取消任务:running/queued → failed(rc=-15 表示被终止)
   const cm = path.match(/^\/api\/jobs\/(\d+)\/cancel$/);
@@ -195,4 +194,113 @@ export async function mockApi(path, opts) {
   }
 
   throw new ApiError(404, 'mock: 未实现 ' + method + ' ' + path);
+}
+
+/* ------------------------------------------------------------ 数据看板 */
+// GT 从文件名解析:「01-02-04_Event_2048_...」前缀的横线分隔数字即真值事件编号;
+// 无该前缀(如 nested_clip.mp4)视为无真值
+function mockGtIds(rel) {
+  const m = String(rel).split('/').pop().match(/^([\d-]+)_Event_/);
+  if (!m) return [];
+  return m[1].split('-').map(Number).filter(n => n > 0).sort((a, b) => a - b);
+}
+
+// 演示「人工已改」徽章:该样本的原始模型输出(pred_raw)少了 class2,
+// 人工审核后补上 → edited=true(pred_raw_ids ≠ pred_ids);其余样本 raw == pred
+const MOCK_PRED_RAW_OVERRIDES = {
+  '01-02_Event_129_1755579215119_1': [1],
+};
+
+// 审核状态枚举,与 dashboard.js REVIEWS 一致;行默认 'unconfirmed'
+const MOCK_REVIEW_STATUSES = ['unconfirmed', 'confirmed', 'needs_review'];
+
+function idDiff(a, b) { return a.filter(x => b.indexOf(x) < 0); }
+
+function mockDashboard() {
+  const rows = mockDb.videos.map(v => {
+    const gt = mockGtIds(v.rel);
+    let pred = [];
+    if (v.has_results) {
+      const r = mockResults(v.stem);
+      pred = (r.sft_label && Array.isArray(r.sft_label.action) ? r.sft_label.action.slice() : [])
+        .sort((a, b) => a - b);
+    }
+    const predRaw = v.has_results
+      ? (MOCK_PRED_RAW_OVERRIDES[v.stem] || pred).slice().sort((a, b) => a - b)
+      : [];
+    const edited = v.has_results && JSON.stringify(predRaw) !== JSON.stringify(pred);
+    const missing = idDiff(gt, pred); // 漏检:GT 有而模型未检出
+    const extra = idDiff(pred, gt);   // 误检:模型检出而 GT 无
+    return {
+      rel: v.rel, stem: v.stem, has_results: v.has_results,
+      gt_ids: gt, pred_ids: pred,
+      status: !v.has_results ? 'no_results'
+        : (v.rel.indexOf('_Event_') < 0 ? 'no_gt'
+          : (missing.length || extra.length ? 'diff' : 'consistent')),
+      missing: missing, extra: extra,
+      pred_raw_ids: predRaw, edited: edited,
+      edit_extra: edited ? idDiff(pred, predRaw) : [],   // 相对 raw 人工补充的
+      edit_missing: edited ? idDiff(predRaw, pred) : [], // 相对 raw 人工删除的
+      review: mockDb.reviewStates[v.stem] || 'unconfirmed',
+    };
+  });
+  const eventNames = {};
+  MOCK_EVENT_CONFIG.forEach(e => { eventNames[String(e.event_id)] = e.name_zh; });
+  return {
+    rows: rows,
+    summary: mockDashboardSummary(rows),
+    event_names: eventNames,
+    metrics: mockDashboardMetrics(rows),
+  };
+}
+
+function mockDashboardSummary(rows) {
+  const s = { total: rows.length, edited: rows.filter(r => r.edited).length };
+  ['consistent', 'diff', 'no_gt', 'no_results'].forEach(k => {
+    s[k] = rows.filter(r => r.status === k).length;
+  });
+  MOCK_REVIEW_STATUSES.forEach(k => {
+    s[k] = rows.filter(r => r.review === k).length;
+  });
+  return s;
+}
+
+// 仅统计 has_results 且有 GT 的行;per_event 为数组(dashboard.js 按 .length/.forEach 消费),
+// macro 为各类简单平均,micro 由总 TP/FP/FN 计算
+function mockDashboardMetrics(rows) {
+  const done = rows.filter(r => r.status === 'consistent' || r.status === 'diff');
+  const ids = new Set();
+  done.forEach(r => { r.gt_ids.forEach(i => ids.add(i)); r.pred_ids.forEach(i => ids.add(i)); });
+  const per = [];
+  let ttp = 0, tfp = 0, tfn = 0;
+  Array.from(ids).sort((a, b) => a - b).forEach(id => {
+    let tp = 0, fp = 0, fn = 0;
+    done.forEach(r => {
+      const inGt = r.gt_ids.indexOf(id) >= 0, inPred = r.pred_ids.indexOf(id) >= 0;
+      if (inGt && inPred) tp++;
+      else if (inPred) fp++;
+      else if (inGt) fn++;
+    });
+    const p = tp + fp > 0 ? tp / (tp + fp) : 0;
+    const rc = tp + fn > 0 ? tp / (tp + fn) : 0;
+    per.push({
+      event_id: id, tp: tp, fp: fp, fn: fn,
+      precision: +p.toFixed(4), recall: +rc.toFixed(4),
+      f1: +((p + rc) > 0 ? 2 * p * rc / (p + rc) : 0).toFixed(4),
+    });
+    ttp += tp; tfp += fp; tfn += fn;
+  });
+  const avg = k => per.length
+    ? +(per.reduce((s, e) => s + e[k], 0) / per.length).toFixed(4) : 0;
+  const mp = ttp + tfp > 0 ? ttp / (ttp + tfp) : 0;
+  const mr = ttp + tfn > 0 ? ttp / (ttp + tfn) : 0;
+  return {
+    per_event: per,
+    macro: { precision: avg('precision'), recall: avg('recall'), f1: avg('f1') },
+    micro: {
+      tp: ttp, fp: tfp, fn: tfn,
+      precision: +mp.toFixed(4), recall: +mr.toFixed(4),
+      f1: +((mp + mr) > 0 ? 2 * mp * mr / (mp + mr) : 0).toFixed(4),
+    },
+  };
 }

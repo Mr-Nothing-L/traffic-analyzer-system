@@ -5,7 +5,6 @@ import { $, $$, esc, toast } from './util.js';
 import { state } from './state.js';
 import { api } from './api.js';
 import { loadTree, renderSidebar, syncButtons } from './tree.js';
-import { loadEvalLatest } from './jobs.js';
 import { renderWelcome } from './preview.js';
 
 // 顶栏工作区按钮两段式:主标签「工作区」+ 次级详细路径(未选择时只有「选择工作区…」)
@@ -28,14 +27,13 @@ export async function applyWorkspace(ws) {
   state.currentStem = null;
   state.currentRel = null;
   state.checked.clear();
-  state.evalData = null;
   // 工作区切换:丢弃一切与当前视频绑定的草稿/dirty 态,避免 hasUnsavedEdits() 幽灵为真
   state.results = null;
   state.evidenceDraft = null;
   state.evidenceDirty = false;
   state.sftDraft = null;
   state.sftSavedSig = '';
-  await Promise.all([loadTree(), loadEvalLatest()]);
+  await loadTree();
   renderWelcome();
   renderSidebar();
   syncButtons();

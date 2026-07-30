@@ -7,12 +7,12 @@ forward arguments).
 
 [文件说明]
 作用:FastAPI 应用工厂 create_app():装配 workspace/fs/jobs/evidence_api/frames/
-video_stream/evaluate 各路由,提供 /api/expert-phases 专家阶段定义接口,挂载
+video_stream/dashboard 各路由,提供 /api/expert-phases 专家阶段定义接口,挂载
 web/static 前端并为其禁用缓存,注册 lifespan/atexit
 钩子以在服务退出时停止所有排队/运行中的分析子进程;通过 TRAFFIC_ANALYZER_WEB_WORKSPACE
 环境变量接收预设工作区(工厂模式无法转发参数)。
 上游:traffic_analyzer/cli.py 的 web 子命令(uvicorn "traffic_analyzer.web.app:create_app")。
-下游:web/ 下 workspace、fs、jobs、evidence_api、frames、video_stream、evaluate 路由模块;
+下游:web/ 下 workspace、fs、jobs、evidence_api、frames、video_stream、dashboard 路由模块;
 web/static 前端静态文件。
 """
 
@@ -30,7 +30,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 
 from traffic_analyzer.web import (
-    evaluate,
+    dashboard,
     evidence_api,
     frames,
     fs,
@@ -79,7 +79,7 @@ def create_app(workspace: Optional[str] = None) -> FastAPI:
     app.include_router(evidence_api.router)
     app.include_router(frames.router)
     app.include_router(video_stream.router)
-    app.include_router(evaluate.router)
+    app.include_router(dashboard.router)
 
     @app.get("/api/expert-phases")
     def get_expert_phases() -> Any:

@@ -1,77 +1,15 @@
-"""Evaluation endpoint tests (incl. scripts/batch_evaluate.py contracts)."""
+"""scripts/batch_evaluate.py script-level contract tests.
+
+(/api/evaluate 路由及其任务类型已移除,相关用例一并删除;脚本本体保留。)
+"""
 
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
-from typing import Any, List
-
-from fastapi.testclient import TestClient
-
-from traffic_analyzer.web.app import create_app
-
-from .conftest import _make_results, _make_workspace, _wait_for_job
+from typing import Any
 
 
-# ---------------------------------------------------------------------------
-# Evaluation
-# ---------------------------------------------------------------------------
-
-
-class TestEvaluate:
-    def test_evaluate_without_workspace_400(self) -> None:
-        client = TestClient(create_app())
-        assert client.post("/api/evaluate", json={}).status_code == 400
-
-    def test_evaluate_without_results_400(self, tmp_path: Path) -> None:
-        workspace = _make_workspace(tmp_path)
-        client = TestClient(create_app(workspace=str(workspace)))
-        assert client.post("/api/evaluate", json={}).status_code == 400
-
-        # Empty analysis directory is still a 400.
-        (workspace / "analysis").mkdir()
-        assert client.post("/api/evaluate", json={}).status_code == 400
-
-    def test_evaluate_latest_404(self, tmp_path: Path) -> None:
-        workspace = _make_workspace(tmp_path)
-        client = TestClient(create_app(workspace=str(workspace)))
-        assert client.get("/api/evaluate/latest").status_code == 404
-
-    def test_evaluate_run_and_read_latest(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        workspace = _make_workspace(tmp_path)
-        _make_results(workspace, "v1")
-        metrics = {"macro": {"precision": 1.0}, "total_videos": 1}
-
-        def _fake_command(ws: Path) -> List[str]:
-            latest = ws / "analysis" / "evaluation" / "latest.json"
-            script = (
-                "import json, pathlib;"
-                f"p = pathlib.Path(r'{latest}');"
-                "p.parent.mkdir(parents=True, exist_ok=True);"
-                f"p.write_text(json.dumps({metrics!r}), encoding='utf-8')"
-            )
-            return [sys.executable, "-c", script]
-
-        monkeypatch.setattr(
-            "traffic_analyzer.web.jobs.build_evaluate_command", _fake_command
-        )
-        client = TestClient(create_app(workspace=str(workspace)))
-
-        resp = client.post("/api/evaluate", json={})
-        assert resp.status_code == 200
-        job_id = resp.json()["job_id"]
-
-        job = _wait_for_job(client, job_id)
-        assert job["kind"] == "evaluate"
-        assert job["status"] == "done"
-        assert job["progress"]["fraction"] == 1.0
-
-        latest = client.get("/api/evaluate/latest")
-        assert latest.status_code == 200
-        assert latest.json()["total_videos"] == 1
 class TestBatchEvaluateAtomicWrite:
     def test_atomic_write_text(self, tmp_path: Path, batch_evaluate_module: Any) -> None:
         module = batch_evaluate_module
@@ -111,13 +49,3 @@ class TestBatchEvaluateNestedVideo:
         assert rc == 0
         text = output.read_text(encoding="utf-8")
         assert "01_Event_129_1_1" in text
-class TestEvaluateLatestCorrupt:
-    def test_corrupt_latest_404(self, tmp_path: Path) -> None:
-        workspace = _make_workspace(tmp_path)
-        latest = workspace / "analysis" / "evaluation" / "latest.json"
-        latest.parent.mkdir(parents=True)
-        latest.write_text('{"truncated": ', encoding="utf-8")
-        client = TestClient(create_app(workspace=str(workspace)))
-        resp = client.get("/api/evaluate/latest")
-        assert resp.status_code == 404  # not a 500
-        assert "mid-write" in resp.json()["detail"]

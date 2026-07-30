@@ -300,8 +300,6 @@ export function syncButtons() {
   const hasWs = !!(state.workspace && state.workspace.path);
   $('#btn-infer').disabled = !hasWs || state.checked.size === 0
     || state.jobs.some(j => j.kind === 'infer' && (j.status === 'running' || j.status === 'queued'));
-  $('#btn-evaluate').disabled = !hasWs
-    || state.jobs.some(j => j.kind === 'evaluate' && (j.status === 'running' || j.status === 'queued'));
 }
 
 // 加载工作区文件树;preserve 时保留已展开目录(轮询刷新用)

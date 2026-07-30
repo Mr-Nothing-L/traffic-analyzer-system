@@ -8,8 +8,9 @@ log tail (~30 lines).
 
 [文件说明]
 作用:单工作线程串行子进程任务队列(JobManager)。build_infer_command 构造
-``python -m traffic_analyzer analyze`` 命令(带 --sft-label),build_evaluate_command 构造
-scripts/batch_evaluate.py 评估命令;worker 按行解析子进程输出并委托
+``python -m traffic_analyzer analyze`` 命令(带 --sft-label);infer 成功(rc==0)
+时删除该 stem 冻结的 <stem>_raw.json 快照(新推理输出取代被冻结的原始输出);
+worker 按行解析子进程输出并委托
 web/progress.py 的泳道状态机更新进度;提供 /api/infer(同 stem 的
 queued/running infer 去重,重复 409;提交前持 evidence_api._put_locks[stem],
 与 PUT 同一把锁、统一锁顺序 _put_locks → JobManager._lock)、/api/jobs、
@@ -18,10 +19,10 @@ cancel 竞态处理:锁内读 job.proc,worker 挂上 proc 后复查 status(非 r
 立即 terminate),收尾块只在 status=='running' 时改写 status/returncode;
 任务超时(默认 4 小时,TRAFFIC_ANALYZER_JOB_TIMEOUT_SECONDS 可调,<=0 禁用)
 到点 terminate 并标 failed;shutdown 后置 _shutdown 标志,submit 拒绝新任务。
-上游:web/app.py(挂载路由,lifespan/atexit 时调用 shutdown);web/evaluate.py(复用
-build_evaluate_command);web/evidence_api.py(PUT 检查同 stem 在跑 infer;
-本模块 post_infer 复用其 _put_locks)。
-下游:traffic_analyzer CLI(python -m traffic_analyzer analyze)、scripts/batch_evaluate.py、
+上游:web/app.py(挂载路由,lifespan/atexit 时调用 shutdown);
+web/evidence_api.py(PUT 检查同 stem 在跑 infer,并在首次 SFT 编辑前冻结
+<stem>_raw.json;本模块 post_infer 复用其 _put_locks)。
+下游:traffic_analyzer CLI(python -m traffic_analyzer analyze)、
 web/workspace.py 的 analysis/<stem>/ 路径契约、web/progress.py(进度状态机)。
 """
 
@@ -86,16 +87,15 @@ def build_infer_command(workspace: Path, video_rel: str, stem: str) -> List[str]
     ]
 
 
-def build_evaluate_command(workspace: Path) -> List[str]:
-    """Command running batch evaluation over the whole workspace."""
-    analysis = workspace / "analysis"
-    return [
-        sys.executable, "scripts/batch_evaluate.py",
-        "--video-dir", str(workspace),
-        "--report-dir", str(analysis),
-        "--gt-mode", "filename",
-        "--output", str(analysis / "evaluation" / "latest.json"),
-    ]
+def _discard_frozen_raw(workspace: Path, stem: str) -> None:
+    """Delete the frozen ``<stem>_raw.json`` snapshot (best-effort)."""
+    raw_path = workspace_mod.analysis_dir(workspace, stem) / f"{stem}_raw.json"
+    try:
+        raw_path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        logger.warning("failed to remove frozen raw snapshot %s: %s", raw_path, exc)
 
 
 @dataclass
@@ -103,10 +103,11 @@ class Job:
     """One queued/running/finished subprocess."""
 
     id: int
-    kind: str  # "infer" | "evaluate"
+    kind: str  # "infer"
     argv: List[str]
     stem: Optional[str] = None
     rel: Optional[str] = None  # workspace-relative video path (infer jobs)
+    workspace: Optional[Path] = None  # needed to drop the frozen _raw.json on success
     cwd: Path = REPO_ROOT
     status: str = "queued"  # queued | running | done | failed
     step_label: str = "排队中"
@@ -178,6 +179,7 @@ class JobManager:
         argv: List[str],
         stem: Optional[str] = None,
         rel: Optional[str] = None,
+        workspace: Optional[Path] = None,
         cwd: Path = REPO_ROOT,
     ) -> int:
         with self._lock:
@@ -186,7 +188,8 @@ class JobManager:
             job_id = self._next_id
             self._next_id += 1
             self._jobs[job_id] = Job(
-                id=job_id, kind=kind, argv=list(argv), stem=stem, rel=rel, cwd=Path(cwd)
+                id=job_id, kind=kind, argv=list(argv), stem=stem, rel=rel,
+                workspace=workspace, cwd=Path(cwd),
             )
         self._queue.put(self._jobs[job_id])
         return job_id
@@ -214,7 +217,7 @@ class JobManager:
             if job.status != "queued":
                 return  # cancelled / shut down while still in the queue
             job.status = "running"
-            job.step_label = "评估中" if job.kind == "evaluate" else "推理中"
+            job.step_label = "推理中"
         try:
             proc = subprocess.Popen(
                 job.argv,
@@ -281,6 +284,11 @@ class JobManager:
                 if returncode == 0:
                     _finish_stage_lanes(job)
                     job.fraction = 1.0
+        if returncode == 0 and job.kind == "infer" and job.stem and job.workspace:
+            # 重推理成功:新的 <stem>.json 已是当前原始输出,冻结的旧快照
+            # (<stem>_raw.json)失去「编辑前基线」意义,删除以免 dashboard
+            # 继续把旧快照当作原始输出。
+            _discard_frozen_raw(job.workspace, job.stem)
 
     def _on_job_timeout(self, job: Job) -> None:
         """Timer callback: terminate the child and mark the job failed."""
@@ -440,7 +448,11 @@ def post_infer(body: InferRequest, request: Request) -> Dict[str, Any]:
         for stem, rel in videos:
             workspace_mod.analysis_dir(workspace, stem).mkdir(parents=True, exist_ok=True)
             argv = build_infer_command(workspace, rel, stem)
-            job_ids.append(request.app.state.jobs.submit("infer", argv, stem=stem, rel=rel))
+            job_ids.append(
+                request.app.state.jobs.submit(
+                    "infer", argv, stem=stem, rel=rel, workspace=workspace
+                )
+            )
     return {"job_ids": job_ids}
 
 

@@ -1,143 +1,13 @@
 /* ================================================================
-   任务步骤文案
+   动作:推理
    ================================================================ */
-import { $, esc, toast } from './util.js';
-import { state, STEP_LABELS } from './state.js';
+import { toast } from './util.js';
+import { state } from './state.js';
 import { api } from './api.js';
 import { loadTree, renderSidebar, syncButtons } from './tree.js';
 import { selectVideo } from './preview.js';
 import { sftSignature } from './sft_model.js';
 
-export function jobStepText(job) {
-  const p = job.progress || {};
-  if (job.status === 'queued') return '排队中';
-  if (job.status === 'done') return '完成';
-  if (job.status === 'failed') return '失败 (rc=' + (job.returncode == null ? '?' : job.returncode) + ')';
-  if (job.kind === 'evaluate') return esc(p.step_label || '评估中');
-  const total = p.total_steps || 5;
-  const idx = p.step_index || 0;
-  if (!idx) return esc(p.step_label || '启动中');
-  return esc(p.step_label || STEP_LABELS[idx] || '') + ' ' + idx + '/' + total;
-}
-
-/* ------------------------------------------------------------ 精度评估卡 */
-let evalCardSnap = ''; // 整卡快照:内容未变时跳过重建,避免每轮询整卡 innerHTML 替换
-export function renderEvalCard() {
-  const slot = $('#eval-card-slot');
-  if (!slot) return;
-  const evalJob = [...state.jobs].reverse().find(j => j.kind === 'evaluate');
-  const running = evalJob && (evalJob.status === 'running' || evalJob.status === 'queued');
-  // 运行中 body 展示 log_tail,快照需含之;evalData 对象小,整体入快照
-  const lt = running
-    ? (Array.isArray(evalJob.log_tail) ? evalJob.log_tail.join('\n') : (evalJob.log_tail || ''))
-    : '';
-  const snap = JSON.stringify([
-    !!running, running ? jobStepText(evalJob) : '', lt,
-    !!(state.workspace && state.workspace.path), state.evalData,
-  ]);
-  // slot.firstChild 为空说明宿主视图刚重建(快照失效),必须重渲染
-  if (snap === evalCardSnap && slot.firstChild) return;
-  evalCardSnap = snap;
-
-  let inner = '<div class="card" id="card-eval"><div class="card-head">'
-    + '<span class="card-title">精度评估</span>'
-    + '<span class="card-sub">基于文件名真值(--gt-mode filename)</span>'
-    + '<span class="spacer"></span>'
-    + '<button class="btn btn-primary btn-sm" id="btn-eval-run"'
-    + (running || !state.workspace || !state.workspace.path ? ' disabled' : '') + '>'
-    + (running ? '<span class="spinner spinner-inverse"></span>评估中…' : '运行评估') + '</button></div>'
-    + '<div class="card-body" id="eval-body"></div></div>';
-  slot.innerHTML = inner;
-
-  const btn = $('#btn-eval-run');
-  if (btn) btn.addEventListener('click', runEvaluate);
-
-  const body = $('#eval-body');
-  if (running) {
-    // log_tail 已在快照处归一化为多行文本,空串不渲染 pre 块
-    body.innerHTML = '<div class="eval-running"><span class="spinner"></span><span>'
-      + jobStepText(evalJob) + '</span></div>'
-      + (lt ? '<pre class="md" style="margin-top:10px"><code>' + esc(lt) + '</code></pre>' : '');
-    return;
-  }
-  if (!state.evalData) {
-    body.innerHTML = '<div class="empty-note">尚无评估结果。完成推理后点击「运行评估」。</div>';
-    return;
-  }
-  body.innerHTML = evalTableHtml(state.evalData);
-}
-
-function evalTableHtml(data) {
-  const per = data.per_event || {};
-  const overall = data.overall || {};
-  const keys = Object.keys(per).sort((a, b) => {
-    if (a === 'normal') return 1;
-    if (b === 'normal') return -1;
-    return Number(a) - Number(b);
-  });
-  let html = '<div class="eval-table-wrap"><table class="eval-table">'
-    + '<thead><tr><th>事件ID</th><th>事件名称</th><th>GT数</th><th>TP</th><th>FP</th><th>FN</th>'
-    + '<th>精确率</th><th>召回率</th><th>F1</th></tr></thead><tbody>';
-  keys.forEach(k => {
-    const e = per[k] || {};
-    const name = k === 'normal' ? '正常(无事件)' : (e.name || '事件' + k);
-    const id = k === 'normal' ? '-' : k;
-    html += '<tr><td>' + esc(id) + '</td><td>' + esc(name) + '</td>'
-      + '<td class="num">' + esc(e.gt_count != null ? e.gt_count : (e.total != null ? e.total : '-')) + '</td>'
-      + '<td class="num">' + esc(e.tp != null ? e.tp : '-') + '</td>'
-      + '<td class="num">' + esc(e.fp != null ? e.fp : '-') + '</td>'
-      + '<td class="num">' + esc(e.fn != null ? e.fn : '-') + '</td>'
-      + '<td class="num">' + esc(e.precision != null ? e.precision : '-') + '</td>'
-      + '<td class="num">' + esc(e.recall != null ? e.recall : '-') + '</td>'
-      + '<td class="num">' + esc(e.f1 != null ? e.f1 : '-') + '</td></tr>';
-  });
-  html += '<tr class="total"><td>-</td><td>总体(宏平均 / 微平均)</td>'
-    + '<td class="num">-</td>'
-    + '<td class="num">' + esc(overall.total_tp != null ? overall.total_tp : '-') + '</td>'
-    + '<td class="num">' + esc(overall.total_fp != null ? overall.total_fp : '-') + '</td>'
-    + '<td class="num">' + esc(overall.total_fn != null ? overall.total_fn : '-') + '</td>'
-    + '<td class="num">' + esc(overall.macro_precision != null ? overall.macro_precision : '-') + ' / '
-    + esc(overall.micro_precision != null ? overall.micro_precision : '-') + '</td>'
-    + '<td class="num">' + esc(overall.macro_recall != null ? overall.macro_recall : '-') + ' / '
-    + esc(overall.micro_recall != null ? overall.micro_recall : '-') + '</td>'
-    + '<td class="num">' + esc(overall.macro_f1 != null ? overall.macro_f1 : '-') + ' / '
-    + esc(overall.micro_f1 != null ? overall.micro_f1 : '-') + '</td></tr>';
-  html += '</tbody></table></div>';
-  return html;
-}
-
-let evalPosting = false; // 提交防抖:双击时第二次直接忽略,与按钮 disabled 无关
-export async function runEvaluate() {
-  if (evalPosting) return;
-  evalPosting = true;
-  try {
-    try {
-      await api('/api/evaluate', { method: 'POST', body: {} });
-      toast('评估任务已提交');
-      pollJobs();
-    } catch (e) {
-      toast('评估提交失败(' + e.status + '):' + e.message, 'err');
-    }
-    renderEvalCard();
-    syncButtons();
-  } finally {
-    evalPosting = false;
-  }
-}
-
-export async function loadEvalLatest() {
-  try {
-    state.evalData = await api('/api/evaluate/latest');
-  } catch (e) {
-    if (e.status !== 404) toast('读取评估结果失败:' + e.message, 'err');
-    state.evalData = null;
-  }
-  renderEvalCard();
-}
-
-/* ================================================================
-   动作:推理
-   ================================================================ */
 let inferPosting = false; // 提交防抖:双击时第二次直接忽略,与按钮 disabled 无关
 export async function startInfer() {
   const rels = state.videos.filter(v => state.checked.has(v.rel)).map(v => v.rel);
@@ -226,10 +96,6 @@ export async function pollJobs() {
       const was = prev[j.id];
       if (was && was !== j.status && (j.status === 'done' || j.status === 'failed')) {
         needVideos = true;
-        if (j.kind === 'evaluate' && j.status === 'done') loadEvalLatest();
-        if (j.kind === 'evaluate' && j.status === 'failed') {
-          toast('评估失败(rc=' + j.returncode + ')', 'err'); renderEvalCard();
-        }
         if (j.kind === 'infer' && j.status === 'done') {
           toast('推理完成:' + (j.rel || j.stem || ''), 'ok');
         }
@@ -244,9 +110,6 @@ export async function pollJobs() {
       if (j.kind === 'infer' && j.status === 'running' && was && was !== j.status
           && (j.rel || j.stem) === state.currentRel && !reloadRel) {
         reloadRel = j.rel || j.stem;
-      }
-      if (j.kind === 'evaluate' && (j.status === 'running' || j.status === 'queued')) {
-        renderEvalCard(); // 更新评估卡进度
       }
     });
     state.prevJobStatus = next;

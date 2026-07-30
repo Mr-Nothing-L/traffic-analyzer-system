@@ -1,7 +1,7 @@
 /* ================================================================
    Mock 数据层(?mock=1)—— 专家泳道慢速模拟与 mockTick 推进
    ================================================================ */
-import { REAL, mockDb, MOCK_EVENT_CONFIG, EVENT_NAMES_10 } from './mock_db.js';
+import { REAL, mockDb, MOCK_EVENT_CONFIG } from './mock_db.js';
 
 /* ------------------------------------------------------------ 专家泳道慢速模拟 */
 // 与 config 中 8 个激活类别一致 + 最后的「裁决」泳道;label 为各阶段中文短文案
@@ -157,41 +157,8 @@ export function mockTick() {
           if (v) v.has_results = true;
         }
       }
-    } else {
-      running._ticks = (running._ticks || 0) + 1;
-      running.progress = { step_label: '评估中', step_index: 0, total_steps: 5, fraction: null };
-      running.log_tail = '[mock] evaluate tick ' + running._ticks;
-      if (running._ticks >= 4) {
-        running.status = 'done';
-        running.returncode = 0;
-        mockDb.evalLatest = mockEvalMetrics();
-      }
     }
   }
-}
-
-function mockEvalMetrics() {
-  const per = {};
-  EVENT_NAMES_10.forEach((name, i) => {
-    const tp = i === 1 ? 3 : (i % 3);
-    per[String(i + 1)] = {
-      name: name, gt_count: tp + (i % 2), tp: tp, fp: i === 4 ? 1 : 0, fn: i % 2,
-      precision: tp / (tp + (i === 4 ? 1 : 0)) || 0,
-      recall: tp / (tp + (i % 2)) || 0,
-      f1: 0,
-    };
-    const p = per[String(i + 1)];
-    p.f1 = (p.precision + p.recall) > 0 ? 2 * p.precision * p.recall / (p.precision + p.recall) : 0;
-    p.precision = +p.precision.toFixed(4); p.recall = +p.recall.toFixed(4); p.f1 = +p.f1.toFixed(4);
-  });
-  return {
-    per_event: per,
-    overall: {
-      macro_precision: 0.82, macro_recall: 0.75, macro_f1: 0.7833,
-      micro_precision: 0.85, micro_recall: 0.77, micro_f1: 0.808,
-      total_tp: 12, total_fp: 2, total_fn: 4,
-    },
-  };
 }
 
 export { MOCK_EXPERT_PHASES };
