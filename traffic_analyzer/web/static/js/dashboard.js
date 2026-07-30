@@ -227,7 +227,8 @@ function renderTable(rows) {
   }
   let html = '<div class="dash-table-wrap"><table class="dash-table dash-rows-table">'
     + '<thead><tr><th>视频</th><th>GT 事件</th><th>模型检出</th><th>一致性</th>'
-    + '<th>人工</th><th>审核</th><th></th></tr></thead><tbody>';
+    + '<th class="dash-col-edit">人工</th><th class="dash-col-review">审核</th>'
+    + '<th class="dash-col-open"></th></tr></thead><tbody>';
   visible.forEach(r => {
     const hasGt = r.status !== 'no_gt';
     const hasPred = r.status !== 'no_results';

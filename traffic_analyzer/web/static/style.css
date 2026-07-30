@@ -1618,6 +1618,11 @@ body.hsplit-dragging { cursor: row-resize; user-select: none; }
   white-space: nowrap;
 }
 .dash-nowrap { white-space: nowrap; }
+/* 明细表固定列宽:人工列无数据时不塌缩,审核列容纳三个 chip 不挤压,
+   表头与单元格同属一张表、同一列定义,宽度一致即对齐 */
+.dash-rows-table th.dash-col-edit { width: 92px; }
+.dash-rows-table th.dash-col-review { width: 208px; }
+.dash-rows-table th.dash-col-open { width: 72px; }
 .dash-open { color: var(--accent); font-weight: 650; white-space: nowrap; }
 
 /* 事件名 chips */
