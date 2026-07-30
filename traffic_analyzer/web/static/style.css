@@ -1583,7 +1583,7 @@ body.hsplit-dragging { cursor: row-resize; user-select: none; }
   border-bottom: 1px solid var(--border);
   padding: 7px 10px;
   text-align: left;
-  vertical-align: top;
+  vertical-align: middle; /* 单元格内容垂直居中 */
 }
 .dash-table thead th {
   color: var(--text2);
