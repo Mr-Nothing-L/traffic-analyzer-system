@@ -1591,24 +1591,25 @@ body.hsplit-dragging { cursor: row-resize; user-select: none; }
   letter-spacing: 0.04em;
   background: #FBF9F4;
   white-space: nowrap;
+  text-align: center; /* 表头居中 */
 }
 .dash-table tbody tr:last-child td { border-bottom: none; }
+/* 列间深浅交替:每列视觉边界更清晰(奇数列白,偶数列浅米) */
+.dash-table tbody td:nth-child(even) { background: #F7F3EC; }
 .dash-table td.num {
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
   text-align: right;
   white-space: nowrap;
 }
-.dash-metrics-table tbody tr:not(.total):nth-child(even) td { background: #FCFAF6; }
 .dash-metrics-table tr.total td {
   font-weight: 700;
   background: var(--accent-soft);
   border-top: 1px solid var(--accent);
 }
 
-/* 明细行:整行可点击跳回详情 */
+/* 明细行:整行可点击跳回详情(hover 覆盖列交替色,整行高亮) */
 .dash-rows-table tbody tr { cursor: pointer; }
-.dash-rows-table tbody tr:nth-child(even) td { background: #FCFAF6; }
 .dash-rows-table tbody tr:hover td { background: #F4EFE5; }
 .dash-v { max-width: 260px; }
 .dash-v span {
