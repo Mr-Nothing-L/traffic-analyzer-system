@@ -5,21 +5,20 @@ It reports what it sees (fact identification) without any filtering or
 exclusion logic. Adjudication happens later in the pipeline.
 
 This file is now a thin compatibility layer.  The far-distance enhancement
-and tool-call execution implementations live in
-:mod:`traffic_analyzer.core.expert_agent_far_enhancement` and
-:mod:`traffic_analyzer.core.expert_agent_tools` respectively.
+implementation lives in
+:mod:`traffic_analyzer.core.expert_agent_far_enhancement`.
 
 [文件说明]
 作用:单事件检测代理 ExpertAgent。每个实例只负责一个事件类别的事实识别
 (选帧→加载 prompt 模板并注入 scene_understanding 先验→VLM 调用→解析为
 EventCandidate,可选自我反思),不做任何过滤/排除,裁决留给后续步骤。
-本文件为兼容层,远距离增强与工具调用实现拆分到同目录另两个模块。
+本文件为兼容层,远距离增强实现拆分到同目录另一模块。
 上游:core/pipeline_steps.py 的 ExpertAgentLayer(并行调度)与
 AdjudicationStep(缺失事件时重跑专家)。
 下游:core/vlm_engine.py 的 VLMInferenceEngine.call;core/config_manager.py
 加载 config/prompts/ 下的 event_N.yaml 事件模板及 scene_understanding、
 expert_response_reflection 模板;core/expert_agent_far_enhancement.py 的
-FarEnhancementDetector;core/expert_agent_tools.py 的 ToolCallExecutor;
+FarEnhancementDetector;
 utils/event_detection.py 的 select_event_images / parse_expert_response /
 reflect_expert_candidate。
 """
@@ -35,7 +34,6 @@ from traffic_analyzer.core.expert_agent_far_enhancement import (
     _EXPERT_RESPONSE_SCHEMA,
     _FAR_ENHANCEMENT_OUTPUT_DIR,
 )
-from traffic_analyzer.core.expert_agent_tools import ToolCallExecutor
 from traffic_analyzer.core.vlm_engine import FatalAPIError, VLMInferenceEngine
 from traffic_analyzer.models.schemas import (
     AnalysisContext,
@@ -300,117 +298,6 @@ class ExpertAgent:
             self.category, self.vlm_engine, self.config_manager
         )
 
-    @property
-    def _tool_executor(self) -> ToolCallExecutor:
-        return ToolCallExecutor(self.category, self.vlm_engine)
-    def _is_explicitly_car_reasoning(self, reason: str) -> bool:
-        return self._far_detector._is_explicitly_car_reasoning(reason)
-
-    def _is_explicitly_car_reasoning_for_pedestrian(self, reason: str) -> bool:
-        return self._far_detector._is_explicitly_car_reasoning_for_pedestrian(reason)
-
-    def _is_explicitly_car_reasoning_for_non_motor(self, reason: str) -> bool:
-        return self._far_detector._is_explicitly_car_reasoning_for_non_motor(reason)
-
-    def _select_car_veto_check(self, event_id: int):
-        return self._far_detector._select_car_veto_check(event_id)
-
-    def _build_minimal_final_classifier_template(
-        self,
-        template: PromptTemplate,
-    ) -> PromptTemplate:
-        return self._far_detector._build_minimal_final_classifier_template(template)
-
-    def _should_veto_as_car(
-        self,
-        parsed: Dict[str, Any],
-        text: str,
-        event_id: int,
-    ) -> bool:
-        return self._far_detector._should_veto_as_car(parsed, text, event_id)
-
-    def _apply_structured_veto_to_candidate(
-        self,
-        candidate: EventCandidate,
-    ) -> EventCandidate:
-        return self._far_detector._apply_structured_veto_to_candidate(candidate)
-
-    def _is_no_structure_reasoning(self, reason: str) -> bool:
-        return self._far_detector._is_no_structure_reasoning(reason)
-
-    def _build_far_candidate(
-        self,
-        frame_info: Dict[str, Any],
-        reason: str,
-        frame_analysis_log: List[Dict[str, Any]],
-        raw_text: Optional[str] = None,
-        fallback: bool = False,
-    ) -> EventCandidate:
-        return self._far_detector._build_far_candidate(frame_info, reason, frame_analysis_log, raw_text, fallback)
-
-    def _run_final_classifier(
-        self,
-        frame_info: Dict[str, Any],
-        template: PromptTemplate,
-        context_vars: Dict[str, Any],
-    ) -> Optional[EventCandidate]:
-        return self._far_detector._run_final_classifier(frame_info, template, context_vars)
-
-    def _accept_fallback(
-        self,
-        frame_info: Dict[str, Any],
-        frame_analysis_log: List[Dict[str, Any]],
-    ) -> Optional[EventCandidate]:
-        return self._far_detector._accept_fallback(frame_info, frame_analysis_log)
-
-    def _has_construction_evidence(self, regions: List[Dict[str, Any]]) -> bool:
-        return self._far_detector._has_construction_evidence(regions)
-
-    def _build_construction_fallback_candidate(
-        self,
-        candidate: EventCandidate,
-        display_regions: List[Dict[str, Any]],
-        valid_regions: List[Dict[str, Any]],
-        selected_index: int,
-        gallery_ref: str,
-        roi_summary: str,
-    ) -> EventCandidate:
-        return self._far_detector._build_construction_fallback_candidate(candidate, display_regions, valid_regions, selected_index, gallery_ref, roi_summary)
-
-    @staticmethod
-    def _parse_roi_confidence(value: Any) -> float:
-        return FarEnhancementDetector._parse_roi_confidence(value)
-
-    def _score_far_candidates(
-        self,
-        candidates: List[Dict[str, Any]],
-        motion_score_threshold: float = 1.0,
-        motion_penalty: float = 5.0,
-    ) -> List[Dict[str, Any]]:
-        return self._far_detector._score_far_candidates(candidates, motion_score_threshold, motion_penalty)
-
-    def _log_frame(
-        self,
-        frame_analysis_log: List[Dict[str, Any]],
-        frame_log: Dict[str, Any],
-        reason: Optional[str] = None,
-    ) -> None:
-        return self._far_detector._log_frame(frame_analysis_log, frame_log, reason)
-
-    def _detect_with_far_enhancement_gallery(
-        self,
-        context: AnalysisContext,
-        images: List[Any],
-        template: PromptTemplate,
-        context_vars: Dict[str, Any],
-        roi_template: PromptTemplate,
-        output_dir: Path,
-        image_ref_prefix: str,
-        video_stem: str,
-        far_cfg: Any,
-    ) -> Optional[EventCandidate]:
-        return self._far_detector._detect_with_far_enhancement_gallery(context, images, template, context_vars, roi_template, output_dir, image_ref_prefix, video_stem, far_cfg)
-
     def _detect_with_far_enhancement(
         self,
         context: AnalysisContext,
@@ -419,45 +306,4 @@ class ExpertAgent:
         context_vars: Dict[str, Any],
     ) -> Optional[EventCandidate]:
         return self._far_detector._detect_with_far_enhancement(context, images, template, context_vars, default_output_dir=_FAR_ENHANCEMENT_OUTPUT_DIR)
-
-    def _execute_tool_calls(
-        self,
-        response: Any,
-        context: AnalysisContext,
-        images: List[Any],
-    ) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
-        return self._tool_executor._execute_tool_calls(response, context, images)
-
-    def _execute_native_tool_calls(
-        self,
-        template: Any,
-        images: List[Any],
-        context_vars: Dict[str, Any],
-        context: AnalysisContext,
-    ) -> Optional[Tuple[Dict[str, Any], Optional[str]]]:
-        return self._tool_executor._execute_native_tool_calls(template, images, context_vars, context)
-
-    def _execute_anthropic_native_tools(
-        self,
-        template: Any,
-        images: List[Any],
-        context_vars: Dict[str, Any],
-        context: AnalysisContext,
-    ) -> Optional[Tuple[Dict[str, Any], Optional[str]]]:
-        return self._tool_executor._execute_anthropic_native_tools(template, images, context_vars, context)
-
-    def _format_tracking_result(self, result_data: Dict[str, Any]) -> str:
-        return self._tool_executor._format_tracking_result(result_data)
-
-    def _second_vlm_call(
-        self,
-        template: PromptTemplate,
-        first_response: Any,
-        tool_result: Dict[str, Any],
-        annotated_image: Optional[str],
-        images: List[Any],
-        context_vars: Dict[str, Any],
-    ) -> EventCandidate:
-        return self._tool_executor._second_vlm_call(template, first_response, tool_result, annotated_image, images, context_vars)
-
 

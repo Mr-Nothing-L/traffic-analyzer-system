@@ -18,23 +18,22 @@ Grounding verification 步骤(在 AdjudicationStep 之后执行)。
 下游:core/vlm_engine.py 的 VLMInferenceEngine.call;config/prompts/
 grounding_verification.yaml(经 ConfigManager.get_prompt_template 加载);
 utils/event_detection.py 的 select_event_images;core/pipeline_steps.py 的
-PipelineStep 基类;core/sft_label_rewrite.py 的 _build_event_definitions_json。
+PipelineStep 基类;core/sft_label_rewrite.py 的 _build_event_definitions_json /
+_build_verdicts_json(only_positive=True)。
 """
 
 from __future__ import annotations
 
-import json
 import logging
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Dict, List, Optional
 
 from traffic_analyzer.core.pipeline_steps import PipelineStep
-from traffic_analyzer.core.sft_label_rewrite import _build_event_definitions_json
-from traffic_analyzer.core.vlm_engine import FatalAPIError
-from traffic_analyzer.models.schemas import (
-    AnalysisContext,
-    EventCategory,
-    EventResult,
+from traffic_analyzer.core.sft_label_rewrite import (
+    _build_event_definitions_json,
+    _build_verdicts_json,
 )
+from traffic_analyzer.core.vlm_engine import FatalAPIError
+from traffic_analyzer.models.schemas import AnalysisContext
 from traffic_analyzer.utils.event_detection import select_event_images
 
 logger = logging.getLogger(__name__)
@@ -58,40 +57,6 @@ _GROUNDING_RESPONSE_SCHEMA: Dict[str, Any] = {
         }
     },
 }
-
-
-def _build_verdicts_json(
-    event_results: Mapping[int, EventResult],
-    categories: Sequence[EventCategory],
-) -> str:
-    """Serialize the positive (detected=True) verdicts for the prompt.
-
-    与 sft_label_rewrite._build_verdicts_json 口径一致（event_id / event_name /
-    summary / instances），但只包含核验对象——裁决阳性事件。
-    """
-    active_ids = {c.event_id for c in categories if c.is_active}
-    verdicts: List[Dict[str, Any]] = []
-    for eid in sorted(event_results):
-        er = event_results[eid]
-        if not getattr(er, "detected", False) or eid not in active_ids:
-            continue  # 未激活类别与非阳性事件不进入核验 prompt
-        verdicts.append(
-            {
-                "event_id": eid,
-                "event_name": er.event_name,
-                "summary": er.summary,
-                "instances": [
-                    {
-                        "start_time_sec": inst.start_time_sec,
-                        "end_time_sec": inst.end_time_sec,
-                        "description": inst.description,
-                        "reasoning": inst.reasoning,
-                    }
-                    for inst in er.instances
-                ],
-            }
-        )
-    return json.dumps(verdicts, ensure_ascii=False, indent=2)
 
 
 class GroundingVerificationStep(PipelineStep):
@@ -148,7 +113,9 @@ class GroundingVerificationStep(PipelineStep):
             return None
 
         context_vars = {
-            "verdicts_json": _build_verdicts_json(context.event_results, categories),
+            "verdicts_json": _build_verdicts_json(
+                context.event_results, categories, only_positive=True
+            ),
             "event_definitions_json": _build_event_definitions_json(categories),
         }
 

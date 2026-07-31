@@ -20,6 +20,7 @@ from PIL import Image
 
 from traffic_analyzer.core.config_manager import ConfigManager
 from traffic_analyzer.core.expert_agent import ExpertAgent, _FAR_ENHANCEMENT_OUTPUT_DIR
+from traffic_analyzer.core.expert_agent_far_enhancement import FarEnhancementDetector
 from traffic_analyzer.models.schemas import (
     AnalysisContext,
     EventInstance,
@@ -697,10 +698,10 @@ def test_fallback_rejected_when_occluded(make_agent) -> None:
         ("模糊色块，没有车轮车把", True),
     ],
 )
-def test_is_no_structure_reasoning(make_agent, reason, expected_no_structure) -> None:
+def test_is_no_structure_reasoning(config_manager, non_motor_category, reason, expected_no_structure) -> None:
     """Pure uncertainty expressions must not be treated as 'no structure'."""
-    agent, _ = make_agent({})
-    assert agent._is_no_structure_reasoning(reason) is expected_no_structure
+    detector = FarEnhancementDetector(non_motor_category, None, config_manager)
+    assert detector._is_no_structure_reasoning(reason) is expected_no_structure
 
 
 def test_fallback_accepts_uncertainty_reasoning(make_agent) -> None:
@@ -1585,10 +1586,10 @@ def test_construction_gallery_fallback_not_triggered_for_worker_vehicle_only(
         ("红框内可见两轮车和骑手", False),
     ],
 )
-def test_is_explicitly_car_reasoning_for_non_motor(make_agent, reason, expected) -> None:
+def test_is_explicitly_car_reasoning_for_non_motor(config_manager, non_motor_category, reason, expected) -> None:
     """The event-aware car veto distinguishes car-context from car-conclusion."""
-    agent, _ = make_agent({})
-    assert agent._is_explicitly_car_reasoning_for_non_motor(reason) is expected
+    detector = FarEnhancementDetector(non_motor_category, None, config_manager)
+    assert detector._is_explicitly_car_reasoning_for_non_motor(reason) is expected
 
 
 def test_non_motor_car_context_does_not_override_positive(make_agent) -> None:

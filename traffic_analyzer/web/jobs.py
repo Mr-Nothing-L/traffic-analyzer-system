@@ -1,6 +1,6 @@
 """Serial subprocess job queue for the web UI.
 
-Inference and evaluation run as child processes, one at a time, on a single
+Inference jobs run as child processes, one at a time, on a single
 worker thread. The child's stdout and stderr are merged and read line by
 line to update the job's progress (from the analyzer's ``[x/4]`` step
 markers and ``EXPERT_PROGRESS|`` expert-lane markers) and to keep a rolling
@@ -21,7 +21,7 @@ cancel 竞态处理:锁内读 job.proc,worker 挂上 proc 后复查 status(非 r
 到点 terminate 并标 failed;shutdown 后置 _shutdown 标志,submit 拒绝新任务。
 上游:web/app.py(挂载路由,lifespan/atexit 时调用 shutdown);
 web/evidence_api.py(PUT 检查同 stem 在跑 infer,并在首次 SFT 编辑前冻结
-<stem>_raw.json;本模块 post_infer 复用其 _put_locks)。
+<stem>_raw.json;本模块 post_infer 复用其 _put_locks 与 find_active_infer_job)。
 下游:traffic_analyzer CLI(python -m traffic_analyzer analyze)、
 web/workspace.py 的 analysis/<stem>/ 路径契约、web/progress.py(进度状态机)。
 """
@@ -384,18 +384,6 @@ class InferRequest(BaseModel):
     rels: Optional[List[str]] = None   # workspace-relative video paths (any depth)
 
 
-def _active_infer_job(request: Request, stem: str) -> Optional[Dict[str, Any]]:
-    """The queued/running infer job for ``stem``, if any (caller holds put lock)."""
-    for job in request.app.state.jobs.list_jobs():
-        if (
-            job.get("kind") == "infer"
-            and job.get("stem") == stem
-            and job.get("status") in ("queued", "running")
-        ):
-            return job
-    return None
-
-
 @router.post("/api/infer")
 def post_infer(body: InferRequest, request: Request) -> Dict[str, Any]:
     workspace = workspace_mod.require_workspace(request)
@@ -435,7 +423,7 @@ def post_infer(body: InferRequest, request: Request) -> Dict[str, Any]:
         for stem in sorted(seen_stems):
             stack.enter_context(evidence_api_mod._put_locks[stem])
         for stem in seen_stems:
-            active = _active_infer_job(request, stem)
+            active = evidence_api_mod.find_active_infer_job(request, stem)
             if active is not None:
                 raise HTTPException(
                     status_code=409,

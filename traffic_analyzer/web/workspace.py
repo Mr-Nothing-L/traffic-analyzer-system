@@ -9,7 +9,7 @@ and an ``images/`` subdirectory.
 作用:工作区状态(WorkspaceState)与视频发现、路径安全校验(防目录穿越);定义
 analysis/<stem>/ 结果目录契约,并提供 /api/workspace、/api/workspace/videos、
 /api/workspace/tree 路由。
-上游:web/app.py(挂载路由);web/ 下 jobs、evidence_api、frames、video_stream、evaluate
+上游:web/app.py(挂载路由);web/ 下 jobs、evidence_api、frames、video_stream
 均复用其 require_workspace/validate_stem/analysis_dir 等辅助函数。
 下游:无包内模块依赖,仅读写工作区文件系统;VIDEO_EXTENSIONS 与 scripts/batch_evaluate.py
 的视频发现保持一致。
@@ -150,6 +150,19 @@ def resolve_workspace_file(workspace: Path, rel: str) -> Path:
     if not target.is_file():
         raise HTTPException(status_code=404, detail="Unknown workspace file")
     return target
+
+
+def resolve_workspace_video(request: Request, rel: str) -> Path:
+    """Resolve a workspace-relative video file (404 on traversal/non-video).
+
+    Shared by frames.py and video_stream.py for their ``/api/workspace/*``
+    endpoints.
+    """
+    workspace = require_workspace(request)
+    video = resolve_workspace_file(workspace, rel)
+    if video.suffix.lower() not in VIDEO_EXTENSIONS:
+        raise HTTPException(status_code=404, detail="Not a video file")
+    return video
 
 
 def list_tree(workspace: Path, rel: str) -> Dict[str, Any]:

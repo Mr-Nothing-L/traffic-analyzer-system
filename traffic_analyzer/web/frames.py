@@ -105,15 +105,6 @@ def _resolve_stem_video(request: Request, stem: str) -> Path:
     return video
 
 
-def _resolve_rel_video(request: Request, path: str) -> Path:
-    """Resolve a workspace-relative video file (404 on traversal/non-video)."""
-    workspace = workspace_mod.require_workspace(request)
-    video = workspace_mod.resolve_workspace_file(workspace, path)
-    if video.suffix.lower() not in workspace_mod.VIDEO_EXTENSIONS:
-        raise HTTPException(status_code=404, detail="Not a video file")
-    return video
-
-
 def _meta_or_404(video: Path) -> Dict[str, Any]:
     meta = read_video_meta(video)
     if meta is None:
@@ -141,7 +132,7 @@ def get_frame(stem: str, request: Request, index: int = Query(..., ge=0)) -> Res
 @router.get("/api/workspace/meta")
 def get_workspace_meta(request: Request, path: str) -> Dict[str, Any]:
     """Video metadata for a workspace-relative path (nested tree videos)."""
-    return _meta_or_404(_resolve_rel_video(request, path))
+    return _meta_or_404(workspace_mod.resolve_workspace_video(request, path))
 
 
 @router.get("/api/workspace/frame")
@@ -149,4 +140,4 @@ def get_workspace_frame(
     request: Request, path: str, index: int = Query(..., ge=0)
 ) -> Response:
     """On-demand frame for a workspace-relative path (nested tree videos)."""
-    return _frame_response(_resolve_rel_video(request, path), index)
+    return _frame_response(workspace_mod.resolve_workspace_video(request, path), index)

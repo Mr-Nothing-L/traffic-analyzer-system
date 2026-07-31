@@ -21,10 +21,8 @@ from typing import Any, Dict, List, Optional
 import pytest
 
 from traffic_analyzer.core.config_manager import ConfigManager
-from traffic_analyzer.core.grounding_verification import (
-    GroundingVerificationStep,
-    _build_verdicts_json,
-)
+from traffic_analyzer.core.grounding_verification import GroundingVerificationStep
+from traffic_analyzer.core.sft_label_rewrite import _build_verdicts_json
 from traffic_analyzer.core.vlm_exceptions import FatalAPIError
 from traffic_analyzer.models.schemas import (
     AnalysisContext,
@@ -160,6 +158,7 @@ class TestBuildVerdictsJson:
             _build_verdicts_json(
                 _make_event_results(detected_ids=(7,)),
                 config_manager.get_event_categories(),
+                only_positive=True,
             )
         )
 

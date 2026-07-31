@@ -10,7 +10,7 @@
 - **单视频 / 批量推理**：后台任务队列执行（子进程串行），前端实时展示任务进度
 - **逐视频结果卡片**：SFT 样本详情、Markdown 报告、可视化证据编辑器
 - **可视化证据编辑器**：多边形与矩形标注的顶点级编辑，保存回 `<stem>_evidence.json`
-- **批量准确率评估并入 UI**：基于 `scripts/batch_evaluate.py`，展示逐事件 precision / recall / F1，结果写入 `<workspace>/analysis/evaluation/latest.json`
+- **数据看板并入 UI**：`traffic_analyzer/web/dashboard.py`，逐行合并文件名 GT 与预测结果，展示 GT 一致性（consistent / diff / no_gt / no_results）、三态审核状态（unconfirmed / confirmed / needs_review，持久化至 `review_states.json`）与实时指标
 
 #### 2. 新增 `web` CLI 子命令
 - `python3 -m traffic_analyzer web [--host 127.0.0.1] [--port 8600] [--workspace DIR]` 启动 Web 服务（uvicorn，自动打开浏览器）
@@ -27,12 +27,21 @@
 
 #### 5. Web 工作区结果目录约定
 - 每个视频结果：`<workspace>/analysis/<video_stem>/{report.md, <video_stem>.json, <video_stem>_evidence.json, images/}`
-- 批量评估输出：`<workspace>/analysis/evaluation/latest.json`
+- 审核状态：`<workspace>/analysis/review_states.json`
 
 #### 6. batch_evaluate 报告发现修复
 - `scripts/batch_evaluate.py` 报告发现支持 Web 工作区布局（`<report_dir>/<stem>/report.md` 子目录），并按视频 stem 去重，避免顶层与子目录报告重复计数
 
-#### 7. 新增依赖
+#### 7. Grounding verification（裁决后锚定核验）
+- 新增 `traffic_analyzer/core/grounding_verification.py`（`grounding_check_enable` 开启）：裁决后对每个阳性事件再发一次 VLM 调用，仅用原始粗关键帧核验关键视觉元素是否可锚定；无法锚定的阳性判为幻觉并就地推翻（`grounding_overturned=True`），Prompt 见 `traffic_analyzer/config/prompts/grounding_verification.yaml`
+
+#### 8. SFT label 模式
+- 新增 `traffic_analyzer/core/sft_label_rewrite.py`（`--sft-label` 开启）：裁决后由一次额外 VLM 调用将裁决结果改写为每视频一条 SFT 训练样本（JSON），仅依据原始粗关键帧 grounding；无法在原始帧上锚定阳性事件的样本写入 `quarantine/` 子目录
+
+#### 9. Mock 演示模式
+- 前端追加 `?mock=1` 即可使用内置模拟数据进行演示（`traffic_analyzer/web/static/js/mock*.js`），无需后端与真实视频；配套 `scripts/build_mock_data.py` 与 `scripts/e2e_mock_test.py`
+
+#### 10. 新增依赖
 - `requirements.txt` 新增 `fastapi>=0.110.0,<1.0.0`、`uvicorn>=0.29.0,<1.0.0`（Web 服务）
 
 ### 关键文件变更
@@ -40,14 +49,16 @@
 | 文件 | 变更 |
 |---|---|
 | `traffic_analyzer/web/app.py` | 新增：FastAPI 应用工厂（`create_app()`，uvicorn factory 模式） |
-| `traffic_analyzer/web/jobs.py` | 新增：串行子进程任务队列（推理/评估），逐行解析进度 |
+| `traffic_analyzer/web/jobs.py` | 新增：串行子进程任务队列（推理），逐行解析进度 |
 | `traffic_analyzer/web/workspace.py` | 新增：工作区状态与视频发现 |
 | `traffic_analyzer/web/evidence_api.py` | 新增：结果读取与证据编辑端点 |
-| `traffic_analyzer/web/evaluate.py` | 新增：准确率评估端点（调用 `scripts/batch_evaluate.py`） |
+| `traffic_analyzer/web/dashboard.py` | 新增：数据看板端点（GT 一致性、审核状态、实时指标） |
 | `traffic_analyzer/web/frames.py` | 新增：按需视频帧提取（LRU 缓存） |
-| `traffic_analyzer/web/static/` | 新增：SPA 前端（`index.html` / `app.js` / `style.css`） |
+| `traffic_analyzer/web/static/` | 新增：SPA 前端（`index.html` / `js/` / `style.css`），含 `?mock=1` mock 演示模式 |
 | `traffic_analyzer/cli.py` | 新增 `web` 子命令（`--host` / `--port` / `--workspace`） |
 | `traffic_analyzer/core/evidence_exporter.py` | 新增：`<stem>_evidence.json` 导出（schema_version 1，归一化坐标） |
+| `traffic_analyzer/core/grounding_verification.py`、`traffic_analyzer/config/prompts/grounding_verification.yaml` | 新增：裁决后锚定核验步骤（`grounding_check_enable`） |
+| `traffic_analyzer/core/sft_label_rewrite.py` | 新增：SFT label 改写步骤（`--sft-label`），不可锚定样本隔离至 `quarantine/` |
 | `traffic_analyzer/orchestrator/analysis_orchestrator.py`、`traffic_analyzer/models/context.py` | tmp_img 产物路径改为 `<output_dir>/tmp_img/<video_stem>/` |
 | `scripts/batch_evaluate.py` | 报告发现支持工作区子目录布局（`*/report.md`）并按 stem 去重 |
 | `requirements.txt` | 新增 fastapi / uvicorn |

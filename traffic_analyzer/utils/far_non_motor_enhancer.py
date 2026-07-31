@@ -26,7 +26,6 @@ from .bbox_geometry import (
     compute_bbox_aspect_ratio,
     compute_enlarged_bbox,
     is_bbox_aspect_valid,
-    is_bbox_aspect_valid_for_non_motor,
     is_bbox_large_enough,
     _norm_to_px,
 )
@@ -59,7 +58,6 @@ __all__ = [
     "compute_enlarged_bbox",
     "compute_bbox_aspect_ratio",
     "is_bbox_aspect_valid",
-    "is_bbox_aspect_valid_for_non_motor",
     "compute_bbox_area_px",
     "is_bbox_large_enough",
     "load_image",

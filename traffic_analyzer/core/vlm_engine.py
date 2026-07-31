@@ -8,12 +8,11 @@ and usage tracking.
 
 [文件说明]
 作用:VLM 统一推理引擎入口。VLMInferenceEngine 封装 prompt 渲染(Jinja2)、
-  内存/磁盘两级缓存、per-provider 重试与 sticky failover、tool 调用
-  (call_with_tools / call_with_tool_results)及 token 用量统计;
+  内存/磁盘两级缓存、per-provider 重试与 sticky failover 及 token 用量统计;
   并重导出各子模块内部函数供测试与旧导入兼容。
 上游:orchestrator/analysis_orchestrator.py(构造 VLMInferenceEngine 并注入各步骤)、
   core/pipeline_steps.py、core/expert_agent.py、core/expert_agent_far_enhancement.py、
-  core/expert_agent_tools.py、core/sft_label_rewrite.py、core/grounding_verification.py。
+  core/sft_label_rewrite.py、core/grounding_verification.py。
 下游:core/vlm_provider_clients.py(构造并发起各 provider API 请求,API key 与
   base_url 来自环境变量配置)、core/vlm_cache.py(磁盘缓存与 cache key 计算)、
   core/vlm_response_parser.py(JSON 提取/修复/校验)、core/vlm_error_classifier.py
@@ -79,7 +78,6 @@ from traffic_analyzer.core.vlm_provider_clients import (
     _build_openai_payload,
     _call_aliyun,
     _call_anthropic,
-    _call_anthropic_with_tools,
     _call_google,
     _call_openai,
     _encode_image_to_base64,
@@ -119,7 +117,6 @@ __all__ = [
     "_build_google_payload",
     "_build_aliyun_payload",
     "_call_anthropic",
-    "_call_anthropic_with_tools",
     "_call_openai",
     "_call_google",
     "_call_aliyun",
@@ -526,270 +523,6 @@ class VLMInferenceEngine:
                 logger.debug("[cache] DISK STORED key %s...", cache_key[:16])
 
         return response
-
-    def call_with_tools(
-        self,
-        template: PromptTemplate,
-        images: List[Any],
-        tool_definitions: List[Dict[str, Any]],
-        context_vars: Optional[Dict[str, Any]] = None,
-        response_schema: Optional[Dict[str, Any]] = None,
-        tool_choice: Optional[Dict[str, Any]] = None,
-    ) -> Tuple[LLMResponse, List[Dict[str, Any]]]:
-        """
-        Execute a VLM call with Anthropic Native API tool support.
-
-        This method performs a multi-turn conversation:
-        1. User message (prompt + images) + tools definition
-        2. Assistant message with tool_use blocks (or direct text response)
-        3. If tool_use blocks present: User message with tool_result blocks
-        4. Assistant message with final analysis
-
-        Args:
-            template: Prompt template to render.
-            images: List of images.
-            tool_definitions: List of Anthropic-format tool definitions.
-            context_vars: Variables for Jinja2 prompt rendering.
-            response_schema: Optional JSON schema for basic validation.
-
-        Returns:
-            (LLMResponse, tool_use_blocks)
-            If tool_use_blocks is non-empty, caller must execute tools and call again.
-        """
-        # Snapshot the active provider once: a concurrent failover must not
-        # swap client/config between the payload build and the dispatch below.
-        with self._provider_lock:
-            provider_index = self._current_provider_index
-        provider = self._providers[provider_index].provider
-        config = self._providers[provider_index]
-        client = self._clients[provider_index]
-
-        if provider != "anthropic":
-            logger.warning(
-                "[vlm_engine:call_with_tools] FALLBACK | provider=%s not anthropic, using string-based tool parsing",
-                provider,
-            )
-            # Fallback to regular call
-            response = self.call(template, images, context_vars, response_schema)
-            return response, []
-
-        system_prompt, user_prompt = self.render_prompt(template, context_vars)
-
-        # Build initial message list
-        _, kwargs = _build_anthropic_payload(
-            system_prompt,
-            user_prompt,
-            images,
-            config.model,
-            config.max_tokens,
-            config.temperature,
-        )
-        kwargs["tools"] = tool_definitions
-        kwargs["tool_choice"] = tool_choice if tool_choice else {"type": "auto"}
-
-        call_id = str(uuid.uuid4())
-        start_time = time.perf_counter()
-        raw_text = ""
-        parsed_data: Dict[str, Any] = {}
-        success = False
-        error_message: Optional[str] = None
-        prompt_tokens = completion_tokens = total_tokens = 0
-        tool_uses: List[Dict[str, Any]] = []
-
-        template_id = getattr(template, "template_id", "unknown")
-        try:
-            raw_text, tool_uses, prompt_tokens, completion_tokens, total_tokens = (
-                _call_anthropic_with_tools(client, kwargs)
-            )
-
-            # If no tool uses, try to parse JSON from text
-            if not tool_uses:
-                try:
-                    parsed_data = _extract_json_from_text(raw_text)
-                    if response_schema:
-                        _validate_schema_basic(parsed_data, response_schema)
-                except Exception as json_exc:
-                    # JSON parsing failed but no tool uses either
-                    # This might happen if the model returns plain text instead of JSON
-                    # Log warning but don't fail - let caller handle fallback
-                    logger.warning(
-                        "[vlm_engine:call_with_tools] JSON_PARSE_WARNING | template_id=%s | %s",
-                        template_id,
-                        json_exc,
-                    )
-                    # Don't set parsed_data, leave it empty
-            else:
-                # Tool use expected: skip JSON parsing, return raw text for tool parsing
-                logger.info(
-                    "[vlm_engine:call_with_tools] TOOL_USE_DETECTED | template_id=%s tool_uses=%d",
-                    template_id,
-                    len(tool_uses),
-                )
-
-            success = True
-        except FatalAPIError:
-            raise
-        except Exception as exc:
-            error_message = str(exc)
-            logger.error(
-                "[vlm_engine:call_with_tools] FIRST_CALL_ERROR | template_id=%s | %s",
-                template_id,
-                exc,
-                exc_info=True,
-            )
-
-        latency_ms = (time.perf_counter() - start_time) * 1000.0
-
-        # Update stats
-        with self._cache_lock:
-            self._total_calls += 1
-            self._total_prompt_tokens += prompt_tokens
-            self._total_completion_tokens += completion_tokens
-            self._total_tokens += total_tokens
-            self._total_latency_ms += latency_ms
-            if not success:
-                self._failed_calls += 1
-
-        response = LLMResponse(
-            success=success,
-            raw_text=raw_text,
-            parsed_data=parsed_data,
-            model=config.model,
-            provider=provider,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_tokens=total_tokens,
-            latency_ms=latency_ms,
-            retry_count=0,
-        )
-
-        return response, tool_uses
-
-    def call_with_tool_results(
-        self,
-        template: PromptTemplate,
-        images: List[Any],
-        previous_messages: List[Dict[str, Any]],
-        tool_results: List[Dict[str, Any]],
-        context_vars: Optional[Dict[str, Any]] = None,
-        response_schema: Optional[Dict[str, Any]] = None,
-    ) -> LLMResponse:
-        """
-        Continue conversation with tool results.
-
-        Args:
-            template: Original prompt template (for system prompt).
-            images: Original images (not used in second call, but kept for consistency).
-            previous_messages: Full message history from first call.
-            tool_results: List of {"tool_use_id": str, "content": str}.
-            context_vars: Variables for Jinja2 prompt rendering.
-            response_schema: Optional JSON schema for basic validation.
-
-        Returns:
-            LLMResponse with final analysis.
-        """
-        # Snapshot the active provider once (see call_with_tools).
-        with self._provider_lock:
-            provider_index = self._current_provider_index
-        provider = self._providers[provider_index].provider
-        config = self._providers[provider_index]
-        client = self._clients[provider_index]
-
-        if provider != "anthropic":
-            logger.error(
-                "[vlm_engine:call_with_tool_results] ERROR | provider=%s not anthropic",
-                provider,
-            )
-            return LLMResponse(
-                success=False,
-                raw_text="",
-                parsed_data={},
-                model=config.model,
-                provider=provider,
-                prompt_tokens=0,
-                completion_tokens=0,
-                total_tokens=0,
-                latency_ms=0,
-                retry_count=0,
-            )
-
-        system_prompt, _ = self.render_prompt(template, context_vars)
-
-        # Build messages: previous + tool_result
-        messages = list(previous_messages)
-
-        # Add tool_result message
-        tool_content = []
-        for result in tool_results:
-            tool_content.append({
-                "type": "tool_result",
-                "tool_use_id": result["tool_use_id"],
-                "content": result["content"],
-            })
-        messages.append({"role": "user", "content": tool_content})
-
-        kwargs = {
-            "model": config.model,
-            "max_tokens": config.max_tokens,
-            "temperature": config.temperature,
-            "messages": messages,
-        }
-        if system_prompt:
-            kwargs["system"] = system_prompt
-
-        call_id = str(uuid.uuid4())
-        start_time = time.perf_counter()
-        raw_text = ""
-        parsed_data: Dict[str, Any] = {}
-        success = False
-        prompt_tokens = completion_tokens = total_tokens = 0
-
-        template_id = getattr(template, "template_id", "unknown")
-        try:
-            raw_text, _, prompt_tokens, completion_tokens, total_tokens = (
-                _call_anthropic_with_tools(client, kwargs)
-            )
-            parsed_data = _extract_json_from_text(raw_text)
-            if response_schema:
-                _validate_schema_basic(parsed_data, response_schema)
-            success = True
-            logger.info(
-                "[vlm_engine:call_with_tool_results] SECOND_CALL | template_id=%s",
-                template_id,
-            )
-        except FatalAPIError:
-            raise
-        except Exception as exc:
-            logger.error(
-                "[vlm_engine:call_with_tool_results] SECOND_CALL_ERROR | template_id=%s | %s",
-                template_id,
-                exc,
-                exc_info=True,
-            )
-
-        latency_ms = (time.perf_counter() - start_time) * 1000.0
-
-        with self._cache_lock:
-            self._total_calls += 1
-            self._total_prompt_tokens += prompt_tokens
-            self._total_completion_tokens += completion_tokens
-            self._total_tokens += total_tokens
-            self._total_latency_ms += latency_ms
-            if not success:
-                self._failed_calls += 1
-
-        return LLMResponse(
-            success=success,
-            raw_text=raw_text,
-            parsed_data=parsed_data,
-            model=config.model,
-            provider=provider,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_tokens=total_tokens,
-            latency_ms=latency_ms,
-            retry_count=0,
-        )
 
     def _execute_once(
         self,

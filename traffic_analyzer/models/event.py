@@ -2,7 +2,7 @@
 Event detection and adjudication models for the traffic analyzer framework.
 
 [文件说明]
-作用:定义事件检测与裁决相关模型:EventCategory(事件类目定义)、EventInstance/EventResult(单类目检测结果,含 grounding_note/grounding_overturned 锚定核验字段)、EventCandidate(专家层原始候选)、CrossEventInferenceRule、AdjudicationRule、AuditEntry、AdjudicationResult(裁决输出)。
+作用:定义事件检测与裁决相关模型:EventCategory(事件类目定义)、EventInstance/EventResult(单类目检测结果,含 grounding_note/grounding_overturned 锚定核验字段)、EventCandidate(专家层原始候选)、AdjudicationRule、AuditEntry、AdjudicationResult(裁决输出)。
 上游:models/schemas.py、models/context.py、models/report.py 引用;间接服务于 core/expert_agent.py、core/pipeline_steps.py、core/grounding_verification.py、core/report_generator.py、core/report_markdown_renderer.py。
 下游:models/enums.py;pydantic。
 """
@@ -42,21 +42,6 @@ class EventCategory(BaseModel):
         description="List of tool names available to this expert agent"
     )
     is_active: bool = True
-
-
-class CrossEventInferenceRule(BaseModel):
-    """Rule for inferring a target event from a source event's detection result."""
-    rule_id: str
-    name: str = ""
-    target_event_id: int          # 要推断的目标事件
-    source_event_id: int          # 源事件（必须已检测到）
-    source_description_keywords: List[str] = Field(
-        default_factory=list,
-        description="源事件实例描述中匹配任一关键词即触发推断",
-    )
-    confidence_multiplier: float = Field(0.9, ge=0.0, le=1.0)
-    description_prefix: str = ""  # 推断实例的描述前缀
-    reasoning: str = ""           # 推断理由
 
 
 class AdjudicationRule(BaseModel):

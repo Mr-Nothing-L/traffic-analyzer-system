@@ -11,7 +11,7 @@ Levels:
 - fine:   reserved for future VLM-call-level instrumentation
 
 [文件说明]
-作用:提供 ``tool_call``/``tool_call_nested`` 上下文管理器,为分析流水线关键
+作用:提供 ``tool_call`` 上下文管理器,为分析流水线关键
     操作输出带缩进、参数与耗时的 INFO 日志行,不改变任何业务逻辑。
 上游:orchestrator/analysis_orchestrator.py。
 下游:无第三方依赖;输出级别由环境变量 TRAFFIC_ANALYZER_TOOL_LOG_LEVEL
@@ -91,10 +91,3 @@ class ToolCall:
 def tool_call(name: str, **args: Any) -> ToolCall:
     """Create a top-level ToolCall context manager."""
     return ToolCall(name, **args)
-
-
-def tool_call_nested(
-    parent: ToolCall, idx: int, total: int, name: str, **args: Any
-) -> ToolCall:
-    """Create a nested ToolCall (rendered indented under parent)."""
-    return ToolCall(f"step[{idx}/{total}]: {name}", indent=parent.indent + 2, **args)

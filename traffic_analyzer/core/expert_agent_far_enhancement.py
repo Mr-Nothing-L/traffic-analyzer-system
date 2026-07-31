@@ -10,8 +10,7 @@ veto helpers used by that flow.  No new functionality was added.
 (逐帧 ROI 检测、运动对比、候选打分、最终分类器),并含汽车语义否决
 (car veto)、施工证据组合判断与降级回填逻辑;同时定义专家响应与各 ROI
 检测的 JSON schema。增强合成图写入 output/tmp_img。
-上游:core/expert_agent.py(ExpertAgent 通过 _far_detector 属性委托调用);
-另被 core/expert_agent_tools.py 复用 _EXPERT_RESPONSE_SCHEMA。
+上游:core/expert_agent.py(ExpertAgent 通过 _far_detector 属性委托调用)。
 下游:core/vlm_engine.py 的 VLMInferenceEngine.call;core/config_manager.py
 加载各事件模板的 far_object_enhancement 配置、ROI 模板及
 emergency_lane_calibration / emergency_lane_vehicle_roi 等辅助模板;

@@ -7,7 +7,7 @@
     ``reflect_expert_candidate`` 对专家候选做文本反思一致性检查(fail-open)。
 上游:``select_event_images`` 被 core/pipeline_steps.py、core/sft_label_rewrite.py、
     core/grounding_verification.py 共用;解析/反思函数被 core/expert_agent.py、
-    core/expert_agent_far_enhancement.py、core/expert_agent_tools.py 使用。
+    core/expert_agent_far_enhancement.py 使用。
 下游:models/schemas.py 的 AnalysisContext/EventCandidate/EventCategory/EventInstance;
     VLM 引擎与反思 prompt 模板由调用方以参数传入。
 """
@@ -318,7 +318,3 @@ def parse_expert_response(response: Any, category: EventCategory) -> EventCandid
         raw_vlm_response={"raw_text": response.raw_text} if hasattr(response, "raw_text") else {},
         raw_vlm_text=response.raw_text if hasattr(response, "raw_text") else "",
     )
-
-
-# Backward-compatible alias for code that still references the old name.
-parse_direct_vlm_response = parse_expert_response

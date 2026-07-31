@@ -219,10 +219,7 @@ def stream_workspace_video(
     request: Request, path: str, ss: Optional[float] = Query(None, ge=0)
 ) -> object:
     """Stream a workspace-relative video file (nested tree videos)."""
-    workspace = workspace_mod.require_workspace(request)
-    video = workspace_mod.resolve_workspace_file(workspace, path)
-    if video.suffix.lower() not in workspace_mod.VIDEO_EXTENSIONS:
-        raise HTTPException(status_code=404, detail="Not a video file")
+    video = workspace_mod.resolve_workspace_video(request, path)
     return _stream_response(video, ss, request)
 
 

@@ -1,8 +1,6 @@
 /* ------------------------------------------------------------ 全局状态 */
 export const MOCK = new URLSearchParams(location.search).get('mock') === '1';
 
-export const STEP_LABELS = { 1: '预处理', 2: '专家分析', 3: '裁决', 4: 'SFT 标注', 5: '报告生成' };
-
 export const state = {
   workspace: null,          // {path} | {path:null}
   videos: [],               // [{name, stem, rel, size, mtime, has_results}](全工作区递归)

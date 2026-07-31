@@ -1,7 +1,8 @@
 """Result reading and evidence/SFT editing endpoints.
 
 Reads ``report.md`` / ``<stem>.json`` / ``<stem>_evidence.json`` from
-``<workspace>/analysis/<stem>/`` and serves the copied composite images.
+``<workspace>/analysis/<stem>/`` and serves files under that directory via
+``GET /api/results/{stem}/file?path=`` (composite images, tmp_img subtrees).
 The evidence PUT endpoint re-validates the payload against schema v1 and
 only allows edits to the user-editable coordinate/label fields:
 
@@ -35,7 +36,8 @@ _read_json 区分「文件不存在」(GET → null / PUT → 404)与「文件�
 (GET → 500 / PUT → 422,绝不静默当作不存在)。
 上游:web/app.py(挂载路由);web/static 前端(结果查看与标注编辑)。
 下游:web/workspace.py(路径与 stem 校验)、web/jobs.py(在跑任务检查,
-jobs.post_infer 反向复用本模块的 _put_locks 消除 infer-vs-PUT 的 TOCTOU)、
+jobs.post_infer 反向复用本模块的 _put_locks 与 find_active_infer_job 消除
+infer-vs-PUT 的 TOCTOU)、
 config/event_categories.yaml 与 config/event_options.yaml
 (/api/config/events 供 SFT 编辑器按事件分框与渲染结构化选项)。
 """
@@ -123,28 +125,41 @@ def _atomic_write_json(path: Path, payload: Any) -> None:
 _put_locks: "defaultdict[str, threading.Lock]" = defaultdict(threading.Lock)
 
 
-def _reject_active_infer(request: Request, stem: str) -> None:
-    """409 when a queued/running infer job targets ``stem``.
+def find_active_infer_job(request: Request, stem: str) -> Optional[Dict[str, Any]]:
+    """The queued/running infer job for ``stem``, if any.
 
-    The job would overwrite the very files the PUT is editing (PUT-vs-infer
-    race), so the edit must wait until the job finishes.
+    Shared by the evidence/SFT PUT endpoints (409 guard) and
+    ``jobs.post_infer`` (duplicate-submit guard), so both sides test the
+    same condition. Caller holds ``_put_locks[stem]``.
     """
     jobs = getattr(request.app.state, "jobs", None)
     if jobs is None:
-        return
+        return None
     for job in jobs.list_jobs():
         if (
             job.get("kind") == "infer"
             and job.get("stem") == stem
             and job.get("status") in ("queued", "running")
         ):
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"Inference job #{job.get('id')} for '{stem}' is "
-                    f"{job.get('status')}; retry after it finishes"
-                ),
-            )
+            return job
+    return None
+
+
+def _reject_active_infer(request: Request, stem: str) -> None:
+    """409 when a queued/running infer job targets ``stem``.
+
+    The job would overwrite the very files the PUT is editing (PUT-vs-infer
+    race), so the edit must wait until the job finishes.
+    """
+    job = find_active_infer_job(request, stem)
+    if job is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Inference job #{job.get('id')} for '{stem}' is "
+                f"{job.get('status')}; retry after it finishes"
+            ),
+        )
 
 
 _MASK = "__editable__"
@@ -207,21 +222,6 @@ def get_results(stem: str, request: Request) -> Dict[str, Any]:
         "sft_label": sft_label,
         "evidence": evidence,
     }
-
-
-@router.get("/api/results/{stem}/images/{name}")
-def get_result_image(stem: str, name: str, request: Request) -> FileResponse:
-    workspace = workspace_mod.require_workspace(request)
-    workspace_mod.validate_stem(stem)
-    if not name or name in (".", "..") or "/" in name or "\\" in name or ".." in name:
-        raise HTTPException(status_code=404, detail="Image not found")
-    # 仅服务 images/ 下的文件;tmp_img 等子树一律走 /file?path= 精确路径,
-    # 不做 basename 回退搜索,避免索引到工作区里的历史残留文件。
-    images_dir = (workspace_mod.analysis_dir(workspace, stem) / "images").resolve()
-    candidate = (images_dir / name).resolve()
-    if candidate.parent != images_dir or not candidate.is_file():
-        raise HTTPException(status_code=404, detail="Image not found")
-    return FileResponse(candidate)
 
 
 @router.get("/api/results/{stem}/file")

@@ -608,13 +608,38 @@ def write_sample(
 def _build_verdicts_json(
     event_results: Mapping[int, EventResult],
     categories: Sequence[EventCategory],
+    only_positive: bool = False,
 ) -> str:
-    """Serialize adjudicated verdicts (privileged hints) for the prompt."""
+    """Serialize adjudicated verdicts (privileged hints) for the prompt.
+
+    ``only_positive=True`` 时只序列化裁决阳性事件(grounding 核验口径):
+    不含 ``detected`` 字段,``event_name`` 取 EventResult 上的名称。
+    """
     verdicts: List[Dict[str, Any]] = []
     for cat in sorted(categories, key=lambda c: c.event_id):
         if not cat.is_active:
             continue  # 未激活类别不进入 prompt
         er = event_results.get(cat.event_id)
+        if only_positive:
+            if er is None or not getattr(er, "detected", False):
+                continue  # 非阳性事件不进入核验 prompt
+            verdicts.append(
+                {
+                    "event_id": cat.event_id,
+                    "event_name": er.event_name,
+                    "summary": er.summary,
+                    "instances": [
+                        {
+                            "start_time_sec": inst.start_time_sec,
+                            "end_time_sec": inst.end_time_sec,
+                            "description": inst.description,
+                            "reasoning": inst.reasoning,
+                        }
+                        for inst in er.instances
+                    ],
+                }
+            )
+            continue
         verdicts.append(
             {
                 "event_id": cat.event_id,

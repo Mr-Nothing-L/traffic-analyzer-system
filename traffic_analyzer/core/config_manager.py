@@ -1,13 +1,12 @@
 """
 ConfigManager module for the traffic analyzer framework.
 
-Loads, validates, and hot-reloads YAML configuration files and .env settings,
+Loads and validates YAML configuration files and .env settings,
 exposing them as strongly typed Pydantic models.
 
 [文件说明]
-作用:配置管理中心(ConfigManager),负责加载、校验与热重载 YAML 配置和 .env 设置,
-     统一以 Pydantic 模型向外提供 SystemConfig、事件类别、prompt 模板、
-     跨事件推理规则与裁决规则。
+作用:配置管理中心(ConfigManager),负责加载与校验 YAML 配置和 .env 设置,
+     统一以 Pydantic 模型向外提供 SystemConfig、事件类别、prompt 模板与裁决规则。
 上游:cli.py、orchestrator/analysis_orchestrator.py、core/pipeline_steps.py、
      core/expert_agent.py、core/expert_agent_far_enhancement.py 等所有需要配置的模块。
 下游:config/event_categories.yaml、config/annotation_spec.yaml、config/prompts/*.yaml
@@ -27,7 +26,6 @@ from dotenv import dotenv_values, load_dotenv
 
 from traffic_analyzer.models.schemas import (
     AdjudicationRule,
-    CrossEventInferenceRule,
     EventCategory,
     LLMProviderConfig,
     PromptTemplate,
@@ -43,7 +41,7 @@ class ConfigValidationError(ValueError):
 
 
 class ConfigManager:
-    """Manages loading, validation, and hot-reloading of framework configuration.
+    """Manages loading and validation of framework configuration.
 
     The manager reads YAML files from a designated config directory and overlays
     LLM provider settings from a ``.env`` file (via ``python-dotenv``). All data
@@ -72,7 +70,6 @@ class ConfigManager:
         self._system_config: Optional[SystemConfig] = None
         self._event_categories: Dict[int, EventCategory] = {}
         self._prompt_templates: Dict[str, PromptTemplate] = {}
-        self._inference_rules: Dict[str, CrossEventInferenceRule] = {}
         self._adjudication_rules: Dict[str, AdjudicationRule] = {}
 
     # ------------------------------------------------------------------
@@ -155,12 +152,6 @@ class ConfigManager:
                 )
             self._event_categories[event_id] = EventCategory.model_validate(cat)
 
-        # Load cross-event inference rules
-        self._inference_rules = {
-            rule["rule_id"]: CrossEventInferenceRule.model_validate(rule)
-            for rule in raw_event_categories.get("cross_event_inference_rules", [])
-        }
-
         # Load adjudication rules; duplicate rule_ids would silently overwrite
         # each other, so fail fast instead.
         self._adjudication_rules = {}
@@ -229,10 +220,9 @@ class ConfigManager:
 
         total_template_versions = sum(len(v) for v in self._prompt_templates.values())
         logger.info(
-            "Config loaded: %d categories, %d inference rules, %d adjudication rules, "
+            "Config loaded: %d categories, %d adjudication rules, "
             "%d prompt templates (%d versions) from %d file(s)",
             len(self._event_categories),
-            len(self._inference_rules),
             len(self._adjudication_rules),
             len(self._prompt_templates),
             total_template_versions,
@@ -256,12 +246,6 @@ class ConfigManager:
             for k in sorted(self._event_categories)
             if self._event_categories[k].is_active
         ]
-
-    def get_total_event_categories(self) -> int:
-        """Return the total number of configured event categories (including inactive)."""
-        if self._system_config is None:
-            raise RuntimeError("Configuration has not been loaded. Call load_all() first.")
-        return len(self._event_categories)
 
     def get_llm_providers(self) -> List[LLMProviderConfig]:
         """Return all configured LLM providers in priority order."""
@@ -363,12 +347,6 @@ class ConfigManager:
             )
             raise
 
-    def get_inference_rules(self) -> List[CrossEventInferenceRule]:
-        """Return all configured cross-event inference rules."""
-        if self._system_config is None:
-            raise RuntimeError("Configuration has not been loaded. Call load_all() first.")
-        return list(self._inference_rules.values())
-
     def get_adjudication_rules(self) -> List[AdjudicationRule]:
         """Return all configured adjudication rules, ordered by priority (descending)."""
         if self._system_config is None:
@@ -383,16 +361,15 @@ class ConfigManager:
            ``event_categories.yaml`` event IDs.
         2. Every ``EventCategory`` with ``detection_mode == expert_agent`` has a
            valid ``prompt_template_id``.
-        3. Cross-event inference rules reference valid event IDs.
-        4. Adjudication rules have valid priorities (duplicate rule_ids already
+        3. Adjudication rules have valid priorities (duplicate rule_ids already
            fail at load time).
-        5. Prompt template A/B traffic percentages sum to 100%.
-        6. Tools referenced in event categories exist in prompt templates;
+        4. Prompt template A/B traffic percentages sum to 100%.
+        5. Tools referenced in event categories exist in prompt templates;
            active categories declaring tools are rejected because the tool
            registry currently registers none.
-        7. Event IDs are continuous from 0 — inactive categories included, since
+        6. Event IDs are continuous from 0 — inactive categories included, since
            they still occupy a bit in the binary encoding.
-        8. Active categories use ``expert_agent``, the only detection mode with
+        7. Active categories use ``expert_agent``, the only detection mode with
            an execution path.
 
         Returns:
@@ -464,27 +441,7 @@ class ConfigManager:
                         f"unknown prompt_template_id '{cat.prompt_template_id}'."
                     )
 
-        # 3. Cross-event inference rule validation
-        valid_event_ids = set(self._event_categories.keys())
-        for rule in self._inference_rules.values():
-            if rule.target_event_id not in valid_event_ids:
-                errors.append(
-                    f"Inference rule '{rule.rule_id}' references unknown target_event_id {rule.target_event_id}."
-                )
-            if rule.source_event_id not in valid_event_ids:
-                errors.append(
-                    f"Inference rule '{rule.rule_id}' references unknown source_event_id {rule.source_event_id}."
-                )
-            if rule.target_event_id == rule.source_event_id:
-                errors.append(
-                    f"Inference rule '{rule.rule_id}' target and source are the same event."
-                )
-            if not rule.source_description_keywords:
-                errors.append(
-                    f"Inference rule '{rule.rule_id}' has empty source_description_keywords."
-                )
-
-        # 4. Adjudication rule validation (duplicate rule_ids fail at load time)
+        # 3. Adjudication rule validation (duplicate rule_ids fail at load time)
         for rule in self._adjudication_rules.values():
             if rule.priority < 0 or rule.priority > 1000:
                 errors.append(
@@ -492,7 +449,7 @@ class ConfigManager:
                     f"outside valid range [0, 1000]."
                 )
 
-        # 5. Prompt template A/B traffic percentage validation
+        # 4. Prompt template A/B traffic percentage validation
         for template_id, versions in self._prompt_templates.items():
             variants_with_traffic = [
                 (v, pt) for v, pt in versions.items() if pt.traffic_percentage is not None
@@ -510,7 +467,7 @@ class ConfigManager:
                         f"sum to {total_pct}% (less than 100%, some traffic will fallback to last variant)."
                     )
 
-        # 6. Validate tools referenced in event categories exist in prompt templates
+        # 5. Validate tools referenced in event categories exist in prompt templates
         for cat in self._event_categories.values():
             if cat.tools:
                 if cat.is_active:
@@ -538,7 +495,7 @@ class ConfigManager:
                             f"but prompt template '{cat.prompt_template_id}' not found."
                         )
 
-        # 7. Event IDs are the global annotation-doc v4.5 action numbers and
+        # 6. Event IDs are the global annotation-doc v4.5 action numbers and
         # must be continuous from 1; id 9 is the reserved "normal" placeholder
         # and is intentionally skipped. Any other gap silently shrinks the
         # binary encoding width and drops higher events from the encoding.
@@ -551,7 +508,7 @@ class ConfigManager:
                 f"(9 reserved as the normal placeholder), got {sorted_ids}."
             )
 
-        # 8. Only expert_agent has an execution path; an active category using
+        # 7. Only expert_agent has an execution path; an active category using
         # any other detection mode would silently pin its encoding bit to 0.
         for cat in self._event_categories.values():
             if cat.is_active and cat.detection_mode.value != "expert_agent":
@@ -562,15 +519,6 @@ class ConfigManager:
                 )
 
         return errors
-
-    def reload(self) -> SystemConfig:
-        """Hot-reload all configuration files from disk.
-
-        Returns:
-            A freshly loaded and validated ``SystemConfig``.
-        """
-        logger.info("Hot-reloading configuration from %s", self.config_dir)
-        return self.load_all()
 
     # ------------------------------------------------------------------
     # Internal helpers

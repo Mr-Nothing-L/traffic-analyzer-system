@@ -58,10 +58,6 @@ def is_bbox_aspect_valid(
     return compute_bbox_aspect_ratio(bbox_norm) < max_ratio
 
 
-# Backward-compatible alias for existing callers.
-is_bbox_aspect_valid_for_non_motor = is_bbox_aspect_valid
-
-
 def _norm_to_px(bbox_norm: List[float], width: int, height: int) -> List[int]:
     """Convert normalized bbox to pixel coordinates."""
     x1, y1, x2, y2 = bbox_norm

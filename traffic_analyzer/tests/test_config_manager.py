@@ -202,7 +202,6 @@ class TestLoadAll:
         assert len(all_cats) == 3
         assert len(active_cats) == 2
         assert [cat.event_id for cat in active_cats] == [1, 3]
-        assert mgr.get_total_event_categories() == 3
 
     def test_prompt_template_lookup(self, manager: ConfigManager) -> None:
         manager.load_all()
@@ -617,7 +616,7 @@ class TestReload:
             yaml.safe_dump(cats), encoding="utf-8"
         )
 
-        manager.reload()
+        manager.load_all()
         assert len(manager.get_event_categories()) == 3
 
     def test_unloaded_manager_raises_on_getters(self, temp_config_dir: Path) -> None:

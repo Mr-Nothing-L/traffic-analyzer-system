@@ -25,7 +25,7 @@ from traffic_analyzer.utils.far_non_motor_enhancer import (
     create_composite,
     create_motion_comparison_composite,
     create_multi_roi_gallery,
-    is_bbox_aspect_valid_for_non_motor,
+    is_bbox_aspect_valid,
     is_bbox_large_enough,
     load_image,
 )
@@ -206,9 +206,9 @@ def test_compute_bbox_aspect_ratio(bbox, expected):
         ([0.3, 0.4, 0.6, 0.5], 2.0, False),
     ],
 )
-def test_is_bbox_aspect_valid_for_non_motor(bbox, max_ratio, expected):
+def test_is_bbox_aspect_valid(bbox, max_ratio, expected):
     """Tall bboxes pass, flat bboxes fail, custom thresholds tune behavior."""
-    assert is_bbox_aspect_valid_for_non_motor(bbox, max_ratio=max_ratio) is expected
+    assert is_bbox_aspect_valid(bbox, max_ratio=max_ratio) is expected
 
 
 def test_create_motion_comparison_composite_dimensions():
