@@ -25,6 +25,15 @@
       <div class="tb-spacer"></div>
       <button id="btn-infer" class="btn btn-primary" disabled>开始推理</button>
       <button id="btn-dashboard" class="btn btn-ghost" title="查看 GT 与模型检出的一致性看板">数据看板</button>
+      <div id="user-area" class="user-area" hidden>
+        <button id="user-avatar" class="user-avatar" title="账号"></button>
+        <div id="user-pop" class="user-pop" hidden>
+          <div class="user-pop-row"><span class="user-pop-key">用户名</span><span id="user-pop-name">-</span></div>
+          <div class="user-pop-row"><span class="user-pop-key">登录时间</span><span id="user-pop-time">-</span></div>
+          <div class="user-pop-row"><span class="user-pop-key">来源 IP</span><span id="user-pop-ip">-</span></div>
+          <button id="btn-logout" class="btn btn-ghost btn-sm user-pop-logout">登出</button>
+        </div>
+      </div>
     </div>
   </header>
 

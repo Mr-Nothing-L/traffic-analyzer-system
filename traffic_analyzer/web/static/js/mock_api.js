@@ -21,6 +21,42 @@ function mockCachePut(key, url) {
   if (keys.length > MOCK_FRAME_CACHE_MAX) delete mockFrameCache[keys[0]];
 }
 
+/* ------------------------------------------------------------ 乐观锁(mock) */
+// 冲突演示开关:?mock=1&conflict=1 时,每个 stem+kind 首次携带 base_sig 的保存
+// 必现一次 409(模拟「他人已修改」);默认关闭,避免常规演示/e2e 的首次保存被打断。
+// 无论开关与否,base_sig 与当前 file_sig 不匹配一律 409(契约行为)
+const CONFLICT_DEMO = new URLSearchParams(location.search).get('conflict') === '1';
+
+// file_sig:每个 stem+kind 各自递增,GET /api/results 携带;PUT 带 base_sig 校验,
+// 每次成功后对应 kind 签名 +1(SFT 与证据互不影响,与后端按文件哈希语义一致)。
+// 存储惰性挂在 mockDb 上(mock_db.js 不在本包改动范围)
+function currentSig(stem, kind) {
+  const sigs = mockDb.fileSigs || (mockDb.fileSigs = {});
+  const key = stem + '|' + (kind || 'sft');
+  if (!sigs[key]) sigs[key] = 'sig-1';
+  return sigs[key];
+}
+
+function bumpSig(stem, kind) {
+  const key = stem + '|' + (kind || 'sft');
+  const n = parseInt(currentSig(stem, kind).split('-')[1], 10) + 1;
+  mockDb.fileSigs[key] = 'sig-' + n;
+  return mockDb.fileSigs[key];
+}
+
+function checkBaseSig(stem, kind, body) {
+  if (!body || body.base_sig === undefined) return;
+  const fired = mockDb.conflictFired || (mockDb.conflictFired = {});
+  const key = stem + '|' + kind;
+  if (CONFLICT_DEMO && !fired[key]) {
+    fired[key] = true; // 演示:首次保存必现一次 409
+    throw new ApiError(409, '文件已被他人修改(file_sig 不匹配)');
+  }
+  if (body.base_sig !== currentSig(stem, kind)) {
+    throw new ApiError(409, '文件已被他人修改(file_sig 不匹配)');
+  }
+}
+
 export function mockFrameUrl(stem, index) {
   const key = stem + '#' + index;
   const hit = mockCacheGet(key);
@@ -121,6 +157,17 @@ export async function mockApi(path, opts) {
 
   if (path === '/api/jobs') return mockDb.jobs;
 
+  // presence:GET 名册模拟另外两个用户(张三在编辑、李四在查看);POST 上报直接收下
+  if (path === '/api/presence') {
+    if (method === 'POST') return { ok: true };
+    const v0 = mockDb.videos[0];
+    const v1 = mockDb.videos[1] || v0;
+    return [
+      { username: '张三', viewing: null, editing: v0 ? v0.rel : null },
+      { username: '李四', viewing: v1 ? v1.rel : null, editing: null },
+    ];
+  }
+
   // 数据看板:GT 按文件名解析,pred 取 SFT 标注 action,metrics 实时计算
   if (path === '/api/dashboard' && method === 'GET') {
     if (!mockDb.workspace.path) throw new ApiError(400, 'No workspace selected');
@@ -157,19 +204,22 @@ export async function mockApi(path, opts) {
     const stem = decodeURIComponent(m[1]);
     const v = mockDb.videos.find(v => v.stem === stem);
     if (!v || !v.has_results) return { report_md: null, sft_label: null, evidence: null };
-    return mockResults(stem);
+    return Object.assign({}, mockResults(stem), {
+      file_sig: currentSig(stem, 'sft'), evidence_sig: currentSig(stem, 'evidence') });
   }
 
   m = path.match(/^\/api\/results\/([^/]+)\/evidence$/);
   if (m && method === 'PUT') {
     const stem = decodeURIComponent(m[1]);
     if (!body || !Array.isArray(body.events)) throw new ApiError(422, 'evidence 结构不合法');
+    checkBaseSig(stem, 'evidence', body); // 乐观锁:base_sig 不匹配 → 409
+    delete body.base_sig; // 锁字段不落库
     const r = mockResults(stem);
     const old = r.evidence;
     // 简易校验:事件数一致、不可改字段未变
     if (old && body.events.length !== old.events.length) throw new ApiError(422, 'events 数量不可变');
     r.evidence = body;
-    return { ok: true };
+    return Object.assign({}, body, { evidence_sig: bumpSig(stem, 'evidence') });
   }
 
   if (path === '/api/config/events' && method === 'GET') return MOCK_EVENT_CONFIG;
@@ -179,6 +229,8 @@ export async function mockApi(path, opts) {
     const stem = decodeURIComponent(m[1]);
     const v = mockDb.videos.find(v => v.stem === stem);
     if (!v || !v.has_results) throw new ApiError(404, 'SFT 文件不存在');
+    checkBaseSig(stem, 'sft', body); // 乐观锁:base_sig 不匹配 → 409
+    delete body.base_sig; // 锁字段不落库也不回传
     const r = mockResults(stem);
     const old = r.sft_label;
     // 与后端一致:仅 description / action 可变,action 必须是合法编号
@@ -190,7 +242,8 @@ export async function mockApi(path, opts) {
       if (JSON.stringify(body[k]) !== JSON.stringify(old[k])) throw new ApiError(422, k + ' 不可修改');
     });
     r.sft_label = body;
-    return body;
+    // 返回保存后的对象并附带新 file_sig(前端更新缓存,下一次保存以此为 base_sig)
+    return Object.assign({}, body, { file_sig: bumpSig(stem, 'sft') });
   }
 
   throw new ApiError(404, 'mock: 未实现 ' + method + ' ' + path);

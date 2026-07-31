@@ -7,6 +7,7 @@ import { api } from './api.js';
 import { selectVideo } from './preview.js';
 import { retryInfer, cancelJob } from './jobs.js';
 import { pixelBarHtml, paintPixelBar } from './pixel_bar.js';
+import { presenceBadgeHtml, presenceUsers } from './presence.js';
 
 export function latestJobForStem(stem) {
   for (let i = state.jobs.length - 1; i >= 0; i--) {
@@ -136,6 +137,7 @@ function treeRowsHtml(entries, depth) {
         + '<span class="tree-ico">🎬</span>'
         + '<div class="video-meta"><div class="video-name" title="' + esc(rel) + '">' + esc(e.name) + '</div>'
         + '<div class="video-sub">' + fmtBytes(e.size) + '</div></div>'
+        + presenceBadgeHtml(rel)
         + statusHtml
         + '</div>';
     } else {
@@ -180,7 +182,7 @@ export function renderSidebar() {
   // 行内停止键(■)不会持过期 id
   const snap = JSON.stringify([
     state.tree.root, state.tree.children, Array.from(state.tree.expanded),
-    state.filter, state.sort,
+    state.filter, state.sort, presenceUsers(),
     state.videos.map(v => [v.rel, v.has_results, videoStatus(v).text,
       state.checked.has(v.rel), state.currentRel === v.rel,
       (latestJobForStem(v.stem) || {}).id || 0]),

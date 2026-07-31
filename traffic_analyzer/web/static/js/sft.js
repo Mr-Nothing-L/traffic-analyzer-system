@@ -1,7 +1,8 @@
 /* ------------------------------------------------------------ SFT 卡(视图层) */
 import { $, $$, esc, toast, flashSaveBtn } from './util.js';
 import { state } from './state.js';
-import { api } from './api.js';
+import { api, getFileSig } from './api.js';
+import { selectVideo } from './preview.js';
 import {
   groupMentionStrings, declaredSpans, tokenizeSpansHtml,
   replaceDeclaredSpans, swapSkeletonPrefix, mapMentionToOption,
@@ -402,12 +403,15 @@ async function saveSft() {
   if (btn) btn.disabled = true;
   // 只改 description / action / event_attributes / attr_mentions,其余字段原样提交(后端会校验)
   const payload = Object.assign({}, state.results.sft_label, buildSftRevision());
+  const baseSig = getFileSig(stem);
+  if (baseSig) payload.base_sig = baseSig; // 乐观锁:与 GET /api/results 的 file_sig 对齐
   const inFlightSig = sftSignature(); // 在途 payload 的签名,用于识别保存期间的继续编辑
   try {
     const saved = await api('/api/results/' + encodeURIComponent(stem) + '/sft', {
       method: 'PUT', body: payload,
     });
     if (state.currentStem !== stem) return; // 期间切换了视频
+    if (saved && saved.file_sig) delete saved.file_sig; // 锁字段(api 层已缓存)不进标注对象
     state.results.sft_label = saved || payload;
     toast('已保存', 'ok');
     if (sftSignature() === inFlightSig) {
@@ -417,6 +421,14 @@ async function saveSft() {
     }
     flashSaveBtn($('#btn-sft-save')); // 按钮短暂显示 ✓(可能已被上面的重建替换,取最新按钮)
   } catch (e) {
+    if (e.status === 409) {
+      // 乐观锁冲突:他人已修改;重载会丢弃当前未保存的修改,先 confirm
+      if (confirm('该视频的标注已被他人修改。\n确定将丢弃当前未保存的修改并刷新为最新版本。')) {
+        toast('他人已修改,已为你刷新', 'err');
+        selectVideo(state.currentRel);
+        return;
+      }
+    }
     if (btn) btn.disabled = false;
     toast('保存失败(' + e.status + '):' + e.message, 'err');
   }

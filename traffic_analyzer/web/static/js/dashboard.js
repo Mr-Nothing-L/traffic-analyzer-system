@@ -11,6 +11,7 @@ import { $, esc, toast } from './util.js';
 import { state, runCleanups } from './state.js';
 import { api } from './api.js';
 import { selectVideo } from './preview.js';
+import { presenceBadgeHtml, presenceUsers } from './presence.js';
 
 const CONSISTENCY = [
   { key: 'consistent', label: '一致', cls: 'ok' },
@@ -27,7 +28,7 @@ const REVIEWS = [
 let dashData = null;   // /api/dashboard 最近一次成功响应
 let dashSnap = '';     // 数据快照:未变时跳过重渲染,防轮询闪烁
 let fetching = false;  // 请求去重
-const filters = { consistency: new Set(), review: new Set(), editedOnly: false };
+const filters = { consistency: new Set(), review: new Set(), editedOnly: false, name: '' };
 
 /* ------------------------------------------------------------ 进入 / 轮询 */
 export async function openDashboard() {
@@ -62,7 +63,8 @@ export async function dashboardTick() {
   try {
     const data = await api('/api/dashboard');
     if (state.view !== 'dashboard' || !$('#dash-root')) return; // 期间已离开看板
-    const snap = JSON.stringify(data);
+    // presence 名册一并纳入快照:他人编辑/查看徽章变化时同样触发重渲染
+    const snap = JSON.stringify([data, presenceUsers()]);
     if (snap !== dashSnap) {
       dashData = data;
       dashSnap = snap;
@@ -151,7 +153,7 @@ function chipHtml(group, key, label, cls, count) {
 function renderFilters(s) {
   const el = $('#dash-filters');
   if (!el) return;
-  const hint = (filters.consistency.size || filters.review.size || filters.editedOnly)
+  const hint = (filters.consistency.size || filters.review.size || filters.editedOnly || filters.name)
     ? '<button type="button" class="dash-chip dash-chip-clear" data-group="__clear">清除过滤</button>'
     : '';
   el.innerHTML =
@@ -162,12 +164,16 @@ function renderFilters(s) {
     + REVIEWS.map(r => chipHtml('review', r.key, r.label, r.cls, s[r.key])).join('')
     + '<span class="dash-filter-sep"></span>'
     + chipHtml('edited', 'edited', '人工已改', 'edit', s.edited)
+    + '<span class="dash-filter-sep"></span>'
+    + '<input id="dash-search" class="dash-search" type="text" spellcheck="false"'
+    + ' placeholder="搜索名称…" value="' + esc(filters.name) + '">'
     + hint;
   el.querySelectorAll('.dash-chip').forEach(btn => {
     btn.addEventListener('click', () => {
       const g = btn.dataset.group;
       if (g === '__clear') {
         filters.consistency.clear(); filters.review.clear(); filters.editedOnly = false;
+        filters.name = '';
       } else if (g === 'edited') {
         filters.editedOnly = !filters.editedOnly;
       } else {
@@ -177,12 +183,20 @@ function renderFilters(s) {
       renderBody(); // 纯本地过滤,无需重新拉取
     });
   });
+  // 名称搜索:输入即过滤(子串、不区分大小写、匹配 rel);只重渲染表格,
+  // 不重建过滤条本身,输入框焦点不丢
+  const search = $('#dash-search', el);
+  search.addEventListener('input', () => {
+    filters.name = search.value;
+    renderTable((dashData && dashData.rows) || []);
+  });
 }
 
 function rowVisible(r) {
   if (filters.consistency.size && !filters.consistency.has(r.status)) return false;
   if (filters.review.size && !filters.review.has(r.review)) return false;
   if (filters.editedOnly && !r.edited) return false;
+  if (filters.name && String(r.rel).toLowerCase().indexOf(filters.name.toLowerCase()) < 0) return false;
   return true;
 }
 
@@ -243,7 +257,8 @@ function renderTable(rows) {
         : '<span class="dash-none">无检出</span>')
       : '<span class="dash-none">—</span>';
     html += '<tr data-rel="' + esc(r.rel) + '">'
-      + '<td class="dash-v" title="' + esc(r.rel) + '"><span>' + esc(r.rel) + '</span></td>'
+      + '<td class="dash-v" title="' + esc(r.rel) + '"><span>' + esc(r.rel) + '</span>'
+      + presenceBadgeHtml(r.rel) + '</td>'
       + '<td>' + gtCell + '</td>'
       + '<td>' + predCell + '</td>'
       + '<td class="dash-nowrap">' + consistencyBadge(r) + '</td>'
@@ -277,7 +292,7 @@ async function setReview(stem, status) {
   row.review = status;
   adjustSummary(prev, -1);
   adjustSummary(status, 1);
-  dashSnap = JSON.stringify(dashData); // 快照与乐观值对齐,避免轮询回写同一数据时重渲染
+  dashSnap = JSON.stringify([dashData, presenceUsers()]); // 快照与乐观值对齐,避免轮询回写同一数据时重渲染
   renderBody();
   try {
     await api('/api/dashboard/review', { method: 'PUT', body: { stem: stem, status: status } });
@@ -285,7 +300,7 @@ async function setReview(stem, status) {
     row.review = prev;
     adjustSummary(status, -1);
     adjustSummary(prev, 1);
-    dashSnap = JSON.stringify(dashData);
+    dashSnap = JSON.stringify([dashData, presenceUsers()]);
     renderBody();
     toast('审核状态保存失败:' + e.message, 'err');
   }

@@ -21,6 +21,12 @@ For the two optional fields the PUT distinguishes "not submitted" from
 on-disk value as-is (legacy samples stay without the key, annotated samples
 keep their annotations); an explicit ``null`` deletes the key.
 
+Optimistic locking: ``GET /api/results/{stem}`` returns ``file_sig`` (sha256
+of the current SFT json, first 16 hex chars); both PUTs accept ``base_sig``
+and reject with ``409 {"detail": "conflict"}`` when it no longer matches the
+file on disk. Successful PUTs stamp ``last_edited_by`` (from
+``request.state.user``) into the written JSON (disk only, not the response).
+
 [文件说明]
 作用:结果读取与证据/SFT 编辑接口(端点 + 原子写 + per-stem PUT 锁;pydantic
 模型在 web/evidence_schema.py,yaml 缓存索引在 web/event_config.py)。GET 读取
@@ -44,6 +50,7 @@ config/event_categories.yaml 与 config/event_options.yaml
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -101,6 +108,14 @@ def _read_json(path: Path) -> Optional[Any]:
         return json.loads(text)
     except json.JSONDecodeError as exc:
         raise _CorruptJsonError(f"{path.name}: {exc}") from exc
+
+
+def _file_sig(path: Path) -> Optional[str]:
+    """文件内容 sha256 前 16 位(乐观锁指纹);文件不可读 → None。"""
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+    except OSError:
+        return None
 
 
 def _atomic_write_json(path: Path, payload: Any) -> None:
@@ -171,6 +186,8 @@ def _strip_editable(payload: Dict[str, Any]) -> Dict[str, Any]:
     Two payloads that differ ONLY in editable fields strip to equal dicts.
     """
     copy = json.loads(json.dumps(payload, ensure_ascii=False))
+    # last_edited_by 是服务端写入的追溯字段,不参与「仅可编辑字段可不同」比对。
+    copy.pop("last_edited_by", None)
     for event in copy.get("events", []):
         calibration = event.get("calibration")
         if isinstance(calibration, dict):
@@ -186,6 +203,7 @@ def _strip_editable(payload: Dict[str, Any]) -> Dict[str, Any]:
 def _strip_sft_editable(payload: Dict[str, Any]) -> Dict[str, Any]:
     """与 ``_strip_editable`` 同理:仅 description / action / event_attributes / attr_mentions 允许不同。"""
     copy = json.loads(json.dumps(payload, ensure_ascii=False))
+    copy.pop("last_edited_by", None)  # 服务端追溯字段,不参与比对
     copy["description"] = _MASK
     copy["action"] = _MASK
     copy["event_attributes"] = _MASK
@@ -221,6 +239,10 @@ def get_results(stem: str, request: Request) -> Dict[str, Any]:
         "report_md": report_md,
         "sft_label": sft_label,
         "evidence": evidence,
+        # 乐观锁指纹:当前 SFT json 内容 sha256 前 16;PUT 回传 base_sig 做冲突检测。
+        "file_sig": _file_sig(out_dir / f"{stem}.json"),
+        # 证据文件指纹:证据 PUT 的 base_sig 以此为准(与 SFT 分开,互不误伤)。
+        "evidence_sig": _file_sig(out_dir / f"{stem}_evidence.json"),
     }
 
 
@@ -263,7 +285,7 @@ def put_evidence(stem: str, body: Evidence, request: Request) -> Dict[str, Any]:
         if disk is None:
             raise HTTPException(status_code=404, detail="Evidence file not found")
 
-        new_payload = body.model_dump()
+        new_payload = body.model_dump(exclude={"base_sig"})
         if not isinstance(disk, dict) or _strip_editable(disk) != _strip_editable(
             new_payload
         ):
@@ -276,8 +298,15 @@ def put_evidence(stem: str, body: Evidence, request: Request) -> Dict[str, Any]:
                 ),
             )
 
-        _atomic_write_json(evidence_path, new_payload)
-    return new_payload
+        # 乐观锁:提交时的基准指纹与当前文件不一致 → 他人已改,拒绝覆盖。
+        if body.base_sig is not None and body.base_sig != _file_sig(evidence_path):
+            raise HTTPException(status_code=409, detail="conflict")
+        # 追溯字段只落盘;响应仍返回用户提交的 payload 本身。
+        to_write = dict(new_payload)
+        to_write["last_edited_by"] = getattr(request.state, "user", "local")
+        _atomic_write_json(evidence_path, to_write)
+    # 回传写入后的新指纹,前端下一次保存以此为 base_sig,无需再 GET。
+    return dict(new_payload, evidence_sig=_file_sig(evidence_path))
 
 
 @router.get("/api/config/events")
@@ -335,7 +364,7 @@ def put_sft(stem: str, body: SftSample, request: Request) -> Dict[str, Any]:
         # exclude_unset 区分「字段未提交」与「显式 null」:
         # - 未提交:保留磁盘现状(旧格式样本不新增字段;已有结构化标注不丢失);
         # - 显式 null:删除该键(显式清除语义,经正常写路径落盘)。
-        new_payload = body.model_dump(exclude_unset=True)
+        new_payload = body.model_dump(exclude_unset=True, exclude={"base_sig"})
         for field in ("event_attributes", "attr_mentions"):
             if field not in new_payload:
                 if isinstance(disk, dict) and field in disk:
@@ -353,6 +382,10 @@ def put_sft(stem: str, body: SftSample, request: Request) -> Dict[str, Any]:
                 ),
             )
 
+        # 乐观锁:提交时的基准指纹与当前文件不一致 → 他人已改,拒绝覆盖。
+        if body.base_sig is not None and body.base_sig != _file_sig(sft_path):
+            raise HTTPException(status_code=409, detail="conflict")
+
         # 原始输出冻结:首次人工编辑落盘前,把推理原始输出复制为
         # <stem>_raw.json(dashboard 据此计算 edited/edit_missing/edit_extra);
         # 已存在则不覆盖(保持「首次编辑前的原始输出」语义);重推理成功时由
@@ -360,5 +393,9 @@ def put_sft(stem: str, body: SftSample, request: Request) -> Dict[str, Any]:
         raw_path = sft_path.with_name(f"{stem}_raw.json")
         if not raw_path.exists():
             shutil.copy(sft_path, raw_path)
-        _atomic_write_json(sft_path, new_payload)
-    return new_payload
+        # 追溯字段只落盘;响应仍返回用户提交的 payload 本身。
+        to_write = dict(new_payload)
+        to_write["last_edited_by"] = getattr(request.state, "user", "local")
+        _atomic_write_json(sft_path, to_write)
+    # 回传写入后的新指纹,前端下一次保存以此为 base_sig,无需再 GET。
+    return dict(new_payload, file_sig=_file_sig(sft_path))

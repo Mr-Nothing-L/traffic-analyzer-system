@@ -187,11 +187,14 @@ class TestSftPut:
         payload["description"] = "<think>\n改写过。\n</think>\n<answer>\n天气：阴天\n</answer>"
         resp = client.put("/api/results/v1/sft", json=payload)
         assert resp.status_code == 200
-        assert resp.json() == payload
+        body = resp.json()
+        assert body.pop("file_sig") is not None
+        assert body == payload
 
         disk = json.loads(
             (tmp_path / "analysis" / "v1" / "v1.json").read_text(encoding="utf-8")
         )
+        assert disk.pop("last_edited_by") == "local"
         assert disk == payload
 
     @pytest.mark.parametrize(
@@ -244,10 +247,13 @@ class TestSftPut:
         }
         resp = client.put("/api/results/v1/sft", json=payload)
         assert resp.status_code == 200
-        assert resp.json() == payload
+        body = resp.json()
+        assert body.pop("file_sig") is not None
+        assert body == payload
         disk = json.loads(
             (tmp_path / "analysis" / "v1" / "v1.json").read_text(encoding="utf-8")
         )
+        assert disk.pop("last_edited_by") == "local"
         assert disk == payload
 
     @pytest.mark.parametrize(
@@ -289,6 +295,7 @@ class TestSftPut:
         disk = json.loads(
             (tmp_path / "analysis" / "v1" / "v1.json").read_text(encoding="utf-8")
         )
+        assert disk.pop("last_edited_by") == "local"
         assert disk == payload
         assert "event_attributes" not in disk
 
@@ -306,10 +313,13 @@ class TestSftPut:
         }
         resp = client.put("/api/results/v1/sft", json=payload)
         assert resp.status_code == 200
-        assert resp.json() == payload
+        body = resp.json()
+        assert body.pop("file_sig") is not None
+        assert body == payload
         disk = json.loads(
             (tmp_path / "analysis" / "v1" / "v1.json").read_text(encoding="utf-8")
         )
+        assert disk.pop("last_edited_by") == "local"
         assert disk == payload
 
     def _roadwork_payload(self) -> Dict[str, Any]:
@@ -338,10 +348,13 @@ class TestSftPut:
         }
         resp = client.put("/api/results/v1/sft", json=payload)
         assert resp.status_code == 200
-        assert resp.json() == payload
+        body = resp.json()
+        assert body.pop("file_sig") is not None
+        assert body == payload
         disk = json.loads(
             (tmp_path / "analysis" / "v1" / "v1.json").read_text(encoding="utf-8")
         )
+        assert disk.pop("last_edited_by") == "local"
         assert disk == payload
 
     def test_put_attr_mentions_flat_multi_still_ok(self, tmp_path: Path) -> None:
@@ -353,7 +366,9 @@ class TestSftPut:
         }
         resp = client.put("/api/results/v1/sft", json=payload)
         assert resp.status_code == 200
-        assert resp.json() == payload
+        body = resp.json()
+        assert body.pop("file_sig") is not None
+        assert body == payload
 
     def test_put_attr_mentions_nested_bad_option_422(self, tmp_path: Path) -> None:
         # 嵌套对象的选项名不在该组 options 内 → 422,磁盘不改动。

@@ -13,6 +13,8 @@ import {
 import { renderWelcome } from './preview.js';
 import { openDashboard, dashboardTick } from './dashboard.js';
 import { pollJobs, schedulePoll, startInfer } from './jobs.js';
+import { initUserArea } from './auth.js';
+import { startPresence } from './presence.js';
 import {
   browseWorkspace, closeDirModal, confirmDir, showDirInput,
   onDirRecentChange, dirModalKeys, navDir, setWorkspaceLabel,
@@ -137,6 +139,10 @@ function initToolbar() {
 async function init() {
   initToolbar();
   if (MOCK) setInterval(mockTick, 700);
+
+  // 先确认登录态:GET /api/auth/me(401 由 auth.js 拦截跳 /login;mock 模式内部跳过)
+  await initUserArea();
+  startPresence(); // 每 10s 上报 viewing/editing;名册由轮询刷新
 
   try {
     state.workspace = await api('/api/workspace');

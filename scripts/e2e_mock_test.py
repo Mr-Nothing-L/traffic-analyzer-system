@@ -16,6 +16,7 @@
 """
 
 import argparse
+import os
 import json
 import subprocess
 import sys
@@ -49,6 +50,9 @@ def server_up() -> bool:
     try:
         with urllib.request.urlopen(BASE + "/api/jobs", timeout=2) as resp:
             return resp.status == 200 and isinstance(json.loads(resp.read()), list)
+    except urllib.error.HTTPError as e:
+        # 认证开启时 401 同样证明是本系统的服务在监听
+        return e.code == 401
     except Exception:
         return False
 
@@ -490,6 +494,18 @@ def main() -> int:
                 t0 = time.time()
                 print(f"\n===== 第 {idx} 轮 =====")
                 page.goto(BASE + "/?mock=1", wait_until="domcontentloaded")
+                # 认证开启时会 302 到 /login:用 E2E_USER/E2E_PASS 登录一次后继续
+                if "/login" in page.url:
+                    user = os.environ.get("E2E_USER")
+                    pw = os.environ.get("E2E_PASS")
+                    if not user:
+                        raise RuntimeError(
+                            "服务开启了认证但未提供 E2E_USER/E2E_PASS 环境变量")
+                    page.fill("#login-form input[name=username], #username", user)
+                    page.fill("#login-form input[name=password], #password", pw)
+                    page.click("button[type=submit]")
+                    page.wait_for_url("**/", timeout=10_000)
+                    page.goto(BASE + "/?mock=1", wait_until="domcontentloaded")
                 page.wait_for_selector("#toolbar", timeout=10_000)
                 p = Pass(idx, pause=pause)
                 run_pass(page, p, SHOT_DIR / f"pass_{idx:03d}.png")

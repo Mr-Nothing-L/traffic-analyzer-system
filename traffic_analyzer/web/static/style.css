@@ -1603,3 +1603,159 @@ body.hsplit-dragging { cursor: row-resize; user-select: none; }
 .dash-review-chip.dash-chip-ok.on { background: var(--sage-soft); border-color: var(--sage); color: var(--sage); }
 .dash-review-chip.dash-chip-warn.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-hover); }
 .dash-review-chip.dash-chip-mute.on { background: #EFEAE0; border-color: #B7AC97; color: var(--text); }
+
+/* ---------- 工具栏用户区(头像 + 浮窗) ---------- */
+.user-area { position: relative; display: flex; align-items: center; }
+
+/* 头像:纯 CSS box-shadow 逐像素绘制的马赛克马头(12×12 像素格,--px 为单格边长;
+   ::before 自身是左上角 1 格透明基块,其余格全部由阴影复制而出) */
+.user-avatar {
+  --px: 3px;
+  position: relative;
+  width: calc(var(--px) * 12);
+  height: calc(var(--px) * 12);
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  cursor: pointer;
+  flex: 0 0 auto;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.user-avatar:hover { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.user-avatar::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: var(--px);
+  height: var(--px);
+  box-shadow:
+    calc(var(--px) * 2) calc(var(--px) * 0) 0 0 #2A2620,
+    calc(var(--px) * 7) calc(var(--px) * 0) 0 0 #2A2620,
+    calc(var(--px) * 2) calc(var(--px) * 1) 0 0 #2A2620,
+    calc(var(--px) * 3) calc(var(--px) * 1) 0 0 #2A2620,
+    calc(var(--px) * 6) calc(var(--px) * 1) 0 0 #2A2620,
+    calc(var(--px) * 7) calc(var(--px) * 1) 0 0 #2A2620,
+    calc(var(--px) * 2) calc(var(--px) * 2) 0 0 #2A2620,
+    calc(var(--px) * 3) calc(var(--px) * 2) 0 0 #D97757,
+    calc(var(--px) * 4) calc(var(--px) * 2) 0 0 #D97757,
+    calc(var(--px) * 5) calc(var(--px) * 2) 0 0 #D97757,
+    calc(var(--px) * 6) calc(var(--px) * 2) 0 0 #D97757,
+    calc(var(--px) * 7) calc(var(--px) * 2) 0 0 #2A2620,
+    calc(var(--px) * 1) calc(var(--px) * 3) 0 0 #2A2620,
+    calc(var(--px) * 2) calc(var(--px) * 3) 0 0 #D97757,
+    calc(var(--px) * 3) calc(var(--px) * 3) 0 0 #2A2620,
+    calc(var(--px) * 4) calc(var(--px) * 3) 0 0 #D97757,
+    calc(var(--px) * 5) calc(var(--px) * 3) 0 0 #D97757,
+    calc(var(--px) * 6) calc(var(--px) * 3) 0 0 #D97757,
+    calc(var(--px) * 7) calc(var(--px) * 3) 0 0 #2A2620,
+    calc(var(--px) * 0) calc(var(--px) * 4) 0 0 #2A2620,
+    calc(var(--px) * 1) calc(var(--px) * 4) 0 0 #D97757,
+    calc(var(--px) * 2) calc(var(--px) * 4) 0 0 #D97757,
+    calc(var(--px) * 3) calc(var(--px) * 4) 0 0 #D97757,
+    calc(var(--px) * 4) calc(var(--px) * 4) 0 0 #D97757,
+    calc(var(--px) * 5) calc(var(--px) * 4) 0 0 #D97757,
+    calc(var(--px) * 6) calc(var(--px) * 4) 0 0 #D97757,
+    calc(var(--px) * 7) calc(var(--px) * 4) 0 0 #2A2620,
+    calc(var(--px) * 0) calc(var(--px) * 5) 0 0 #2A2620,
+    calc(var(--px) * 1) calc(var(--px) * 5) 0 0 #D97757,
+    calc(var(--px) * 2) calc(var(--px) * 5) 0 0 #D97757,
+    calc(var(--px) * 3) calc(var(--px) * 5) 0 0 #D97757,
+    calc(var(--px) * 4) calc(var(--px) * 5) 0 0 #D97757,
+    calc(var(--px) * 5) calc(var(--px) * 5) 0 0 #D97757,
+    calc(var(--px) * 6) calc(var(--px) * 5) 0 0 #2A2620,
+    calc(var(--px) * 0) calc(var(--px) * 6) 0 0 #2A2620,
+    calc(var(--px) * 1) calc(var(--px) * 6) 0 0 #D97757,
+    calc(var(--px) * 2) calc(var(--px) * 6) 0 0 #2A2620,
+    calc(var(--px) * 3) calc(var(--px) * 6) 0 0 #D97757,
+    calc(var(--px) * 4) calc(var(--px) * 6) 0 0 #D97757,
+    calc(var(--px) * 5) calc(var(--px) * 6) 0 0 #D97757,
+    calc(var(--px) * 6) calc(var(--px) * 6) 0 0 #2A2620,
+    calc(var(--px) * 1) calc(var(--px) * 7) 0 0 #2A2620,
+    calc(var(--px) * 2) calc(var(--px) * 7) 0 0 #D97757,
+    calc(var(--px) * 3) calc(var(--px) * 7) 0 0 #D97757,
+    calc(var(--px) * 4) calc(var(--px) * 7) 0 0 #D97757,
+    calc(var(--px) * 5) calc(var(--px) * 7) 0 0 #D97757,
+    calc(var(--px) * 6) calc(var(--px) * 7) 0 0 #2A2620,
+    calc(var(--px) * 1) calc(var(--px) * 8) 0 0 #2A2620,
+    calc(var(--px) * 2) calc(var(--px) * 8) 0 0 #D97757,
+    calc(var(--px) * 3) calc(var(--px) * 8) 0 0 #D97757,
+    calc(var(--px) * 4) calc(var(--px) * 8) 0 0 #D97757,
+    calc(var(--px) * 5) calc(var(--px) * 8) 0 0 #2A2620,
+    calc(var(--px) * 2) calc(var(--px) * 9) 0 0 #2A2620,
+    calc(var(--px) * 3) calc(var(--px) * 9) 0 0 #D97757,
+    calc(var(--px) * 4) calc(var(--px) * 9) 0 0 #D97757,
+    calc(var(--px) * 5) calc(var(--px) * 9) 0 0 #D97757,
+    calc(var(--px) * 6) calc(var(--px) * 9) 0 0 #D97757,
+    calc(var(--px) * 7) calc(var(--px) * 9) 0 0 #D97757,
+    calc(var(--px) * 8) calc(var(--px) * 9) 0 0 #D97757,
+    calc(var(--px) * 2) calc(var(--px) * 10) 0 0 #2A2620,
+    calc(var(--px) * 3) calc(var(--px) * 10) 0 0 #D97757,
+    calc(var(--px) * 4) calc(var(--px) * 10) 0 0 #D97757,
+    calc(var(--px) * 5) calc(var(--px) * 10) 0 0 #D97757,
+    calc(var(--px) * 6) calc(var(--px) * 10) 0 0 #D97757,
+    calc(var(--px) * 7) calc(var(--px) * 10) 0 0 #D97757,
+    calc(var(--px) * 8) calc(var(--px) * 10) 0 0 #D97757,
+    calc(var(--px) * 2) calc(var(--px) * 11) 0 0 #2A2620,
+    calc(var(--px) * 3) calc(var(--px) * 11) 0 0 #2A2620,
+    calc(var(--px) * 4) calc(var(--px) * 11) 0 0 #2A2620,
+    calc(var(--px) * 5) calc(var(--px) * 11) 0 0 #2A2620,
+    calc(var(--px) * 6) calc(var(--px) * 11) 0 0 #2A2620,
+    calc(var(--px) * 7) calc(var(--px) * 11) 0 0 #2A2620,
+    calc(var(--px) * 8) calc(var(--px) * 11) 0 0 #2A2620;
+}
+
+.user-pop {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  min-width: 220px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-hover);
+  padding: 12px 14px;
+  z-index: 60;
+  animation: fade-in 0.15s ease;
+}
+.user-pop-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 12.5px;
+  padding: 3px 0;
+}
+.user-pop-key { flex: 0 0 auto; color: var(--text2); }
+.user-pop-row span:last-child { font-family: var(--mono); word-break: break-all; }
+.user-pop-logout { width: 100%; margin-top: 10px; }
+
+/* ---------- presence 徽章(编辑中=橙底,查看中=灰底;不显示自己) ---------- */
+.presence-badge {
+  flex: 0 0 auto;
+  font-family: var(--pixel);
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+.presence-editing { background: var(--accent); color: #FFF; }
+.presence-viewing { background: #E4DECF; color: var(--text2); }
+/* 看板行内:跟在视频名后面,不撑开行高 */
+.dash-v .presence-badge { margin-left: 6px; }
+
+/* ---------- 看板名称搜索框 ---------- */
+.dash-search {
+  font-family: var(--pixel);
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--card);
+  color: var(--text);
+  padding: 5px 12px;
+  width: 180px;
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+.dash-search:focus { border-color: var(--accent); }

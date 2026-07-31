@@ -34,7 +34,13 @@ class TestResults:
         workspace = _make_workspace(tmp_path)
         client = TestClient(create_app(workspace=str(workspace)))
         data = client.get("/api/results/v2").json()
-        assert data == {"report_md": None, "sft_label": None, "evidence": None}
+        assert data == {
+            "report_md": None,
+            "sft_label": None,
+            "evidence": None,
+            "file_sig": None,
+            "evidence_sig": None,
+        }
 
 
 class TestResultFile:

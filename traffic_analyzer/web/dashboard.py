@@ -14,8 +14,8 @@ evaluated rows only (rows without GT or without results do not participate).
 
 PUT /api/dashboard/review validates the three-state review status and
 persists it to ``<workspace>/analysis/review_states.json``
-(``{stem: {status, updated_at}}``) with the same atomic write as
-``evidence_api._atomic_write_json``.
+(``{stem: {status, updated_at, by}}``, ``by`` = ``request.state.user``) with
+the same atomic write as ``evidence_api._atomic_write_json``.
 
 [文件说明]
 作用:dashboard 聚合接口。GET /api/dashboard 按工作区视频逐行合并文件名 GT
@@ -125,6 +125,8 @@ def put_dashboard_review(body: ReviewRequest, request: Request) -> Dict[str, Any
         entry = {
             "status": body.status,
             "updated_at": datetime.now(timezone.utc).isoformat(),
+            # 追溯:谁做的复核(认证关闭时为 'local')。
+            "by": getattr(request.state, "user", "local"),
         }
         states[body.stem] = entry
         path.parent.mkdir(parents=True, exist_ok=True)

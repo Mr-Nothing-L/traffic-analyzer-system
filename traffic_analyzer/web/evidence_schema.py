@@ -114,6 +114,8 @@ class Evidence(BaseModel):
     schema_version: int
     video: VideoInfo
     events: List[EventEntry] = []
+    # 乐观锁:GET /api/results 的 file_sig 回传,写前不一致 → 409;落盘时排除。
+    base_sig: Optional[str] = None
 
     @field_validator("schema_version")
     @classmethod
@@ -249,6 +251,8 @@ class SftSample(BaseModel):
     chunk_name: Any
     event_attributes: Optional[Dict[str, Dict[str, Any]]] = None
     attr_mentions: Optional[Dict[str, Dict[str, Any]]] = None
+    # 乐观锁:GET /api/results 的 file_sig 回传,写前不一致 → 409;落盘时排除。
+    base_sig: Optional[str] = None
 
     @field_validator("action")
     @classmethod

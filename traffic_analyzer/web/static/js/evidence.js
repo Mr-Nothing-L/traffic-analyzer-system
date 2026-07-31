@@ -1,7 +1,8 @@
 /* ------------------------------------------------------------ 证据编辑卡 */
 import { $, $$, esc, toast, flashSaveBtn } from './util.js';
 import { state, runCleanups } from './state.js';
-import { api, videoSource, sourceFrameUrl, imageUrl } from './api.js';
+import { api, videoSource, sourceFrameUrl, imageUrl, getEvidenceSig } from './api.js';
+import { selectVideo } from './preview.js';
 
 function markDirty() {
   state.evidenceDirty = true;
@@ -55,9 +56,14 @@ async function saveEvidence() {
   if (btn) btn.disabled = true;
   // 在途草稿签名(与 sft.js saveSft 的 inFlightSig 同模式):识别保存期间的继续编辑
   const inFlightSig = JSON.stringify(state.evidenceDraft);
+  // 乐观锁:base_sig 取自 GET /api/results 缓存的 file_sig;浅拷贝上送,不污染草稿
+  const baseSig = getEvidenceSig(stem);
+  const body = baseSig
+    ? Object.assign({}, state.evidenceDraft, { base_sig: baseSig })
+    : state.evidenceDraft;
   try {
     await api('/api/results/' + encodeURIComponent(stem) + '/evidence', {
-      method: 'PUT', body: state.evidenceDraft,
+      method: 'PUT', body: body,
     });
     if (state.currentStem !== stem) return; // 期间切换了视频
     state.results.evidence = JSON.parse(JSON.stringify(state.evidenceDraft));
@@ -67,6 +73,14 @@ async function saveEvidence() {
     toast('证据已保存', 'ok');
     flashSaveBtn($('#btn-ev-save')); // 按钮短暂显示 ✓
   } catch (e) {
+    if (e.status === 409) {
+      // 乐观锁冲突:他人已修改;重载会丢弃当前未保存的修改,先 confirm
+      if (confirm('该视频的证据已被他人修改。\n确定将丢弃当前未保存的修改并刷新为最新版本。')) {
+        toast('他人已修改,已为你刷新', 'err');
+        selectVideo(state.currentRel);
+        return;
+      }
+    }
     if (btn) btn.disabled = false;
     toast('保存失败(' + e.status + '):' + e.message, 'err');
   }
