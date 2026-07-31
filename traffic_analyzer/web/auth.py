@@ -81,18 +81,16 @@ def _load_or_create_secret() -> str:
     secret = os.environ.get(SECRET_ENV_VAR)
     if secret:
         return secret
-    try:
-        existing = _ENV_PATH.read_text(encoding="utf-8")
-    except OSError:
-        existing = ""
-    for line in existing.splitlines():
-        line = line.strip()
-        if line.startswith(f"{SECRET_ENV_VAR}="):
-            value = line.split("=", 1)[1].strip().strip('"').strip("'")
-            if value:
-                return value
+    value = _env_value(SECRET_ENV_VAR)
+    if value:
+        return value
     secret = secrets.token_hex(32)
     try:
+        existing = ""
+        try:
+            existing = _ENV_PATH.read_text(encoding="utf-8")
+        except OSError:
+            pass
         separator = "" if not existing or existing.endswith("\n") else "\n"
         with open(_ENV_PATH, "a", encoding="utf-8") as fh:
             fh.write(f"{separator}{SECRET_ENV_VAR}={secret}\n")
@@ -103,9 +101,24 @@ def _load_or_create_secret() -> str:
     return secret
 
 
+def _env_value(key: str) -> Optional[str]:
+    """Read one ``KEY=value`` entry from the project-root .env ('' if missing)."""
+    try:
+        existing = _ENV_PATH.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for line in existing.splitlines():
+        line = line.strip()
+        if line.startswith(f"{key}="):
+            value = line.split("=", 1)[1].strip().strip('"').strip("'")
+            if value:
+                return value
+    return None
+
+
 def configure() -> AuthConfig:
-    """Build the AuthConfig from the environment (called once per create_app)."""
-    users = _parse_users(os.environ.get(USERS_ENV_VAR, ""))
+    """Build the AuthConfig (env vars first, then project-root .env)."""
+    users = _parse_users(os.environ.get(USERS_ENV_VAR, "") or (_env_value(USERS_ENV_VAR) or ""))
     secret = _load_or_create_secret() if users else None
     return AuthConfig(users, secret)
 
@@ -215,7 +228,9 @@ def login(body: LoginRequest, request: Request, response: Response) -> Dict[str,
     if not config.enabled:
         raise HTTPException(status_code=404, detail="auth is not enabled")
     expected = config.users.get(body.username)
-    if expected is None or not hmac.compare_digest(expected, body.password):
+    if expected is None or not hmac.compare_digest(
+        expected.encode("utf-8"), body.password.encode("utf-8")
+    ):
         raise HTTPException(status_code=401, detail="invalid credentials")
     login_ip = _request_ip(request)
     cookie = _make_cookie(config, body.username, login_ip)

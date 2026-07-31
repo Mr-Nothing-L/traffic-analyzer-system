@@ -250,6 +250,19 @@ def _reset_fake_capture_instances() -> Any:
     yield
 
 
+@pytest.fixture(autouse=True)
+def _isolate_env_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Isolate the project-root .env: web auth configure() falls back to it, and
+    ConfigManager's load_dotenv injects it into os.environ. Neutralize both so
+    tests stay deterministic regardless of local .env contents."""
+    from traffic_analyzer.web import auth as _auth
+
+    monkeypatch.setattr(_auth, "_ENV_PATH", tmp_path / ".env.nonexistent")
+    monkeypatch.delenv(_auth.USERS_ENV_VAR, raising=False)
+    monkeypatch.delenv(_auth.SECRET_ENV_VAR, raising=False)
+    yield
+
+
 class _FakeBuf:
     def __init__(self, data: bytes) -> None:
         self._data = data
