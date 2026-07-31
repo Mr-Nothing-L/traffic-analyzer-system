@@ -21,6 +21,7 @@
 - **两层响应缓存** — 内存 LRU + SQLite 磁盘缓存（跨进程共享），按 prompt+图像内容寻址，并按 provider+model 过滤；损坏行自动清除自愈。
 - **劣质视频拒绝路径** — 预过滤器（可选）与"零可用帧"检查会生成 reject report，CLI 以退出码 2 结束且不保存报告文件。
 - **裁决重试与审计** — 裁决结果缺事件时最多重试 5 轮（异常专家单独重跑），仍缺失则从专家候选回填；每条排除决策记录 `rule_id` 与理由到审计日志。
+- **CLI 实时进度面板** — 终端（TTY）运行 `analyze` 时以 rich Live 面板展示总进度与逐专家泳道进度条；非 TTY（如 Web 子进程）自动退化为 stdout 的 `EXPERT_PROGRESS` 标记行，供 Web 前端泳道动画解析，不影响推理本身。
 
 ---
 
@@ -119,10 +120,16 @@ python3 -m traffic_analyzer web --host 0.0.0.0 --port 9000 --workspace ./workspa
 
 界面（FastAPI 后端 + SPA 前端，代码在 `traffic_analyzer/web/`）功能：
 
+![数据看板](docs/images/ui_dashboard.png)
+
 - **工作区选择** — 视频与分析结果统一存放在一个工作目录下；
-- **单视频/批量推理** — 后台任务队列执行，实时展示任务进度；
-- **逐视频结果卡片** — SFT 样本详情、Markdown 报告与可视化证据编辑器（多边形/矩形顶点级编辑，保存回 `<stem>_evidence.json`）；
-- **批量准确率评估** — `scripts/batch_evaluate.py` 已并入界面，展示逐事件 precision/recall/F1。
+- **单视频/批量推理** — 后台任务队列执行；**专家工作间**面板以像素风格泳道动画实时展示进度（8 个类别专家 + 裁决 + SFT 标注/报告阶段，共 11 条泳道），可随时点击「停止推理」取消任务（子进程先 SIGTERM 后 SIGKILL）；
+- **逐视频结果卡片** — SFT 样本详情（**结构化选项 chips**：封闭枚举选项与描述文本联动，首次人工修改前把推理原始输出冻结为 `<stem>_raw.json`）、Markdown 报告与**可视化证据编辑器**（多边形/矩形顶点级编辑，保存回 `<stem>_evidence.json`）；
+- **数据看板** — 整页视图（取代原界面内批量精度评估）：GT vs 模型检出的逐视频一致性（一致/分歧/无 GT/未推理）、审核三态（未确认/已确认/需复核，持久化到 `analysis/review_states.json`）、实时聚合的逐事件 precision/recall/F1，以及基于 `_raw.json` 快照的「人工已改」区分；
+- **mock 演示模式** — 前端 URL 追加 `?mock=1` 即用内置模拟数据完整演示（右上角显示 MOCK 徽标，不依赖后端推理）；`scripts/e2e_mock_test.py` 在该模式下做全按键循环自测。
+
+![结果详情](docs/images/ui_detail.jpg)
+![专家工作间](docs/images/ui_expert_panel.png)
 
 Web 推理任务以子进程运行同一条 `analyze` 流水线并开启 `--sft-label`，因此每个任务同时导出 `<stem>_evidence.json`，见下文「工作区结果目录」。
 
@@ -260,14 +267,28 @@ traffic_analyzer/
 │   ├── image_drawing.py            # 图像加载与底层绘制
 │   ├── construction_evidence_gallery.py  # 施工事件多 ROI 证据画廊
 │   ├── annotation_spec_loader.py   # annotation_spec.yaml 加载并转 Prompt 文本
+│   ├── progress.py                 # 逐专家进度上报器（TTY 渲染 rich Live 面板，非 TTY 输出 EXPERT_PROGRESS 标记行）
 │   └── tool_call_logger.py         # Tool-Call 风格日志（TRAFFIC_ANALYZER_TOOL_LOG_LEVEL 控制）
-├── web/                            # FastAPI 后端 + SPA 前端（web/static/）
-└── tests/                          # pytest 测试套件（含 tools/ 子目录）
+├── web/                            # FastAPI 后端 + SPA 前端
+│   ├── app.py                      # 应用工厂 create_app()：装配路由与静态资源，退出时停止全部分析子进程
+│   ├── workspace.py / fs.py        # 工作区状态与工作区文件树接口
+│   ├── jobs.py                     # 推理任务队列（子进程跑 analyze --sft-label；取消先 SIGTERM 后 SIGKILL）
+│   ├── progress.py                 # 泳道进度状态机（解析子进程标记行 → 泳道列表与整体进度）
+│   ├── evidence_api.py / evidence_schema.py  # 证据与 SFT 样本读写（首次编辑冻结 <stem>_raw.json）
+│   ├── frames.py / video_stream.py # 关键帧图像与视频流接口
+│   ├── dashboard.py                # 数据看板聚合（GT vs 检出一致性、审核三态、精度指标）
+│   ├── event_config.py             # 事件配置索引（event_id → 名称）
+│   ├── expert_phases.json          # 专家阶段定义（前端泳道进度爬升封顶）
+│   └── static/                     # SPA 前端（index.html、js/ 下 21 个 ES 模块、像素字体 fonts/）
+└── tests/                          # pytest 测试套件（含 tools/ 与 web/ 子目录）
 
 scripts/
 ├── analyze.sh / infer.sh           # 单视频分析示例（硬编码路径，改后使用）
 ├── batch_infer.py                  # 批量推理（多进程）
-└── batch_evaluate.py               # 批量评估（HTML/MD/JSON 报告）
+├── batch_evaluate.py               # 批量评估 CLI（HTML/MD/JSON 报告；界面内评估入口已移除，由数据看板取代）
+├── build_mock_data.py              # 生成前端 mock 演示数据（?mock=1 使用）
+├── build_font_subset.py            # 重建界面像素字体子集（fusion-pixel-12px.woff2）
+└── e2e_mock_test.py                # mock 模式全按键循环自测（截图存 output/e2e_screenshots/）
 
 # 仓库根目录关键文件
 requirements.txt / requirements-dev.txt   # 运行 / 开发依赖
@@ -434,11 +455,12 @@ Markdown 报告主要章节（关键结论前置）：视频信息 → 最终分
 Web UI 的推理任务将每个视频的结果存放在 `<workspace>/analysis/<video_stem>/` 下：
 
 - `report.md` — Markdown 报告
-- `<video_stem>.json` — `Report` 模型的完整序列化
+- `<video_stem>.json` — SFT 训练样本（含 `action` / `description` 等字段；界面中可编辑，仅 `description` / `action` / `event_attributes` / `attr_mentions` 允许修改）
+- `<video_stem>_raw.json` — 首次人工编辑 SFT 样本前冻结的推理原始输出；数据看板据此计算「人工已改」及编辑前后的事件差异
 - `<video_stem>_evidence.json` — 可编辑的可视化证据文件（schema_version 1）：标定多边形、证据区域与证据画廊图像，坐标为归一化 [0,1]；界面中的证据编辑器将顶点修改保存回该文件
 - `images/` — 证据 JSON 引用的图像
 
-批量评估输出写入 `<workspace>/analysis/evaluation/latest.json`。
+数据看板的审核三态持久化到 `<workspace>/analysis/review_states.json`。
 
 ---
 
@@ -448,7 +470,7 @@ Web UI 的推理任务将每个视频的结果存放在 `<workspace>/analysis/<v
 python3 -m pytest traffic_analyzer/tests -q
 ```
 
-套件覆盖：配置加载与校验（`test_config_manager.py`）、CLI（`test_cli.py`）、编排器与拒绝路径（`test_orchestrator.py`）、抽帧与 prefilter（`test_video_preprocessor.py`）、专家增强流程（`test_expert_agent_far_enhancement.py`、`test_far_non_motor_enhancer.py`、`test_roi_motion.py`、`test_emergency_lane_occupancy.py`）、反思机制（`test_expert_reflection.py`）、锚定核验（`test_grounding_verification.py`）、SFT label 改写（`test_sft_label_rewrite.py`）、VLM 引擎/缓存/故障转移/解析/提供者客户端（`test_vlm_*.py`）、报告生成（`test_report_generator.py`）与工具路由（`tools/test_tool_router.py`）。当前全部通过（599 passed）。
+套件覆盖：配置加载与校验（`test_config_manager.py`）、CLI（`test_cli.py`）、编排器与拒绝路径（`test_orchestrator.py`）、抽帧与 prefilter（`test_video_preprocessor.py`）、专家增强流程（`test_expert_agent_far_enhancement.py`、`test_far_non_motor_enhancer.py`、`test_roi_motion.py`、`test_emergency_lane_occupancy.py`）、反思机制（`test_expert_reflection.py`）、锚定核验（`test_grounding_verification.py`）、SFT label 改写（`test_sft_label_rewrite.py`）、逐专家进度上报（`test_progress.py`）、证据导出（`test_evidence_exporter.py`）、VLM 引擎/缓存/故障转移/解析/提供者客户端（`test_vlm_*.py`）、报告生成（`test_report_generator.py`）、工具路由（`tools/test_tool_router.py`）与 Web 后端（`web/` 子目录：数据看板聚合、任务队列与取消、证据/SFT 编辑与冻结快照、`batch_evaluate.py` 脚本契约等）。当前全部通过（703 passed, 1 skipped）。
 
 ---
 

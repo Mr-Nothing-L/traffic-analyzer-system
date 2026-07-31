@@ -8,8 +8,9 @@ analysis report (JSON or Markdown). Event definitions, prompts, adjudication rul
 and thresholds are all YAML-driven — adding or tuning an event needs no code changes.
 
 **Current version: 5.0.0** — adds a web UI (FastAPI backend + SPA frontend) with
-workspace management, queued single/batch inference, per-video result cards with a
-visual-evidence editor, and in-UI batch accuracy evaluation.
+workspace management, queued single/batch inference with per-lane expert progress,
+per-video result cards with a visual-evidence editor and SFT label editing, and a
+GT-vs-prediction data dashboard with review states and live P/R/F1 metrics.
 
 ## Overview
 
@@ -135,13 +136,33 @@ python3 -m traffic_analyzer web --host 0.0.0.0 --port 9000 --workspace ./workspa
 
 The UI (FastAPI backend + SPA in `traffic_analyzer/web/`) provides:
 
+![Data dashboard](docs/images/ui_dashboard.png)
+
 - **Workspace selection** — videos and analysis results live under one workspace folder.
-- **Single/batch inference** — a background job queue with per-job progress.
+- **Single/batch inference** — a background job queue with per-job progress and a
+  stop button (`POST /api/jobs/{id}/cancel`; SIGTERM, then SIGKILL).
+- **Expert workshop** — an 11-lane pixel-block progress animation (8 category
+  experts + adjudication + SFT labeling + report) driven by the analyzer's
+  `EXPERT_PROGRESS` stdout markers; the sidebar mini progress bar uses the same
+  scale (mean of all lanes). In the CLI, the same lanes render as a rich-based
+  multi-expert panel when stdout is a TTY.
 - **Per-video result cards** — SFT sample detail, the Markdown report, and a
-  visual-evidence editor (polygon & box vertex edits saved back to
-  `<stem>_evidence.json`).
-- **Batch accuracy evaluation** — `scripts/batch_evaluate.py` merged into the UI,
-  with per-event precision/recall/F1.
+  canvas evidence editor (polygon & box vertex/edge dragging saved back to
+  `<stem>_evidence.json`). SFT structured-option chips (closed enums built from
+  real `attr_mentions`) stay in sync with the description text skeleton.
+- **Data dashboard** — per-video GT (parsed from filenames) vs. model detections
+  (consistent / diff / no_gt / no_results), a three-state review workflow
+  (unconfirmed / confirmed / needs_review, persisted to
+  `analysis/review_states.json`), and live aggregate metrics (per-event TP/FP/FN,
+  precision/recall/F1 with macro & micro averages). The first manual SFT edit
+  freezes the raw model output as `<stem>_raw.json`, so human edits are reported
+  separately (`edited` + `edit_missing`/`edit_extra`).
+- **Mock demo mode** — open with `?mock=1` for a zero-token demo: real video
+  streaming, simulated inference animation, and real conclusion data
+  (snapshotted by `scripts/build_mock_data.py`).
+
+![Result detail](docs/images/ui_detail.jpg)
+![Expert workshop](docs/images/ui_expert_panel.png)
 
 Inference jobs run the same `analyze` pipeline with `--sft-label` enabled, so each
 job also exports `<stem>_evidence.json` — see
@@ -169,8 +190,7 @@ print(report.binary_encoding.encoding_string)   # e.g. 1_0_1_0_0_0_0_0_0_0_0
 
 ```
 traffic_analyzer/
-├── cli.py                              # argparse CLI: analyze / validate-config / web, exit codes
-├── __main__.py                         # enables `python -m traffic_analyzer`
+├── cli.py / __main__.py                # argparse CLI: analyze / validate-config / web, exit codes; `python -m` entry
 ├── __init__.py                         # __version__ = "5.0.0"
 ├── config/
 │   ├── event_categories.yaml           # Event definitions + adjudication_rules
@@ -209,38 +229,45 @@ traffic_analyzer/
 │   ├── llm.py                          # LLMResponse, PromptTemplate, LLMCallRecord, …
 │   ├── report.py                       # Report, BinaryEncoding
 │   ├── context.py                      # AnalysisContext (shared pipeline state)
-│   ├── enums.py                        # DetectionMode, ConfidenceLevel
-│   └── schemas.py                      # Re-exports all model modules
+│   └── enums.py / schemas.py           # DetectionMode, ConfidenceLevel; re-exports all model modules
 ├── orchestrator/
 │   ├── analysis_orchestrator.py        # Main pipeline wiring (analyze(): preprocess → experts → adjudication → grounding → report)
 │   ├── video_meta_extractor.py         # Lightweight video metadata extraction
 │   ├── reject_report_factory.py        # Reject report construction
 │   ├── candidate_fallback.py           # Candidate → EventResult fallback conversion
 │   └── orchestrator_exceptions.py      # Orchestrator exception types
-├── tools/                              # RESERVED — schema/router exist, registry is empty
-│   ├── tool_schema.py                  # Tool definition layer
-│   ├── tool_router.py                  # Tool routing layer
-│   └── tool_registry.py                # Default router factory (registers zero tools)
+├── tools/                              # RESERVED — schema/router/registry exist, registry is empty
 ├── utils/
 │   ├── event_detection.py              # Image selection, response parsing, reflection check
 │   ├── emergency_lane_occupancy.py     # Event-2 evidence images (masks, boxes, zoom grids)
 │   ├── far_non_motor_enhancer.py       # Non-motor vehicle enhancement helpers
-│   ├── roi_composite.py                # ROI composite image generation
-│   ├── roi_motion.py                   # Adjacent-frame ROI motion analysis
+│   ├── roi_composite.py / roi_motion.py  # ROI composite images + adjacent-frame motion analysis
 │   ├── construction_evidence_gallery.py# Event-7 multi-ROI evidence gallery
-│   ├── bbox_geometry.py                # Bounding-box geometry helpers
-│   ├── image_drawing.py                # Image annotation helpers
+│   ├── bbox_geometry.py / image_drawing.py  # Geometry + image annotation helpers
 │   ├── annotation_spec_loader.py       # annotation_spec.yaml → prompt text
 │   └── tool_call_logger.py             # tool_call trace logging
 ├── web/                                # FastAPI backend + SPA frontend (web/static/)
+│   ├── app.py                          # App factory: router assembly, static mount, /api/expert-phases
+│   ├── workspace.py / fs.py            # Workspace selection + video file tree
+│   ├── jobs.py                         # Inference job queue (subprocess, cancel, timeout)
+│   ├── progress.py                     # Swimlane progress state machine (EXPERT_PROGRESS markers)
+│   ├── expert_phases.json              # Per-event progress phase labels
+│   ├── evidence_api.py / evidence_schema.py  # SFT/evidence edit endpoints + schema validation (freezes <stem>_raw.json)
+│   ├── frames.py / video_stream.py     # Frame preview + video streaming
+│   ├── dashboard.py / event_config.py  # GT-vs-prediction dashboard, review states, metrics + event metadata
+│   └── static/                         # SPA (ES modules, pixel-font skin, ?mock=1 demo layer)
 └── tests/                              # pytest suite (unit + pipeline-level, VLM mocked)
-    ├── test_*.py                       # 19 test modules (CLI, config, engine, experts, reports)
-    └── tools/test_tool_router.py       # Tool router tests
+    ├── test_*.py                       # 21 test modules (CLI, config, engine, experts, reports)
+    ├── tools/test_tool_router.py       # Tool router tests
+    └── web/                            # Web API tests (conftest + 9 modules: jobs, dashboard, evidence/SFT, …)
 
 scripts/
 ├── analyze.sh / infer.sh               # Example single-video CLI invocations
 ├── batch_infer.py                      # Batch inference over a directory (see Testing)
-└── batch_evaluate.py                   # Ground-truth evaluation → HTML/MD/JSON report
+├── batch_evaluate.py                   # Ground-truth evaluation → HTML/MD/JSON report
+├── build_mock_data.py                  # Snapshot real results into web/static/js/mock_data.js
+├── build_font_subset.py                # Build the subset pixel font shipped with the UI
+└── e2e_mock_test.py                    # Looping ?mock=1 UI self-test / demo script (Playwright)
 
 # Root files of note
 requirements.txt / requirements-dev.txt # Runtime / dev dependencies
@@ -499,12 +526,14 @@ Web UI inference jobs store per-video results under `<workspace>/analysis/<video
 
 - `report.md` — the Markdown report
 - `<video_stem>.json` — the serialized `Report` model
+- `<video_stem>_raw.json` — frozen copy of the raw model output, created on the
+  first manual SFT edit; the dashboard diffs current vs. raw actions from it
 - `<video_stem>_evidence.json` — the editable visual-evidence file (schema_version 1):
   calibration polygons, evidence regions, and gallery images with normalized [0,1]
   coordinates; the UI's evidence editor saves vertex edits back to this file
 - `images/` — the evidence images referenced by the JSON
 
-Batch evaluation output is written to `<workspace>/analysis/evaluation/latest.json`.
+The dashboard's review states live in `<workspace>/analysis/review_states.json`.
 
 ## Testing
 
@@ -512,10 +541,10 @@ Batch evaluation output is written to `<workspace>/analysis/evaluation/latest.js
 python3 -m pytest traffic_analyzer/tests -q
 ```
 
-The suite (currently 599 passed) mocks all VLM calls and covers: config loading
-and validation, CLI and exit codes, video preprocessing, the expert layer, far-enhancement
-pipelines, reflection, adjudication, grounding verification, SFT label rewrite, report
-generation, providers, retry/failover, caches.
+The suite (currently 703 passed, 1 skipped) mocks all VLM calls and covers: config
+loading/validation, CLI and exit codes, video preprocessing, the expert layer,
+far-enhancement, reflection, adjudication, grounding verification, SFT label rewrite,
+reports, providers, retry/failover, caches, and the web API (`traffic_analyzer/tests/web/`).
 
 Batch workflow helpers:
 
