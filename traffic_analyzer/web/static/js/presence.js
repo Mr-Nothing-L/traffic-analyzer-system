@@ -12,6 +12,7 @@ import { state } from './state.js';
 import { api } from './api.js';
 import { getMe } from './auth.js';
 import { sftSignature } from './sft_model.js';
+import { icon } from './icons.js';
 
 const PRESENCE_INTERVAL_MS = 10000;
 let roster = [];
@@ -61,7 +62,7 @@ export function presenceBadgeHtml(rel) {
     if (myName && u.username === myName) return;
     if (u.editing === rel) {
       html += '<span class="presence-badge presence-editing" title="'
-        + esc(u.username) + ' 正在编辑">✎ ' + esc(u.username) + '</span>';
+        + esc(u.username) + ' 正在编辑">' + icon('edit', 11) + ' ' + esc(u.username) + '</span>';
     } else if (u.viewing === rel) {
       html += '<span class="presence-badge presence-viewing" title="'
         + esc(u.username) + ' 正在查看">' + esc(u.username) + '</span>';

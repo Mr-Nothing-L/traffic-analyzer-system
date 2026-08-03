@@ -317,8 +317,7 @@ function reviewChips(r) {
 
 function pagerHtml(data) {
   const tp = data.total_pages || 0;
-  return '<div class="dash-pager" id="dash-pager"'
-    + ' style="display:flex;align-items:center;gap:12px;justify-content:center;padding:10px 0 2px;">'
+  return '<div class="dash-pager" id="dash-pager">'
     + '<button type="button" class="dash-chip" id="dash-prev"'
     + (data.page <= 1 ? ' disabled' : '') + '>上一页</button>'
     + '<span class="card-sub">第 ' + data.page + ' / ' + Math.max(tp, 1) + ' 页</span>'
@@ -373,14 +372,19 @@ function renderTable() {
   rows.forEach(r => {
     const hasGt = r.status !== 'no_gt';
     const hasPred = r.status !== 'no_results';
+    // 一致性差异行:GT 缺失(漏检)/模型多余(误检)的事件 chip 用暖色,其余保持中性底
+    const missIds = new Set(r.missing || []);
+    const extraIds = new Set(r.extra || []);
+    const evChip = (id, warm) => '<span class="dash-ev-chip' + (warm ? ' dash-ev-chip-warm' : '')
+      + '">' + esc(eventName(id)) + '</span>';
     const gtCell = hasGt
       ? ((r.gt_ids || []).length
-        ? r.gt_ids.map(id => '<span class="dash-ev-chip">' + esc(eventName(id)) + '</span>').join('')
+        ? r.gt_ids.map(id => evChip(id, missIds.has(id))).join('')
         : '<span class="dash-none">无事件</span>')
       : '<span class="dash-none">—</span>';
     const predCell = hasPred
       ? ((r.pred_ids || []).length
-        ? r.pred_ids.map(id => '<span class="dash-ev-chip">' + esc(eventName(id)) + '</span>').join('')
+        ? r.pred_ids.map(id => evChip(id, extraIds.has(id))).join('')
         : '<span class="dash-none">无检出</span>')
       : '<span class="dash-none">—</span>';
     html += '<tr data-rel="' + esc(r.rel) + '">'

@@ -8,6 +8,7 @@ import { selectVideo } from './preview.js';
 import { retryInfer, cancelJob } from './jobs.js';
 import { pixelBarHtml, paintPixelBar } from './pixel_bar.js';
 import { presenceBadgeHtml, presenceUsers } from './presence.js';
+import { icon, CHECK_SVG } from './icons.js';
 
 export function latestJobForStem(stem) {
   for (let i = state.jobs.length - 1; i >= 0; i--) {
@@ -31,6 +32,18 @@ let sidebarSnapshot = '';
 // 使侧栏快照失效,强制下次 renderSidebar 重建 DOM(模块外只能通过此函数复位)
 export function invalidateSidebar() {
   sidebarSnapshot = '';
+}
+
+/* ------------------------------------------------------------ 窄屏抽屉 */
+// 414–767px(及更小)档位侧栏改为顶部抽屉(style.css 响应式专节),开关状态挂在
+// body.drawer-open 类名上;桌面视口下该类名无任何样式效果,不影响桌面端选择器与布局
+export function toggleSidebarDrawer() {
+  document.body.classList.toggle('drawer-open');
+}
+
+// 选中视频后自动收起抽屉(桌面端调用无副作用:该类名本来就不会存在/无样式)
+export function closeSidebarDrawer() {
+  document.body.classList.remove('drawer-open');
 }
 
 /* ------------------------------------------------------------ 过滤/排序 */
@@ -80,10 +93,6 @@ function viewEntries(entries) {
   return sortLevel(filterLevel(entries));
 }
 
-// 已完成徽标的 ✓:SVG 路径配合 stroke-dashoffset 动画一次性描边绘制
-const CHECK_SVG = '<svg class="badge-check" viewBox="0 0 12 12" aria-hidden="true">'
-  + '<path d="M2.5 6.4 5 8.9 9.5 3.6"/></svg>';
-
 // 8 格迷你像素条(格内 3 子条,与主区像素条同构;实现见公共模块 pixel_bar.js)
 const MINI_CELLS = 8;
 
@@ -96,7 +105,7 @@ function treeRowsHtml(entries, depth) {
       const open = state.tree.expanded.has(e.rel);
       html += '<div class="tree-row tree-dir" data-dir="' + esc(e.rel) + '" ' + pad + '>'
         + '<span class="tree-caret' + (open ? ' open' : '') + '">▸</span>'
-        + '<span class="tree-ico">📁</span>'
+        + '<span class="tree-ico">' + icon('folder', 12) + '</span>'
         + '<span class="tree-name" title="' + esc(e.rel) + '">' + esc(e.name) + '</span></div>';
       if (open) {
         const kids = state.tree.children[e.rel];
@@ -116,25 +125,25 @@ function treeRowsHtml(entries, depth) {
       };
       const st = videoStatus(v);
       // 运行中:视频名右侧渲染迷你像素进度条(fraction 点亮格数;fraction 为 null 时不定态波浪)
-      //   + 行内停止键(■);排队/完成/失败保持徽标
-      // 已完成:徽标内嵌 ✓ SVG(描边动画);失败:徽标旁附重试按钮(↻),点击仅对该视频重新提交推理
+      //   + 行内停止键;排队/完成/失败保持徽标
+      // 已完成:徽标内嵌 ✓ SVG(描边动画);失败:徽标旁附重试按钮,点击仅对该视频重新提交推理
       const job = latestJobForStem(v.stem);
       const frac = job && job.progress ? job.progress.fraction : null;
       const statusHtml = st.cls === 'st-running'
         ? '<span class="mini-prog pixel-bar' + (frac == null ? ' indet' : '')
           + '" data-prog-stem="' + esc(v.stem) + '" title="推理中">'
           + pixelBarHtml(MINI_CELLS) + '</span>'
-          + '<button class="stop-btn" data-stop="' + esc(job.id) + '" title="停止推理">■</button>'
+          + '<button class="stop-btn" data-stop="' + esc(job.id) + '" title="停止推理">' + icon('stop', 11) + '</button>'
         : (st.cls === 'st-done'
             ? '<span class="badge st-done">' + CHECK_SVG + esc(st.text) + '</span>'
             : '<span class="badge ' + st.cls + '">' + st.text + '</span>')
           + (st.cls === 'st-failed'
-            ? '<button class="retry-btn" data-retry="' + esc(rel) + '" title="重新推理">↻</button>'
+            ? '<button class="retry-btn" data-retry="' + esc(rel) + '" title="重新推理">' + icon('retry', 11) + '</button>'
             : '');
       html += '<div class="video-item' + (state.currentRel === rel ? ' active' : '')
         + '" data-rel="' + esc(rel) + '" ' + pad + '>'
         + '<input type="checkbox" data-check="' + esc(rel) + '"' + (state.checked.has(rel) ? ' checked' : '') + '>'
-        + '<span class="tree-ico">🎬</span>'
+        + '<span class="tree-ico">' + icon('video', 12) + '</span>'
         + '<div class="video-meta"><div class="video-name" title="' + esc(rel) + '">' + esc(e.name) + '</div>'
         + '<div class="video-sub">' + fmtBytes(e.size) + '</div></div>'
         + presenceBadgeHtml(rel)
@@ -144,7 +153,7 @@ function treeRowsHtml(entries, depth) {
       // 非视频文件:仅展示,不可勾选/选中
       html += '<div class="tree-row tree-file" ' + pad + ' title="' + esc(e.rel) + '">'
         + '<span class="tree-caret"></span>'
-        + '<span class="tree-ico">📄</span>'
+        + '<span class="tree-ico">' + icon('file', 12) + '</span>'
         + '<span class="tree-name">' + esc(e.name) + '</span></div>';
     }
   });
@@ -180,7 +189,7 @@ export function renderSidebar() {
   }
   // 快照对比,避免每次轮询重建 DOM(防止打断勾选/展开);过滤/排序也计入快照
   // latestJobForStem 的 job id 一并纳入:任务更替(重试/重提交)时 id 变化触发重建,
-  // 行内停止键(■)不会持过期 id
+  // 行内停止键不会持过期 id
   const snap = JSON.stringify([
     state.tree.root, state.tree.children, Array.from(state.tree.expanded),
     state.filter, state.sort, presenceUsers(),
@@ -230,7 +239,10 @@ export function renderSidebar() {
     });
   });
   $$('#video-list .video-item').forEach(item => {
-    item.addEventListener('click', () => selectVideo(item.dataset.rel));
+    item.addEventListener('click', () => {
+      selectVideo(item.dataset.rel);
+      closeSidebarDrawer(); // 窄屏抽屉:选中视频后自动收起(桌面端无副作用)
+    });
   });
   updateMiniProgress(); // 重建后像素条初始为全暗,立即按当前 fraction 点亮
   $('#check-all').checked = state.videos.length > 0 && state.videos.every(v => state.checked.has(v.rel));

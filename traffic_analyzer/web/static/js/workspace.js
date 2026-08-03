@@ -6,6 +6,7 @@ import { state } from './state.js';
 import { api } from './api.js';
 import { loadTree, renderSidebar, syncButtons } from './tree.js';
 import { renderWelcome } from './preview.js';
+import { icon } from './icons.js';
 
 // 顶栏工作区按钮两段式:主标签「工作区」+ 次级详细路径(未选择时只有「选择工作区…」)
 export function setWorkspaceLabel(ws) {
@@ -165,18 +166,18 @@ function renderDirList() {
     return;
   }
   if (!dirModal.cwd) {
-    list.innerHTML = '<div class="dir-state">无法读取目录,可点击 ✎ 手动输入路径</div>';
+    list.innerHTML = '<div class="dir-state">无法读取目录,可点击 ' + icon('edit', 12) + ' 手动输入路径</div>';
     return;
   }
   let html = '';
   if (dirModal.parent) {
     html += '<div class="dir-row dir-up" data-path="' + esc(dirModal.parent) + '">'
-      + '<span class="dir-ico">⬆</span><span class="dir-name">..</span></div>';
+      + '<span class="dir-ico">' + icon('up', 13) + '</span><span class="dir-name">..</span></div>';
   }
   html += dirModal.dirs.map(d =>
     '<div class="dir-row' + (dirModal.selected === d.path ? ' selected' : '')
     + '" data-path="' + esc(d.path) + '" data-dir="1">'
-    + '<span class="dir-ico">📁</span><span class="dir-name">' + esc(d.name) + '</span></div>'
+    + '<span class="dir-ico">' + icon('folder', 13) + '</span><span class="dir-name">' + esc(d.name) + '</span></div>'
   ).join('');
   if (!dirModal.dirs.length) html += '<div class="dir-state">此目录没有子文件夹</div>';
   list.innerHTML = html;

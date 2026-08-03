@@ -28,8 +28,7 @@ export function renderWelcome() {
       ? '<p>当前工作区:<span class="hint-kbd">' + esc(state.workspace.path) + '</span></p>'
         + (treeLoaded
           ? '<p>在左侧勾选视频后点击「开始推理」;点击视频名查看 SFT 标注、分析报告与可视化证据。</p>'
-          : '<p><button id="btn-load-workspace" class="btn btn-primary"'
-            + ' style="font-size:17px;padding:12px 36px;">加载工作区</button></p>'
+          : '<p><button id="btn-load-workspace" class="btn btn-primary hero-cta">加载工作区</button></p>'
             + '<p>大工作区加载需要一些时间;「数据看板」无需等待加载,可直接打开。</p>')
       : '<p>请先点击顶部「选择工作区…」按钮,选择包含视频文件的目录。</p>')
     + '<p>开发模式:在地址后追加 <span class="hint-kbd">?mock=1</span> 可使用内置模拟数据。</p>'
@@ -163,7 +162,7 @@ function renderResultCards(stem, source, r, hasResults) {
       const note = job && job.status === 'queued'
         ? '该视频正在推理队列中,完成后此处将展示 SFT 标注、分析报告与证据。'
         : (job && job.status === 'failed'
-          ? '该视频上次推理未完成(已停止或失败),暂无分析结果。可在左侧点击 ↻ 重试,或重新勾选后点击「开始推理」。'
+          ? '该视频上次推理未完成(已停止或失败),暂无分析结果。可在左侧点击「重试」,或重新勾选后点击「开始推理」。'
           : '该视频尚未推理,暂无分析结果。在左侧勾选后点击「开始推理」即可分析。');
       html += '<div class="card"><div class="card-body empty-note">' + esc(note) + '</div></div>';
     }

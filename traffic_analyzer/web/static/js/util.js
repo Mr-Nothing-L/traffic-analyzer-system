@@ -44,7 +44,7 @@ export function flashSaveBtn(btn) {
   if (!btn) return;
   const orig = btn.textContent;
   btn.classList.add('btn-saved');
-  btn.textContent = '✓ ' + orig;
+  btn.textContent = '已保存';
   setTimeout(() => {
     if (!btn.isConnected) return;
     btn.classList.remove('btn-saved');

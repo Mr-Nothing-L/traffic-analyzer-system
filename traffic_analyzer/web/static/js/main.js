@@ -8,7 +8,7 @@ import { api } from './api.js';
 import { mockTick } from './mock.js';
 import {
   SIDE_FILTER_KEY, SIDE_SORT_KEY,
-  renderSidebar, syncButtons, invalidateSidebar,
+  renderSidebar, syncButtons, invalidateSidebar, toggleSidebarDrawer,
 } from './tree.js';
 import { renderWelcome } from './preview.js';
 import { openDashboard, dashboardTick } from './dashboard.js';
@@ -78,6 +78,8 @@ function initToolbar() {
   if (MOCK) $('#mock-badge').hidden = false;
 
   $('#btn-workspace').addEventListener('click', browseWorkspace);
+  // 窄屏(≤767px)抽屉开关:按钮仅该档位显示(style.css 响应式专节)
+  $('#btn-files').addEventListener('click', toggleSidebarDrawer);
   $('#dir-close').addEventListener('click', closeDirModal);
   $('#dir-cancel').addEventListener('click', closeDirModal);
   $('#dir-confirm').addEventListener('click', confirmDir);

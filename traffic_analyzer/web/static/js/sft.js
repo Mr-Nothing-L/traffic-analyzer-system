@@ -439,10 +439,12 @@ export async function renderSftBody(sft) {
   if (!body) return;
   if (!sft) { body.innerHTML = '<div class="empty-note">无 SFT 标注</div>'; return; }
 
+  // chunk 时间戳统一一位小数(2.5s → 2.5s,整数秒也补 .0),元信息列宽稳定
+  const sec = v => (typeof v === 'number' ? v.toFixed(1) : String(v));
   const meta = '<div class="sft-meta">'
     + '<span>' + esc(sft.chunk || '') + '</span>'
     + '<span>idx: ' + esc(sft.idx) + '</span>'
-    + '<span>' + esc(sft.start_timestamp) + 's → ' + esc(sft.end_timestamp) + 's</span>'
+    + '<span>' + esc(sec(sft.start_timestamp)) + 's → ' + esc(sec(sft.end_timestamp)) + 's</span>'
     + '<span>' + esc(sft.chunk_name || '') + '</span>'
     + '</div>';
 

@@ -5,6 +5,7 @@ import { api } from './api.js';
 import { latestJobForStem } from './tree.js';
 import { cancelJob } from './jobs.js';
 import { pixelBarHtml, paintPixelBar } from './pixel_bar.js';
+import { icon } from './icons.js';
 
 // GET /api/expert-phases 的阶段定义缓存(每类别 [{fraction, label}]);404 时记 null,走内置 fallback 封顶
 let expertPhasesPromise = null;
@@ -51,7 +52,7 @@ export function mountExpertPanel(job) {
     + '<div class="expert-head">'
     + '<span class="expert-step" id="exp-step"></span>'
     + '<span class="mini-prog pixel-bar" id="exp-mini" title="总进度">' + pixelBarHtml(8) + '</span>'
-    + '<button class="btn btn-ghost btn-sm stop-btn" id="exp-stop" title="停止推理">■ 停止推理</button>'
+    + '<button class="btn btn-ghost btn-sm stop-btn" id="exp-stop" title="停止推理">' + icon('stop') + ' 停止推理</button>'
     + '</div>'
     + '<div class="expert-lanes" id="exp-lanes"></div>'
     + '</div>';
@@ -125,7 +126,7 @@ export function mountExpertPanel(job) {
       // 失败(含用户停止):原地换成失败提示;done 由轮询触发的 selectVideo 重载为结果卡
       if (cur && cur.status === 'failed' && document.body.contains(body)) {
         body.innerHTML = '<div class="empty-note">推理已停止或失败,暂无分析结果。'
-          + '可在左侧点击 ↻ 重试,或重新勾选后点击「开始推理」。</div>';
+          + '可在左侧点击「重试」,或重新勾选后点击「开始推理」。</div>';
       }
       return;
     }
@@ -147,8 +148,11 @@ export function mountExpertPanel(job) {
       }
       lane.displayed = d;
       paintPixelBar(lane.cells, d, { running: ex.status === 'running' });
-      lane.phaseEl.textContent = ex.label || '';
-      lane.phaseEl.title = ex.label || '';
+      // queued 泳道降为单行摘要(名称 + 「等待调度」,像素矩阵由 CSS 隐藏);
+      // running/done 保持全尺寸矩阵,阶段文案照旧
+      const phaseText = ex.status === 'queued' ? '等待调度' : (ex.label || '');
+      lane.phaseEl.textContent = phaseText;
+      lane.phaseEl.title = phaseText;
       const cls = expertLaneCls(ex);
       if (cls !== lane.cls) {
         lane.cls = cls;
