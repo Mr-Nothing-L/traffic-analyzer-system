@@ -4,7 +4,8 @@
 import { $, esc } from './util.js';
 import { state, runCleanups } from './state.js';
 import { api, videoSource } from './api.js';
-import { latestJobForStem, renderSidebar, invalidateSidebar } from './tree.js';
+import { latestJobForStem, renderSidebar, invalidateSidebar, loadTree, syncButtons } from './tree.js';
+import { pollJobs } from './jobs.js';
 import { renderSftBody } from './sft.js';
 import { renderEvidenceCard } from './evidence.js';
 import { mountExpertPanel } from './expert_panel.js';
@@ -15,17 +16,40 @@ export function renderWelcome() {
   runCleanups();
   const main = $('#main');
   delete main.dataset.renderedStem; // 离开分析视图,下次 renderResults 需整体重建
+  const hasWs = !!(state.workspace && state.workspace.path);
+  // 树未加载(state.tree.loaded=false)时给醒目的「加载工作区」按钮:
+  // 刷新后不再自动 loadTree(大工作区 >10s),由用户显式触发
+  const treeLoaded = state.tree && state.tree.loaded;
   main.innerHTML =
     '<div class="welcome">'
     + '<div class="hero">'
     + '<h1>高速交通事件分析台</h1>'
-    + (state.workspace && state.workspace.path
+    + (hasWs
       ? '<p>当前工作区:<span class="hint-kbd">' + esc(state.workspace.path) + '</span></p>'
-        + '<p>在左侧勾选视频后点击「开始推理」;点击视频名查看 SFT 标注、分析报告与可视化证据。</p>'
+        + (treeLoaded
+          ? '<p>在左侧勾选视频后点击「开始推理」;点击视频名查看 SFT 标注、分析报告与可视化证据。</p>'
+          : '<p><button id="btn-load-workspace" class="btn btn-primary"'
+            + ' style="font-size:17px;padding:12px 36px;">加载工作区</button></p>'
+            + '<p>大工作区加载需要一些时间;「数据看板」无需等待加载,可直接打开。</p>')
       : '<p>请先点击顶部「选择工作区…」按钮,选择包含视频文件的目录。</p>')
     + '<p>开发模式:在地址后追加 <span class="hint-kbd">?mock=1</span> 可使用内置模拟数据。</p>'
     + '</div>'
     + '</div>';
+  const loadBtn = $('#btn-load-workspace');
+  if (loadBtn) loadBtn.addEventListener('click', loadWorkspaceOnDemand);
+}
+
+// 欢迎页「加载工作区」:显式触发 tree/videos 加载 + 任务轮询首轮
+async function loadWorkspaceOnDemand() {
+  const btn = $('#btn-load-workspace');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = '正在加载工作区,请稍候…';
+  }
+  await loadTree();
+  await pollJobs();
+  renderWelcome(); // tree.loaded → 恢复常规操作提示
+  syncButtons();
 }
 
 function skeletons() {

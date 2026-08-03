@@ -42,7 +42,18 @@ export async function applyWorkspace(ws) {
 /* ================================================================
    工作区目录弹窗(浏览服务器文件系统,替代原生系统对话框)
    ================================================================ */
-const dirModal = { open: false, cwd: null, parent: null, dirs: [], selected: null, loading: false };
+const dirModal = { open: false, cwd: null, parent: null, dirs: [], selected: null, loading: false, applying: false };
+
+// confirmDir 后 applyWorkspace 期间(大工作区 tree/videos 加载可能 >10s)锁定弹窗:
+// 禁用 ✕/取消/确认按钮,Esc 与背景点击关闭经 closeDirModal 统一拦截,
+// 防止用户在加载中途关窗,把界面留在半旧半新的状态。
+function setDirApplying(on) {
+  dirModal.applying = on;
+  $('#dir-close').disabled = on;
+  $('#dir-cancel').disabled = on;
+  $('#dir-confirm').disabled = on;
+  $('#dir-applying').hidden = !on;
+}
 
 /* ---- 最近使用的工作区(localStorage 持久化,最新在前,去重,最多 8 条) ---- */
 const RECENT_WS_KEY = 'ta_recent_workspaces';
@@ -97,6 +108,7 @@ export function browseWorkspace() {
 }
 
 export function closeDirModal() {
+  if (dirModal.applying) return; // applyWorkspace 加载期间:禁止任何途径关闭(✕/取消/Esc/背景点击)
   dirModal.open = false;
   $('#dir-modal').hidden = true;
   $('#btn-workspace').focus();
@@ -203,13 +215,18 @@ export function showDirInput() {
 
 export async function confirmDir() {
   const path = dirModal.selected || dirModal.cwd;
-  if (!path) return;
+  if (!path || dirModal.applying) return;
   const btn = $('#dir-confirm');
   btn.disabled = true;
   try {
     const ws = await api('/api/workspace', { method: 'POST', body: { path: path } });
     pushRecentWorkspace(path); // 确认成功后记入「最近使用」
-    await applyWorkspace(ws);
+    setDirApplying(true); // 加载期间锁弹窗并显示「正在加载工作区,请稍候…」
+    try {
+      await applyWorkspace(ws);
+    } finally {
+      setDirApplying(false); // 成功与失败(toast 报错)都恢复可关
+    }
     closeDirModal();
     toast('已选择工作区:' + ws.path);
   } catch (e) {
@@ -219,10 +236,10 @@ export async function confirmDir() {
   }
 }
 
-// ESC 关闭;Tab 在弹窗内循环(简易焦点陷阱)
+// ESC 关闭(applyWorkspace 加载期间无效);Tab 在弹窗内循环(简易焦点陷阱)
 export function dirModalKeys(e) {
   if (!dirModal.open) return;
-  if (e.key === 'Escape') { closeDirModal(); return; }
+  if (e.key === 'Escape') { if (!dirModal.applying) closeDirModal(); return; }
   if (e.key !== 'Tab') return;
   const els = $$('#dir-modal button, #dir-modal input, #dir-modal select').filter(el => !el.hidden && !el.disabled);
   if (!els.length) return;

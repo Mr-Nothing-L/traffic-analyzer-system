@@ -268,6 +268,16 @@ def _isolate_env_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     yield
 
 
+@pytest.fixture(autouse=True)
+def _clear_web_caches() -> Any:
+    """进程内 TTL 缓存(dashboard/videos)跨用例隔离:每个用例前后清空。"""
+    from traffic_analyzer.web import workspace as _workspace
+
+    _workspace.invalidate_caches()
+    yield
+    _workspace.invalidate_caches()
+
+
 class _FakeBuf:
     def __init__(self, data: bytes) -> None:
         self._data = data

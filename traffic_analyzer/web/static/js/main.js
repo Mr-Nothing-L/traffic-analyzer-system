@@ -8,7 +8,7 @@ import { api } from './api.js';
 import { mockTick } from './mock.js';
 import {
   SIDE_FILTER_KEY, SIDE_SORT_KEY,
-  loadTree, renderSidebar, syncButtons, invalidateSidebar,
+  renderSidebar, syncButtons, invalidateSidebar,
 } from './tree.js';
 import { renderWelcome } from './preview.js';
 import { openDashboard, dashboardTick } from './dashboard.js';
@@ -148,7 +148,12 @@ async function init() {
     state.workspace = await api('/api/workspace');
     if (state.workspace && state.workspace.path) {
       setWorkspaceLabel(state.workspace);
-      await Promise.all([loadTree(), pollJobs()]);
+      // 刷新后不再自动 loadTree():大工作区(数千视频、外接盘)下 tree+videos
+      // 需 >10s,改为欢迎页「加载工作区」按钮由用户显式触发(见 preview.js
+      // renderWelcome)。pollJobs 很轻(仅 /api/jobs),照常启动以恢复任务进度。
+      // 「数据看板」按钮走 /api/dashboard 接口、不依赖树,保持常可用(syncButtons
+      // 只门控「开始推理」),树未加载时也可直接打开看板。
+      await pollJobs();
     }
   } catch (e) {
     // 后端未就绪:保持初始界面

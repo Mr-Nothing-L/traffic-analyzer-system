@@ -289,6 +289,10 @@ class JobManager:
             # (<stem>_raw.json)失去「编辑前基线」意义,删除以免 dashboard
             # 继续把旧快照当作原始输出。
             _discard_frozen_raw(job.workspace, job.stem)
+        if job.kind == "infer":
+            # infer 完成(无论成败,<stem>.json / 快照可能已变化):
+            # 看板与视频列表缓存失效,下一 GET 重算。
+            workspace_mod.invalidate_caches()
 
     def _on_job_timeout(self, job: Job) -> None:
         """Timer callback: terminate the child and mark the job failed."""

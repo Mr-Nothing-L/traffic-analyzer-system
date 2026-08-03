@@ -38,6 +38,11 @@ q(rel/stem 子串,不区分大小写)过滤(先过滤后分页)与 page/size 分
 (size ≤ 200;page 越界 → 空 rows + 正确 total_pages)。
 PUT /api/dashboard/review 校验三态(unconfirmed/confirmed/needs_review,非法
 422)并原子写 <workspace>/analysis/review_states.json。
+_build_dashboard 结果带进程内 TTL 缓存(key=workspace 路径,TTL 见
+workspace._CACHE_TTL_SEC,默认 15s),两个 GET 端点共用一份构建结果;
+失效统一走 workspace.invalidate_caches(workspace 变更 / infer 完成 /
+review PUT / SFT/证据 PUT)。大工作区(数千视频、外接盘)全量构建 ~11s,
+缓存命中 <100ms。
 上游:web/app.py(挂载路由);web/static 前端(dashboard 页)。
 下游:web/workspace.py(视频发现与路径契约)、web/event_config.py(事件名索引)、
 web/evidence_api.py(_read_json / _atomic_write_json)、scripts/batch_evaluate.py。
@@ -142,6 +147,8 @@ def put_dashboard_review(body: ReviewRequest, request: Request) -> Dict[str, Any
         states[body.stem] = entry
         path.parent.mkdir(parents=True, exist_ok=True)
         evidence_api._atomic_write_json(path, states)
+    # review 落盘 → 看板/视频缓存失效(下一 GET 重算,反映最新审核态)
+    workspace_mod.invalidate_caches()
     return {"stem": body.stem, **entry}
 
 
@@ -231,7 +238,7 @@ def _build_dashboard(workspace: Path) -> Dict[str, Any]:
     }
 
     rows: List[Dict[str, Any]] = []
-    for video in workspace_mod.list_videos(workspace):
+    for video in workspace_mod.list_videos_cached(workspace):
         stem = video["stem"]
         gt_ids = sorted(extract_gt(video["name"]))
         has_results = workspace_mod.has_results(workspace, stem)
@@ -303,10 +310,35 @@ def _build_dashboard(workspace: Path) -> Dict[str, Any]:
     }
 
 
+# _build_dashboard 的进程内缓存(key=workspace 路径,TTL 见 workspace._CACHE_TTL_SEC):
+# 大工作区下全量构建需 ~11s(外接盘逐文件 stat/读 JSON),GET /api/dashboard 与
+# /api/dashboard/rows 共用同一份构建结果;命中后响应 <100ms。
+# 失效统一走 workspace_mod.invalidate_caches(workspace 变更 / infer 完成 /
+# review PUT / SFT/证据 PUT)。
+# copy=False 只读使用:两个端点都不就地修改返回值——aggregate 端点只读取
+# summary/event_names/metrics 三个键;rows 端点的过滤/分页均产生新列表,
+# 行字典只读序列化(4393 行的深拷贝需 ~200ms,会破坏命中 <100ms 的目标)。
+_dashboard_cache = workspace_mod.register_cache(workspace_mod._TTLCache())
+
+
+def _get_dashboard(workspace: Path) -> Dict[str, Any]:
+    """_build_dashboard 的缓存版:命中直接返回(TTL 内),未命中重算并写入。
+
+    返回值是缓存对象本身:调用方只读使用,不得就地修改。
+    """
+    key = str(workspace)
+    cached = _dashboard_cache.get(key, copy=False)
+    if cached is not None:
+        return cached
+    data = _build_dashboard(workspace)
+    _dashboard_cache.set(key, data)
+    return data
+
+
 @router.get("/api/dashboard")
 def get_dashboard(request: Request) -> Dict[str, Any]:
     """Aggregate overview only (rows moved to GET /api/dashboard/rows)."""
-    data = _build_dashboard(workspace_mod.require_workspace(request))
+    data = _get_dashboard(workspace_mod.require_workspace(request))
     return {
         "summary": data["summary"],
         "event_names": data["event_names"],
@@ -330,7 +362,7 @@ def get_dashboard_rows(
     q: str = "",
 ) -> Dict[str, Any]:
     """Filtered + paginated dashboard rows (filter first, then paginate)."""
-    rows = _build_dashboard(workspace_mod.require_workspace(request))["rows"]
+    rows = _get_dashboard(workspace_mod.require_workspace(request))["rows"]
 
     statuses = _csv_values(consistency)
     if statuses:

@@ -116,6 +116,14 @@ def run_pass(page, p: Pass, shot: Path) -> None:
         if p.pause > 0:
             page.wait_for_timeout(ms)
 
+    # ---------- 0. 刷新后树不再自动加载:点欢迎页「加载工作区」按钮 ----------
+    # (main.js init 只启动轻量 pollJobs;loadTree 由按钮显式触发)
+    def t_load_workspace():
+        page.wait_for_selector("#btn-load-workspace", timeout=10_000)
+        page.click("#btn-load-workspace")
+        page.wait_for_selector("#video-list .video-item", timeout=10_000)
+    p.step("欢迎页「加载工作区」按钮(刷新后不自动 loadTree)", t_load_workspace)
+
     # ---------- 1. 工作区弹窗基础 ----------
     def t_workspace_modal():
         page.click("#btn-workspace")

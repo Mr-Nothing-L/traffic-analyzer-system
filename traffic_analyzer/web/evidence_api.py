@@ -305,6 +305,8 @@ def put_evidence(stem: str, body: Evidence, request: Request) -> Dict[str, Any]:
         to_write = dict(new_payload)
         to_write["last_edited_by"] = getattr(request.state, "user", "local")
         _atomic_write_json(evidence_path, to_write)
+    # 证据落盘 → 看板/视频缓存失效
+    workspace_mod.invalidate_caches()
     # 回传写入后的新指纹,前端下一次保存以此为 base_sig,无需再 GET。
     return dict(new_payload, evidence_sig=_file_sig(evidence_path))
 
@@ -397,5 +399,7 @@ def put_sft(stem: str, body: SftSample, request: Request) -> Dict[str, Any]:
         to_write = dict(new_payload)
         to_write["last_edited_by"] = getattr(request.state, "user", "local")
         _atomic_write_json(sft_path, to_write)
+    # SFT 落盘 → 看板/视频缓存失效(pred_ids / edited / has_results 可能变化)
+    workspace_mod.invalidate_caches()
     # 回传写入后的新指纹,前端下一次保存以此为 base_sig,无需再 GET。
     return dict(new_payload, file_sig=_file_sig(sft_path))

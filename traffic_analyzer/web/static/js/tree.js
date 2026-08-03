@@ -174,7 +174,8 @@ export function renderSidebar() {
   }
   if (!state.tree.loaded) {
     sidebarSnapshot = '';
-    list.innerHTML = '<div class="side-empty">加载中…</div>';
+    // 刷新后不再自动 loadTree:引导用户去主区点「加载工作区」
+    list.innerHTML = '<div class="side-empty">尚未加载:请点击主区「加载工作区」</div>';
     return;
   }
   // 快照对比,避免每次轮询重建 DOM(防止打断勾选/展开);过滤/排序也计入快照

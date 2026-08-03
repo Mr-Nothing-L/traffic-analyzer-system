@@ -114,6 +114,7 @@ function rowsQuery(page) {
 async function fetchRows(page) {
   if (state.view !== 'dashboard' || !$('#dash-root') || rowsFetching) return;
   rowsFetching = true;
+  setPagerBusy(true); // 加载期(大工作区可达 ~11s)禁用翻页并提示,防用户连点误判
   try {
     let data = await api(rowsQuery(page));
     if (state.view !== 'dashboard' || !$('#dash-root')) return;
@@ -147,7 +148,20 @@ async function fetchRows(page) {
     // 已有数据时静默保留下轮重试
   } finally {
     rowsFetching = false;
+    setPagerBusy(false);
   }
+}
+
+// rowsFetching 期间翻页条两按钮 disabled + 「加载中…」提示;
+// 恢复时按最新 rowsData 重算 disabled(不恢复旧值,避免页码已变的陈旧状态)。
+function setPagerBusy(busy) {
+  const hint = $('#dash-pager-busy');
+  if (hint) hint.hidden = !busy;
+  const prev = $('#dash-prev');
+  const next = $('#dash-next');
+  const d = rowsData;
+  if (prev) prev.disabled = busy || !d || d.page <= 1;
+  if (next) next.disabled = busy || !d || (d.total_pages || 0) < 1 || d.page >= d.total_pages;
 }
 
 /* ------------------------------------------------------------ 渲染 */
@@ -310,15 +324,22 @@ function pagerHtml(data) {
     + '<span class="card-sub">第 ' + data.page + ' / ' + Math.max(tp, 1) + ' 页</span>'
     + '<button type="button" class="dash-chip" id="dash-next"'
     + (tp < 1 || data.page >= tp ? ' disabled' : '') + '>下一页</button>'
+    + '<span class="card-sub" id="dash-pager-busy" hidden>加载中…</span>'
     + '</div>';
 }
 
 function bindPager(el, data) {
   const prev = $('#dash-prev', el);
   const next = $('#dash-next', el);
-  if (prev) prev.addEventListener('click', () => { if (data.page > 1) fetchRows(data.page - 1); });
+  // 点击时读最新 rowsData(轮询/筛选可能已更新页码),不用闭包里的旧 data,
+  // 避免陈旧页码;rowsFetching 期间忽略点击(按钮已 disabled,双保险)。
+  if (prev) prev.addEventListener('click', () => {
+    const d = rowsData || data;
+    if (!rowsFetching && d.page > 1) fetchRows(d.page - 1);
+  });
   if (next) next.addEventListener('click', () => {
-    if (data.page < (data.total_pages || 0)) fetchRows(data.page + 1);
+    const d = rowsData || data;
+    if (!rowsFetching && d.page < (d.total_pages || 0)) fetchRows(d.page + 1);
   });
 }
 
