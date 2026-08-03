@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import shutil
 import sys
@@ -315,24 +314,6 @@ def _make_tiny_video(path: Path, frames: int = 8) -> Path:
     if path.stat().st_size == 0:
         pytest.skip("cv2 VideoWriter produced an empty mp4v file")
     return path
-
-
-def _one_chunk_then_disconnect(resp: Any) -> bytes:
-    """Read one chunk from the (async) body iterator, then close it.
-
-    Mirrors the production path: starlette wraps the sync generator with
-    ``iterate_in_threadpool``; on client disconnect the async generator is
-    closed, which drops the last reference to the suspended sync generator
-    and runs its ``finally`` (killing ffmpeg).
-    """
-
-    async def _drive() -> bytes:
-        agen = resp.body_iterator
-        chunk = await agen.__anext__()
-        await agen.aclose()
-        return chunk
-
-    return asyncio.run(_drive())
 
 
 # ---------------------------------------------------------------------------
