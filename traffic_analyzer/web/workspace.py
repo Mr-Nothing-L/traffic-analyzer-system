@@ -8,7 +8,9 @@ and an ``images/`` subdirectory.
 [文件说明]
 作用:工作区状态(WorkspaceState)与视频发现、路径安全校验(防目录穿越);定义
 analysis/<stem>/ 结果目录契约,并提供 /api/workspace、/api/workspace/videos、
-/api/workspace/tree 路由。
+/api/workspace/tree 路由。可选白名单:TRAFFIC_ANALYZER_WORKSPACE_DIRS(逗号分隔,
+支持 ~ 与相对路径,config/.env 或环境变量)非空时,POST /api/workspace 与
+fs 目录浏览仅允许名单目录及其子路径,越界 403;未设置/为空则不限制。
 上游:web/app.py(挂载路由);web/ 下 jobs、evidence_api、frames、video_stream
 均复用其 require_workspace/validate_stem/analysis_dir 等辅助函数。
 下游:无包内模块依赖,仅读写工作区文件系统;VIDEO_EXTENSIONS 与 scripts/batch_evaluate.py
@@ -29,6 +31,50 @@ router = APIRouter()
 
 # Aligned with scripts/batch_evaluate.py video discovery.
 VIDEO_EXTENSIONS = (".mp4", ".avi", ".mov", ".mkv", ".wmv")
+
+WORKSPACE_DIRS_ENV_VAR = "TRAFFIC_ANALYZER_WORKSPACE_DIRS"
+
+# traffic_analyzer/config/.env(traffic_analyzer/web/workspace.py → parents[1])。
+# web 独立启动未必经过 ConfigManager 的 load_dotenv,兜底自己读一次文件;
+# 测试 monkeypatch 此常量。
+_CONFIG_ENV_PATH = Path(__file__).resolve().parents[1] / "config" / ".env"
+
+
+def _config_env_value(key: str) -> Optional[str]:
+    """Read one ``KEY=value`` entry from config/.env (same idea as auth._env_value)."""
+    try:
+        text = _CONFIG_ENV_PATH.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith(f"{key}="):
+            value = line.split("=", 1)[1].strip().strip('"').strip("'")
+            if value:
+                return value
+    return None
+
+
+def allowed_workspace_dirs() -> List[Path]:
+    """Resolved whitelist from ``TRAFFIC_ANALYZER_WORKSPACE_DIRS`` (comma-separated).
+
+    ``os.environ`` first (ConfigManager's load_dotenv injects config/.env into
+    it), then config/.env itself. ``~`` and relative paths are supported.
+    Empty/unset → ``[]`` = unrestricted (legacy behavior).
+    """
+    raw = os.environ.get(WORKSPACE_DIRS_ENV_VAR)
+    if raw is None:
+        raw = _config_env_value(WORKSPACE_DIRS_ENV_VAR)
+    dirs: List[Path] = []
+    for item in (raw or "").split(","):
+        item = item.strip()
+        if item:
+            dirs.append(Path(item).expanduser().resolve())
+    return dirs
+
+
+def _within_allowed(path: Path, allowed: List[Path]) -> bool:
+    return any(path == root or root in path.parents for root in allowed)
 
 
 class WorkspaceState:
@@ -220,6 +266,9 @@ def set_workspace(body: WorkspaceSetRequest, request: Request) -> Dict[str, Any]
     path = Path(body.path).expanduser().resolve()
     if not path.is_dir():
         raise HTTPException(status_code=400, detail=f"Not a directory: {body.path}")
+    allowed = allowed_workspace_dirs()
+    if allowed and not _within_allowed(path, allowed):
+        raise HTTPException(status_code=403, detail="workspace not in allowed list")
     request.app.state.workspace.set(path)
     return {"path": str(path)}
 

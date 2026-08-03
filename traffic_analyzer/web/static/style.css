@@ -1525,7 +1525,7 @@ body.hsplit-dragging { cursor: row-resize; user-select: none; }
 .dash-table td.num {
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
-  text-align: right;
+  text-align: center; /* 精度数字居中对齐 */
   white-space: nowrap;
 }
 .dash-metrics-table tr.total td {
@@ -1545,6 +1545,8 @@ body.hsplit-dragging { cursor: row-resize; user-select: none; }
   white-space: nowrap;
 }
 .dash-nowrap { white-space: nowrap; }
+/* 一致性列(漏:x;误:x)允许换行,不再溢出单元格 */
+.dash-rows-table td:nth-child(4) { white-space: normal; }
 /* 明细表固定列宽:人工列无数据时不塌缩,审核列容纳三个 chip 不挤压,
    表头与单元格同属一张表、同一列定义,宽度一致即对齐 */
 /* 明细表:fixed 布局 + 全列显式列宽,任何视口/缓存状态下网格都稳定对齐 */

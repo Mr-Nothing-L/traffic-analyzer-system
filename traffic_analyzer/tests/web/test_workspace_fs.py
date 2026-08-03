@@ -252,3 +252,92 @@ class TestFsList:
         data = client.get("/api/fs/list", params={"path": "/"}).json()
         assert data["path"] == "/"
         assert data["parent"] is None
+
+
+# ---------------------------------------------------------------------------
+# Workspace allowlist (TRAFFIC_ANALYZER_WORKSPACE_DIRS)
+# ---------------------------------------------------------------------------
+
+
+class TestWorkspaceAllowlist:
+    @pytest.fixture()
+    def allowed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        root = tmp_path / "allowed"
+        (root / "sub").mkdir(parents=True)
+        (tmp_path / "outside").mkdir()
+        monkeypatch.setenv("TRAFFIC_ANALYZER_WORKSPACE_DIRS", str(root))
+        return root
+
+    def test_set_workspace_allowed_and_subpath(
+        self, tmp_path: Path, allowed: Path
+    ) -> None:
+        client = TestClient(create_app())
+        resp = client.post("/api/workspace", json={"path": str(allowed)})
+        assert resp.status_code == 200
+        resp = client.post("/api/workspace", json={"path": str(allowed / "sub")})
+        assert resp.status_code == 200
+        assert resp.json() == {"path": str((allowed / "sub").resolve())}
+
+    def test_set_workspace_outside_403(self, tmp_path: Path, allowed: Path) -> None:
+        client = TestClient(create_app())
+        resp = client.post("/api/workspace", json={"path": str(tmp_path / "outside")})
+        assert resp.status_code == 403
+        assert resp.json() == {"detail": "workspace not in allowed list"}
+        # 名单的父目录同样越界。
+        resp = client.post("/api/workspace", json={"path": str(tmp_path)})
+        assert resp.status_code == 403
+
+    def test_fs_list_confined_to_allowed(self, tmp_path: Path, allowed: Path) -> None:
+        client = TestClient(create_app())
+        assert client.get("/api/fs/list", params={"path": str(allowed)}).status_code == 200
+        assert (
+            client.get("/api/fs/list", params={"path": str(allowed / "sub")}).status_code
+            == 200
+        )
+        resp = client.get("/api/fs/list", params={"path": str(tmp_path / "outside")})
+        assert resp.status_code == 403
+        assert client.get("/api/fs/list", params={"path": "/"}).status_code == 403
+
+    def test_fs_list_default_is_first_allowed(
+        self, tmp_path: Path, allowed: Path
+    ) -> None:
+        client = TestClient(create_app())
+        data = client.get("/api/fs/list").json()
+        assert data["path"] == str(allowed.resolve())
+
+    def test_comma_separated_and_tilde(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from traffic_analyzer.web import workspace as workspace_mod
+
+        a = tmp_path / "a"
+        b = tmp_path / "b"
+        monkeypatch.setenv(
+            "TRAFFIC_ANALYZER_WORKSPACE_DIRS", f" {a} ,~/,{b} ,"
+        )
+        dirs = workspace_mod.allowed_workspace_dirs()
+        assert dirs == [a.resolve(), Path.home().resolve(), b.resolve()]
+
+    def test_unset_means_unrestricted(self, tmp_path: Path) -> None:
+        # conftest 已 delenv;未配置时维持现状(任意目录可用)。
+        client = TestClient(create_app())
+        assert client.post("/api/workspace", json={"path": str(tmp_path)}).status_code == 200
+        assert client.get("/api/fs/list", params={"path": str(tmp_path)}).status_code == 200
+
+    def test_config_env_file_fallback(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """os.environ 没有时兜底读 config/.env(_CONFIG_ENV_PATH)。"""
+        from traffic_analyzer.web import workspace as workspace_mod
+
+        allowed = tmp_path / "allowed"
+        allowed.mkdir()
+        env_file = tmp_path / "config.env"
+        env_file.write_text(
+            f"TRAFFIC_ANALYZER_WORKSPACE_DIRS={allowed}\n", encoding="utf-8"
+        )
+        monkeypatch.setattr(workspace_mod, "_CONFIG_ENV_PATH", env_file)
+        monkeypatch.delenv("TRAFFIC_ANALYZER_WORKSPACE_DIRS", raising=False)
+        client = TestClient(create_app())
+        assert client.post("/api/workspace", json={"path": str(tmp_path)}).status_code == 403
+        assert client.post("/api/workspace", json={"path": str(allowed)}).status_code == 200

@@ -132,7 +132,7 @@ class TestSecretBootstrap:
         monkeypatch.delenv(auth.SECRET_ENV_VAR, raising=False)
         config = auth.configure()
         assert config.enabled and config.secret
-        # 密钥追加写回 .env,且再次 configure 复用同一密钥(重启会话不失效)。
+        # 密钥追加写回 config/.env(_ENV_PATH),再次 configure 复用同一密钥。
         assert f"{auth.SECRET_ENV_VAR}={config.secret}" in env_file.read_text()
         assert auth.configure().secret == config.secret
 
@@ -145,3 +145,75 @@ class TestSecretBootstrap:
         monkeypatch.setenv(auth.USERS_ENV_VAR, _USERS)
         monkeypatch.delenv(auth.SECRET_ENV_VAR, raising=False)
         assert auth.configure().secret == "from-dotenv"
+
+
+class TestEnvMigration:
+    """首次启动:库为空 + config/.env 有 USERS → 导入 users.db 并注释该行。"""
+
+    def test_env_users_imported_and_line_commented(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from traffic_analyzer.web import user_store
+
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            f"{auth.USERS_ENV_VAR}={_USERS}\n", encoding="utf-8"
+        )
+        monkeypatch.setattr(auth, "_ENV_PATH", env_file)
+        monkeypatch.setenv(auth.SECRET_ENV_VAR, _SECRET)
+        config = auth.configure()
+        assert config.enabled
+        assert [u["username"] for u in user_store.list_users()] == ["lisi", "zhangsan"]
+        assert user_store.verify_password("zhangsan", "pass1")
+        text = env_file.read_text(encoding="utf-8")
+        assert f"# migrated to users.db: {auth.USERS_ENV_VAR}={_USERS}" in text
+
+    def test_auth_stays_enabled_from_db_after_migration(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from traffic_analyzer.web import user_store
+
+        env_file = tmp_path / ".env"
+        env_file.write_text(f"{auth.USERS_ENV_VAR}={_USERS}\n", encoding="utf-8")
+        monkeypatch.setattr(auth, "_ENV_PATH", env_file)
+        monkeypatch.setenv(auth.SECRET_ENV_VAR, _SECRET)
+        auth.configure()  # 迁移发生,env 行被注释
+        # 模拟重启后:env 与 .env 都没有 USERS,仅靠 users.db 仍开启认证。
+        monkeypatch.delenv(auth.USERS_ENV_VAR, raising=False)
+        config = auth.configure()
+        assert config.enabled
+        assert config.users == {} and config.db_has_users
+        client = TestClient(create_app(workspace=str(_make_workspace(tmp_path))))
+        resp = client.post(
+            "/api/auth/login", json={"username": "lisi", "password": "pass2"}
+        )
+        assert resp.status_code == 200
+        assert user_store.get_user("lisi") is not None
+
+    def test_no_import_when_db_not_empty(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from traffic_analyzer.web import user_store
+
+        user_store.add_user("existing", "pw0")
+        env_file = tmp_path / ".env"
+        env_file.write_text(f"{auth.USERS_ENV_VAR}={_USERS}\n", encoding="utf-8")
+        monkeypatch.setattr(auth, "_ENV_PATH", env_file)
+        monkeypatch.setenv(auth.SECRET_ENV_VAR, _SECRET)
+        auth.configure()
+        # 库非空 → 不导入、不注释;env 用户仍可通过 env 回退登录。
+        assert user_store.get_user("zhangsan") is None
+        assert not env_file.read_text(encoding="utf-8").startswith("#")
+        client = TestClient(create_app(workspace=str(_make_workspace(tmp_path))))
+        assert (
+            client.post(
+                "/api/auth/login", json={"username": "zhangsan", "password": "pass1"}
+            ).status_code
+            == 200
+        )
+        assert (
+            client.post(
+                "/api/auth/login", json={"username": "existing", "password": "pw0"}
+            ).status_code
+            == 200
+        )

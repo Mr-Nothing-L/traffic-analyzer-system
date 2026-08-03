@@ -19,6 +19,8 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from . import workspace as workspace_mod
+
 router = APIRouter()
 
 
@@ -31,13 +33,23 @@ def list_dirs(
     """List the subdirectories of ``path`` (absolute; ``~`` is expanded).
 
     Without ``path`` the current workspace is listed, or the user's home
-    directory when no workspace is selected yet. Symlinks are resolved and
+    directory when no workspace is selected yet (the first allowed dir when
+    ``TRAFFIC_ANALYZER_WORKSPACE_DIRS`` is set). Symlinks are resolved and
     the returned ``path`` is the normalized absolute path; entries that
     cannot be stat'ed (e.g. permission denied) are skipped silently.
+
+    When the workspace allowlist is non-empty, only the allowed directories
+    and their subpaths may be listed — anything else gets 403.
     """
+    allowed = workspace_mod.allowed_workspace_dirs()
     if not path:
         workspace = request.app.state.workspace.get()
-        base = workspace if workspace is not None else Path.home()
+        if workspace is not None:
+            base = workspace
+        elif allowed:
+            base = allowed[0]
+        else:
+            base = Path.home()
     else:
         base = Path(path).expanduser()
         if not base.is_absolute():
@@ -45,6 +57,8 @@ def list_dirs(
     if not base.is_dir():
         raise HTTPException(status_code=404, detail=f"Not a directory: {base}")
     base = base.resolve()
+    if allowed and not workspace_mod._within_allowed(base, allowed):
+        raise HTTPException(status_code=403, detail="path not in allowed workspace list")
 
     try:
         entries = sorted(base.iterdir(), key=lambda p: p.name.lower())

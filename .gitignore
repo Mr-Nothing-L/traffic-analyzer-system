@@ -83,3 +83,5 @@ docs/v4.5_images/
 # HTML artifacts
 architecture_diagram.html
 演示区/
+traffic_analyzer/config/users.db
+traffic_analyzer/config/.env
