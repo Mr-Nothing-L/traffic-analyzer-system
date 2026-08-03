@@ -1,6 +1,13 @@
 """Dashboard aggregation endpoints (GT vs prediction overview).
 
-GET /api/dashboard walks the workspace videos and joins, per row, the
+GET /api/dashboard returns the aggregate overview — ``summary`` counts,
+``event_names`` (str(event_id) → name_zh, from event_config's
+event_categories index) and set-algebra ``metrics`` — all computed over the
+full, unfiltered row set. GET /api/dashboard/rows returns the per-video rows
+with filtering (``consistency``/``review`` comma-separated multi-value,
+``edited=1``, ``q`` = case-insensitive rel/stem substring) and pagination
+(``page``/``size``, filter before paginate, size capped at 200; out-of-range
+page → empty rows with the correct ``total_pages``). Each row joins the
 filename ground truth (via ``scripts/batch_evaluate.py``'s
 ``extract_gt_from_filename``, loaded by path with importlib since the script
 is not a package) with the prediction read from ``analysis/<stem>/<stem>.json``
@@ -18,13 +25,17 @@ persists it to ``<workspace>/analysis/review_states.json``
 the same atomic write as ``evidence_api._atomic_write_json``.
 
 [文件说明]
-作用:dashboard 聚合接口。GET /api/dashboard 按工作区视频逐行合并文件名 GT
-(importlib 按路径加载 scripts/batch_evaluate.py 的 extract_gt_from_filename)
-与 analysis/<stem>/<stem>.json 的 action 预测,产出四态行
-(consistent/diff/no_gt/no_results;missing/extra 仅 diff 行填充)、summary
-计数、event_names(str(event_id) → name_zh,取自 event_config 的
-event_categories 索引)与集合运算指标(无 GT/未推理行不参与);存在冻结快照
-<stem>_raw.json 时附 edited 与编辑前后 action 差异(edit_missing/edit_extra)。
+作用:dashboard 聚合接口。GET /api/dashboard 只返回汇总视图(summary 计数、
+event_names(str(event_id) → name_zh,取自 event_config 的 event_categories
+索引)、集合运算 metrics),全部基于未过滤的全量行。GET /api/dashboard/rows
+返回逐视频行:按工作区视频逐行合并文件名 GT(importlib 按路径加载
+scripts/batch_evaluate.py 的 extract_gt_from_filename)与
+analysis/<stem>/<stem>.json 的 action 预测,产出四态行
+(consistent/diff/no_gt/no_results;missing/extra 仅 diff 行填充);存在冻结
+快照 <stem>_raw.json 时附 edited 与编辑前后 action 差异
+(edit_missing/edit_extra)。支持 consistency/review 逗号分隔多值、edited=1、
+q(rel/stem 子串,不区分大小写)过滤(先过滤后分页)与 page/size 分页
+(size ≤ 200;page 越界 → 空 rows + 正确 total_pages)。
 PUT /api/dashboard/review 校验三态(unconfirmed/confirmed/needs_review,非法
 422)并原子写 <workspace>/analysis/review_states.json。
 上游:web/app.py(挂载路由);web/static 前端(dashboard 页)。
@@ -40,7 +51,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from traffic_analyzer.web import event_config
@@ -210,9 +221,8 @@ def _compute_metrics(
     return {"per_event": per_event, "macro": macro, "micro": micro}
 
 
-@router.get("/api/dashboard")
-def get_dashboard(request: Request) -> Dict[str, Any]:
-    workspace = workspace_mod.require_workspace(request)
+def _build_dashboard(workspace: Path) -> Dict[str, Any]:
+    """Full unfiltered dashboard: rows + summary + event_names + metrics."""
     extract_gt = _gt_extractor()
     reviews = _load_review_states(workspace)
     # event_categories 索引(name_zh → event_id)反转为契约的 str(event_id) → name_zh。
@@ -290,4 +300,62 @@ def get_dashboard(request: Request) -> Dict[str, Any]:
         "summary": summary,
         "event_names": event_names,
         "metrics": _compute_metrics(evaluated, event_names),
+    }
+
+
+@router.get("/api/dashboard")
+def get_dashboard(request: Request) -> Dict[str, Any]:
+    """Aggregate overview only (rows moved to GET /api/dashboard/rows)."""
+    data = _build_dashboard(workspace_mod.require_workspace(request))
+    return {
+        "summary": data["summary"],
+        "event_names": data["event_names"],
+        "metrics": data["metrics"],
+    }
+
+
+def _csv_values(raw: str) -> Set[str]:
+    """逗号分隔多值参数 → 非空值集合。"""
+    return {v.strip() for v in raw.split(",") if v.strip()}
+
+
+@router.get("/api/dashboard/rows")
+def get_dashboard_rows(
+    request: Request,
+    page: int = Query(1, ge=1),
+    size: int = Query(50, ge=1, le=200),
+    consistency: str = "",
+    review: str = "",
+    edited: str = "",
+    q: str = "",
+) -> Dict[str, Any]:
+    """Filtered + paginated dashboard rows (filter first, then paginate)."""
+    rows = _build_dashboard(workspace_mod.require_workspace(request))["rows"]
+
+    statuses = _csv_values(consistency)
+    if statuses:
+        rows = [r for r in rows if r["status"] in statuses]
+    reviews = _csv_values(review)
+    if reviews:
+        rows = [r for r in rows if r["review"] in reviews]
+    if edited == "1":
+        rows = [r for r in rows if r["edited"]]
+    needle = q.strip().lower()
+    if needle:
+        rows = [
+            r
+            for r in rows
+            if needle in r["rel"].lower() or needle in r["stem"].lower()
+        ]
+
+    total = len(rows)
+    total_pages = (total + size - 1) // size  # total=0 → 0 页
+    start = (page - 1) * size
+    # page 越界:切片天然为空,total/total_pages 仍按过滤后全量返回。
+    return {
+        "rows": rows[start : start + size],
+        "page": page,
+        "size": size,
+        "total": total,
+        "total_pages": total_pages,
     }

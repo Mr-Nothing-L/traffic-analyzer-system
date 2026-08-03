@@ -168,10 +168,42 @@ export async function mockApi(path, opts) {
     ];
   }
 
-  // 数据看板:GT 按文件名解析,pred 取 SFT 标注 action,metrics 实时计算
+  // 数据看板汇总:GT 按文件名解析,pred 取 SFT 标注 action,metrics 实时计算;
+  // 与后端一致,只回 summary/event_names/metrics(基于全量未过滤行),行走 /rows
   if (path === '/api/dashboard' && method === 'GET') {
     if (!mockDb.workspace.path) throw new ApiError(400, 'No workspace selected');
-    return mockDashboard();
+    const d = mockDashboard();
+    return { summary: d.summary, event_names: d.event_names, metrics: d.metrics };
+  }
+
+  // 看板行:先过滤(consistency/review 逗号多值、edited=1、q 子串)后分页
+  const dashRowsMatch = path.match(/^\/api\/dashboard\/rows(?:\?(.*))?$/);
+  if (dashRowsMatch && method === 'GET') {
+    if (!mockDb.workspace.path) throw new ApiError(400, 'No workspace selected');
+    const q = new URLSearchParams(dashRowsMatch[1] || '');
+    const page = parseInt(q.get('page') || '1', 10);
+    const size = parseInt(q.get('size') || '50', 10);
+    if (!(page >= 1) || !(size >= 1) || size > 200) {
+      throw new ApiError(422, 'page/size 参数非法(1 ≤ size ≤ 200)');
+    }
+    const statuses = (q.get('consistency') || '').split(',').map(s => s.trim()).filter(Boolean);
+    const reviews = (q.get('review') || '').split(',').map(s => s.trim()).filter(Boolean);
+    const needle = (q.get('q') || '').trim().toLowerCase();
+    let rows = mockDashboard().rows;
+    if (statuses.length) rows = rows.filter(r => statuses.indexOf(r.status) >= 0);
+    if (reviews.length) rows = rows.filter(r => reviews.indexOf(r.review) >= 0);
+    if (q.get('edited') === '1') rows = rows.filter(r => r.edited);
+    if (needle) {
+      rows = rows.filter(r =>
+        r.rel.toLowerCase().indexOf(needle) >= 0 || r.stem.toLowerCase().indexOf(needle) >= 0);
+    }
+    const total = rows.length;
+    const start = (page - 1) * size;
+    return {
+      rows: rows.slice(start, start + size), // page 越界 → 空 rows
+      page: page, size: size, total: total,
+      total_pages: Math.ceil(total / size),
+    };
   }
 
   // 人工审核结论:{stem, status};存内存(reviewStates),刷新页面即失

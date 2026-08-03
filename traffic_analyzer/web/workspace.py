@@ -32,6 +32,13 @@ router = APIRouter()
 # Aligned with scripts/batch_evaluate.py video discovery.
 VIDEO_EXTENSIONS = (".mp4", ".avi", ".mov", ".mkv", ".wmv")
 
+# os.walk 剪枝目录:推理产出目录(analysis/<stem>/images、tmp_img、output 等)
+# 在大工作区里体量极大,且其中的 mp4(中间产物/证据剪辑)不是「工作区视频」,
+# 不下钻遍历;这些目录里的视频既不进 /api/workspace/videos,也不参与看板。
+# 注意:has_results 按 workspace/analysis/<stem>/ 路径直接探测(不走遍历),
+# 剪掉 analysis 不影响结果判定;单层的 list_tree 不做此剪枝(用户可见产出目录)。
+PRUNED_DIR_NAMES = frozenset({"analysis", "tmp_img", "output", "__pycache__"})
+
 WORKSPACE_DIRS_ENV_VAR = "TRAFFIC_ANALYZER_WORKSPACE_DIRS"
 
 # traffic_analyzer/config/.env(traffic_analyzer/web/workspace.py → parents[1])。
@@ -134,7 +141,7 @@ def find_video(workspace: Path, stem: str) -> Optional[Path]:
 
 
 def list_videos(workspace: Path) -> List[Dict[str, Any]]:
-    """All videos in the workspace at any depth (dot-dirs skipped).
+    """All videos in the workspace at any depth (dot-dirs and PRUNED_DIR_NAMES skipped).
 
     Each entry carries the workspace-relative path (``rel``) used by the
     frontend as its unique key; ``has_results`` follows the flat
@@ -143,7 +150,10 @@ def list_videos(workspace: Path) -> List[Dict[str, Any]]:
     videos: List[Dict[str, Any]] = []
     root = workspace.resolve()
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        # 点目录与产出目录(PRUNED_DIR_NAMES)原地剔除,os.walk 不再下钻。
+        dirnames[:] = [
+            d for d in dirnames if not d.startswith(".") and d not in PRUNED_DIR_NAMES
+        ]
         for name in filenames:
             path = Path(dirpath) / name
             if path.suffix.lower() not in VIDEO_EXTENSIONS:

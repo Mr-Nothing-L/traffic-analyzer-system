@@ -18,6 +18,7 @@
 import argparse
 import os
 import json
+import re
 import subprocess
 import sys
 import time
@@ -395,9 +396,12 @@ def run_pass(page, p: Pass, shot: Path) -> None:
         page.mouse.up()
     p.step("预览区(重试播放 + 分隔条拖动复位)", t_preview_pane)
 
-    # ---------- 13. 数据看板 ----------
+    # ---------- 13. 数据看板(服务端分页/筛选) ----------
     # 入口按钮 #btn-dashboard 与看板视图(dashboard.js: #dash-root/.dash-chip/
-    # .dash-review-chip/.dash-open)由包B 提供;未就绪时各子断言降级为 SKIP 而非 FAIL
+    # .dash-review-chip/.dash-open/#dash-pager)由包B 提供;未就绪时各子断言降级为 SKIP
+    # 契约:GET /api/dashboard → {summary, event_names, metrics};
+    #       GET /api/dashboard/rows?page&size&consistency&review&edited&q
+    #       → {rows, page, size, total, total_pages}
     def t_dashboard():
         btn = page.locator("#btn-dashboard")
         if btn.count() == 0:
@@ -411,28 +415,63 @@ def run_pass(page, p: Pass, shot: Path) -> None:
             print("  [SKIP] 数据看板:按钮已点击但看板视图未渲染(dashboard.js 未就绪)")
             return
 
-        total = page.locator(rows_sel).count()
-        assert total >= 3, f"看板表格行数应 >=3,实际 {total}"
+        def row_count() -> int:
+            return page.locator(rows_sel).count()
+
+        # 翻页条存在:「上一页 | 第 x / y 页 | 下一页」
+        pager = page.locator("#dash-pager")
+        assert pager.count() == 1, "看板应渲染翻页条 #dash-pager"
+        assert page.locator("#dash-prev").count() == 1, "翻页条应含「上一页」按钮"
+        assert page.locator("#dash-next").count() == 1, "翻页条应含「下一页」按钮"
+        pm = re.search(r"第\s*(\d+)\s*/\s*(\d+)\s*页", pager.text_content() or "")
+        # mock 视频数远小于每页 50 条,不足以演示多页翻页,
+        # 页数断言降级为 total_pages >= 1(只验证翻页条渲染与页数自洽)
+        assert pm and int(pm.group(1)) >= 1 and int(pm.group(2)) >= 1, \
+            f"翻页条页数应 >=1,实际:{pager.text_content()!r}"
+
+        # 页眉「第 a-b 条 / 共 N 条」与表格行数一致(单页时行数 == total)
+        sm = re.search(r"第\s*(\d+)\s*-\s*(\d+)\s*条\s*/\s*共\s*(\d+)\s*条",
+                       page.text_content("#dash-summary") or "")
+        assert sm, f"页眉应显示「第 a-b 条 / 共 N 条」,实际:{page.text_content('#dash-summary')!r}"
+        a, b, total = int(sm.group(1)), int(sm.group(2)), int(sm.group(3))
+        n = row_count()
+        assert n == b - a + 1, f"当前页行数应等于页眉区间 {a}-{b},实际 {n}"
+        assert total >= 3, f"看板总行数应 >=3,实际 {total}"
 
         # 「人工已改」徽章:mock 将 01-02_Event_129 构造为 edited=true(pred_raw ≠ pred)
         assert page.locator("#dash-body .dash-badge-edit").count() >= 1, \
             "看板应出现「人工已改」徽章(.dash-badge-edit)"
 
-        # 过滤 chip:点「人工已改」chip,仅留 edited 行,行数应变少;再点一次复位
+        # 过滤 chip(服务端过滤):点「人工已改」,仅留 edited 行,行数应变少;再点一次复位
         chip = page.locator('.dash-chip[data-group="edited"]')
         if chip.count() == 0:
             print("  [SKIP] 看板过滤 chip:未找到 .dash-chip[data-group=edited]")
         else:
             chip.click()
-            page.wait_for_timeout(300)
-            n = page.locator(rows_sel).count()
-            assert 0 < n < total, f"点「人工已改」chip 后行数应减少,实际 {n}/{total}"
-            chip = page.locator('.dash-chip[data-group="edited"]')  # 重渲染后重新定位
-            chip.click()
-            page.wait_for_timeout(300)
-            assert page.locator(rows_sel).count() == total, "复位后行数应恢复"
+            page.wait_for_function(
+                "(t) => { const n = document.querySelectorAll("
+                "'#dash-body tr[data-rel]').length; return n > 0 && n < t; }",
+                arg=total, timeout=8000)
+            page.locator('.dash-chip[data-group="edited"]').click()  # 重渲染后重新定位
+            page.wait_for_function(
+                "(t) => document.querySelectorAll('#dash-body tr[data-rel]').length === t",
+                arg=total, timeout=8000)
 
-        # 审核 chip:点击后应出现选中态(.on)
+        # 名称搜索(服务端过滤,300ms 防抖):输入特征子串后只剩 1 行;清空恢复
+        search = page.locator("#dash-search")
+        if search.count() == 0:
+            print("  [SKIP] 看板名称搜索:未找到 #dash-search 输入框")
+        else:
+            search.fill(MOCK_FILTER_TEXT)
+            page.wait_for_function(
+                "() => document.querySelectorAll('#dash-body tr[data-rel]').length === 1",
+                timeout=8000)
+            search.fill("")
+            page.wait_for_function(
+                "(t) => document.querySelectorAll('#dash-body tr[data-rel]').length === t",
+                arg=total, timeout=8000)
+
+        # 审核 chip:点击后应出现选中态(.on)(就地更新,不整页重拉)
         review_chip = page.locator("#dash-body .dash-review-chip").first
         if review_chip.count() == 0:
             print("  [SKIP] 看板审核 chip:未找到 .dash-review-chip 元素")
@@ -450,7 +489,7 @@ def run_pass(page, p: Pass, shot: Path) -> None:
             open_links.first.click()
             sel("#pane-top")
             page.wait_for_selector("#video-list .video-item.active", timeout=8000)
-    p.step("数据看板(行数/人工已改徽章/过滤 chip/审核 chip/打开回详情)", t_dashboard)
+    p.step("数据看板(翻页条/行数=total/筛选 chip/搜索/审核 chip/打开回详情)", t_dashboard)
 
     page.screenshot(path=str(shot), full_page=False)
 
