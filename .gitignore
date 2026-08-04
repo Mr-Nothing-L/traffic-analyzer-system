@@ -85,3 +85,5 @@ architecture_diagram.html
 演示区/
 traffic_analyzer/config/users.db
 traffic_analyzer/config/.env
+frontend/node_modules/
+frontend/dist/

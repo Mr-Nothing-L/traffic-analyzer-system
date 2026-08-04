@@ -8,7 +8,8 @@ forward arguments).
 [文件说明]
 作用:FastAPI 应用工厂 create_app():装配 workspace/fs/jobs/evidence_api/frames/
 video_stream/dashboard/auth/presence/realtime 各路由,提供 /api/expert-phases
-专家阶段定义接口,挂载 web/static 前端并为其禁用缓存,在 no-cache 之后注册
+专家阶段定义接口,挂载 web/static(/,legacy SPA)与 frontend/dist(/v2,新
+前端构建产物,未构建时跳过)并为其禁用缓存,在 no-cache 之后注册
 auth middleware(未配置 TRAFFIC_ANALYZER_USERS 时认证完全关闭),注册
 lifespan/atexit 钩子以在服务退出时停止所有排队/运行中的分析子进程;lifespan
 启动时为 realtime EventBus 绑定事件循环(跨线程 publish 经
@@ -50,6 +51,7 @@ from traffic_analyzer.web import (
 logger = logging.getLogger(__name__)
 
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 # Expert phase definitions served by GET /api/expert-phases (frontend uses
 # them to cap the progress climb); shipped next to this module.
 _EXPERT_PHASES_JSON = Path(__file__).resolve().parent / "expert_phases.json"
@@ -130,6 +132,9 @@ def create_app(workspace: Optional[str] = None) -> FastAPI:
             or request.url.path.startswith("/js/")
             or request.url.path.startswith("/css/")
             or request.url.path.startswith("/fonts/")
+            or request.url.path == "/v2"
+            or request.url.path == "/v2/"
+            or request.url.path == "/v2/index.html"
         ):
             response.headers["Cache-Control"] = "no-cache"
         return response
@@ -138,6 +143,19 @@ def create_app(workspace: Optional[str] = None) -> FastAPI:
     # 请求直接 302/401,不走 no-cache 处理;认证关闭时 middleware 只补
     # request.state.user='local'。
     auth.install(app)
+
+    # 绞杀者迁移:v2 前端(Vue 3,frontend/dist)挂 /v2,legacy SPA 继续占 /。
+    # /v2 必须先于 / 注册(Starlette 挂载按前缀匹配,/ 会吞掉 /v2)。
+    # dev 期未构建(frontend/dist 不存在)时跳过,不炸。
+    v2_dist = _REPO_ROOT / "frontend" / "dist"
+    if (v2_dist / "index.html").is_file():
+        app.mount(
+            "/v2",
+            StaticFiles(directory=str(v2_dist), html=True),
+            name="static-v2",
+        )
+    else:
+        logger.info("v2 frontend not built, /v2 not mounted: %s", v2_dist)
 
     # Static frontend (developed in parallel) — must not crash when missing.
     try:
