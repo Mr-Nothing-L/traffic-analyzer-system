@@ -87,3 +87,6 @@ traffic_analyzer/config/users.db
 traffic_analyzer/config/.env
 frontend/node_modules/
 frontend/dist/
+
+# vitest 缓存(误生成于 src 下时)
+frontend/src/node_modules/
