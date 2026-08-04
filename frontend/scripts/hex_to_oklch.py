@@ -36,6 +36,10 @@ PALETTE: list[tuple[str, str]] = [
     ("--color-surface-5", "#FCFAF6"),
     ("--color-hover-bg", "#F4EFE5"),
     ("--color-stage-bg", "#1C1A17"),
+    # 阶段 5 补齐(SFT 编辑器 / 专家泳道,取自 legacy sft.css / expert.css;
+    # design.md 属仓库根未同步,见 tokens.css 顶部注释的生成纪律):
+    ("--color-accent-deep", "#F0C4AB"),  # legacy .sft-tok-link(chip hover 联动加深底)
+    ("--color-dot-muted", "#D8D1C2"),  # legacy .lane-dot(泳道 queued 状态点)
 ]
 
 OUT = Path(__file__).resolve().parents[1] / "src" / "styles" / "tokens.css"

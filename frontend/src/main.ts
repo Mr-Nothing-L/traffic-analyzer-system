@@ -10,5 +10,7 @@ import './styles/dashboard.css'
 import './styles/detail.css'
 import './styles/report.css'
 import './styles/evidence.css'
+import './styles/sft.css'
+import './styles/expert.css'
 
 createApp(App).use(createPinia()).use(router).mount('#app')

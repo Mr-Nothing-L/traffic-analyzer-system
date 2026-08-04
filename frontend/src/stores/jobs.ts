@@ -4,9 +4,20 @@ import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import { ApiError, apiFetch } from '../api/client'
 
+/** 专家泳道(泳道面板数据源:job.progress 快照,见 web/progress.py / jobs/job.py to_dict)。 */
+export interface ExpertLane {
+  name: string
+  status: string // queued / running / done / error
+  detected: boolean | null // done 时的检出语义;裁决/阶段泳道恒 null
+  fraction: number
+  label: string
+}
+
 export interface JobProgress {
   fraction: number | null
   step_label?: string
+  step_index?: number
+  experts?: ExpertLane[]
 }
 
 export interface Job {

@@ -88,6 +88,25 @@ export function putEvidence(
   })
 }
 
+/** 事件类别配置(SFT 编辑器按事件分框 + 封闭枚举选项;GET /api/config/events)。 */
+export function getEventConfig<T>(): Promise<T> {
+  return apiFetch<T>('/config/events')
+}
+
+/** SFT 保存:body 需含 base_sig(乐观锁,取 GET 响应的 file_sig),冲突时后端 409;
+ * 响应为写入后的样本 + 新 file_sig(见 web/evidence/sft_api.py)。 */
+export function putSft<T>(stem: string, body: unknown): Promise<T & { file_sig?: string }> {
+  return apiFetch(`/results/${enc(stem)}/sft`, {
+    method: 'PUT',
+    body: JSON.stringify(body),
+  })
+}
+
+/** 专家阶段定义(泳道缓行封顶用;404 时调用方回退内置封顶,同 legacy)。 */
+export function getExpertPhases<T>(): Promise<T> {
+  return apiFetch<T>('/expert-phases')
+}
+
 /* ---------- 媒体来源与 URL ---------- */
 
 /** 当前视频媒体来源:顶层视频走 /api/videos/{stem} 端点;

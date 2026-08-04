@@ -1,25 +1,29 @@
 <script setup lang="ts">
 /** 分析详情页:上栏视频预览 + 可拖拽分隔条 + 下栏结果卡
- * (SFT 只读 / 分析报告 / 证据编辑;推理中显示简单进度)。
+ * (SFT 编辑 / 分析报告 / 证据编辑;推理中显示专家泳道面板)。
  * 编排迁移自 legacy preview.js selectVideo + renderResults。 */
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
-import { NCard } from 'naive-ui'
+import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute } from 'vue-router'
+import { NCard, useDialog, useMessage } from 'naive-ui'
 import { videoSourceOf } from '../api/results'
 import EvidenceCard from '../components/detail/EvidenceCard.vue'
+import ExpertPanel from '../components/detail/expert/ExpertPanel.vue'
 import ReportCard from '../components/detail/ReportCard.vue'
-import SftCard from '../components/detail/SftCard.vue'
+import SftEditor from '../components/detail/sft/SftEditor.vue'
 import VideoPlayer from '../components/detail/VideoPlayer.vue'
-import PixelBar from '../components/tree/PixelBar.vue'
 import { useVSplitter } from '../composables/useVSplitter'
 import { useEvidenceStore } from '../stores/evidence'
 import { useJobsStore } from '../stores/jobs'
+import { useSftStore } from '../stores/sft'
 import { useWorkspaceStore } from '../stores/workspace'
 
 const route = useRoute()
 const ws = useWorkspaceStore()
 const jobs = useJobsStore()
 const ev = useEvidenceStore()
+const sft = useSftStore()
+const dialog = useDialog()
+const message = useMessage()
 
 const stem = computed(() => String(route.params.stem || ''))
 const rel = computed(() => (route.query.rel ? String(route.query.rel) : null))
@@ -34,7 +38,6 @@ const hasResults = computed(() => {
   return !!(r && (r.sft_label || r.report_md || r.evidence))
 })
 const job = computed(() => jobs.latestJobForStem(stem.value))
-const jobFraction = computed(() => job.value?.progress?.fraction ?? null)
 
 async function loadAll() {
   if (!stem.value) return
@@ -48,14 +51,39 @@ onMounted(async () => {
   await loadAll()
 })
 watch(stem, loadAll)
-// 推理完成 → 重载结果(同 legacy 任务完成后重进详情)
+// 推理完成 → 重载结果;有未保存编辑时不自动重载,避免丢弃草稿(同 legacy hasUnsavedEdits)
 watch(
   () => job.value?.status,
   (s, prev) => {
-    if (s === 'done' && prev && prev !== 'done') ev.load(stem.value)
+    if (!(s === 'done' && prev && prev !== 'done')) return
+    if (sft.dirty || ev.dirty) {
+      message.warning(
+        `「${rel.value || stem.value}」已重新分析完成,但当前有未保存的修改;请先保存或手动重新加载`,
+      )
+      return
+    }
+    ev.load(stem.value)
   },
 )
 onUnmounted(() => ev.clear())
+
+// 离开详情页/切换视频时 dirty 未保存 → 确认后丢弃(legacy 为静默丢弃,v2 按要求加提示)
+function confirmDiscardIfDirty(): boolean | Promise<boolean> {
+  if (!sft.dirty) return true
+  return new Promise<boolean>((resolve) => {
+    dialog.warning({
+      title: '未保存的修改',
+      content: '当前视频的 SFT 标注有未保存的修改,离开将丢弃这些修改。',
+      positiveText: '丢弃并离开',
+      negativeText: '继续编辑',
+      onPositiveClick: () => resolve(true),
+      onNegativeClick: () => resolve(false),
+      onClose: () => resolve(false),
+    })
+  })
+}
+onBeforeRouteUpdate(() => confirmDiscardIfDirty())
+onBeforeRouteLeave(() => confirmDiscardIfDirty())
 
 const emptyNote = computed(() => {
   const j = job.value
@@ -95,20 +123,11 @@ const emptyNote = computed(() => {
           <div class="empty-note">加载结果失败:{{ ev.loadError }}</div>
         </n-card>
         <template v-else-if="hasResults && results">
-          <SftCard :stem="stem" :sft="results.sft_label" />
+          <SftEditor :stem="stem" :sft="results.sft_label" :file-sig="results.file_sig" />
           <ReportCard :stem="stem" :report-md="results.report_md" />
           <EvidenceCard v-if="results.evidence" :stem="stem" :source="source" />
         </template>
-        <n-card v-else-if="job && job.status === 'running'" class="card-running">
-          <template #header>
-            <span class="card-head">推理进行中</span><span class="card-sub">{{ stem }}</span>
-          </template>
-          <div class="running-card-body">
-            <PixelBar :fraction="jobFraction" :running="true" :cells="24" />
-            <span class="running-step">{{ job.progress?.step_label || '推理中' }}</span>
-          </div>
-          <div class="empty-note">完整专家泳道面板迁移中(阶段 5 开放)。</div>
-        </n-card>
+        <ExpertPanel v-else-if="job && job.status === 'running'" :stem="stem" />
         <n-card v-else>
           <div class="empty-note">{{ emptyNote }}</div>
         </n-card>
