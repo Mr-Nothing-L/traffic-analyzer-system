@@ -1,0 +1,209 @@
+/* ==========================================================================
+   证据编辑卡(移植自 legacy evidence.css,颜色改引 token;
+   端点/角点改为可 focus 的 DOM 把手,键盘方向键微调)
+   ========================================================================== */
+
+.ev-pane {
+  animation: fade-in var(--dur-med) var(--ease-out);
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* ---------- 工具条 / 图例 ---------- */
+.ev-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+  font-size: var(--text-sm);
+  color: var(--color-text2);
+}
+
+.ev-frame-input {
+  width: 64px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 3px 6px;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  background: var(--color-card);
+  color: var(--color-text);
+}
+
+.ev-frame-input:focus-visible {
+  border-color: var(--color-accent);
+  outline: none;
+}
+
+.ev-legend {
+  display: inline-flex;
+  gap: 12px;
+  margin-left: auto;
+}
+
+.ev-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.ev-legend .sw {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  display: inline-block;
+}
+
+.sw-emergency {
+  background: var(--color-accent);
+}
+
+.sw-chevron {
+  background: var(--color-blue);
+}
+
+.sw-box {
+  background: var(--color-sage);
+}
+
+/* ---------- 画布舞台 ---------- */
+.ev-stage {
+  position: relative;
+  background: var(--color-stage-bg);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  line-height: 0;
+}
+
+.ev-img {
+  width: 100%;
+  display: block;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.ev-canvas {
+  position: absolute;
+  inset: 0;
+  cursor: crosshair;
+  image-rendering: pixelated;
+}
+
+/* 端点/角点把手:可 focus,方向键微调(1px,Shift=10px);
+   颜色随形状类别(应急车道 accent / 导流区 blue / 证据框 sage) */
+.ev-handle {
+  position: absolute;
+  width: 9px;
+  height: 9px;
+  padding: 0;
+  border: 1px solid var(--color-card);
+  border-radius: 1px;
+  transform: translate(-50%, -50%);
+  cursor: pointer;
+  z-index: 2;
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+
+.ev-handle:hover,
+.ev-handle:focus-visible {
+  transform: translate(-50%, -50%) scale(1.5);
+  z-index: 3;
+}
+
+.ev-handle:focus-visible {
+  outline: 2px solid var(--color-card);
+  outline-offset: 1px;
+}
+
+.ev-handle.ev-handle-emergency {
+  background: var(--color-accent);
+}
+
+.ev-handle.ev-handle-chevron {
+  background: var(--color-blue);
+}
+
+.ev-handle.ev-handle-box {
+  background: var(--color-sage);
+}
+
+/* ---------- 证据框标签条 ---------- */
+.ev-labelbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  font-size: var(--text-sm);
+  color: var(--color-text2);
+}
+
+.ev-label-input {
+  flex: 1;
+  max-width: 360px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 5px 9px;
+  font-size: var(--text-md);
+  background: var(--color-card);
+  color: var(--color-text);
+}
+
+.ev-label-input:focus {
+  border-color: var(--color-accent);
+  outline: none;
+}
+
+/* ---------- 画廊 ---------- */
+.ev-gallery {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.ev-gallery img {
+  height: 84px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  cursor: zoom-in;
+  /* 模糊加载:加载完成(加 .loaded)后过渡到清晰 */
+  filter: blur(8px);
+  opacity: 0.4;
+  transition:
+    transform var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out),
+    filter var(--dur-med) var(--ease-out),
+    opacity var(--dur-med) var(--ease-out);
+}
+
+.ev-gallery img.loaded {
+  filter: blur(0);
+  opacity: 1;
+}
+
+.ev-gallery img.loaded:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-hover);
+}
+
+/* 证据卡空态:内联提示行 */
+.ev-empty {
+  padding: 4px 2px;
+  color: var(--color-text2);
+  font-size: var(--text-sm);
+}
+
+/* ---------- dirty 标记 / 保存反馈 ---------- */
+.dirty-flag {
+  font-size: var(--text-xs);
+  color: var(--color-accent);
+  font-weight: 650;
+}

@@ -2,6 +2,7 @@
 /** 递归树节点(自建,不用 NTree:行内有勾选/徽标/像素条/重试/停止/presence 徽章)。
  * 行为迁移自 legacy tree.js treeRowsHtml + toggleDir。 */
 import { computed } from 'vue'
+import { useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
 import { useAppStore } from '../../stores/app'
 import { useJobsStore } from '../../stores/jobs'
@@ -20,6 +21,7 @@ const jobs = useJobsStore()
 const presence = usePresenceStore()
 const tree = useTreeView()
 const message = useMessage()
+const router = useRouter()
 
 const visible = computed(() => tree.viewEntries(props.entries))
 
@@ -40,8 +42,13 @@ function onCheck(rel: string, ev: Event) {
   ws.setChecked(rel, (ev.target as HTMLInputElement).checked)
 }
 
+/** 点视频行:选中(行高亮 + presence viewing)并进分析详情页。 */
 function onSelect(rel: string) {
   ws.currentRel = rel
+  const v = ws.videos.find((x) => x.rel === rel)
+  // 全量列表缺失时由文件名退 stem(同 legacy tree.js 合成逻辑)
+  const stem = v ? v.stem : rel.split('/').pop()!.replace(/\.[^.]+$/, '')
+  router.push({ name: 'detail', params: { stem }, query: { rel } })
 }
 
 /** 行内「■ 停止」:取该视频最新任务的 id(运行中行必有 running job)。 */

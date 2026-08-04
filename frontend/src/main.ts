@@ -7,5 +7,8 @@ import './styles/base.css'
 import './styles/tree.css'
 import './styles/dirpicker.css'
 import './styles/dashboard.css'
+import './styles/detail.css'
+import './styles/report.css'
+import './styles/evidence.css'
 
 createApp(App).use(createPinia()).use(router).mount('#app')

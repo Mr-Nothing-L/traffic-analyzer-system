@@ -35,6 +35,7 @@ PALETTE: list[tuple[str, str]] = [
     ("--color-surface-4", "#F1EDE4"),
     ("--color-surface-5", "#FCFAF6"),
     ("--color-hover-bg", "#F4EFE5"),
+    ("--color-stage-bg", "#1C1A17"),
 ]
 
 OUT = Path(__file__).resolve().parents[1] / "src" / "styles" / "tokens.css"
