@@ -1,4 +1,11 @@
 /* 自 components/DirPickerModal.vue 拆分(单文件 ≤250 行约束);类名均为组件专属前缀,无全局污染。 */
+
+/* NModal 遮罩轻微模糊(移植 legacy tree.css:16 .dir-backdrop 的 backdrop-filter: blur(2px);
+   全局选择器,当前仅本弹窗使用 NModal) */
+.n-modal-mask {
+  backdrop-filter: blur(2px);
+}
+
 .dir-dialog {
   background: var(--color-card);
   border: 1px solid var(--color-border);
@@ -88,6 +95,10 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  /* hover 过渡(legacy tree.css:116) */
+  transition:
+    background var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
 }
 
 .dir-crumb:hover {
@@ -151,6 +162,8 @@
   cursor: pointer;
   user-select: none;
   font-size: 13px;
+  /* hover 过渡(legacy tree.css:155) */
+  transition: background var(--dur-fast) var(--ease-out);
 }
 
 .dir-row:hover {
@@ -179,6 +192,23 @@
   text-align: center;
   color: var(--color-text2);
   font-size: 12.5px;
+}
+
+/* 目录加载 spinner(移植 legacy tree.css:175-185 .dir-spinner / dir-spin) */
+.dir-spinner {
+  width: 20px;
+  height: 20px;
+  margin: 0 auto 8px;
+  border: 3px solid var(--color-border);
+  border-top-color: var(--color-accent);
+  border-radius: 50%;
+  animation: dir-spin 0.8s linear infinite;
+}
+
+@keyframes dir-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .dir-foot {

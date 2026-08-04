@@ -169,7 +169,11 @@ async function confirmDir() {
         </button>
       </div>
       <div class="dir-list">
-        <div v-if="loading" class="dir-state">加载中…</div>
+        <!-- 加载 spinner(legacy tree.css:175-185)替换原纯文字 -->
+        <div v-if="loading" class="dir-state">
+          <div class="dir-spinner" />
+          加载中…
+        </div>
         <template v-else-if="cwd">
           <div v-if="parent" class="dir-row dir-up" @click="navDir(parent)">
             <span class="dir-ico"><UiIcon name="up" :size="13" /></span>

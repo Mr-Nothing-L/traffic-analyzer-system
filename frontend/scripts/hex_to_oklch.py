@@ -132,9 +132,13 @@ def hex_to_oklch(hex_value: str) -> tuple[float, float, float]:
 
 
 def fmt(l: float, c: float, h: float) -> str:
-    """oklch() 字符串;近无色度(白/黑/灰)省略 hue,避免无意义角度。"""
+    """oklch() 字符串;近无色度(白/黑/灰)hue 无意义,固定写 0.00。
+
+    不能省略 hue 写成 oklch(L C) 两参式:主流内核(Safari/Firefox/Chromium)
+    将其判为非法色,自定义属性在使用处触发 IACVT 回退 unset(等同透明),
+    曾导致 DirPickerModal 的 var(--color-card) 背景全透。"""
     if c < 0.0005:
-        return f"oklch({l:.4f} {c:.4f})"
+        return f"oklch({l:.4f} {c:.4f} 0.00)"
     return f"oklch({l:.4f} {c:.4f} {h:.2f})"
 
 

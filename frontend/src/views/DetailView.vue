@@ -98,7 +98,9 @@ const emptyNote = computed(() => {
 <template>
   <div ref="colRef" class="split-col">
     <div class="pane-top" :style="{ height: (ratio * 100).toFixed(2) + '%' }">
-      <n-card class="card-preview">
+      <!-- 结果加载中:预览区先显示 shimmer 骨架块(legacy base.css:100-111) -->
+      <div v-if="ev.loading && !results" class="skel skel-pane-top" />
+      <n-card v-else class="card-preview">
         <template #header>
           <span class="card-head">视频预览</span><span class="card-sub">{{ stem }}</span>
         </template>
@@ -116,9 +118,8 @@ const emptyNote = computed(() => {
     </div>
     <div class="pane-bottom">
       <div class="detail-cards">
-        <n-card v-if="ev.loading && !results">
-          <div class="empty-note">正在加载结果…</div>
-        </n-card>
+        <!-- 结果加载中:卡片区 shimmer 骨架块(替换原「正在加载结果…」纯文字) -->
+        <div v-if="ev.loading && !results" class="skel skel-detail-card" />
         <n-card v-else-if="ev.loadError">
           <div class="empty-note">加载结果失败:{{ ev.loadError }}</div>
         </n-card>

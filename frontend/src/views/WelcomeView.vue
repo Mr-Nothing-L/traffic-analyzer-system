@@ -34,6 +34,8 @@ const ws = useWorkspaceStore()
 .welcome-card {
   max-width: 1060px;
   box-shadow: var(--shadow);
+  /* 卡片进场(legacy layout.css:112-119 card-in)+ 既有 hover 升影保留 */
+  animation: card-in var(--dur-med) var(--ease-out) both;
   transition: box-shadow var(--dur-med) var(--ease-out);
 }
 

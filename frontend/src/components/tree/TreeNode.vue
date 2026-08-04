@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /** 递归树节点(自建,不用 NTree:行内有勾选/徽标/像素条/重试/停止/presence 徽章)。
  * 行为迁移自 legacy tree.js treeRowsHtml + toggleDir。 */
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
 import { useAppStore } from '../../stores/app'
@@ -54,6 +54,53 @@ onMounted(scheduleBatch) // 挂载时 rows 即大目录(如任务完成后保留
 onBeforeUnmount(() => {
   if (batchTimer) clearTimeout(batchTimer)
 })
+
+/* ---- 目录展开/收起动画(移植自 legacy tree.js:267-290 的 WAAPI 高度+淡入;reduced-motion 折叠为短淡入,design.md §4) ---- */
+const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)')
+
+/** 动画参数取自 motion token,与设计系统同源。 */
+function motionToken(name: string, fallback: string) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback
+}
+/** token 时长 → ms(兼容 ms/s 写法)。 */
+function durMs(name: string, fallback: number) {
+  const v = motionToken(name, '')
+  return v.endsWith('ms') ? parseFloat(v) : v.endsWith('s') ? parseFloat(v) * 1000 : fallback
+}
+
+/** 高度+淡入播放一次;结束或被取消都回调 done。 */
+function playKids(kids: HTMLElement, expand: boolean, done: () => void) {
+  const h = `${kids.scrollHeight}px`
+  const frames = expand
+    ? [{ maxHeight: '0px', opacity: 0 }, { maxHeight: h, opacity: 1 }]
+    : [{ maxHeight: h, opacity: 1 }, { maxHeight: '0px', opacity: 0 }]
+  const opt = { duration: durMs('--dur-med', 200), easing: motionToken('--ease-out', 'ease-out') }
+  kids.animate(frames, opt).finished.then(done, done)
+}
+
+/** 展开:子层就绪后播高度 0→实际 + 淡入(同 legacy 先渲染后动画;首次展开先等懒加载)。 */
+function onKidsEnter(el: Element, done: () => void, rel: string) {
+  const kids = el as HTMLElement
+  if (reduceMotion.matches) { // 折叠为 ≤150ms 淡入
+    kids.animate([{ opacity: 0 }, { opacity: 1 }], { duration: durMs('--dur-fast', 120) })
+      .finished.then(done, done)
+    return
+  }
+  if (ws.children[rel]) { playKids(kids, true, done); return }
+  const src = () => (ws.expanded.has(rel) ? ws.children[rel] : null)
+  const stop = watch(src, async (v) => {
+    if (!v) { if (!ws.expanded.has(rel)) { stop(); done() } return } // 等待中被收起/失败:放弃
+    stop()
+    await nextTick() // 等子层挂载后量真实高度
+    playKids(kids, true, done)
+  })
+}
+
+/** 收起:高度→0 + 淡出;reduced-motion 直接切换(同 legacy 跳过语义)。 */
+function onKidsLeave(el: Element, done: () => void) {
+  if (reduceMotion.matches) { done(); return }
+  playKids(el as HTMLElement, false, done)
+}
 
 function pad(d: number) {
   return { paddingLeft: `${8 + d * 14}px` } // 每级 14px 缩进(同 legacy)
@@ -116,16 +163,19 @@ async function onRetry(rel: string) {
         <span class="tree-ico"><UiIcon name="folder" :size="12" /></span>
         <span class="tree-name" :title="row.e.rel">{{ row.e.name }}</span>
       </div>
-      <div v-if="ws.expanded.has(row.e.rel)" class="tree-kids">
-        <TreeNode
-          v-if="ws.children[row.e.rel] && ws.children[row.e.rel].length"
-          :entries="ws.children[row.e.rel]"
-          :depth="depth + 1"
-        />
-        <div v-else class="tree-empty" :style="pad(depth + 1)">
-          {{ ws.children[row.e.rel] ? '空目录' : '加载中…' }}
+      <!-- 展开/收起:JS hook 驱动 WAAPI 高度+淡入(移植自 legacy tree.js);分片挂载在容器内,不会重复触发 -->
+      <Transition :css="false" @enter="(el, done) => onKidsEnter(el, done, row.e.rel)" @leave="onKidsLeave">
+        <div v-if="ws.expanded.has(row.e.rel)" class="tree-kids">
+          <TreeNode
+            v-if="ws.children[row.e.rel] && ws.children[row.e.rel].length"
+            :entries="ws.children[row.e.rel]"
+            :depth="depth + 1"
+          />
+          <div v-else class="tree-empty" :style="pad(depth + 1)">
+            {{ ws.children[row.e.rel] ? '空目录' : '加载中…' }}
+          </div>
         </div>
-      </div>
+      </Transition>
     </template>
 
     <!-- 视频行:勾选 + 状态徽标/像素条 + presence 徽章(row.status 已预取,每行只算一次) -->
