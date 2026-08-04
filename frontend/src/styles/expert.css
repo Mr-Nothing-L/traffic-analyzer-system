@@ -112,14 +112,7 @@
 }
 
 /* 泳道状态色:queued 灰 / running 橙 / done+detected 绿 / done+undetected 灰绿 / error 红 */
-/* queued 泳道降为单行摘要:去卡片化(透明底/框)、隐藏像素矩阵,
-   只留「名称 + 等待调度」灰字一行;running/done 保持全尺寸矩阵 */
-.expert-lane.lane-queued {
-  padding: 3px 4px;
-  background: transparent;
-  border-color: transparent;
-}
-.expert-lane.lane-queued .pixel-bar { display: none; }
+/* queued 泳道保持完整卡片 + 全灭像素格阵列(观感=等待中),仅名称/阶段置灰 */
 .expert-lane.lane-queued .expert-name,
 .expert-lane.lane-queued .expert-phase { color: var(--color-text2); }
 .expert-lane.lane-running .pixel-sub.on { background: var(--color-accent); }

@@ -32,8 +32,8 @@ review.py 为复核状态持久化与 PUT /api/dashboard/review(成功后 realti
 发布 dashboard.changed)。本模块聚合导出,保持
 ``from traffic_analyzer.web import dashboard`` 及 ``dashboard.router`` /
 ``dashboard._build_dashboard`` 等既有引用/monkeypatch 路径可用。
-_build_dashboard 结果带进程内 TTL 缓存(key=workspace 路径,TTL 见
-workspace._CACHE_TTL_SEC,默认 15s),两个 GET 端点共用一份构建结果;
+_build_dashboard 结果带进程内缓存(key=workspace 路径,长 TTL + 主动失效,
+TTL 见 metrics._DASHBOARD_CACHE_TTL_SEC),两个 GET 端点共用一份构建结果;
 失效统一走 workspace.invalidate_caches(workspace 变更 / infer 完成 /
 review PUT / SFT/证据 PUT)。大工作区(数千视频、外接盘)全量构建 ~11s,
 缓存命中 <100ms。

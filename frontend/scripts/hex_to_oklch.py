@@ -4,6 +4,11 @@
 矩阵),无第三方依赖。生成 frontend/src/styles/tokens.css;hex 源改动后重跑:
 
     python3 frontend/scripts/hex_to_oklch.py
+
+每条颜色 token 输出两层::root 内先写 hex 兜底,再在
+@supports (color: oklch(0 0 0)) 块里写 oklch 覆盖。注意不能用"hex 行 + oklch 行
+同块并列"的写法——自定义属性解析期不校验,oklch 声明会覆盖 hex 声明,不认
+oklch 的老内核在使用处才 IACVT 回退 unset(等同透明),兜底会失效。
 """
 
 from __future__ import annotations
@@ -48,6 +53,9 @@ HEADER = """/* Hallmark · macrostructure: Workbench · tone: technical/utilitar
 /* ==========================================================================
    高速交通事件分析台 v2 — 设计 token(design.md §1 的 OKLCH 承载)
    由 frontend/scripts/hex_to_oklch.py 生成,请勿手改色值;改色先改 design.md。
+   每条颜色两层::root 写 hex 兜底,@supports (color: oklch(...)) 内写 oklch
+   覆盖(老内核整个 @supports 块跳过,真正回退 hex;同块双行写法会因自定义
+   属性解析期不校验而失效)。
    组件内只准引用 var(--token),禁止 inline hex/OKLCH(design.md §8)。
    ========================================================================== */
 """
@@ -132,15 +140,21 @@ def fmt(l: float, c: float, h: float) -> str:
 
 def main() -> None:
     lines = [HEADER, ":root {\n"]
+    oklch_lines = []
     for token, hex_value in PALETTE:
         l, c, h = hex_to_oklch(hex_value)
-        lines.append(f"  {token}: {fmt(l, c, h)}; /* 源 {hex_value} */\n")
+        lines.append(f"  {token}: {hex_value};\n")  # 兜底:老内核(无 oklch 支持)只用这层
+        oklch_lines.append(f"  {token}: {fmt(l, c, h)}; /* 源 {hex_value} */\n")
         print(f"{token:24s} {hex_value} -> {fmt(l, c, h)}")
     lines.append("\n")
     lines.append(SHADOWS)
     lines.append(FONTS)
     lines.append(SCALES)
     lines.append("}\n")
+    # 支持 oklch 的现代浏览器用精确 OKLCH 值覆盖;老内核跳过整个块,hex 兜底生效
+    lines.append("\n@supports (color: oklch(0 0 0)) {\n:root {\n")
+    lines.extend(oklch_lines)
+    lines.append("}\n}\n")
     lines.append(FONT_FACE)
     OUT.write_text("".join(lines), encoding="utf-8")
     print(f"\nwrote {OUT}")

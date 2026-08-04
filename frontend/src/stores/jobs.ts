@@ -41,13 +41,18 @@ export const useJobsStore = defineStore('jobs', () => {
   const jobs = ref<Job[]>([])
   const inferPosting = ref(false) // 提交防抖(legacy inferPosting)
 
-  /** 同 stem 取最新一条 infer 任务(列表尾部最新)。 */
-  function latestJobForStem(stem: string): Job | null {
-    for (let i = jobs.value.length - 1; i >= 0; i--) {
-      const j = jobs.value[i]
-      if (j.kind === 'infer' && j.stem === stem) return j
+  /** stem → 最新 infer 任务索引(jobs 变更时重建;latestJobForStem 走 O(1))。 */
+  const latestJobByStem = computed(() => {
+    const m = new Map<string, Job>()
+    for (const j of jobs.value) {
+      if (j.kind === 'infer' && j.stem) m.set(j.stem, j) // 列表尾部最新,后者覆盖前者
     }
-    return null
+    return m
+  })
+
+  /** 同 stem 取最新一条 infer 任务。 */
+  function latestJobForStem(stem: string): Job | null {
+    return latestJobByStem.value.get(stem) ?? null
   }
 
   /** 是否有运行中/排队中的 infer(「开始推理」禁用条件之一)。 */
@@ -65,8 +70,7 @@ export const useJobsStore = defineStore('jobs', () => {
   }
 
   /** SSE 快照落库:按 id 更新/插入;终态后忽略迟到的非终态快照(同 legacy)。 */
-  function onJobEvent(job: Job) {
-    if (!job || job.id == null) return
+  function applyJob(job: Job) {
     const cur = jobs.value.find((j) => j.id === job.id)
     if (
       cur &&
@@ -78,6 +82,29 @@ export const useJobsStore = defineStore('jobs', () => {
     }
     if (cur) Object.assign(cur, job)
     else jobs.value.push(job)
+  }
+
+  /* ---- 进度节流:非终态快照 ~100ms 合并落库(同 job 只留最新一帧),避免高频 SSE 驱动整树重渲染 ---- */
+  const PROGRESS_FLUSH_MS = 100
+  const pendingJobs = new Map<number, Job>() // 待落库快照(job id → 最新一帧)
+  let flushTimer: ReturnType<typeof setTimeout> | null = null
+
+  function flushPending() {
+    flushTimer = null
+    pendingJobs.forEach(applyJob)
+    pendingJobs.clear()
+  }
+
+  /** SSE 入口:终态立即落库(并丢弃该 job 待合并帧);非终态并入节流窗口。 */
+  function onJobEvent(job: Job) {
+    if (!job || job.id == null) return
+    if (job.status === 'done' || job.status === 'failed') {
+      pendingJobs.delete(job.id)
+      applyJob(job)
+      return
+    }
+    pendingJobs.set(job.id, job)
+    if (!flushTimer) flushTimer = setTimeout(flushPending, PROGRESS_FLUSH_MS)
   }
 
   async function postInfer(rels: string[]): Promise<ActionResult> {

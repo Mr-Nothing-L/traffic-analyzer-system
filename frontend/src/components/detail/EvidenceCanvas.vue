@@ -8,6 +8,7 @@ import { NButton } from 'naive-ui'
 import type { EvidenceEvent, EvidenceVideoInfo, VideoSource } from '../../api/results'
 import { frameUrl, resultFileUrl } from '../../api/results'
 import { useEvidenceStore } from '../../stores/evidence'
+import { oklchToRgb } from '../../theme'
 import type { CanvasColors, Handle, Shape } from './evidenceGeo'
 import { buildHandles, buildShapes, drawShapes, movePoint } from './evidenceGeo'
 import { useEvDrag } from './useEvDrag'
@@ -131,10 +132,11 @@ function openImage(name: string) {
 let ro: ResizeObserver | null = null
 onMounted(() => {
   const cs = getComputedStyle(document.documentElement) // canvas 只认计算色,源仍是 token
-  colors.emergency = cs.getPropertyValue('--color-accent').trim()
-  colors.chevron = cs.getPropertyValue('--color-blue').trim()
-  colors.box = cs.getPropertyValue('--color-sage').trim()
-  colors.onAccent = cs.getPropertyValue('--color-on-accent').trim()
+  // 老内核读到 oklch 时 canvas fillStyle 不认,统一经 oklchToRgb 换算(hex 则原样透传)
+  colors.emergency = oklchToRgb(cs.getPropertyValue('--color-accent').trim())
+  colors.chevron = oklchToRgb(cs.getPropertyValue('--color-blue').trim())
+  colors.box = oklchToRgb(cs.getPropertyValue('--color-sage').trim())
+  colors.onAccent = oklchToRgb(cs.getPropertyValue('--color-on-accent').trim())
   ro = new ResizeObserver(fit) // 分隔条拖动等容器尺寸变化不触发 window resize
   if (stageEl.value) ro.observe(stageEl.value)
   window.addEventListener('resize', fit)

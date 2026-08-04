@@ -56,8 +56,8 @@ export function advanceLane(
   return d
 }
 
-// queued 泳道降为单行摘要(名称 + 「等待调度」,像素矩阵由 CSS 隐藏);
-// running/done 保持全尺寸矩阵,阶段文案照旧
+// queued 泳道仍渲染完整卡片 + 全灭像素格阵列,仅阶段文案固定为「等待调度」;
+// running/done 阶段文案照旧用 label
 export function phaseText(ex: ExpertLane): string {
   return ex.status === 'queued' ? '等待调度' : ex.label || ''
 }

@@ -111,7 +111,7 @@ async function onLogout() {
 }
 
 .app-title {
-  font-size: var(--text-xl);
+  font-size: 24px; /* 对齐 legacy layout.css .tb-title;token 体系无 24px 档,直接写值 */
   font-weight: 650;
   letter-spacing: 0.02em;
 }

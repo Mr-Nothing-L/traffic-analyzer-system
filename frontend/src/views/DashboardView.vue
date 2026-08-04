@@ -43,7 +43,7 @@ function onSearch(ev: Event) {
 </script>
 
 <template>
-  <main class="dash-page">
+  <div class="dash-page">
     <div class="dash-head">
       <h1 class="dash-title">数据看板</h1>
       <n-button size="small" @click="router.push('/')">
@@ -59,7 +59,7 @@ function onSearch(ev: Event) {
         <span class="dash-card-title">逐视频明细</span>
         <span class="dash-card-sub">{{ summaryText }}</span>
         <span class="dash-spacer" />
-        <span class="dash-card-sub">点击行跳回树视图选中该视频</span>
+        <span class="dash-card-sub">点击行进入该视频分析详情</span>
       </div>
       <!-- 筛选条:一致性/审核多值 chip + 人工已改 + 名称搜索,全部走服务端(先过滤后分页) -->
       <div class="dash-filters">
@@ -117,17 +117,11 @@ function onSearch(ev: Event) {
         <DashboardTable />
       </div>
     </section>
-  </main>
+  </div>
 </template>
 
 <style scoped>
-.dash-page {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  padding: var(--space-lg) var(--space-xl) var(--space-2xl);
-}
-
+/* 看板嵌在 TreeView 主区内:滚动与 padding 由外壳 .app-main 承担,这里不再重复 */
 .dash-head {
   max-width: 1280px;
   display: flex;

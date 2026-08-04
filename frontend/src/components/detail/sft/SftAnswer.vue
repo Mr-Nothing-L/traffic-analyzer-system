@@ -8,7 +8,8 @@ import { useSftStore } from '../../../stores/sft'
 const store = useSftStore()
 const ENV_KEYS = ['天气', '时间', '场景'] // 固定顺序(同 legacy)
 
-const sceneEl = ref<HTMLTextAreaElement | null>(null)
+// 注意:ref 写在 v-for(ENV_KEYS)内,Vue 会把引用收集成元素数组而非单个元素
+const sceneEl = ref<HTMLTextAreaElement[] | null>(null)
 
 // 场景文本框自适应高度(同 legacy autoGrow)
 const MAX_H = 300
@@ -50,7 +51,11 @@ const rows = computed<ConclusionRow[]>(() => {
 })
 
 onMounted(() => {
-  if (sceneEl.value) nextTick(() => sceneEl.value && autoGrow(sceneEl.value))
+  // 「场景」在 ENV_KEYS 中唯一,数组首项即目标文本框
+  nextTick(() => {
+    const ta = sceneEl.value?.[0]
+    if (ta) autoGrow(ta)
+  })
 })
 </script>
 

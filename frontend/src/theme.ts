@@ -4,13 +4,16 @@
  * 组件内依旧零 raw hex/oklch。 */
 import type { GlobalThemeOverrides } from 'naive-ui'
 
-/** oklch(L C H) → 'rgb(r, g, b)';非 oklch 输入原样返回。 */
-function oklchToRgb(input: string): string {
-  const m = input.match(/oklch\(\s*([\d.]+)\s+([\d.]+)\s+([\d.]+)\s*(?:\/\s*([\d.]+%?)\s*)?\)/)
+/** oklch(L C H) → 'rgb(r, g, b)';非 oklch 输入(如 hex)原样返回。
+ * 近无色度(白/黑/灰)生成器会省略 hue,此时按 h=0 处理(C≈0,hue 无影响)。 */
+export function oklchToRgb(input: string): string {
+  const m = input.match(
+    /oklch\(\s*([\d.]+)\s+([\d.]+)(?:\s+([\d.]+))?\s*(?:\/\s*([\d.]+%?)\s*)?\)/,
+  )
   if (!m) return input
   const L = parseFloat(m[1])
   const C = parseFloat(m[2])
-  const h = (parseFloat(m[3]) * Math.PI) / 180
+  const h = ((m[3] ? parseFloat(m[3]) : 0) * Math.PI) / 180
   const a = C * Math.cos(h)
   const b = C * Math.sin(h)
   // OKLab → 线性 sRGB(标准矩阵)
@@ -74,7 +77,7 @@ export const themeOverrides: GlobalThemeOverrides = {
     modalColor: 'var(--color-card)',
     popoverColor: 'var(--color-card)',
     borderColor: 'var(--color-border)',
-    borderRadius: 'var(--radius)',
+    borderRadius: 'var(--radius-sm)',
     borderRadiusSmall: 'var(--radius-sm)',
     fontFamily: 'var(--font-sans)',
     fontFamilyMono: 'var(--font-mono)',

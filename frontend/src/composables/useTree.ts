@@ -42,8 +42,15 @@ export function videoStatusOf(
   return { cls: 'st-none', text: '未推理' }
 }
 
-export function useTreeView() {
-  const ws = useWorkspaceStore()
+/** 渲染行视图模型:视频行预取 video/状态/进度(模板每行只算一次,不再重复 videoFor)。 */
+export interface ViewRow {
+  e: TreeEntry
+  video: VideoInfo | null // 视频行非空
+  status: VideoStatus | null // 视频行非空
+  fraction: number | null // 运行中行的像素条进度
+}
+
+export function useTreeView() {  const ws = useWorkspaceStore()
   const jobs = useJobsStore()
 
   /** 子串过滤,忽略大小写(仅影响展示,不改勾选)。 */
@@ -88,11 +95,10 @@ export function useTreeView() {
   function viewEntries(entries: TreeEntry[]): TreeEntry[] {
     return sortLevel(filterLevel(entries))
   }
-
-  /** 树条目 → 视频信息:优先全量列表,缺失时由条目合成(任意深度,同 legacy)。 */
+  /** 树条目 → 视频信息:优先全量列表索引(O(1)),缺失时由条目合成(任意深度,同 legacy)。 */
   function videoFor(e: TreeEntry): VideoInfo {
     return (
-      ws.videos.find((v) => v.rel === e.rel) || {
+      ws.videoByRel.get(e.rel) || {
         stem: e.stem || e.name.replace(/\.[^.]+$/, ''),
         rel: e.rel,
         name: e.name,
@@ -107,5 +113,22 @@ export function useTreeView() {
     return videoStatusOf(v, jobs.latestJobForStem(v.stem))
   }
 
-  return { nameMatches, viewEntries, videoFor, videoStatus }
+  /** 当前层级的渲染行(先过滤排序,再为视频行预取状态;任务进度变化时整体重算)。 */
+  function viewRows(entries: TreeEntry[]): ViewRow[] {
+    return viewEntries(entries).map((e) => {
+      if (e.type === 'dir' || !e.is_video) {
+        return { e, video: null, status: null, fraction: null }
+      }
+      const video = videoFor(e)
+      const job = jobs.latestJobForStem(video.stem)
+      return {
+        e,
+        video,
+        status: videoStatusOf(video, job),
+        fraction: job && job.progress ? job.progress.fraction : null,
+      }
+    })
+  }
+
+  return { nameMatches, viewEntries, viewRows, videoFor, videoStatus }
 }

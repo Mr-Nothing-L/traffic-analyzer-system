@@ -32,7 +32,7 @@ const ws = useWorkspaceStore()
 
 <style scoped>
 .welcome-card {
-  max-width: 640px;
+  max-width: 1060px;
   box-shadow: var(--shadow);
   transition: box-shadow var(--dur-med) var(--ease-out);
 }

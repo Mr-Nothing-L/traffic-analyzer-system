@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /** 逐视频明细表 + 翻页条(自建表格:NDataTable 对行内 chip 组/presence 徽章/整行
  * 点击跳得不顺手,自建更贴 legacy 密度)。迁移自 legacy renderTable/pagerHtml/bindPager。
- * 行点击:legacy 回详情视图;v2 详情视图未迁移,改为跳树视图并选中该视频。 */
+ * 行点击:选中该视频并进分析详情页(与树行点击一致,对齐 legacy 回详情视图)。 */
 import { computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
@@ -58,8 +58,8 @@ function goPage(delta: number) {
   dash.fetchRows(target)
 }
 
-/** 行点击 → 树视图选中:树未加载先加载,逐层展开祖先目录保证节点可见。 */
-async function openRow(rel: string) {
+/** 行点击 → 选中并进详情:树未加载先加载,逐层展开祖先目录保证节点可见(同 TreeNode.onSelect)。 */
+async function openRow(rel: string, stem: string) {
   try {
     if (!ws.loaded) await ws.loadTree()
     const parts = rel.split('/')
@@ -68,7 +68,7 @@ async function openRow(rel: string) {
       if (!ws.expanded.has(dir)) await ws.toggleDir(dir)
     }
     ws.currentRel = rel
-    router.push('/')
+    router.push({ name: 'detail', params: { stem }, query: { rel } })
   } catch (e) {
     message.error(`打开视频失败:${(e as Error).message}`)
   }
@@ -95,7 +95,7 @@ async function openRow(rel: string) {
           </tr>
         </thead>
         <tbody>
-          <tr v-for="r in rows" :key="r.rel" @click="openRow(r.rel)">
+          <tr v-for="r in rows" :key="r.rel" @click="openRow(r.rel, r.stem)">
             <td class="dash-v" :title="r.rel">
               <span class="file-name">{{ r.rel }}</span>
               <span

@@ -11,8 +11,8 @@ metrics 为集合运算(仅 consistent/diff 行参与;per_event + macro/micro)�
 GET /api/dashboard 只回汇总视图(summary 计数、event_names
 (str(event_id) → name_zh,event_config 的 event_categories 索引反转)、
 metrics),全部基于未过滤全量行。
-_build_dashboard 结果带进程内 TTL 缓存(key=workspace 路径,TTL 见
-workspace._CACHE_TTL_SEC,默认 15s),GET /api/dashboard 与 rows 端点共用;
+_build_dashboard 结果带进程内缓存(key=workspace 路径,长 TTL + 主动失效,
+TTL 见 metrics._DASHBOARD_CACHE_TTL_SEC),GET /api/dashboard 与 rows 端点共用;
 失效统一走 workspace.invalidate_caches;copy=False 只读契约(调用方不得
 就地修改)。_build_dashboard 经 dashboard 包命名空间延迟查找,测试
 monkeypatch traffic_analyzer.web.dashboard._build_dashboard 即生效。
@@ -25,8 +25,9 @@ scripts/batch_evaluate.py。
 from __future__ import annotations
 
 import importlib.util
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from fastapi import APIRouter, HTTPException, Request
 
@@ -38,6 +39,7 @@ from traffic_analyzer.web.dashboard.review import (
     REVIEW_STATUSES,
     _load_review_states,
 )
+from traffic_analyzer.web.workspace.videos import _LongTTLCache
 
 router = APIRouter()
 
@@ -137,6 +139,22 @@ def _compute_metrics(
     return {"per_event": per_event, "macro": macro, "micro": micro}
 
 
+def _read_video_payloads(
+    workspace: Path, stem: str
+) -> Tuple[bool, Optional[Any], Optional[Any]]:
+    """单个视频的看板输入(纯 IO):has_results + SFT JSON + 冻结快照 JSON。
+
+    单条损坏不拖垮整个看板:JSON 损坏按「无预测/无快照」降级展示。
+    """
+    out_dir = workspace_mod.analysis_dir(workspace, stem)
+    try:
+        sft = evidence_api._read_json(out_dir / f"{stem}.json")
+        raw = evidence_api._read_json(out_dir / f"{stem}_raw.json")
+    except evidence_api._CorruptJsonError:
+        sft = raw = None
+    return workspace_mod.has_results(workspace, stem), sft, raw
+
+
 def _build_dashboard(workspace: Path) -> Dict[str, Any]:
     """Full unfiltered dashboard: rows + summary + event_names + metrics."""
     extract_gt = _gt_extractor()
@@ -146,19 +164,18 @@ def _build_dashboard(workspace: Path) -> Dict[str, Any]:
         str(eid): name for name, eid in event_config.event_name_index().items()
     }
 
+    videos = workspace_mod.list_videos_cached(workspace)
+    # 逐视频的 has_results 探测与两个 JSON 读取是纯 IO(大工作区外接盘上为冷建
+    # 大头),线程池并发;executor.map 保序,rows 仍按 videos 顺序装配,结果确定。
+    with ThreadPoolExecutor() as pool:
+        payloads = list(
+            pool.map(lambda v: _read_video_payloads(workspace, v["stem"]), videos)
+        )
+
     rows: List[Dict[str, Any]] = []
-    for video in workspace_mod.list_videos_cached(workspace):
+    for video, (has_results, sft, raw) in zip(videos, payloads):
         stem = video["stem"]
         gt_ids = sorted(extract_gt(video["name"]))
-        has_results = workspace_mod.has_results(workspace, stem)
-        out_dir = workspace_mod.analysis_dir(workspace, stem)
-
-        try:
-            sft = evidence_api._read_json(out_dir / f"{stem}.json")
-            raw = evidence_api._read_json(out_dir / f"{stem}_raw.json")
-        except evidence_api._CorruptJsonError:
-            # 单条损坏不拖垮整个看板:按「无预测/无快照」降级展示。
-            sft = raw = None
         pred_ids = _action_ids(sft)
         pred_raw_ids = _action_ids(raw) if raw is not None else None
 
@@ -219,15 +236,20 @@ def _build_dashboard(workspace: Path) -> Dict[str, Any]:
     }
 
 
-# _build_dashboard 的进程内缓存(key=workspace 路径,TTL 见 workspace._CACHE_TTL_SEC):
-# 大工作区下全量构建需 ~11s(外接盘逐文件 stat/读 JSON),GET /api/dashboard 与
-# /api/dashboard/rows 共用同一份构建结果;命中后响应 <100ms。
-# 失效统一走 workspace_mod.invalidate_caches(workspace 变更 / infer 完成 /
-# review PUT / SFT/证据 PUT)。
+# _build_dashboard 的进程内缓存(key=workspace 路径):「长 TTL + 主动失效」主导。
+# 原 15s 短 TTL 下,大工作区全量构建需秒级~11s(外接盘逐文件 stat/读 JSON),
+# 翻页/切换频繁踩自然过期的冷建;正确性本就由 invalidate_caches 主动失效保证
+# (workspace 变更 / infer 完成 / review PUT / SFT/证据 PUT),TTL 拉长到分钟级,
+# 仅作进程外直接改盘的兜底刷新。GET /api/dashboard 与 /api/dashboard/rows 共用
+# 同一份构建结果;命中后响应 <100ms。
 # copy=False 只读使用:两个端点都不就地修改返回值——aggregate 端点只读取
 # summary/event_names/metrics 三个键;rows 端点的过滤/分页均产生新列表,
 # 行字典只读序列化(4393 行的深拷贝需 ~200ms,会破坏命中 <100ms 的目标)。
-_dashboard_cache = workspace_mod.register_cache(workspace_mod._TTLCache())
+_DASHBOARD_CACHE_TTL_SEC = 600.0
+
+_dashboard_cache = workspace_mod.register_cache(
+    _LongTTLCache(_DASHBOARD_CACHE_TTL_SEC)
+)
 
 
 def _get_dashboard(workspace: Path) -> Dict[str, Any]:

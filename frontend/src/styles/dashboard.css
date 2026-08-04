@@ -79,7 +79,7 @@
 .dash-table-wrap { overflow-x: auto; border: 1px solid var(--color-border); border-radius: var(--radius-sm); }
 .dash-table { border-collapse: collapse; width: 100%; font-family: var(--font-sans); font-size: 12.5px; }
 .dash-table th,
-.dash-table td { border-bottom: 1px solid var(--color-border); padding: 7px 10px; text-align: left; vertical-align: middle; }
+.dash-table td { border-bottom: 1px solid var(--color-border); padding: 7px 10px; text-align: center; vertical-align: middle; }
 .dash-table thead th {
   font-family: var(--font-pixel);
   color: var(--color-text2);
@@ -90,8 +90,8 @@
   text-align: center;
 }
 .dash-table tbody tr:last-child td { border-bottom: none; }
-/* 列间深浅交替(legacy 的浅米列底色 → --color-paper) */
-.dash-table tbody td:nth-child(even) { background: var(--color-paper); }
+/* 行斑马:偶数行浅米底(legacy 浅米 → --color-paper),悬停行 --color-hover-bg 覆盖 */
+.dash-table tbody tr:nth-child(even) td { background: var(--color-paper); }
 .dash-table td.num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; text-align: center; white-space: nowrap; }
 /* 宏/微平均行:2px 顶部粗边框 + 加粗 */
 .dash-metrics-table tr.total td { font-weight: 700; border-top: 2px solid var(--color-line-strong); }

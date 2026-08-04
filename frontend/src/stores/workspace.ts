@@ -1,5 +1,5 @@
 /** 工作区/文件树/勾选状态(迁移自 legacy tree.js + workspace.js + state.js)。 */
-import { computed, reactive, ref } from 'vue'
+import { computed, reactive, ref, shallowReactive, shallowRef } from 'vue'
 import { defineStore } from 'pinia'
 import { apiFetch } from '../api/client'
 
@@ -37,15 +37,22 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const path = ref<string | null>(null) // 当前工作区绝对路径(未设置为 null)
   const loaded = ref(false) // 树是否已由用户显式加载(刷新后不自动加载,同 legacy)
   const root = ref<TreeEntry[]>([])
-  const children = reactive<Record<string, TreeEntry[]>>({}) // dir rel → 子层(懒加载缓存)
+  // 浅响应式:条目对象不做深代理,数据变更一律整体替换(大工作区显著降开销)
+  const children = shallowReactive<Record<string, TreeEntry[]>>({}) // dir rel → 子层(懒加载缓存)
   const expanded = reactive(new Set<string>())
-  const videos = ref<VideoInfo[]>([])
+  const videos = shallowRef<VideoInfo[]>([])
   const checked = reactive(new Set<string>()) // 勾选的视频 rel
   const currentRel = ref<string | null>(null) // 当前选中视频 rel(行高亮 + presence viewing)
   const filter = ref(localStorage.getItem(SIDE_FILTER_KEY) || '')
   const sort = ref<SortKey>((localStorage.getItem(SIDE_SORT_KEY) as SortKey) || 'name')
 
   const hasWorkspace = computed(() => !!path.value)
+  /** rel → 视频信息索引(videos 整体替换时重建;videoFor/选中查询走 O(1))。 */
+  const videoByRel = computed(() => {
+    const m = new Map<string, VideoInfo>()
+    for (const v of videos.value) m.set(v.rel, v)
+    return m
+  })
   const allChecked = computed(
     () => videos.value.length > 0 && videos.value.every((v) => checked.has(v.rel)),
   )
@@ -176,7 +183,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
   return {
     path, loaded, root, children, expanded, videos, checked, currentRel,
-    filter, sort, hasWorkspace, allChecked, someChecked,
+    filter, sort, hasWorkspace, videoByRel, allChecked, someChecked,
     fetchWorkspace, loadTree, toggleDir, applyWorkspace,
     setFilter, setSort, setChecked, setAllChecked, loadRecent, pushRecent,
   }
