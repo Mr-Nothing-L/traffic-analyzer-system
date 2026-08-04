@@ -8,7 +8,8 @@ the TTL. Storage is per-app (``app.state.presence``), in-memory only.
 [文件说明]
 作用:在线状态接口。POST /api/presence {viewing, editing} 按 request.state.user
 (认证关闭时为 'local')记心跳;GET /api/presence 返回 [{user, viewing, editing, ts}],
-30s TTL 惰性剔除。存储为 app.state.presence(内存,线程锁保护)。
+30s TTL 惰性剔除。存储为 app.state.presence(内存,线程锁保护)。beat 后经
+realtime 总线 publish presence 事件(最新 roster)。
 上游:web/app.py(create_app 挂载路由并初始化 store);web/auth.py(request.state.user)。
 下游:web/static 前端(协作在线状态展示)。
 """
@@ -21,6 +22,8 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
+
+from traffic_analyzer.web import realtime
 
 router = APIRouter()
 
@@ -65,6 +68,8 @@ def post_presence(body: PresenceBeat, request: Request) -> Dict[str, Any]:
     store: PresenceStore = request.app.state.presence
     user = getattr(request.state, "user", "local")
     store.beat(user, body.viewing, body.editing)
+    # 名册变化 → 广播最新 roster(订阅方无需轮询 GET)。
+    realtime.publish_from_app(request.app, "presence", {"roster": store.roster()})
     return {"ok": True}
 
 

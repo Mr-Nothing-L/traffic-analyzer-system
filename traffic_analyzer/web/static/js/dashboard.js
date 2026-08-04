@@ -8,15 +8,18 @@
      PUT /api/dashboard/review { stem, status }
    视图协作:openDashboard() 置 state.view='dashboard' 并整页替换 #main;
    selectVideo/renderWelcome 经 runCleanups() 触发此处登记的清理,把
-   state.view 切回 'detail'。轮询由 main.js 每 1.5s 调 dashboardTick()。
+   state.view 切回 'detail'。看板打开期间订阅 SSE dashboard.changed 事件
+   触发重拉(事件驱动,数据量小,直接重拉重渲染,不再做快照比对);
+   关闭时经 cleanups 退订。mock 模式无 SSE,保留 1.5s 轮询。
    筛选(一致性/审核/人工已改/名称搜索)与翻页均走服务端:
    变更即 fetchRows(page=1),当前筛选状态保存在本模块内。
    ================================================================ */
 import { $, esc, toast } from './util.js';
-import { state, runCleanups } from './state.js';
+import { MOCK, state, runCleanups } from './state.js';
 import { api } from './api.js';
+import { subscribe } from './events.js';
 import { selectVideo } from './preview.js';
-import { presenceBadgeHtml, presenceUsers } from './presence.js';
+import { presenceBadgeHtml } from './presence.js';
 
 const CONSISTENCY = [
   { key: 'consistent', label: '一致', cls: 'ok' },
@@ -33,22 +36,31 @@ const PAGE_SIZE = 50;          // 每页行数(契约 size 参数)
 const SEARCH_DEBOUNCE_MS = 300; // 名称搜索防抖
 
 let dashData = null;   // /api/dashboard 最近一次成功响应 {summary, event_names, metrics}
-let dashSnap = '';     // 汇总快照:未变时跳过重渲染,防轮询闪烁
 let fetching = false;  // 汇总请求去重
 let rowsData = null;   // /api/dashboard/rows 最近一次成功响应 {rows, page, size, total, total_pages}
-let rowsSnap = '';     // 明细快照(含 presence 名册,徽章变化同样触发重渲染)
 let rowsFetching = false; // 明细请求去重
 let curPage = 1;       // 当前页码(以服务端回包 page 为准)
 let searchTimer = null;   // 搜索防抖定时器
-const pendingReviews = new Set(); // 正在提交审核的 stem:轮询回包不回滚这些行
+const pendingReviews = new Set(); // 正在提交审核的 stem:重拉回包不回滚这些行
 const filters = { consistency: new Set(), review: new Set(), editedOnly: false, name: '' };
 
-/* ------------------------------------------------------------ 进入 / 轮询 */
+/* ------------------------------------------------------------ 进入 / 事件驱动重拉 */
 export async function openDashboard() {
   runCleanups();
   state.view = 'dashboard';
-  // 看板被 selectVideo/renderWelcome 整页替换时,经 cleanups 把视图态切回 detail
-  state.cleanups.push(() => { if (state.view === 'dashboard') state.view = 'detail'; });
+  // 看板打开期间订阅 SSE:dashboard.changed → 重拉重渲染;
+  // presence(名册变化)→ 就地重渲染表格刷新徽章,不重拉数据
+  const unsubDash = subscribe('dashboard.changed', () => { dashboardTick(); });
+  const unsubPresence = subscribe('presence', () => { renderTable(); });
+  // mock 模式无 SSE:保留打开期间 1.5s 轮询(原行为)
+  const mockTimer = MOCK ? setInterval(dashboardTick, 1500) : null;
+  // 看板被 selectVideo/renderWelcome 整页替换时,经 cleanups 退订并把视图态切回 detail
+  state.cleanups.push(() => {
+    unsubDash();
+    unsubPresence();
+    if (mockTimer) clearInterval(mockTimer);
+    if (state.view === 'dashboard') state.view = 'detail';
+  });
   const main = $('#main');
   delete main.dataset.renderedStem; // 离开分析视图,下次 renderResults 需整体重建
   main.innerHTML =
@@ -65,40 +77,36 @@ export async function openDashboard() {
     + '<div class="card-body dash-body" id="dash-body">'
     + '<div class="empty-note">看板数据加载中…</div></div></div>'
     + '</div></div>';
-  // 重置筛选/分页与快照,强制首轮全量渲染
+  // 重置筛选/分页,强制首轮全量渲染
   filters.consistency.clear(); filters.review.clear();
   filters.editedOnly = false; filters.name = '';
   curPage = 1;
-  dashData = null; dashSnap = '';
-  rowsData = null; rowsSnap = '';
+  dashData = null;
+  rowsData = null;
   await dashboardTick();
 }
 
-// 供 main.js 轮询调用;仅看板激活时拉取,快照比对后再重渲染
-export async function dashboardTick() {
+// 首拉与 SSE dashboard.changed 事件共用:直接重拉重渲染(数据量小,不做快照比对)
+async function dashboardTick() {
   if (state.view !== 'dashboard' || !$('#dash-root') || fetching) return;
   fetching = true;
   try {
     const data = await api('/api/dashboard');
     if (state.view !== 'dashboard' || !$('#dash-root')) return; // 期间已离开看板
-    const snap = JSON.stringify(data);
-    if (snap !== dashSnap) {
-      dashData = data;
-      dashSnap = snap;
-      renderSummary();
-      renderMetrics(data.metrics);
-      renderFilters(data.summary || {});
-    }
+    dashData = data;
+    renderSummary();
+    renderMetrics(data.metrics);
+    renderFilters(data.summary || {});
   } catch (e) {
     if (!dashData && $('#dash-body')) {
       $('#dash-body').innerHTML = '<div class="empty-note">看板数据加载失败:'
         + esc(e.message) + '</div>';
     }
-    // 已有数据时静默保留下轮重试,不打断阅读
+    // 已有数据时静默保留,下次事件重试,不打断阅读
   } finally {
     fetching = false;
   }
-  await fetchRows(curPage); // 明细行独立拉取(自身快照比对防闪烁)
+  await fetchRows(curPage); // 明细行独立拉取
 }
 
 /* ------------------------------------------------------------ 明细行:服务端分页 + 筛选 */
@@ -123,7 +131,7 @@ async function fetchRows(page) {
       data = await api(rowsQuery(data.total_pages));
       if (state.view !== 'dashboard' || !$('#dash-root')) return;
     }
-    // 用户正在点审核 chip 的行:保留本地乐观值,轮询回包不回滚
+    // 用户正在点审核 chip 的行:保留本地乐观值,重拉回包不回滚
     if (pendingReviews.size && rowsData) {
       (data.rows || []).forEach(r => {
         if (pendingReviews.has(r.stem)) {
@@ -132,20 +140,15 @@ async function fetchRows(page) {
         }
       });
     }
-    // presence 名册一并纳入快照:他人编辑/查看徽章变化时同样触发重渲染
-    const snap = JSON.stringify([data, presenceUsers()]);
-    if (snap !== rowsSnap) {
-      rowsData = data;
-      rowsSnap = snap;
-      curPage = data.page;
-      renderTable();
-    }
+    rowsData = data;
+    curPage = data.page;
+    renderTable();
   } catch (e) {
     if (!rowsData && $('#dash-body')) {
       $('#dash-body').innerHTML = '<div class="empty-note">明细加载失败:'
         + esc(e.message) + '</div>';
     }
-    // 已有数据时静默保留下轮重试
+    // 已有数据时静默保留,下次事件重试
   } finally {
     rowsFetching = false;
     setPagerBusy(false);
@@ -237,7 +240,7 @@ function chipHtml(group, key, label, cls, count) {
 function renderFilters(s) {
   const el = $('#dash-filters');
   if (!el) return;
-  // 过滤条重建会替换搜索框:轮询重渲染时保住焦点与光标,不打断输入
+  // 过滤条重建会替换搜索框:重渲染时保住焦点与光标,不打断输入
   const searchHadFocus = document.activeElement && document.activeElement.id === 'dash-search';
   const hint = (filters.consistency.size || filters.review.size || filters.editedOnly || filters.name)
     ? '<button type="button" class="dash-chip dash-chip-clear" data-group="__clear">清除过滤</button>'
@@ -268,7 +271,7 @@ function renderFilters(s) {
         if (set.has(btn.dataset.key)) set.delete(btn.dataset.key); else set.add(btn.dataset.key);
       }
       curPage = 1;
-      renderFilters((dashData && dashData.summary) || {}); // 就地刷新选中态,计数等下轮汇总
+      renderFilters((dashData && dashData.summary) || {}); // 就地刷新选中态,计数等下次汇总重拉
       fetchRows(1);
     });
   });
@@ -330,7 +333,7 @@ function pagerHtml(data) {
 function bindPager(el, data) {
   const prev = $('#dash-prev', el);
   const next = $('#dash-next', el);
-  // 点击时读最新 rowsData(轮询/筛选可能已更新页码),不用闭包里的旧 data,
+  // 点击时读最新 rowsData(重拉/筛选可能已更新页码),不用闭包里的旧 data,
   // 避免陈旧页码;rowsFetching 期间忽略点击(按钮已 disabled,双保险)。
   if (prev) prev.addEventListener('click', () => {
     const d = rowsData || data;
@@ -433,9 +436,6 @@ async function setReview(stem, status) {
   pendingReviews.add(stem);
   adjustSummary(prev, -1);
   adjustSummary(status, 1);
-  // 快照与乐观值对齐,避免轮询回写同一数据时重渲染
-  rowsSnap = JSON.stringify([rowsData, presenceUsers()]);
-  dashSnap = JSON.stringify(dashData);
   renderFilters((dashData && dashData.summary) || {}); // 审核计数 chip 即时更新
   updateReviewChipsDom(row);
   try {
@@ -444,8 +444,6 @@ async function setReview(stem, status) {
     row.review = prev;
     adjustSummary(status, -1);
     adjustSummary(prev, 1);
-    rowsSnap = JSON.stringify([rowsData, presenceUsers()]);
-    dashSnap = JSON.stringify(dashData);
     renderFilters((dashData && dashData.summary) || {});
     updateReviewChipsDom(row);
     toast('审核状态保存失败:' + e.message, 'err');

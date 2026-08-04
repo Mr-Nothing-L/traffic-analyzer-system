@@ -43,6 +43,7 @@ from traffic_analyzer.models.schemas import (
     SceneInfo,
     VideoMetadata,
 )
+from traffic_analyzer.utils.progress import emit_run_done, emit_step
 from traffic_analyzer.utils.tool_call_logger import tool_call
 
 from .candidate_fallback import fallback_candidates_to_event_results
@@ -165,6 +166,7 @@ class AnalysisOrchestrator:
 
         # Step 1: Video preprocessing
         logger.info("[1/4] Preprocessing video...")
+        emit_step(1, 4, "预处理")
         t0 = time.perf_counter()
         keyframes: KeyframeSequence
         try:
@@ -220,6 +222,7 @@ class AnalysisOrchestrator:
 
         # Step 2: Expert Agent Layer
         logger.info("[2/4] Expert Agent Layer...")
+        emit_step(2, 4, "专家")
         t0 = time.perf_counter()
         candidates = []
         if self._expert_agent_layer:
@@ -244,6 +247,7 @@ class AnalysisOrchestrator:
 
         # Step 3: Adjudication
         logger.info("[3/4] Adjudication...")
+        emit_step(3, 4, "裁决")
         t0 = time.perf_counter()
         event_results: List[EventResult] = []
         adj_reasoning = ""
@@ -305,6 +309,7 @@ class AnalysisOrchestrator:
         # Step 3.5: SFT label rewrite (optional, auxiliary)
         if context.config is not None and getattr(context.config, "sft_label_enabled", False):
             logger.info("[3.5/4] SFT label rewrite...")
+            emit_step(3.5, 4, "SFT")
             t0 = time.perf_counter()
             try:
                 sft_step = SftLabelRewriteStep(self.config_manager, self.vlm_engine)
@@ -342,6 +347,7 @@ class AnalysisOrchestrator:
 
         # Step 4: Report generation
         logger.info("[4/4] Generating report...")
+        emit_step(4, 4, "报告")
         t0 = time.perf_counter()
         usage_stats = self.vlm_engine.get_usage_stats()
         total_categories = self._max_event_id()
@@ -410,6 +416,7 @@ class AnalysisOrchestrator:
         logger.info("=" * 60)
         logger.info("Analysis complete in %.2f s. Binary encoding: %s", analysis_duration_sec, report.binary_encoding.encoding_string)
         logger.info("=" * 60)
+        emit_run_done("ok")
 
         return report
 

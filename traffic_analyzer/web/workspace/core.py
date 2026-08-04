@@ -1,4 +1,4 @@
-"""Workspace state and video discovery for the web UI.
+"""Workspace state, caches and the analysis/<stem>/ path contract.
 
 A *workspace* is a directory of videos the user analyzes. Inference results
 live under ``<workspace>/analysis/<video_stem>/`` (see the shared contract):
@@ -6,16 +6,19 @@ live under ``<workspace>/analysis/<video_stem>/`` (see the shared contract):
 and an ``images/`` subdirectory.
 
 [文件说明]
-作用:工作区状态(WorkspaceState)与视频发现、路径安全校验(防目录穿越);定义
-analysis/<stem>/ 结果目录契约,并提供 /api/workspace、/api/workspace/videos、
-/api/workspace/tree 路由。list_videos 与 dashboard 聚合这类昂贵操作带进程内
-TTL 缓存(_TTLCache + invalidate_caches,默认 15s;失效条件:workspace 变更 /
-infer 完成 / review PUT / SFT/证据 PUT)。可选白名单:TRAFFIC_ANALYZER_WORKSPACE_DIRS(逗号分隔,
-支持 ~ 与相对路径,config/.env 或环境变量)非空时,POST /api/workspace 与
-fs 目录浏览仅允许名单目录及其子路径,越界 403;未设置/为空则不限制。
-上游:web/app.py(挂载路由);web/ 下 jobs、evidence_api、frames、video_stream
-均复用其 require_workspace/validate_stem/analysis_dir 等辅助函数。
-下游:无包内模块依赖,仅读写工作区文件系统;VIDEO_EXTENSIONS 与 scripts/batch_evaluate.py
+作用:工作区状态(WorkspaceState)与路径安全校验(防目录穿越);定义
+analysis/<stem>/ 结果目录契约,并提供 GET/POST /api/workspace 路由;
+进程内 TTL 缓存基础设施(_TTLCache + register_cache/invalidate_caches,
+默认 15s;失效条件:workspace 变更 / infer 完成 / review PUT / SFT/证据 PUT)。
+可选白名单:TRAFFIC_ANALYZER_WORKSPACE_DIRS(逗号分隔,支持 ~ 与相对路径,
+config/.env 或环境变量)非空时,POST /api/workspace 与 fs 目录浏览仅允许
+名单目录及其子路径,越界 403;未设置/为空则不限制。
+注意:_CACHE_TTL_SEC 与 _CONFIG_ENV_PATH 经 _pkg_var 从包命名空间读取,
+测试 monkeypatch traffic_analyzer.web.workspace.<名字> 才会生效。
+上游:web/workspace/__init__.py(聚合导出);web/ 下 jobs、evidence_api、
+frames、video_stream、dashboard、fs 均复用其 require_workspace/validate_stem/
+analysis_dir 等辅助函数。
+下游:仅读写工作区文件系统;VIDEO_EXTENSIONS 与 scripts/batch_evaluate.py
 的视频发现保持一致。
 """
 
@@ -23,6 +26,7 @@ from __future__ import annotations
 
 import copy as copy_module
 import os
+import sys
 import threading
 import time
 from pathlib import Path
@@ -44,6 +48,17 @@ VIDEO_EXTENSIONS = (".mp4", ".avi", ".mov", ".mkv", ".wmv")
 PRUNED_DIR_NAMES = frozenset({"analysis", "tmp_img", "output", "__pycache__"})
 
 WORKSPACE_DIRS_ENV_VAR = "TRAFFIC_ANALYZER_WORKSPACE_DIRS"
+
+
+def _pkg_var(name: str, default: Any) -> Any:
+    """从包命名空间(traffic_analyzer.web.workspace)读取可变配置。
+
+    测试 monkeypatch 的是聚合包上的属性(如 workspace_mod._CACHE_TTL_SEC),
+    拆分为包后本模块内部的读取必须经包命名空间转发,patch 才能生效。
+    """
+    pkg = sys.modules.get("traffic_analyzer.web.workspace")
+    return getattr(pkg, name, default) if pkg is not None else default
+
 
 # ---------------------------------------------------------------------------
 # 进程内 TTL 缓存
@@ -80,7 +95,7 @@ class _TTLCache:
             if entry is None:
                 return None
             ts, value = entry
-            if time.monotonic() - ts > _CACHE_TTL_SEC:
+            if time.monotonic() - ts > _pkg_var("_CACHE_TTL_SEC", _CACHE_TTL_SEC):
                 del self._entries[key]
                 return None
         if copy:
@@ -114,16 +129,16 @@ def invalidate_caches() -> None:
     for cache in caches:
         cache.clear()
 
-# traffic_analyzer/config/.env(traffic_analyzer/web/workspace.py → parents[1])。
+# traffic_analyzer/config/.env(traffic_analyzer/web/workspace/core.py → parents[2])。
 # web 独立启动未必经过 ConfigManager 的 load_dotenv,兜底自己读一次文件;
-# 测试 monkeypatch 此常量。
-_CONFIG_ENV_PATH = Path(__file__).resolve().parents[1] / "config" / ".env"
+# 测试 monkeypatch 此常量(包命名空间,见 _pkg_var)。
+_CONFIG_ENV_PATH = Path(__file__).resolve().parents[2] / "config" / ".env"
 
 
 def _config_env_value(key: str) -> Optional[str]:
     """Read one ``KEY=value`` entry from config/.env (same idea as auth._env_value)."""
     try:
-        text = _CONFIG_ENV_PATH.read_text(encoding="utf-8")
+        text = _pkg_var("_CONFIG_ENV_PATH", _CONFIG_ENV_PATH).read_text(encoding="utf-8")
     except OSError:
         return None
     for line in text.splitlines():
@@ -213,64 +228,6 @@ def find_video(workspace: Path, stem: str) -> Optional[Path]:
     return None
 
 
-def list_videos(workspace: Path) -> List[Dict[str, Any]]:
-    """All videos in the workspace at any depth (dot-dirs and PRUNED_DIR_NAMES skipped).
-
-    Each entry carries the workspace-relative path (``rel``) used by the
-    frontend as its unique key; ``has_results`` follows the flat
-    ``analysis/<stem>/`` contract for every depth.
-    """
-    videos: List[Dict[str, Any]] = []
-    root = workspace.resolve()
-    for dirpath, dirnames, filenames in os.walk(root):
-        # 点目录与产出目录(PRUNED_DIR_NAMES)原地剔除,os.walk 不再下钻。
-        dirnames[:] = [
-            d for d in dirnames if not d.startswith(".") and d not in PRUNED_DIR_NAMES
-        ]
-        for name in filenames:
-            path = Path(dirpath) / name
-            if path.suffix.lower() not in VIDEO_EXTENSIONS:
-                continue
-            resolved = path.resolve()
-            if resolved != root and root not in resolved.parents:
-                continue  # symlink escaping the workspace
-            try:
-                stat = path.stat()
-            except OSError:
-                continue
-            videos.append(
-                {
-                    "name": name,
-                    "stem": path.stem,
-                    "rel": path.relative_to(root).as_posix(),
-                    "size": stat.st_size,
-                    "mtime": stat.st_mtime,
-                    "has_results": has_results(workspace, path.stem),
-                }
-            )
-    videos.sort(key=lambda v: v["rel"])
-    return videos
-
-
-_videos_cache = register_cache(_TTLCache())
-
-
-def list_videos_cached(workspace: Path) -> List[Dict[str, Any]]:
-    """list_videos 的 15s 进程内缓存版(key=workspace 路径)。
-
-    /api/workspace/videos 与 dashboard 聚合共用;失效统一走
-    invalidate_caches(workspace 变更 / infer 完成 / review / SFT / 证据 PUT)。
-    copy=False:返回值只读使用(端点直接序列化,不就地修改)。
-    """
-    key = str(workspace)
-    cached = _videos_cache.get(key, copy=False)
-    if cached is not None:
-        return cached
-    videos = list_videos(workspace)
-    _videos_cache.set(key, videos)
-    return videos
-
-
 def _resolve_confined(workspace: Path, rel: str, detail: str) -> Path:
     """Resolve a workspace-relative path, rejecting anything escaping the root."""
     if rel:
@@ -313,46 +270,6 @@ def resolve_workspace_video(request: Request, rel: str) -> Path:
     return video
 
 
-def list_tree(workspace: Path, rel: str) -> Dict[str, Any]:
-    """One directory level of the workspace (dirs first, dotfiles skipped).
-
-    Video entries carry ``stem`` and ``has_results`` at any depth; results
-    follow the flat ``workspace/analysis/<stem>/`` contract.
-    """
-    target = resolve_tree_dir(workspace, rel)
-    entries: List[Dict[str, Any]] = []
-    try:
-        children = list(target.iterdir())
-    except OSError:
-        raise HTTPException(status_code=404, detail="Unknown tree path")
-    for path in children:
-        if path.name.startswith("."):
-            continue
-        try:
-            stat = path.stat()
-        except OSError:
-            continue
-        child_rel = f"{rel}/{path.name}" if rel else path.name
-        if path.is_dir():
-            entries.append({"name": path.name, "rel": child_rel, "type": "dir"})
-        else:
-            is_video = path.suffix.lower() in VIDEO_EXTENSIONS
-            entry: Dict[str, Any] = {
-                "name": path.name,
-                "rel": child_rel,
-                "type": "file",
-                "is_video": is_video,
-                "size": stat.st_size,
-                "mtime": stat.st_mtime,
-            }
-            if is_video:
-                entry["stem"] = path.stem
-                entry["has_results"] = has_results(workspace, path.stem)
-            entries.append(entry)
-    entries.sort(key=lambda e: (e["type"] != "dir", e["name"].lower()))
-    return {"path": rel, "entries": entries}
-
-
 class WorkspaceSetRequest(BaseModel):
     path: str
 
@@ -374,13 +291,3 @@ def set_workspace(body: WorkspaceSetRequest, request: Request) -> Dict[str, Any]
     request.app.state.workspace.set(path)
     invalidate_caches()  # 工作区变更:旧 key 的缓存一并清掉(防内存堆积/串数据)
     return {"path": str(path)}
-
-
-@router.get("/api/workspace/videos")
-def get_workspace_videos(request: Request) -> List[Dict[str, Any]]:
-    return list_videos_cached(require_workspace(request))
-
-
-@router.get("/api/workspace/tree")
-def get_workspace_tree(request: Request, path: str = "") -> Dict[str, Any]:
-    return list_tree(require_workspace(request), path)

@@ -1,4 +1,4 @@
-"""Infer-job queue, EXPERT_PROGRESS lane parsing and lifecycle tests."""
+"""Infer-job queue, progress-event lane parsing and lifecycle tests."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from traffic_analyzer.web.app import create_app
 
 from .conftest import (
     _FAKE_INFER_SCRIPT,
+    _PROGRESS_PREAMBLE,
     _SLEEP_CMD,
     _fake_expert_script,
     _make_tree_workspace,
@@ -29,7 +30,6 @@ from .conftest import (
 # ---------------------------------------------------------------------------
 # Jobs: infer queue + progress parsing
 # ---------------------------------------------------------------------------
-
 
 class TestJobs:
     def test_infer_progress_and_done(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -59,13 +59,17 @@ class TestJobs:
         assert (workspace / "analysis" / "v1").is_dir()
 
     def test_step_marker_mapping(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """[3.5/4] maps to step 4 (SFT), not to step 3."""
+        """step 3.5 maps to step 4 (SFT), not to step 3."""
         from traffic_analyzer.web.jobs import Job, JobManager
 
         manager = JobManager()
         manager.submit(
             "infer",
-            [sys.executable, "-c", "print('[3.5/4] SFT label rewrite...')"],
+            [
+                sys.executable,
+                "-c",
+                _PROGRESS_PREAMBLE + "ev(type='step', step=3.5, total=4, name='SFT')\n",
+            ],
             stem="x",
         )
         job = manager._jobs[1]
@@ -196,7 +200,7 @@ class TestJobs:
         assert len(job.log_tail) == 30
         assert job.log_tail[-1] == "99"
 # ---------------------------------------------------------------------------
-# Jobs: EXPERT_PROGRESS lane parsing
+# Jobs: progress-file lane events
 # ---------------------------------------------------------------------------
 class TestExpertProgress:
     def _submit(self, script: str) -> Any:
@@ -256,12 +260,11 @@ class TestExpertProgress:
         assert job.fraction == 1.0
 
     def test_error_lane_and_to_dict(self) -> None:
-        script = (
-            "p=lambda s: print(s, flush=True);"
-            "p('[2/4] Expert Agent Layer...');"
-            "p('EXPERT_PROGRESS|register|2|占道,裁决');"
-            "p('EXPERT_PROGRESS|done|1/2|占道|error');"
-            "p('EXPERT_PROGRESS|done|2/2|裁决|undetected')"
+        script = _PROGRESS_PREAMBLE + (
+            "ev(type='step', step=2, total=4, name='专家')\n"
+            "ev(type='register', total=2, lanes=['占道','裁决'])\n"
+            "ev(type='lane_done', done=1, total=2, lane='占道', result='error')\n"
+            "ev(type='lane_done', done=2, total=2, lane='裁决', result='undetected')\n"
         )
         job = self._submit(script)
         assert _wait_until(lambda: job.status in ("done", "failed"))
@@ -278,7 +281,7 @@ class TestExpertProgress:
         assert progress["experts"] is not job.experts
 
     def test_step_markers_without_lanes_unchanged(self) -> None:
-        """No register line: fraction stays step_index/5 (legacy behavior)."""
+        """No register event: fraction stays step_index/5 (legacy behavior)."""
         job = self._submit(_FAKE_INFER_SCRIPT)
         assert _wait_until(lambda: job.status in ("done", "failed"))
         assert job.status == "done"

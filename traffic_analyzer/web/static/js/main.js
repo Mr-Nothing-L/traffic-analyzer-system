@@ -10,10 +10,11 @@ import {
   renderSidebar, syncButtons, invalidateSidebar, toggleSidebarDrawer,
 } from './tree.js';
 import { renderWelcome } from './preview.js';
-import { openDashboard, dashboardTick } from './dashboard.js';
-import { pollJobs, schedulePoll, startInfer } from './jobs.js';
+import { openDashboard } from './dashboard.js';
+import { pollJobs, schedulePoll, startInfer, startJobEvents } from './jobs.js';
 import { initUserArea } from './auth.js';
 import { startPresence } from './presence.js';
+import { subscribe } from './events.js';
 import {
   browseWorkspace, closeDirModal, confirmDir, showDirInput,
   onDirRecentChange, dirModalKeys, navDir, setWorkspaceLabel,
@@ -147,7 +148,10 @@ async function init() {
 
   // 先确认登录态:GET /api/auth/me(401 由 auth.js 拦截跳 /login;mock 模式内部跳过)
   await initUserArea();
-  startPresence(); // 每 10s 上报 viewing/editing;名册由轮询刷新
+  startPresence(); // 每 10s 上报 viewing/editing;名册由 SSE 'presence' 事件推送
+  // 名册变化刷新侧栏徽章(presence.js 的订阅先注册,此处触发渲染时名册已更新)
+  subscribe('presence', () => renderSidebar());
+  startJobEvents(); // SSE:订阅 job.progress/job.done 增量更新任务(mock 模式内部跳过)
 
   try {
     state.workspace = await api('/api/workspace');
@@ -166,9 +170,7 @@ async function init() {
   renderWelcome();
   renderSidebar();
   syncButtons();
-  schedulePoll(); // setTimeout 链:活动任务 1.5s / 空闲 5s,页面隐藏时暂停
-  // 看板轮询:与任务轮询同频 1.5s;dashboardTick 内部按 state.view 门控,非看板态零开销
-  setInterval(dashboardTick, 1500);
+  schedulePoll(); // 仅 mock 模式生效:活动任务 1.5s / 空闲 5s;非 mock 由 SSE 事件驱动
 }
 
 init();

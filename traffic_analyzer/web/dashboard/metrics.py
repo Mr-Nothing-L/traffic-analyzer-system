@@ -1,73 +1,49 @@
-"""Dashboard aggregation endpoints (GT vs prediction overview).
-
-GET /api/dashboard returns the aggregate overview — ``summary`` counts,
-``event_names`` (str(event_id) → name_zh, from event_config's
-event_categories index) and set-algebra ``metrics`` — all computed over the
-full, unfiltered row set. GET /api/dashboard/rows returns the per-video rows
-with filtering (``consistency``/``review`` comma-separated multi-value,
-``edited=1``, ``q`` = case-insensitive rel/stem substring) and pagination
-(``page``/``size``, filter before paginate, size capped at 200; out-of-range
-page → empty rows with the correct ``total_pages``). Each row joins the
-filename ground truth (via ``scripts/batch_evaluate.py``'s
-``extract_gt_from_filename``, loaded by path with importlib since the script
-is not a package) with the prediction read from ``analysis/<stem>/<stem>.json``
-(``action`` field). Rows carry a four-state status
-(``consistent`` / ``diff`` / ``no_gt`` / ``no_results``); ``missing``/``extra``
-are only populated for ``diff`` rows. When the frozen raw snapshot
-``<stem>_raw.json`` exists (first SFT edit froze it), the row reports
-``edited`` plus the raw-vs-current action diff (``edit_missing`` / ``edit_extra``
-= ids removed / added by the edit). Metrics use plain set algebra over the
-evaluated rows only (rows without GT or without results do not participate).
-
-PUT /api/dashboard/review validates the three-state review status and
-persists it to ``<workspace>/analysis/review_states.json``
-(``{stem: {status, updated_at, by}}``, ``by`` = ``request.state.user``) with
-the same atomic write as ``evidence_api._atomic_write_json``.
+"""Dashboard metrics + aggregate endpoint (split from the old monolithic dashboard.py).
 
 [文件说明]
-作用:dashboard 聚合接口。GET /api/dashboard 只返回汇总视图(summary 计数、
-event_names(str(event_id) → name_zh,取自 event_config 的 event_categories
-索引)、集合运算 metrics),全部基于未过滤的全量行。GET /api/dashboard/rows
-返回逐视频行:按工作区视频逐行合并文件名 GT(importlib 按路径加载
-scripts/batch_evaluate.py 的 extract_gt_from_filename)与
+作用:看板构建与汇总视图。按工作区视频逐行合并文件名 GT(importlib 按路径
+加载 scripts/batch_evaluate.py 的 extract_gt_from_filename,脚本非包)与
 analysis/<stem>/<stem>.json 的 action 预测,产出四态行
 (consistent/diff/no_gt/no_results;missing/extra 仅 diff 行填充);存在冻结
 快照 <stem>_raw.json 时附 edited 与编辑前后 action 差异
-(edit_missing/edit_extra)。支持 consistency/review 逗号分隔多值、edited=1、
-q(rel/stem 子串,不区分大小写)过滤(先过滤后分页)与 page/size 分页
-(size ≤ 200;page 越界 → 空 rows + 正确 total_pages)。
-PUT /api/dashboard/review 校验三态(unconfirmed/confirmed/needs_review,非法
-422)并原子写 <workspace>/analysis/review_states.json。
+(edit_missing/edit_extra);review 列合并 review._load_review_states。
+metrics 为集合运算(仅 consistent/diff 行参与;per_event + macro/micro)。
+GET /api/dashboard 只回汇总视图(summary 计数、event_names
+(str(event_id) → name_zh,event_config 的 event_categories 索引反转)、
+metrics),全部基于未过滤全量行。
 _build_dashboard 结果带进程内 TTL 缓存(key=workspace 路径,TTL 见
-workspace._CACHE_TTL_SEC,默认 15s),两个 GET 端点共用一份构建结果;
-失效统一走 workspace.invalidate_caches(workspace 变更 / infer 完成 /
-review PUT / SFT/证据 PUT)。大工作区(数千视频、外接盘)全量构建 ~11s,
-缓存命中 <100ms。
-上游:web/app.py(挂载路由);web/static 前端(dashboard 页)。
-下游:web/workspace.py(视频发现与路径契约)、web/event_config.py(事件名索引)、
-web/evidence_api.py(_read_json / _atomic_write_json)、scripts/batch_evaluate.py。
+workspace._CACHE_TTL_SEC,默认 15s),GET /api/dashboard 与 rows 端点共用;
+失效统一走 workspace.invalidate_caches;copy=False 只读契约(调用方不得
+就地修改)。_build_dashboard 经 dashboard 包命名空间延迟查找,测试
+monkeypatch traffic_analyzer.web.dashboard._build_dashboard 即生效。
+上游:web/app.py(经 dashboard 包挂载路由);web/static 前端(dashboard 页)。
+下游:web/workspace.py(视频发现与路径契约)、web/event_config.py(事件名
+索引)、web/evidence_api.py(_read_json)、web/dashboard/review.py(审核态)、
+scripts/batch_evaluate.py。
 """
 
 from __future__ import annotations
 
 import importlib.util
-import threading
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
 
-from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel
+from fastapi import APIRouter, HTTPException, Request
 
+from traffic_analyzer.web import dashboard as _dashboard_pkg
 from traffic_analyzer.web import event_config
 from traffic_analyzer.web import evidence_api
 from traffic_analyzer.web import workspace as workspace_mod
+from traffic_analyzer.web.dashboard.review import (
+    REVIEW_STATUSES,
+    _load_review_states,
+)
 
 router = APIRouter()
 
 # scripts/batch_evaluate.py 不是包(脚本),按路径加载,与 tests 的加载方式一致。
 _BATCH_EVALUATE_PY = (
-    Path(__file__).resolve().parents[2] / "scripts" / "batch_evaluate.py"
+    Path(__file__).resolve().parents[3] / "scripts" / "batch_evaluate.py"
 )
 
 _extract_gt_from_filename: Optional[Callable[[str], Set[int]]] = None
@@ -88,73 +64,6 @@ def _gt_extractor() -> Callable[[str], Set[int]]:
         spec.loader.exec_module(module)
         _extract_gt_from_filename = module.extract_gt_from_filename
     return _extract_gt_from_filename
-
-
-# ---------------------------------------------------------------------------
-# Review states (<workspace>/analysis/review_states.json)
-# ---------------------------------------------------------------------------
-
-REVIEW_STATUSES = ("unconfirmed", "confirmed", "needs_review")
-
-# 单文件、跨 stem:一把锁串行化 read-modify-write。
-_review_lock = threading.Lock()
-
-
-def _review_states_path(workspace: Path) -> Path:
-    return workspace / "analysis" / "review_states.json"
-
-
-def _load_review_states(workspace: Path) -> Dict[str, Any]:
-    """Missing file → {}; corrupt → {} (GET 不因一个损坏文件拖垮整个看板)。"""
-    try:
-        data = evidence_api._read_json(_review_states_path(workspace))
-    except evidence_api._CorruptJsonError:
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-class ReviewRequest(BaseModel):
-    stem: str
-    status: str
-
-
-@router.put("/api/dashboard/review")
-def put_dashboard_review(body: ReviewRequest, request: Request) -> Dict[str, Any]:
-    workspace = workspace_mod.require_workspace(request)
-    workspace_mod.validate_stem(body.stem)
-    if body.status not in REVIEW_STATUSES:
-        raise HTTPException(
-            status_code=422,
-            detail=f"status must be one of {list(REVIEW_STATUSES)}",
-        )
-    path = _review_states_path(workspace)
-    with _review_lock:
-        try:
-            states = evidence_api._read_json(path)
-        except evidence_api._CorruptJsonError as exc:
-            # 损坏 ≠ 不存在:不明确报 422 就会静默覆盖掉他人已写的复核状态。
-            raise HTTPException(
-                status_code=422, detail=f"Existing review states file is corrupt: {exc}"
-            )
-        if not isinstance(states, dict):
-            states = {}
-        entry = {
-            "status": body.status,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-            # 追溯:谁做的复核(认证关闭时为 'local')。
-            "by": getattr(request.state, "user", "local"),
-        }
-        states[body.stem] = entry
-        path.parent.mkdir(parents=True, exist_ok=True)
-        evidence_api._atomic_write_json(path, states)
-    # review 落盘 → 看板/视频缓存失效(下一 GET 重算,反映最新审核态)
-    workspace_mod.invalidate_caches()
-    return {"stem": body.stem, **entry}
-
-
-# ---------------------------------------------------------------------------
-# Dashboard rows / metrics
-# ---------------------------------------------------------------------------
 
 
 def _action_ids(payload: Optional[Any]) -> List[int]:
@@ -330,7 +239,8 @@ def _get_dashboard(workspace: Path) -> Dict[str, Any]:
     cached = _dashboard_cache.get(key, copy=False)
     if cached is not None:
         return cached
-    data = _build_dashboard(workspace)
+    # 经包命名空间延迟查找:monkeypatch dashboard._build_dashboard 即生效。
+    data = _dashboard_pkg._build_dashboard(workspace)
     _dashboard_cache.set(key, data)
     return data
 
@@ -343,51 +253,4 @@ def get_dashboard(request: Request) -> Dict[str, Any]:
         "summary": data["summary"],
         "event_names": data["event_names"],
         "metrics": data["metrics"],
-    }
-
-
-def _csv_values(raw: str) -> Set[str]:
-    """逗号分隔多值参数 → 非空值集合。"""
-    return {v.strip() for v in raw.split(",") if v.strip()}
-
-
-@router.get("/api/dashboard/rows")
-def get_dashboard_rows(
-    request: Request,
-    page: int = Query(1, ge=1),
-    size: int = Query(50, ge=1, le=200),
-    consistency: str = "",
-    review: str = "",
-    edited: str = "",
-    q: str = "",
-) -> Dict[str, Any]:
-    """Filtered + paginated dashboard rows (filter first, then paginate)."""
-    rows = _get_dashboard(workspace_mod.require_workspace(request))["rows"]
-
-    statuses = _csv_values(consistency)
-    if statuses:
-        rows = [r for r in rows if r["status"] in statuses]
-    reviews = _csv_values(review)
-    if reviews:
-        rows = [r for r in rows if r["review"] in reviews]
-    if edited == "1":
-        rows = [r for r in rows if r["edited"]]
-    needle = q.strip().lower()
-    if needle:
-        rows = [
-            r
-            for r in rows
-            if needle in r["rel"].lower() or needle in r["stem"].lower()
-        ]
-
-    total = len(rows)
-    total_pages = (total + size - 1) // size  # total=0 → 0 页
-    start = (page - 1) * size
-    # page 越界:切片天然为空,total/total_pages 仍按过滤后全量返回。
-    return {
-        "rows": rows[start : start + size],
-        "page": page,
-        "size": size,
-        "total": total,
-        "total_pages": total_pages,
     }
