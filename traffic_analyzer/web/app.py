@@ -34,6 +34,7 @@ from typing import Any, Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from traffic_analyzer.web import (
     auth,
@@ -52,6 +53,20 @@ logger = logging.getLogger(__name__)
 
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+class _SpaStaticFiles(StaticFiles):
+    """StaticFiles + SPA 回退:/v2 下的未知路径(客户端路由深链,如
+    /v2/dashboard)回退服务 index.html,真实文件(assets/字体)正常返回。"""
+
+    async def get_response(self, path: str, scope):  # type: ignore[override]
+        try:
+            return await super().get_response(path, scope)
+        except StarletteHTTPException as exc:
+            if exc.status_code == 404:
+                return await super().get_response("index.html", scope)
+            raise
+
 # Expert phase definitions served by GET /api/expert-phases (frontend uses
 # them to cap the progress climb); shipped next to this module.
 _EXPERT_PHASES_JSON = Path(__file__).resolve().parent / "expert_phases.json"
@@ -133,8 +148,7 @@ def create_app(workspace: Optional[str] = None) -> FastAPI:
             or request.url.path.startswith("/css/")
             or request.url.path.startswith("/fonts/")
             or request.url.path == "/v2"
-            or request.url.path == "/v2/"
-            or request.url.path == "/v2/index.html"
+            or request.url.path.startswith("/v2/")
         ):
             response.headers["Cache-Control"] = "no-cache"
         return response
@@ -151,7 +165,7 @@ def create_app(workspace: Optional[str] = None) -> FastAPI:
     if (v2_dist / "index.html").is_file():
         app.mount(
             "/v2",
-            StaticFiles(directory=str(v2_dist), html=True),
+            _SpaStaticFiles(directory=str(v2_dist), html=True),
             name="static-v2",
         )
     else:

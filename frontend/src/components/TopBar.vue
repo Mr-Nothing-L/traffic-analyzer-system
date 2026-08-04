@@ -2,6 +2,7 @@
 /** 顶栏:品牌 / 工作区按钮(打开目录弹窗)/ 开始推理 / 用户区。
  * 迁移自 legacy index.html #toolbar + auth.js 用户区。 */
 import { onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { NButton, NPopover, useMessage } from 'naive-ui'
 import { apiFetch } from '../api/client'
 import { useAppStore } from '../stores/app'
@@ -15,6 +16,7 @@ const app = useAppStore()
 const ws = useWorkspaceStore()
 const jobs = useJobsStore()
 const message = useMessage()
+const router = useRouter()
 const dirPickerOpen = ref(false)
 
 onMounted(async () => {
@@ -60,6 +62,7 @@ async function onLogout() {
       <span v-if="ws.path" class="ws-path" :title="ws.path">{{ ws.path }}</span>
     </button>
     <span class="tb-spacer" />
+    <n-button size="small" @click="router.push('/dashboard')">数据看板</n-button>
     <n-button
       type="primary"
       size="small"

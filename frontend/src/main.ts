@@ -6,5 +6,6 @@ import './styles/tokens.css'
 import './styles/base.css'
 import './styles/tree.css'
 import './styles/dirpicker.css'
+import './styles/dashboard.css'
 
 createApp(App).use(createPinia()).use(router).mount('#app')
