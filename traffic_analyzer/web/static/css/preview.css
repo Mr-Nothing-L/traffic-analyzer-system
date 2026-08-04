@@ -1,0 +1,264 @@
+/* ==========================================================================
+   预览与报告:结果页上下分栏 / 欢迎页 / 报告 markdown / 视频预览卡(自 style.css 拆分,规则原文未改)
+   ========================================================================== */
+
+/* ---------- 结果页上下分栏(视频常驻) ---------- */
+#main:has(.split-col) {
+  overflow: hidden;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+.split-col {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.pane-top {
+  flex: 0 0 auto;
+  min-height: 150px;
+  max-height: 80%;
+  overflow: hidden;
+  padding: 18px 26px 0;
+}
+.pane-top #card-preview {
+  height: 100%;
+  width: 100%;
+  max-width: 1060px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+}
+.pane-top #preview-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.split-col .pv-wrap { flex: 1; min-height: 0; }
+.split-col .pv-wrap video {
+  height: 100%;
+  max-height: none;
+  object-fit: contain; /* 随面板缩放,letterbox 不变形 */
+}
+.split-col #pv-stepper { flex: 1; min-height: 0; overflow-y: auto; }
+.hsplit {
+  flex: 0 0 12px;
+  cursor: row-resize;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* 常驻细分隔线,让分栏边界在静止时也可辨识 */
+  background: linear-gradient(var(--border), var(--border)) center / 100% 1px no-repeat;
+  transition: background 0.12s ease;
+}
+/* 双线握把,与侧栏 #splitter 的竖向双线呼应 */
+.hsplit span {
+  width: 56px;
+  height: 6px;
+  border-top: 2px solid #C4B9A4;
+  border-bottom: 2px solid #C4B9A4;
+  transition: border-color 0.12s ease;
+}
+.hsplit:hover,
+.hsplit.dragging {
+  background:
+    linear-gradient(var(--accent), var(--accent)) center / 100% 1px no-repeat,
+    var(--accent-soft);
+}
+.hsplit:hover span,
+.hsplit.dragging span { border-color: var(--accent); }
+body.hsplit-dragging { cursor: row-resize; user-select: none; }
+.pane-bottom {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 26px 60px;
+}
+
+/* ---------- 欢迎页 ---------- */
+.welcome {
+  max-width: 1060px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.hero {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 40px 36px;
+  animation: card-in 0.35s ease both;
+}
+
+.hero h1 { margin: 0 0 12px; font-size: 24px; font-weight: 700; letter-spacing: -0.01em; }
+.hero p { margin: 5px 0; color: var(--text2); max-width: 640px; font-size: 12px; }
+/* 开发模式提示降级为次要注脚 */
+.hero p:last-of-type { font-size: 12px; opacity: 0.8; }
+.hero .hint-kbd {
+  font-family: var(--mono);
+  font-size: 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1px 6px;
+}
+/* 欢迎页主 CTA:比常规按钮大一号,居中视觉锚点 */
+.hero-cta { font-size: 17px; padding: 12px 36px; }
+
+/* ---------- 报告卡 (markdown) ---------- */
+.md { font-size: 13.5px; }
+.md h1, .md h2, .md h3, .md h4 { margin: 18px 0 8px; line-height: 1.35; }
+.md h1:first-child, .md h2:first-child, .md h3:first-child { margin-top: 0; }
+.md h1 { font-size: 19px; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+.md h2 { font-size: 16.5px; border-bottom: 1px solid var(--border); padding-bottom: 5px; }
+.md h3 { font-size: 14.5px; }
+.md h4 { font-size: 13.5px; }
+.md p { margin: 8px 0; }
+.md ul, .md ol { margin: 8px 0; padding-left: 22px; }
+.md li { margin: 3px 0; }
+.md strong { color: var(--text); }
+.md code {
+  font-family: var(--mono);
+  font-size: 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 1px 5px;
+}
+.md pre {
+  background: var(--text);
+  color: var(--surface-4);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  overflow-x: auto;
+  font-size: 12.5px;
+}
+.md pre code { background: none; border: none; color: inherit; padding: 0; }
+.md table {
+  border-collapse: collapse;
+  margin: 10px 0;
+  width: 100%;
+  font-size: 12.5px;
+}
+.md th, .md td {
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+  text-align: left;
+  /* 判定列(检测结果/决策/动作等短词列)保底 3em,「保留/排除」不再逐字竖排 */
+  min-width: 3em;
+}
+/* 表头均为短标签:不折行 */
+.md th { background: var(--surface-2); font-weight: 650; white-space: nowrap; }
+/* CJK 不在字间断行:判定短词始终整词一行,长文列仍在标点处正常换行 */
+.md td { word-break: keep-all; }
+.md tr:nth-child(even) td { background: var(--surface-5); }
+.md hr { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
+/* 报告图片模糊加载:加载完成(加 .loaded)后由模糊过渡到清晰 */
+.md img {
+  max-width: 100%;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  filter: blur(8px);
+  opacity: 0.4;
+  transition: filter 0.3s ease, opacity 0.3s ease;
+}
+.md img.loaded { filter: blur(0); opacity: 1; }
+.md blockquote {
+  margin: 8px 0;
+  padding: 4px 12px;
+  border-left: 3px solid var(--accent);
+  color: var(--text2);
+}
+
+/* ---------- 视频预览卡 ---------- */
+.pv-wrap {
+  background: #1C1A17;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  display: flex;
+  justify-content: center;
+}
+.pv-wrap video {
+  display: block;
+  width: 100%;
+  max-height: 420px;
+  background: #1C1A17;
+}
+.pv-stage {
+  background: #1C1A17;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  display: flex;
+  justify-content: center;
+}
+.pv-stage img {
+  display: block;
+  max-width: 100%;
+  max-height: 420px;
+}
+.pv-hint {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--text2);
+  margin-bottom: 10px;
+}
+.pv-slider-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 10px;
+}
+.pv-slider-row input[type="range"] {
+  flex: 1;
+  accent-color: var(--accent);
+}
+.pv-idx {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text2);
+  min-width: 72px;
+  text-align: right;
+}
+/* 单帧读取失败时的占位提示(不影响滑块) */
+.pv-frame-err {
+  color: var(--text2);
+  font-size: 12px;
+  padding: 24px 0;
+}
+
+/* ---------- ≤767px:预览/卡片回到自然文档流(响应式专节按域拆分,整节说明见 layout.css) ---------- */
+@media (max-width: 767px) {
+  /* 结果页:隐藏上下分隔条,预览/卡片回到自然文档流,整页统一滚动 */
+  #main:has(.split-col) { overflow-y: auto; }
+  .split-col { height: auto; }
+  .hsplit { display: none; }
+  .pane-top {
+    min-height: 0;
+    max-height: none;
+    overflow: visible;
+    padding: 14px 14px 0;
+  }
+  .pane-top #card-preview { height: auto; }
+  .pane-top #preview-body { flex: none; }
+  .split-col .pv-wrap { flex: none; }
+  .split-col .pv-wrap video { max-height: 42vh; }
+  .split-col #pv-stepper { flex: none; overflow-y: visible; }
+  .pane-bottom { overflow: visible; padding: 14px 14px 48px; }
+
+  /* 报告 markdown 表格:块化后自身容器内横向滚动,不撑破页面
+     (dash-table 既有 .dash-table-wrap 已带 overflow-x:auto) */
+  .md table { display: block; overflow-x: auto; }
+}
+
+/* ---------- ≤413px:进一步降档 ---------- */
+@media (max-width: 413px) {
+  .hero { padding: 24px 18px; }
+  .hero h1 { font-size: 19px; }
+}

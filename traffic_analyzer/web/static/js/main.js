@@ -5,7 +5,6 @@
 import { $ } from './util.js';
 import { MOCK, state } from './state.js';
 import { api } from './api.js';
-import { mockTick } from './mock.js';
 import {
   SIDE_FILTER_KEY, SIDE_SORT_KEY,
   renderSidebar, syncButtons, invalidateSidebar, toggleSidebarDrawer,
@@ -78,7 +77,7 @@ function initToolbar() {
   if (MOCK) $('#mock-badge').hidden = false;
 
   $('#btn-workspace').addEventListener('click', browseWorkspace);
-  // 窄屏(≤767px)抽屉开关:按钮仅该档位显示(style.css 响应式专节)
+  // 窄屏(≤767px)抽屉开关:按钮仅该档位显示(css/tree.css 响应式专节)
   $('#btn-files').addEventListener('click', toggleSidebarDrawer);
   $('#dir-close').addEventListener('click', closeDirModal);
   $('#dir-cancel').addEventListener('click', closeDirModal);
@@ -140,7 +139,11 @@ function initToolbar() {
 
 async function init() {
   initToolbar();
-  if (MOCK) setInterval(mockTick, 700);
+  // mock 体系按需加载:仅 ?mock=1 时动态 import,非 mock 模式零 mock 模块下载
+  if (MOCK) {
+    const { mockTick } = await import('./mock.js');
+    setInterval(mockTick, 700);
+  }
 
   // 先确认登录态:GET /api/auth/me(401 由 auth.js 拦截跳 /login;mock 模式内部跳过)
   await initUserArea();

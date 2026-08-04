@@ -2,7 +2,12 @@
 import { $, esc } from './util.js';
 import { MOCK } from './state.js';
 import { api, metaUrl, sourceFrameUrl } from './api.js';
-import { REAL } from './mock_db.js';
+
+// mock 数据库按需加载(与 api.js 同一惰性方案):仅 ?mock=1 时动态 import,
+// 非 mock 模式零 mock 模块下载。REAL 由 mock_db.js 异步初始化(其内部 await
+// mock_data.js);首次预览调用晚于 main.js init 的 mock 加载 await,读取时必定已就绪
+let REAL = null;
+if (MOCK) import('./mock_db.js').then(m => { REAL = m.REAL; });
 
 export function streamUrl(source, ss) {
   if (MOCK) {

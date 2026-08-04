@@ -1,0 +1,224 @@
+/* ==========================================================================
+   SFT 编辑器(自 style.css 拆分,规则原文未改)
+   ========================================================================== */
+
+/* ---------- SFT 卡 ---------- */
+.sft-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  font-size: 12px;
+  color: var(--text2);
+  font-family: var(--mono);
+  margin-bottom: 14px;
+}
+
+.sft-section-title {
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--text2);
+  letter-spacing: 0.06em;
+  margin: 14px 0 6px;
+}
+
+/* 按事件分框的 SFT 编辑器 */
+.sft-ev {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  background: var(--surface-2);
+}
+.sft-ev.inactive { background: transparent; border-style: dashed; }
+
+.sft-ev-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.sft-ev-name { font-weight: 650; font-size: 13px; }
+.sft-ev.inactive .sft-ev-name { color: var(--text2); }
+
+.sft-ev-tag {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--text2);
+  background: var(--surface-3);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+
+.sft-ev-check {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--text2);
+  cursor: pointer;
+  user-select: none;
+}
+.sft-ev-check input { accent-color: var(--accent); cursor: pointer; }
+
+.sft-ev-text {
+  width: 100%;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 7px 10px;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.6;
+  background: var(--card);
+  color: var(--text);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+/* 聚焦时的动画光环 */
+.sft-ev-text:focus {
+  border-color: var(--accent);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.sft-ev.inactive .sft-ev-text { background: transparent; }
+
+/* 事件文本富文本框(contenteditable):外观与 textarea 一致,换行保留 */
+.sft-richtext {
+  white-space: pre-wrap;
+  word-break: break-word;
+  min-height: 56px; /* 约等于 textarea rows=2 */
+  cursor: text;
+  resize: none; /* div 在 overflow 非 visible 时会出现拖柄,高度由 autoGrow 管理 */
+}
+.sft-richtext:empty::before {
+  content: attr(data-placeholder);
+  color: var(--text2);
+  opacity: 0.7;
+}
+/* 属性提及 token:与 chips 同色系,描边胶囊标注,可点击编辑其内部文字 */
+.sft-tok {
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  padding: 0 3px;
+  background: var(--accent-soft);
+}
+/* chip 变更后刚更新组的 token 短暂脉冲(0.2s),prefers-reduced-motion 时关闭 */
+.sft-tok.sft-tok-pulse { animation: sft-tok-pulse 0.2s ease; }
+@keyframes sft-tok-pulse {
+  0% { box-shadow: 0 0 0 0 var(--accent); }
+  100% { box-shadow: 0 0 0 6px transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sft-tok.sft-tok-pulse { animation: none; }
+}
+.sft-tok { transition: background 0.15s ease, border-color 0.15s ease; }
+/* chip hover 联动:同事件卡内同组 token 静态加深(描边与底色向主色加深),
+   异组 token 无任何变化(不淡化、无动画);加深为静态样式,天然无 motion */
+.sft-tok.sft-tok-link {
+  border-color: var(--accent);
+  background: #F0C4AB;
+}
+/* token hover 反向联动:该组 chips 加同色系描边 */
+.sft-chip.sft-chip-link { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+
+/* 结构化选项 chips(封闭枚举,只读选项集;无增删入口) */
+.sft-attrs { display: flex; flex-direction: column; gap: 10px; margin-bottom: 8px; }
+.sft-attr-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.sft-chips { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+.sft-chip {
+  height: 22px;
+  padding: 0 10px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--text2);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+.sft-chip:hover { background: var(--accent-soft); }
+.sft-chip.selected { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+
+/* 必填缺失软提醒:事件名旁 6px 黄点,hover 显示缺哪项(不拦截保存) */
+.sft-warn-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--gold);
+  cursor: help;
+  animation: sft-warn-in 0.2s ease;
+}
+@keyframes sft-warn-in { from { opacity: 0; } to { opacity: 1; } }
+
+/* chip 改动实时渲染回文本框时的淡入(避免跳变感) */
+.sft-ev-text.sft-fade { animation: sft-text-in 0.15s ease; }
+@keyframes sft-text-in { from { opacity: 0.35; } to { opacity: 1; } }
+
+.sft-unmatched {
+  background: var(--surface-2);
+  color: var(--text2);
+}
+
+.sft-conclusion {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+}
+.answer-class {
+  font-family: var(--mono);
+  color: var(--accent);
+}
+
+.sft-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.answer-block { display: flex; flex-direction: column; gap: 6px; }
+
+.answer-row {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  font-size: 13px;
+}
+
+.answer-key {
+  flex: 0 0 auto;
+  font-size: 11.5px;
+  font-weight: 650;
+  color: var(--text2);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1px 8px;
+}
+
+/* 答案区可编辑字段:天气/时间单行输入,场景自适应文本框 */
+.answer-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-family: inherit;
+  font-size: 13px;
+  background: var(--card);
+  color: var(--text);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.answer-input:focus {
+  border-color: var(--accent);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.answer-env-text { flex: 1 1 auto; min-width: 0; }

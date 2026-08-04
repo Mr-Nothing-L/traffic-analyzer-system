@@ -115,8 +115,9 @@ def create_app(workspace: Optional[str] = None) -> FastAPI:
         # Cover the SPA shell AND all ES modules under /js/ — a stale cached
         # module (e.g. sft.js) silently breaks the UI after upgrades.
         if (
-            request.url.path in ("/", "/index.html", "/style.css")
+            request.url.path in ("/", "/index.html")
             or request.url.path.startswith("/js/")
+            or request.url.path.startswith("/css/")
             or request.url.path.startswith("/fonts/")
         ):
             response.headers["Cache-Control"] = "no-cache"

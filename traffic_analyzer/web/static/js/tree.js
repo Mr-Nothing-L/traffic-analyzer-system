@@ -35,7 +35,7 @@ export function invalidateSidebar() {
 }
 
 /* ------------------------------------------------------------ 窄屏抽屉 */
-// 414–767px(及更小)档位侧栏改为顶部抽屉(style.css 响应式专节),开关状态挂在
+// 414–767px(及更小)档位侧栏改为顶部抽屉(css/tree.css 响应式专节),开关状态挂在
 // body.drawer-open 类名上;桌面视口下该类名无任何样式效果,不影响桌面端选择器与布局
 export function toggleSidebarDrawer() {
   document.body.classList.toggle('drawer-open');

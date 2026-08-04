@@ -29,5 +29,8 @@ export function runCleanups() {
   state.cleanups = [];
 }
 
-// 调试与既有检查脚本依赖的全局句柄
-window.state = state;
+// 调试句柄:仅 URL 带 ?debug=1 或 ?mock=1 时挂载 window.state,供浏览器手动调试
+// (仓库内无任何代码消费 window.state;生产环境不挂载,避免全局句柄泄漏)
+if (MOCK || new URLSearchParams(location.search).get('debug') === '1') {
+  window.state = state;
+}

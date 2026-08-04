@@ -1,0 +1,167 @@
+/* ==========================================================================
+   专家工作间:像素块进度条 / 专家泳道面板(自 style.css 拆分,规则原文未改)
+   ========================================================================== */
+
+/* ---------- 推理进度:像素块进度条 / 专家工作间 ---------- */
+/* 分段像素条:每列 3 个均等方块像素(从上到下堆叠,点亮顺序亦从上到下);
+   未点亮像素为空像素底色 var(--surface-3),.on 点亮(颜色随泳道状态类) */
+.pixel-bar { display: flex; gap: 3px; }
+.pixel-cell {
+  flex: 0 0 auto;
+  width: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.pixel-sub {
+  display: block;
+  width: 10px;
+  height: 10px;
+  border-radius: 1px;
+  background: var(--surface-3); /* 空像素 */
+}
+.pixel-sub.on { background: var(--accent); }
+/* frontier:格内下一条待点亮子像素的明暗脉冲(仅 running 时由 JS 打上) */
+.pixel-sub.frontier { animation: pixel-frontier 0.9s ease-in-out infinite; }
+@keyframes pixel-frontier {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
+
+/* 侧栏 running 行:8 列迷你像素条(每列 3 个方块,尺寸更小) + 行内停止键 */
+.mini-prog {
+  flex: 0 0 auto;
+  align-self: center;
+  gap: 2px;
+}
+.mini-prog .pixel-cell { width: 4px; gap: 1px; }
+.mini-prog .pixel-sub { width: 4px; height: 4px; }
+/* 不定态(fraction 为 null):子像素波浪循环点亮,替代旧渐变扫光 */
+.mini-prog.indet .pixel-sub {
+  background: var(--accent);
+  animation: pixel-wave 1.1s linear infinite;
+}
+.mini-prog.indet .pixel-cell:nth-child(1) .pixel-sub { animation-delay: 0s; }
+.mini-prog.indet .pixel-cell:nth-child(2) .pixel-sub { animation-delay: 0.12s; }
+.mini-prog.indet .pixel-cell:nth-child(3) .pixel-sub { animation-delay: 0.24s; }
+.mini-prog.indet .pixel-cell:nth-child(4) .pixel-sub { animation-delay: 0.36s; }
+.mini-prog.indet .pixel-cell:nth-child(5) .pixel-sub { animation-delay: 0.48s; }
+.mini-prog.indet .pixel-cell:nth-child(6) .pixel-sub { animation-delay: 0.6s; }
+.mini-prog.indet .pixel-cell:nth-child(7) .pixel-sub { animation-delay: 0.72s; }
+.mini-prog.indet .pixel-cell:nth-child(8) .pixel-sub { animation-delay: 0.84s; }
+@keyframes pixel-wave {
+  0%, 100% { opacity: 0.12; }
+  50% { opacity: 1; }
+}
+.stop-btn {
+  flex: 0 0 auto;
+  align-self: center;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--text2);
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1;
+  padding: 3px 5px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+}
+.stop-btn:hover { border-color: var(--red); color: var(--red); background: var(--red-soft); }
+
+/* 专家工作间面板(初次插入时由 JS 将 opacity 置 1,产生淡入) */
+.expert-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  opacity: 0;
+  transition: opacity 0.18s ease;
+}
+.expert-head { display: flex; align-items: center; justify-content: flex-end; gap: 12px; }
+.expert-step { font-size: 12px; color: var(--text2); white-space: nowrap; font-variant-numeric: tabular-nums; }
+/* 专家卡片墙:列数随卡宽与专家数量自适应(auto-fit),每专家一张小卡 */
+.expert-lanes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 10px;
+}
+.expert-lane {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 12px;
+  min-width: 0;
+  background: #FCFAF5;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+/* 裁决卡:虚线框区分"汇总者"角色 */
+.expert-lane.lane-judge { border-style: dashed; }
+.lane-top { display: flex; align-items: center; gap: 7px; min-width: 0; }
+/* 状态点:颜色即泳道状态,running 时呼吸脉冲 */
+.lane-dot { flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%; background: #D8D1C2; }
+.expert-lane.lane-running .lane-dot { background: var(--accent); animation: dot-pulse 1.2s ease-in-out infinite; }
+.expert-lane.lane-detected .lane-dot { background: var(--sage); }
+.expert-lane.lane-clear .lane-dot { background: var(--sage); opacity: 0.45; }
+.expert-lane.lane-error .lane-dot { background: var(--red); }
+@keyframes dot-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+/* 面板名称/行为文字继承 UI 骨架像素字体(#toolbar/… 应用块统一指定) */
+.expert-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  color: var(--text);
+}
+.expert-phase {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+  font-size: 12px;
+  color: var(--text2);
+}
+/* 像素矩阵铺满卡宽:严格正方形(8×8),用 space-between 拉大间隔填充 */
+.expert-lane .pixel-bar { width: 100%; justify-content: space-between; }
+/* 泳道状态色:queued 灰 / running 橙(--accent)/ done+detected 绿 / done+undetected 灰绿 / error 红 */
+/* queued 泳道降为单行摘要:去卡片化(透明底/框)、隐藏像素矩阵,
+   只留「名称 + 等待调度」灰字一行;running/done 保持全尺寸矩阵 */
+.expert-lane.lane-queued {
+  padding: 3px 4px;
+  background: transparent;
+  border-color: transparent;
+}
+.expert-lane.lane-queued .pixel-bar { display: none; }
+.expert-lane.lane-queued .expert-name,
+.expert-lane.lane-queued .expert-phase { color: var(--text2); }
+.expert-lane.lane-running .pixel-sub.on { background: var(--accent); }
+.expert-lane.lane-detected .pixel-sub.on { background: var(--sage); }
+.expert-lane.lane-clear .pixel-sub.on { background: var(--sage); opacity: 0.45; }
+.expert-lane.lane-error .pixel-sub.on { background: var(--red); }
+.expert-lane.lane-error .expert-name { color: var(--red); }
+
+@media (prefers-reduced-motion: reduce) {
+  .pixel-sub.frontier,
+  .mini-prog.indet .pixel-sub { animation: none; }
+  .mini-prog.indet .pixel-sub { opacity: 0.45; }
+}
+
+/* ---------- ≤767px:专家泳道收窄最小列宽(响应式专节按域拆分,整节说明见 layout.css) ---------- */
+@media (max-width: 767px) {
+  /* 专家泳道:收窄最小列宽(≤413 再降为单列) */
+  .expert-lanes { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
+}
+
+/* ---------- ≤413px:专家泳道强制单列 ---------- */
+@media (max-width: 413px) {
+  /* 专家泳道强制单列 */
+  .expert-lanes { grid-template-columns: 1fr; }
+}

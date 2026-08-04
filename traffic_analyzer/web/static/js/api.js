@@ -1,8 +1,13 @@
 /* ------------------------------------------------------------ API 层 */
 import { MOCK } from './state.js';
 import { ApiError } from './util.js';
-import { mockApi, mockFrameUrl, mockImageUrl } from './mock.js';
 import { redirectToLogin } from './auth.js';
+
+// mock 体系按需加载:仅 ?mock=1 时动态 import(参照 mock_db.js 加载 mock_data.js 的写法),
+// 非 mock 模式零 mock 模块下载。mockModule 供同步函数(frameUrl/imageUrl)读取:
+// 首次渲染晚于本 await(main.js init 内同样 await mock 加载),同步读取时必定已就绪
+let mockModule = null;
+const mockReady = MOCK ? import('./mock.js').then(m => { mockModule = m; return m; }) : null;
 
 // 乐观锁:GET /api/results/{stem} 响应里的 file_sig 按 stem 缓存,
 // SFT/证据保存时作 base_sig 上送(见 sft.js / evidence.js);PUT 响应带新 file_sig 时更新
@@ -28,6 +33,7 @@ function captureFileSig(path, json) {
 export async function api(path, opts) {
   opts = opts || {};
   if (MOCK) {
+    const { mockApi } = await mockReady;
     const mockRes = await mockApi(path, opts);
     captureFileSig(path, mockRes); // mock 同样维护 file_sig 缓存(乐观锁演示)
     return mockRes;
@@ -66,7 +72,7 @@ export async function api(path, opts) {
 }
 
 export function frameUrl(stem, index) {
-  if (MOCK) return mockFrameUrl(stem, index);
+  if (MOCK) return mockModule.mockFrameUrl(stem, index);
   return '/api/videos/' + encodeURIComponent(stem) + '/frame?index=' + index;
 }
 
@@ -89,7 +95,7 @@ export function sourceFrameUrl(source, index) {
 }
 
 export function imageUrl(stem, name) {
-  if (MOCK) return mockImageUrl(stem, name);
+  if (MOCK) return mockModule.mockImageUrl(stem, name);
   // name 为相对 analysis/<stem>/ 的路径(report.md 的 "tmp_img/.../x.jpg" 或
   // evidence.json 的 "images/x.jpg"),按原路径请求,不再降级为 basename。
   return '/api/results/' + encodeURIComponent(stem) + '/file?path=' + encodeURIComponent(name);

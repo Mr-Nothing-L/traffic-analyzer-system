@@ -1,0 +1,135 @@
+/* ==========================================================================
+   证据编辑卡(自 style.css 拆分,规则原文未改)
+   ========================================================================== */
+
+/* ---------- 证据编辑卡 ---------- */
+.ev-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 12px 18px 0;
+}
+
+.ev-tab {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text2);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+
+.ev-tab:hover { border-color: var(--accent); color: var(--accent); }
+.ev-tab.active { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.ev-tab .dot { width: 7px; height: 7px; border-radius: 50%; background: #D8D1C2; }
+.ev-tab .dot.detected { background: var(--sage); }
+.ev-tab.active .dot.detected { background: var(--on-accent); }
+
+.ev-pane { animation: fade-in 0.2s ease; }
+
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+
+.ev-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: var(--text2);
+}
+
+.ev-frame-input {
+  width: 64px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 6px;
+  font-family: var(--mono);
+  font-size: 12px;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.ev-legend { display: inline-flex; gap: 12px; margin-left: auto; }
+.ev-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.ev-legend .sw { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+.sw-emergency { background: var(--accent); }
+.sw-chevron { background: var(--blue); }
+.sw-box { background: var(--sage); }
+
+.ev-stage {
+  position: relative;
+  background: #1d1a16;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  line-height: 0;
+}
+
+.ev-img { width: 100%; display: block; user-select: none; -webkit-user-drag: none; }
+
+.ev-canvas {
+  position: absolute;
+  inset: 0;
+  cursor: crosshair;
+  image-rendering: pixelated;
+}
+
+.ev-labelbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--text2);
+}
+
+.ev-label-input {
+  flex: 1;
+  max-width: 360px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 9px;
+  font-size: 12.5px;
+  background: var(--bg);
+  color: var(--text);
+}
+.ev-label-input:focus { border-color: var(--accent); outline: none; }
+
+.ev-gallery {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.ev-gallery img {
+  height: 84px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  cursor: zoom-in;
+  /* 模糊加载:加载完成(加 .loaded)后过渡到清晰 */
+  filter: blur(8px);
+  opacity: 0.4;
+  transition: transform 0.12s ease, box-shadow 0.12s ease,
+              filter 0.3s ease, opacity 0.3s ease;
+}
+.ev-gallery img.loaded { filter: blur(0); opacity: 1; }
+.ev-gallery img.loaded:hover { transform: translateY(-2px); box-shadow: var(--shadow-hover); }
+
+/* 证据卡空态:内联提示行,不再用虚线框占位 */
+.ev-empty {
+  padding: 4px 2px;
+  color: var(--text2);
+  font-size: 12px;
+}
+
+.dirty-flag {
+  font-size: 11.5px;
+  color: var(--accent);
+  font-weight: 650;
+}
