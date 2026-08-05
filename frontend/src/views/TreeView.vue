@@ -22,7 +22,10 @@ const { width, dragging, onPointerDown, reset } = useSplitter()
 
 // SSE:任务进度/完成增量更新徽标与像素条;presence 事件更新在线徽章
 subscribe('job.progress', (d) => jobs.onJobEvent(d as Job))
-subscribe('job.done', (d) => jobs.onJobEvent(d as Job))
+subscribe('job.done', (d) => {
+  jobs.onJobEvent(d as Job)
+  ws.refreshTree() // 任务终态:静默对齐 has_results/徽标(不清空树,见 workspace store)
+})
 subscribe('presence', (d) => presence.setRoster(d))
 
 onMounted(async () => {

@@ -70,7 +70,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     }
   }
 
-  /** 加载文件树;preserve 时保留已展开目录并逐层重拉(任务完成后刷新用)。 */
+  /** 加载文件树;preserve 时保留已展开目录并逐层重拉。 */
   async function loadTree(preserve = false) {
     const prevExpanded = preserve ? Array.from(expanded) : []
     loaded.value = false
@@ -120,6 +120,66 @@ export const useWorkspaceStore = defineStore('workspace', () => {
         expanded.delete(rel)
         throw e
       }
+    }
+  }
+
+  /* ---- 静默刷新:任务终态(完成/失败/停止)后对齐 has_results 与徽标 ----
+   * 与 loadTree 不同:不动 loaded/勾选,先拉取成功再整体替换;主请求失败保留旧树,树绝不消失
+   * (旧版 job.done → loadTree(preserve) 先置 loaded=false 并清空树,重拉慢/失败时卡初始态)。 */
+  let refreshing = false // 在途去重;在途期间又有终态则 refreshQueued 补一轮
+  let refreshQueued = false
+
+  /** 任务终态后静默重拉树/视频列表/已展开子层;未加载时不刷(不擅自加载大工作区)。 */
+  async function refreshTree() {
+    if (!loaded.value) return
+    if (refreshing) {
+      refreshQueued = true
+      return
+    }
+    refreshing = true
+    try {
+      do {
+        refreshQueued = false
+        await refreshOnce()
+      } while (refreshQueued)
+    } finally {
+      refreshing = false
+    }
+  }
+
+  /** 单轮静默刷新:树+视频任一失败整轮放弃;已展开目录消失时放弃其展开态。 */
+  async function refreshOnce() {
+    let entries: TreeEntry[]
+    let vids: VideoInfo[]
+    try {
+      const [tree, videosResp] = await Promise.all([
+        apiFetch<{ entries: TreeEntry[] }>('/workspace/tree'),
+        apiFetch<VideoInfo[]>('/workspace/videos'),
+      ])
+      entries = tree.entries || []
+      vids = videosResp || []
+    } catch {
+      return // 拉取失败:保留旧树
+    }
+    const dirs = Array.from(expanded)
+    const kids = await Promise.all(
+      dirs.map(async (rel): Promise<{ rel: string; entries: TreeEntry[] | null }> => {
+        try {
+          const data = await apiFetch<{ entries: TreeEntry[] }>(
+            `/workspace/tree?path=${encodeURIComponent(rel)}`,
+          )
+          return { rel, entries: data.entries || [] }
+        } catch {
+          return { rel, entries: null } // 目录已消失
+        }
+      }),
+    )
+    root.value = entries
+    videos.value = vids
+    Object.keys(children).forEach((k) => delete children[k])
+    for (const k of kids) {
+      if (k.entries) children[k.rel] = k.entries
+      else expanded.delete(k.rel)
     }
   }
 
@@ -184,7 +244,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   return {
     path, loaded, root, children, expanded, videos, checked, currentRel,
     filter, sort, hasWorkspace, videoByRel, allChecked, someChecked,
-    fetchWorkspace, loadTree, toggleDir, applyWorkspace,
+    fetchWorkspace, loadTree, refreshTree, toggleDir, applyWorkspace,
     setFilter, setSort, setChecked, setAllChecked, loadRecent, pushRecent,
   }
 })
