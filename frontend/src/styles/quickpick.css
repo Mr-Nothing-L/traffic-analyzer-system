@@ -1,0 +1,130 @@
+/* DirQuickPick.vue「快捷选择」+ DirPickerModal 模式分段控件样式。
+   (自 dirpicker.css 拆分:单文件 ≤250 行约束;类名 qp-/dir-seg- 前缀,无全局污染。)
+   三态:hover / :focus-visible / .active(键盘高亮与单击选中);
+   目录名 --font-sans(精确辨认)、完整路径 --font-mono 次要色、组头与分段按钮像素体。 */
+
+/* ---- 模式分段控件:快捷选择 | 手动浏览 ---- */
+.dir-seg {
+  display: flex;
+  gap: 4px;
+  margin: 0 16px 10px;
+  padding: 3px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-2);
+}
+
+.dir-seg-btn {
+  flex: 1;
+  border: none;
+  background: transparent;
+  color: var(--color-text2);
+  font-family: var(--font-pixel);
+  font-size: var(--text-sm);
+  padding: 5px 0;
+  border-radius: 6px;
+  cursor: pointer;
+  transition:
+    background var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+
+.dir-seg-btn:hover {
+  color: var(--color-text);
+}
+
+.dir-seg-btn:focus-visible {
+  outline: 1px solid var(--color-accent);
+  outline-offset: -1px;
+}
+
+.dir-seg-btn.on {
+  background: var(--color-card);
+  color: var(--color-accent);
+  box-shadow: var(--shadow);
+}
+
+.dir-seg-btn:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+/* ---- 快捷选择:过滤框(贴现有 dir-pathbar/dir-input,仅去掉右侧编辑按钮的多余间距) ---- */
+.qp-filter {
+  margin-bottom: 10px;
+}
+
+/* ---- 快捷选择:清单行 ---- */
+.qp-head {
+  font-family: var(--font-pixel);
+  font-size: var(--text-sm);
+  color: var(--color-text2);
+  padding: 8px 9px 3px;
+  user-select: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qp-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 9px;
+  border-radius: 6px;
+  cursor: pointer;
+  user-select: none;
+  outline: none;
+  transition: background var(--dur-fast) var(--ease-out);
+}
+
+.qp-row:hover {
+  background: var(--color-hover-bg);
+}
+
+.qp-row:focus-visible {
+  box-shadow: inset 0 0 0 1px var(--color-accent);
+}
+
+.qp-row.active {
+  background: var(--color-accent-soft);
+  box-shadow: inset 0 0 0 1px var(--color-accent);
+}
+
+.qp-name {
+  font-family: var(--font-sans);
+  font-size: 13px;
+  color: var(--color-text);
+  white-space: nowrap;
+}
+
+.qp-row.root .qp-name {
+  font-weight: 600;
+}
+
+.qp-path {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--color-text2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+}
+
+.qp-more {
+  padding: 4px 9px 8px;
+  font-size: var(--text-xs);
+  color: var(--color-text2);
+  user-select: none;
+}
+
+/* reduced-motion:折叠过渡为即时呈现(design.md:全部折叠为 ≤150ms 淡入,此处直接取消) */
+@media (prefers-reduced-motion: reduce) {
+  .dir-seg-btn,
+  .qp-row {
+    transition: none;
+  }
+}

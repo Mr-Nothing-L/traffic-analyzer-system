@@ -1,12 +1,16 @@
 <script setup lang="ts">
-/** 工作区目录选择弹窗:浏览服务器目录(进入/回上级/面包屑/快速跳转/手动输入)。
- * 行为迁移自 legacy workspace.js 的 dirModal;确认期间锁定弹窗(applying)。 */
-import { computed, h, ref, watch } from 'vue'
-import { NButton, NModal, NSelect, useMessage } from 'naive-ui'
-import type { SelectOption } from 'naive-ui'
+/** 工作区目录选择弹窗:「快捷选择 | 手动浏览」双模式。
+ * 快捷选择 = 白名单平铺清单(DirQuickPick);手动浏览 = 面包屑浏览器(进入/回上级/手动输入)。
+ * 上次模式记 localStorage(ta_dirpicker_mode);两模式共用底部路径栏 + 取消/选择按钮;
+ * 确认期间锁定弹窗(applying),禁止任何途径关闭。 */
+import { computed, ref, watch } from 'vue'
+import { NButton, NModal, useMessage } from 'naive-ui'
 import { ApiError, apiFetch } from '../api/client'
 import { useWorkspaceStore } from '../stores/workspace'
+import DirQuickPick from './DirQuickPick.vue'
 import UiIcon from './UiIcon.vue'
+
+const MODE_KEY = 'ta_dirpicker_mode' // 上次使用的模式:quick=快捷选择 / browse=手动浏览
 
 const props = defineProps<{ show: boolean }>()
 const emit = defineEmits<{ 'update:show': [boolean] }>()
@@ -14,6 +18,9 @@ const emit = defineEmits<{ 'update:show': [boolean] }>()
 const ws = useWorkspaceStore()
 const message = useMessage()
 
+const mode = ref<'quick' | 'browse'>(
+  localStorage.getItem(MODE_KEY) === 'browse' ? 'browse' : 'quick',
+)
 const cwd = ref<string | null>(null)
 const parent = ref<string | null>(null)
 const dirs = ref<{ name: string; path: string }[]>([])
@@ -22,29 +29,27 @@ const loading = ref(false)
 const applying = ref(false) // confirm 后 applyWorkspace 期间锁定弹窗,禁止任何途径关闭
 const showInput = ref(false)
 const inputValue = ref('')
-const defaultDirs = ref<string[]>([]) // 后端白名单目录(弹窗打开时拉取;空则回退最近列表)
 
 let navSeq = 0 // 导航竞态防护:只落地最后一次响应(同 legacy)
+
+watch(mode, (m) => {
+  try {
+    localStorage.setItem(MODE_KEY, m)
+  } catch {
+    // 存储不可用时静默忽略(模式记忆仅是体验增强)
+  }
+  if (m === 'browse' && !cwd.value) navDir(ws.path || null) // 首次切入手动浏览才拉目录
+})
 
 watch(
   () => props.show,
   (open) => {
     if (!open) return
     showInput.value = false
-    fetchDefaultDirs()
-    navDir(ws.path || null) // 无 path 时后端回退到当前工作区或主目录
+    selected.value = null
+    if (mode.value === 'browse') navDir(ws.path || null) // 无 path 时后端回退到当前工作区或主目录
   },
 )
-
-/** 拉取白名单目录(GET /api/workspace/default-dirs);失败按未配置处理。 */
-async function fetchDefaultDirs() {
-  try {
-    const data = await apiFetch<{ dirs: string[] }>('/workspace/default-dirs')
-    defaultDirs.value = data.dirs || []
-  } catch {
-    defaultDirs.value = []
-  }
-}
 
 async function navDir(path: string | null) {
   const seq = ++navSeq
@@ -82,32 +87,6 @@ const crumbs = computed(() => {
   return out
 })
 
-/** 「默认工作区」下拉:优先白名单目录;白名单为空回退 当前工作区 + 最近 + 主目录。 */
-const recentOptions = computed(() => {
-  if (defaultDirs.value.length)
-    return defaultDirs.value.map((p) => ({ label: p, value: p }))
-  const opts: { label: string; value: string }[] = []
-  if (ws.path) opts.push({ label: `当前工作区 (${ws.path})`, value: '__current__' })
-  ws.loadRecent().forEach((p) => opts.push({ label: p, value: p }))
-  opts.push({ label: '主目录', value: '__home__' })
-  return opts
-})
-
-/** 选项渲染:完整路径等宽小字号、长路径允许换行,hover title 给完整路径。 */
-function renderPathLabel(option: SelectOption) {
-  return h(
-    'span',
-    { class: 'dir-dd-path', title: String(option.value ?? '') },
-    String(option.label ?? ''),
-  )
-}
-
-function onRecentPick(v: string) {
-  if (v === '__home__') navDir(null)
-  else if (v === '__current__' && ws.path) navDir(ws.path)
-  else if (v) navDir(v)
-}
-
 function onInputEnter() {
   const p = inputValue.value.trim()
   if (p) navDir(p)
@@ -116,6 +95,17 @@ function onInputEnter() {
 function showManualInput() {
   showInput.value = true
   inputValue.value = cwd.value || ''
+}
+
+/** 快捷选择:单击填入底部路径栏。 */
+function onQuickPick(p: string) {
+  selected.value = p
+}
+
+/** 快捷选择:双击/Enter 立即确认(与底部「选择此文件夹」同路径)。 */
+function onQuickConfirm(p: string) {
+  selected.value = p
+  confirmDir()
 }
 
 function tryClose() {
@@ -155,70 +145,89 @@ async function confirmDir() {
           <UiIcon name="close" :size="13" />
         </button>
       </div>
-      <div class="dir-recent">
-        <span class="dir-recent-label">默认工作区</span>
-        <n-select
-          class="dir-recent-select"
-          :value="null"
-          :options="recentOptions"
-          :render-label="renderPathLabel"
-          placeholder="快速跳转到…"
+      <div class="dir-seg" role="tablist" aria-label="选择方式">
+        <button
+          class="dir-seg-btn"
+          :class="{ on: mode === 'quick' }"
+          role="tab"
+          :aria-selected="mode === 'quick'"
           :disabled="applying"
-          @update:value="onRecentPick"
-        />
-      </div>
-      <div class="dir-pathbar">
-        <div v-if="!showInput" class="dir-crumbs">
-          <template v-for="(c, i) in crumbs" :key="c.path">
-            <span v-if="i > 0" class="dir-crumb-sep">›</span>
-            <span
-              class="dir-crumb"
-              :class="{ current: i === crumbs.length - 1 }"
-              :title="c.path"
-              @click="navDir(c.path)"
-              >{{ c.label }}</span
-            >
-          </template>
-        </div>
-        <input
-          v-else
-          v-model="inputValue"
-          class="dir-input"
-          spellcheck="false"
-          placeholder="输入绝对路径,回车跳转"
-          @keydown.enter.prevent="onInputEnter"
-          @keydown.esc.prevent="showInput = false"
-        />
-        <button class="dir-edit" title="手动输入路径" @click="showManualInput">
-          <UiIcon name="edit" :size="13" />
+          @click="mode = 'quick'"
+        >
+          快捷选择
+        </button>
+        <button
+          class="dir-seg-btn"
+          :class="{ on: mode === 'browse' }"
+          role="tab"
+          :aria-selected="mode === 'browse'"
+          :disabled="applying"
+          @click="mode = 'browse'"
+        >
+          手动浏览
         </button>
       </div>
-      <div class="dir-list">
-        <!-- 加载 spinner(legacy tree.css:175-185)替换原纯文字 -->
-        <div v-if="loading" class="dir-state">
-          <div class="dir-spinner" />
-          加载中…
+      <DirQuickPick
+        v-if="mode === 'quick'"
+        :active="show"
+        :applying="applying"
+        @pick="onQuickPick"
+        @confirm="onQuickConfirm"
+      />
+      <template v-else>
+        <div class="dir-pathbar">
+          <div v-if="!showInput" class="dir-crumbs">
+            <template v-for="(c, i) in crumbs" :key="c.path">
+              <span v-if="i > 0" class="dir-crumb-sep">›</span>
+              <span
+                class="dir-crumb"
+                :class="{ current: i === crumbs.length - 1 }"
+                :title="c.path"
+                @click="navDir(c.path)"
+                >{{ c.label }}</span
+              >
+            </template>
+          </div>
+          <input
+            v-else
+            v-model="inputValue"
+            class="dir-input"
+            spellcheck="false"
+            placeholder="输入绝对路径,回车跳转"
+            @keydown.enter.prevent="onInputEnter"
+            @keydown.esc.prevent="showInput = false"
+          />
+          <button class="dir-edit" title="手动输入路径" @click="showManualInput">
+            <UiIcon name="edit" :size="13" />
+          </button>
         </div>
-        <template v-else-if="cwd">
-          <div v-if="parent" class="dir-row dir-up" @click="navDir(parent)">
-            <span class="dir-ico"><UiIcon name="up" :size="13" /></span>
-            <span class="dir-name">..</span>
+        <div class="dir-list">
+          <!-- 加载 spinner(legacy tree.css:175-185)替换原纯文字 -->
+          <div v-if="loading" class="dir-state">
+            <div class="dir-spinner" />
+            加载中…
           </div>
-          <div
-            v-for="d in dirs"
-            :key="d.path"
-            class="dir-row"
-            :class="{ selected: selected === d.path }"
-            @click="selected = d.path"
-            @dblclick="navDir(d.path)"
-          >
-            <span class="dir-ico"><UiIcon name="folder" :size="13" /></span>
-            <span class="dir-name">{{ d.name }}</span>
-          </div>
-          <div v-if="!dirs.length" class="dir-state">此目录没有子文件夹</div>
-        </template>
-        <div v-else class="dir-state">无法读取目录,可点击右侧按钮手动输入路径</div>
-      </div>
+          <template v-else-if="cwd">
+            <div v-if="parent" class="dir-row dir-up" @click="navDir(parent)">
+              <span class="dir-ico"><UiIcon name="up" :size="13" /></span>
+              <span class="dir-name">..</span>
+            </div>
+            <div
+              v-for="d in dirs"
+              :key="d.path"
+              class="dir-row"
+              :class="{ selected: selected === d.path }"
+              @click="selected = d.path"
+              @dblclick="navDir(d.path)"
+            >
+              <span class="dir-ico"><UiIcon name="folder" :size="13" /></span>
+              <span class="dir-name">{{ d.name }}</span>
+            </div>
+            <div v-if="!dirs.length" class="dir-state">此目录没有子文件夹</div>
+          </template>
+          <div v-else class="dir-state">无法读取目录,可点击右侧按钮手动输入路径</div>
+        </div>
+      </template>
       <div v-if="applying" class="dir-state">正在加载工作区,请稍候…</div>
       <div class="dir-foot">
         <span class="dir-selected" :title="selected || cwd || ''">{{ selected || cwd || '' }}</span>
