@@ -55,7 +55,6 @@ async function onLogout() {
   <header class="app-topbar">
     <span class="tb-logo"><UiIcon name="logo" :size="18" /></span>
     <span class="app-title">高速交通事件分析台</span>
-    <span class="app-version">v2</span>
     <button class="ws-btn" title="浏览服务器目录选择工作区" @click="dirPickerOpen = true">
       <UiIcon name="home" :size="14" />
       <span class="ws-label">{{ ws.path ? '工作区' : '选择工作区…' }}</span>
@@ -114,11 +113,6 @@ async function onLogout() {
   font-size: 24px; /* 对齐 legacy layout.css .tb-title;token 体系无 24px 档,直接写值 */
   font-weight: 650;
   letter-spacing: 0.02em;
-}
-
-.app-version {
-  font-size: var(--text-xs);
-  color: var(--color-text2);
 }
 
 .ws-btn {

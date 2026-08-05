@@ -10,7 +10,8 @@ and an ``images/`` subdirectory.
 (WorkspaceState)、路径契约(analysis/<stem>/)、TTL 缓存设施与
 GET/POST /api/workspace 路由;videos.py 为视频发现(list_videos +
 长 TTL 缓存,见 videos._VIDEOS_CACHE_TTL_SEC)与 /api/workspace/videos 路由;tree.py 为单层目录树与
-/api/workspace/tree 路由。本模块聚合导出,保持
+/api/workspace/tree 路由;default_dirs.py 为 GET /api/workspace/default-dirs
+(白名单目录对前端弹窗的暴露)。本模块聚合导出,保持
 ``from traffic_analyzer.web import workspace`` 及
 ``workspace.<名字>``(含 _TTLCache/_CACHE_TTL_SEC/_CONFIG_ENV_PATH 等
 monkeypatch 目标,经 core._pkg_var 从包命名空间读取)的既有用法。

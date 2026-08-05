@@ -64,6 +64,17 @@
   min-width: 0;
 }
 
+/* 「默认工作区」下拉选项:完整路径等宽小字号,长路径允许换行,
+   hover title(render-label 已带)给完整路径 */
+.dir-dd-path {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  white-space: normal;
+  word-break: break-all;
+}
+
 .dir-pathbar {
   display: flex;
   align-items: center;

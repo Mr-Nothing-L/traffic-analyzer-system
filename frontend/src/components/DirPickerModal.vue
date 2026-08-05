@@ -1,8 +1,9 @@
 <script setup lang="ts">
 /** 工作区目录选择弹窗:浏览服务器目录(进入/回上级/面包屑/快速跳转/手动输入)。
  * 行为迁移自 legacy workspace.js 的 dirModal;确认期间锁定弹窗(applying)。 */
-import { computed, ref, watch } from 'vue'
+import { computed, h, ref, watch } from 'vue'
 import { NButton, NModal, NSelect, useMessage } from 'naive-ui'
+import type { SelectOption } from 'naive-ui'
 import { ApiError, apiFetch } from '../api/client'
 import { useWorkspaceStore } from '../stores/workspace'
 import UiIcon from './UiIcon.vue'
@@ -21,6 +22,7 @@ const loading = ref(false)
 const applying = ref(false) // confirm 后 applyWorkspace 期间锁定弹窗,禁止任何途径关闭
 const showInput = ref(false)
 const inputValue = ref('')
+const defaultDirs = ref<string[]>([]) // 后端白名单目录(弹窗打开时拉取;空则回退最近列表)
 
 let navSeq = 0 // 导航竞态防护:只落地最后一次响应(同 legacy)
 
@@ -29,9 +31,20 @@ watch(
   (open) => {
     if (!open) return
     showInput.value = false
+    fetchDefaultDirs()
     navDir(ws.path || null) // 无 path 时后端回退到当前工作区或主目录
   },
 )
+
+/** 拉取白名单目录(GET /api/workspace/default-dirs);失败按未配置处理。 */
+async function fetchDefaultDirs() {
+  try {
+    const data = await apiFetch<{ dirs: string[] }>('/workspace/default-dirs')
+    defaultDirs.value = data.dirs || []
+  } catch {
+    defaultDirs.value = []
+  }
+}
 
 async function navDir(path: string | null) {
   const seq = ++navSeq
@@ -69,14 +82,25 @@ const crumbs = computed(() => {
   return out
 })
 
-/** 「最近使用」下拉:当前工作区 + 历史路径 + 主目录。 */
+/** 「默认工作区」下拉:优先白名单目录;白名单为空回退 当前工作区 + 最近 + 主目录。 */
 const recentOptions = computed(() => {
+  if (defaultDirs.value.length)
+    return defaultDirs.value.map((p) => ({ label: p, value: p }))
   const opts: { label: string; value: string }[] = []
   if (ws.path) opts.push({ label: `当前工作区 (${ws.path})`, value: '__current__' })
   ws.loadRecent().forEach((p) => opts.push({ label: p, value: p }))
   opts.push({ label: '主目录', value: '__home__' })
   return opts
 })
+
+/** 选项渲染:完整路径等宽小字号、长路径允许换行,hover title 给完整路径。 */
+function renderPathLabel(option: SelectOption) {
+  return h(
+    'span',
+    { class: 'dir-dd-path', title: String(option.value ?? '') },
+    String(option.label ?? ''),
+  )
+}
 
 function onRecentPick(v: string) {
   if (v === '__home__') navDir(null)
@@ -132,11 +156,12 @@ async function confirmDir() {
         </button>
       </div>
       <div class="dir-recent">
-        <span class="dir-recent-label">最近使用</span>
+        <span class="dir-recent-label">默认工作区</span>
         <n-select
           class="dir-recent-select"
           :value="null"
           :options="recentOptions"
+          :render-label="renderPathLabel"
           placeholder="快速跳转到…"
           :disabled="applying"
           @update:value="onRecentPick"

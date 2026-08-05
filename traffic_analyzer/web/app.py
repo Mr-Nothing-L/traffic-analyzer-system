@@ -48,6 +48,7 @@ from traffic_analyzer.web import (
     video_stream,
     workspace as workspace_mod,
 )
+from traffic_analyzer.web.workspace import default_dirs as workspace_default_dirs
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +108,7 @@ def create_app(workspace: Optional[str] = None) -> FastAPI:
             logger.warning("Preset workspace is not a directory, ignored: %s", preset)
 
     app.include_router(workspace_mod.router)
+    app.include_router(workspace_default_dirs.router)
     app.include_router(fs.router)
     app.include_router(jobs.router)
     app.include_router(evidence_api.router)
