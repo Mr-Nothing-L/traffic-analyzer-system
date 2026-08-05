@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """mock 模式全按键循环自测脚本(演示版:带节奏停顿)。
 
+!!! 已废弃:mock 体系已随 legacy 前端(traffic_analyzer/web/static/)删除,
+    本脚本保留存档,不再可用。新前端(Vue 3,frontend/)冒烟请用
+    scripts/e2e_v2_smoke.py。 !!!
+
 用法(项目根目录):
     python3 scripts/e2e_mock_test.py              # 有头浏览器,无限循环,Ctrl+C 停止
     python3 scripts/e2e_mock_test.py --headless   # 无头模式

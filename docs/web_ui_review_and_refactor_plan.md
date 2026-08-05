@@ -169,3 +169,11 @@ frontend/ (新,Vite 工程)
 - 任务队列并发化(多 worker 推理)
 - i18n / 移动端专项 / 可访问性专项
 - 后端 API 的 RESTful 重设计(现有端点全部保留兼容)
+
+---
+
+**阶段 6 已完成(2026-08-05)**:新前端(frontend/dist)提为 `/`,legacy
+`traffic_analyzer/web/static/` 已删除;`/v2/*` 旧书签 301 重定向;`/login`
+由 SPA LoginView 渲染;新增 Playwright 级真实后端冒烟
+`scripts/e2e_v2_smoke.py`(mock 体系的 `e2e_mock_test.py` / `build_mock_data.py`
+标注废弃存档)。

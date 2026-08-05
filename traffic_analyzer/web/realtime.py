@@ -22,7 +22,7 @@ asyncio.Queue,publish 溢出时丢弃最旧事件(进度/看板均可重拉,不�
 上游:web/app.py(create_app 装配并挂载路由,lifespan 绑定 loop);
 web/jobs(queue 在进度更新/任务终态时 publish);web/dashboard.py(review
 PUT 成功后 publish);web/presence.py(beat 后 publish)。
-下游:web/static 前端(EventSource 订阅 /api/events)。
+下游:frontend/dist 前端(EventSource 订阅 /api/events)。
 """
 
 from __future__ import annotations

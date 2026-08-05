@@ -161,7 +161,7 @@ def _event_options_index() -> Dict[int, List[Dict[str, Any]]]:
     return index
 
 
-# 属性值别名表(与 web/static/js/sft.js 的 SFT_ATTR_ALIASES 保持一致):
+# 属性值别名表(与 frontend/src/sft/spans.ts 的 SFT_ATTR_ALIASES 保持一致):
 # VLM 写出别名形态时归一到封闭枚举,枚举词本身总是合法书写形态。
 _ATTR_ALIASES: Dict[str, List[str]] = {
     "行车道": ["主车道"],
@@ -187,7 +187,7 @@ _ATTR_ALIASES: Dict[str, List[str]] = {
     "三角警示牌": ["三角牌"],
 }
 
-# 骨架句模板(与 web/static/js/sft.js 的 SFT_SKELETON_TEMPLATES 保持一致):
+# 骨架句模板(与 frontend/src/sft/model.ts 的 SFT_SKELETON_TEMPLATES 保持一致):
 # 字符串为固定文字;(slot, pre, post) 为该属性有值时输出的从句,空值整句省略。
 _SKELETON_TEMPLATES: Dict[int, List[Any]] = {
     1: [("direction", "", "一侧"), ("lane_type", "", "内"), "停有一辆", ("vehicle_type", "", "")],

@@ -1,0 +1,182 @@
+/* ==========================================================================
+   登录页样式(逐规则移植 legacy static/css/login.css,token 换 v2 --color-* 命名)
+   选择器挂在 .login-page 作用域下:SPA 单 body,legacy 的 body 规则改为页面容器。
+   ========================================================================== */
+
+/* 弹窗/登录卡共用的入场动画(移植 legacy base.css:46-49 modal-in;
+   时长按 design.md §4 motion-cut 收敛为 --dur-med/--ease-out) */
+@keyframes modal-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.login-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+  /* 浅色底上铺一层像素网格点,呼应像素风(legacy 为 rgba(42,38,32,0.045),
+     即 --color-text 4.5% 透明度,用 color-mix 保持纯 token 引用) */
+  background-image:
+    linear-gradient(color-mix(in oklab, var(--color-text) 4.5%, transparent) 1px, transparent 1px),
+    linear-gradient(90deg, color-mix(in oklab, var(--color-text) 4.5%, transparent) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+.login-card {
+  position: relative;
+  width: min(380px, calc(100vw - 32px));
+  background: var(--color-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 36px 32px 28px;
+  font-family: var(--font-pixel);
+  /* 进入:减速曲线,无过冲 */
+  animation: modal-in var(--dur-med) var(--ease-out);
+}
+/* 常态轻投影;表单聚焦(focus-within)时升回重投影 */
+.login-card:focus-within {
+  box-shadow: var(--shadow-hover);
+}
+
+/* 四角像素方块装饰:1px 基块 + box-shadow 逐像素复制 */
+.px-deco {
+  position: absolute;
+  width: 6px;
+  height: 6px;
+  pointer-events: none;
+}
+.px-deco.tl { top: 10px; left: 10px; color: var(--color-accent); }
+.px-deco.tr { top: 10px; right: 10px; color: var(--color-sage); }
+.px-deco.bl { bottom: 10px; left: 10px; color: var(--color-blue); }
+.px-deco.br { bottom: 10px; right: 10px; color: var(--color-accent); }
+.px-deco::before {
+  content: '';
+  position: absolute;
+  width: 6px;
+  height: 6px;
+  background: currentColor;
+  box-shadow:
+    12px 0 0 0 currentColor,
+    0 12px 0 0 currentColor,
+    12px 12px 0 0 var(--color-border),
+    24px 0 0 0 var(--color-border),
+    0 24px 0 0 var(--color-border);
+}
+.px-deco.tr::before { right: 0; }
+.px-deco.bl::before { bottom: 0; }
+.px-deco.br::before { right: 0; bottom: 0; }
+
+.login-logo {
+  display: flex;
+  justify-content: center;
+  font-size: 28px;
+  color: var(--color-accent);
+  line-height: 1;
+  margin-bottom: 10px;
+}
+.login-title {
+  text-align: center;
+  font-size: 24px; /* 对齐 legacy login.css;token 体系无 24px 档,直接写值 */
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  margin: 0 0 4px;
+}
+.login-sub {
+  text-align: center;
+  font-size: 12.5px; /* legacy 密度,token 尺度无此档 */
+  color: var(--color-text2);
+  margin: 0 0 24px;
+}
+
+.login-field {
+  margin-bottom: 14px;
+}
+.login-field label {
+  display: block;
+  font-size: 12.5px; /* legacy 密度,token 尺度无此档 */
+  color: var(--color-text2);
+  margin-bottom: 5px;
+}
+.login-field input {
+  width: 100%;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-paper);
+  color: var(--color-text);
+  font-size: 14px;
+  padding: 9px 11px;
+  outline: none;
+  transition:
+    border-color var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out);
+}
+.login-field input:focus {
+  border-color: var(--color-accent);
+  /* 输入框 focus 光环 */
+  box-shadow: 0 0 0 3px var(--color-accent-soft);
+}
+
+.login-error {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--color-red-soft);
+  color: var(--color-red);
+  border: 1px solid var(--color-red);
+  border-radius: var(--radius-sm);
+  font-size: 12.5px; /* legacy 密度,token 尺度无此档 */
+  padding: 7px 10px;
+  margin-bottom: 14px;
+}
+
+/* 登录按钮(legacy .btn .btn-primary + .login-btn 合并,行为逐条对齐) */
+.login-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+  font-weight: 550;
+  cursor: pointer;
+  padding: 10px 0;
+  font-size: 15px;
+  letter-spacing: 0.35em;
+  text-indent: 0.35em; /* letter-spacing 末字符补偿,保持视觉居中 */
+  transition:
+    transform var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out);
+}
+.login-btn:hover:not(:disabled) {
+  background: var(--color-accent-hover);
+  transform: translateY(-1px);
+  /* 悬停时一圈柔和的主色光晕 */
+  box-shadow: 0 0 0 3px var(--color-accent-soft), var(--shadow);
+}
+.login-btn:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+.login-btn:active:not(:disabled) {
+  transform: scale(0.97);
+  box-shadow: none;
+}
+/* 禁用态降为中性底(loading 提交中复用 disabled) */
+.login-btn:disabled {
+  background: var(--color-surface-3);
+  color: var(--color-text2);
+  opacity: 0.6;
+  cursor: wait;
+}

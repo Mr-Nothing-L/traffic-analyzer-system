@@ -58,7 +58,9 @@ Web 前端解析。退出码：`0` 成功，`1` 错误，`2` 视频被预过滤�
 
 ## Web 界面
 
-Web 界面（FastAPI 后端 + SPA 前端）是推理、SFT 标注编辑与数据集审核的主入口：
+Web 界面（FastAPI 后端 + SPA 前端）是推理、SFT 标注编辑与数据集审核的主入口
+（前端为 Vue 3 单页应用，源码在 `frontend/`，`npm run build` 产出 `frontend/dist`，
+由后端挂载在 `/`）：
 
 ```bash
 python3 -m traffic_analyzer web            # 默认 http://127.0.0.1:8600

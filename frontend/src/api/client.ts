@@ -21,8 +21,9 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
     throw new ApiError(0, '网络错误,无法连接后端')
   }
   if (res.status === 401) {
-    // 会话失效:整页跳登录,与 auth middleware 的 302 语义一致。
-    window.location.href = '/login'
+    // 会话失效:整页跳登录,与 auth middleware 的 302 语义一致;
+    // 已在登录页则不重复跳(跳转即整页刷新,会成循环)。
+    if (window.location.pathname !== '/login') window.location.href = '/login'
     throw new ApiError(401, '未认证,已跳转登录页')
   }
   if (!res.ok) {

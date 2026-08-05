@@ -1,5 +1,5 @@
 // SFT 草稿模型(纯函数,零 DOM):草稿与序列化
-// 逐语义移植自 legacy traffic_analyzer/web/static/js/sft_model.js;
+// 逐语义移植自 legacy 前端 sft_model.js(legacy 已随 web/static 删除);
 // 全局 state 依赖改为显式参数(draft / events 进,数据出)。
 import type {
   EventAttrs, EventDef, MentionValue, SftDraft, SftLabel, SftPutPayload, SftRevision,

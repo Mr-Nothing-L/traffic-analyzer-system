@@ -1,5 +1,5 @@
 // SFT 声明提及 span 引擎(纯函数,零 DOM)
-// 逐语义移植自 legacy traffic_analyzer/web/static/js/sft_spans.js;
+// 逐语义移植自 legacy 前端 sft_spans.js(legacy 已随 web/static 删除);
 // tokenizeSpansHtml(HTML 拼接)改为 tokenizeSpans(分段数据),供 Vue 壳渲染。
 import type { AttrGroup, DeclSpan, EventDef, MentionValue, SpanEdit, SftDraft, TokenSegment } from './types';
 

@@ -64,7 +64,8 @@ prefilter (no report file written).
 ## Web UI
 
 The web UI (FastAPI backend + SPA frontend) is the main interface for inference,
-SFT label editing, and dataset review:
+SFT label editing, and dataset review (the frontend is a Vue 3 SPA; source lives in
+`frontend/`, `npm run build` produces `frontend/dist`, which the backend serves at `/`):
 
 ```bash
 python3 -m traffic_analyzer web            # default http://127.0.0.1:8600

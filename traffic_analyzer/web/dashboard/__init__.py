@@ -37,7 +37,7 @@ TTL 见 metrics._DASHBOARD_CACHE_TTL_SEC),两个 GET 端点共用一份构建结
 失效统一走 workspace.invalidate_caches(workspace 变更 / infer 完成 /
 review PUT / SFT/证据 PUT)。大工作区(数千视频、外接盘)全量构建 ~11s,
 缓存命中 <100ms。
-上游:web/app.py(挂载路由);web/static 前端(dashboard 页)。
+上游:web/app.py(挂载路由);frontend/dist 前端(dashboard 页)。
 下游:web/dashboard/metrics.py、web/dashboard/rows.py、
 web/dashboard/review.py。
 """

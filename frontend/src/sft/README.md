@@ -1,6 +1,6 @@
 # sft/ — SFT 编辑器纯逻辑模块(零 DOM)
 
-从 legacy `traffic_analyzer/web/static/js/`(sft_model.js / sft_spans.js / sft.js 夹带的纯逻辑)
+从 legacy 前端 `web/static/js/`(sft_model.js / sft_spans.js / sft.js 夹带的纯逻辑;已随 legacy 删除)
 逐语义移植为纯 TS:数据进数据出,无 DOM / window / fetch。Vue 壳只负责渲染与事件绑定。
 
 ## legacy 纯逻辑函数清单 → 本模块对照

@@ -8,8 +8,8 @@ forward arguments).
 [文件说明]
 作用:FastAPI 应用工厂 create_app():装配 workspace/fs/jobs/evidence_api/frames/
 video_stream/dashboard/auth/presence/realtime 各路由,提供 /api/expert-phases
-专家阶段定义接口,挂载 web/static(/,legacy SPA)与 frontend/dist(/v2,新
-前端构建产物,未构建时跳过)并为其禁用缓存,在 no-cache 之后注册
+专家阶段定义接口,挂载 frontend/dist(/,Vue 3 SPA 构建产物,未构建时跳过)
+并为其禁用缓存,/v2/* 旧书签 301 重定向到对应 / 路径,在 no-cache 之后注册
 auth middleware(未配置 TRAFFIC_ANALYZER_USERS 时认证完全关闭),注册
 lifespan/atexit 钩子以在服务退出时停止所有排队/运行中的分析子进程;lifespan
 启动时为 realtime EventBus 绑定事件循环(跨线程 publish 经
@@ -17,7 +17,7 @@ loop.call_soon_threadsafe 投递);通过 TRAFFIC_ANALYZER_WEB_WORKSPACE
 环境变量接收预设工作区(工厂模式无法转发参数)。
 上游:traffic_analyzer/cli.py 的 web 子命令(uvicorn "traffic_analyzer.web.app:create_app")。
 下游:web/ 下 workspace、fs、jobs、evidence_api、frames、video_stream、dashboard、
-auth、presence、realtime 路由模块;web/static 前端静态文件。
+auth、presence、realtime 路由模块;frontend/dist 前端构建产物。
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -51,13 +51,12 @@ from traffic_analyzer.web import (
 
 logger = logging.getLogger(__name__)
 
-_STATIC_DIR = Path(__file__).resolve().parent / "static"
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 class _SpaStaticFiles(StaticFiles):
-    """StaticFiles + SPA 回退:/v2 下的未知路径(客户端路由深链,如
-    /v2/dashboard)回退服务 index.html,真实文件(assets/字体)正常返回。"""
+    """StaticFiles + SPA 回退:未知路径(客户端路由深链,如 /dashboard、
+    /video/<stem>)回退服务 index.html,真实文件(assets/字体)正常返回。"""
 
     async def get_response(self, path: str, scope):  # type: ignore[override]
         try:
@@ -118,11 +117,6 @@ def create_app(workspace: Optional[str] = None) -> FastAPI:
     app.include_router(presence.router)
     app.include_router(realtime.router)
 
-    @app.get("/login", include_in_schema=False)
-    def login_page() -> Any:
-        """登录页(静态文件直出;auth middleware 对此路径豁免)。"""
-        return FileResponse(_STATIC_DIR / "login.html")
-
     @app.get("/api/expert-phases")
     def get_expert_phases() -> Any:
         """Expert phase definitions (JSON file shipped beside this module)."""
@@ -137,18 +131,14 @@ def create_app(workspace: Optional[str] = None) -> FastAPI:
 
     @app.middleware("http")
     async def _no_cache_static(request, call_next):
-        # The SPA must always revalidate: a stale cached js/main.js/index.html
-        # breaks the UI after upgrades (heuristic caching otherwise applies).
+        # The SPA must always revalidate: a stale cached index.html or hashed
+        # asset breaks the UI after upgrades (heuristic caching otherwise
+        # applies); cover the shell plus /assets/ 与 /fonts/。
         response = await call_next(request)
-        # Cover the SPA shell AND all ES modules under /js/ — a stale cached
-        # module (e.g. sft.js) silently breaks the UI after upgrades.
         if (
             request.url.path in ("/", "/index.html")
-            or request.url.path.startswith("/js/")
-            or request.url.path.startswith("/css/")
+            or request.url.path.startswith("/assets/")
             or request.url.path.startswith("/fonts/")
-            or request.url.path == "/v2"
-            or request.url.path.startswith("/v2/")
         ):
             response.headers["Cache-Control"] = "no-cache"
         return response
@@ -158,27 +148,24 @@ def create_app(workspace: Optional[str] = None) -> FastAPI:
     # request.state.user='local'。
     auth.install(app)
 
-    # 绞杀者迁移:v2 前端(Vue 3,frontend/dist)挂 /v2,legacy SPA 继续占 /。
-    # /v2 必须先于 / 注册(Starlette 挂载按前缀匹配,/ 会吞掉 /v2)。
-    # dev 期未构建(frontend/dist 不存在)时跳过,不炸。
-    v2_dist = _REPO_ROOT / "frontend" / "dist"
-    if (v2_dist / "index.html").is_file():
-        app.mount(
-            "/v2",
-            _SpaStaticFiles(directory=str(v2_dist), html=True),
-            name="static-v2",
-        )
-    else:
-        logger.info("v2 frontend not built, /v2 not mounted: %s", v2_dist)
+    # /v2 旧书签 301 重定向到对应 / 路径(必须在 / 挂载之前注册)。
+    @app.get("/v2", include_in_schema=False)
+    @app.get("/v2/{path:path}", include_in_schema=False)
+    def v2_redirect(path: str = "") -> Any:
+        target = "/" + path if path else "/"
+        return RedirectResponse(target, status_code=301)
 
-    # Static frontend (developed in parallel) — must not crash when missing.
-    try:
+    # 新前端(Vue 3,frontend/dist)挂 /,放在所有 /api 路由之后:/ 挂载会
+    # 吞掉一切未匹配路径。SPA 深链由 _SpaStaticFiles 回退 index.html。
+    # dev 期未构建(frontend/dist 不存在)时跳过,不炸。
+    spa_dist = _REPO_ROOT / "frontend" / "dist"
+    if (spa_dist / "index.html").is_file():
         app.mount(
             "/",
-            StaticFiles(directory=str(_STATIC_DIR), html=True, check_dir=False),
-            name="static",
+            _SpaStaticFiles(directory=str(spa_dist), html=True),
+            name="static-spa",
         )
-    except Exception:
-        logger.warning("Static directory unavailable, frontend not served: %s", _STATIC_DIR)
+    else:
+        logger.info("frontend not built, SPA not mounted: %s", spa_dist)
 
     return app

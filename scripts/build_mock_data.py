@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """把「演示区」的真实推理结果打包成前端 mock 数据(?mock=1 零 token 演示)。
 
+!!! 已废弃:mock 体系已随 legacy 前端(traffic_analyzer/web/static/)删除,
+    本脚本保留存档,不再可用。 !!!
+
 读取:
   演示区/analysis/<stem>/<stem>.json            SFT 标注(含 event_attributes/attr_mentions)
   演示区/analysis/<stem>/report.md              分析报告

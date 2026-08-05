@@ -92,7 +92,7 @@ class TestAuthEnabled:
         assert resp.headers["location"] == "/login"
         # 登录页与其静态资源不鉴权(否则登录页自身也打不开)。
         assert client.get("/login", follow_redirects=False).status_code != 302
-        assert client.get("/js/main.js", follow_redirects=False).status_code != 302
+        assert client.get("/assets/probe.js", follow_redirects=False).status_code != 302
 
     def test_api_ok_after_login(self, tmp_path: Path) -> None:
         workspace = _make_workspace(tmp_path)

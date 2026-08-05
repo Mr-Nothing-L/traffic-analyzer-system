@@ -6,7 +6,7 @@
 edited=1、q(rel/stem 子串,不区分大小写);先过滤后分页,page/size
 (size ≤ 200;page 越界 → 空 rows + 正确 total_pages)。过滤/分页均产生
 新列表,不就地修改缓存行(copy=False 只读契约)。
-上游:web/app.py(经 dashboard 包挂载路由);web/static 前端(dashboard 页)。
+上游:web/app.py(经 dashboard 包挂载路由);frontend/dist 前端(dashboard 页)。
 下游:web/dashboard/metrics.py(_get_dashboard)、web/workspace.py
 (require_workspace)。
 """

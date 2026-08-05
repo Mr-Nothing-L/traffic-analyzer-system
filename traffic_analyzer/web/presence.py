@@ -11,7 +11,7 @@ the TTL. Storage is per-app (``app.state.presence``), in-memory only.
 30s TTL 惰性剔除。存储为 app.state.presence(内存,线程锁保护)。beat 后经
 realtime 总线 publish presence 事件(最新 roster)。
 上游:web/app.py(create_app 挂载路由并初始化 store);web/auth.py(request.state.user)。
-下游:web/static 前端(协作在线状态展示)。
+下游:frontend/dist 前端(协作在线状态展示)。
 """
 
 from __future__ import annotations

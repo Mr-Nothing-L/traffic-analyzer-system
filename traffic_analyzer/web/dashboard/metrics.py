@@ -16,7 +16,7 @@ TTL 见 metrics._DASHBOARD_CACHE_TTL_SEC),GET /api/dashboard 与 rows 端点共�
 失效统一走 workspace.invalidate_caches;copy=False 只读契约(调用方不得
 就地修改)。_build_dashboard 经 dashboard 包命名空间延迟查找,测试
 monkeypatch traffic_analyzer.web.dashboard._build_dashboard 即生效。
-上游:web/app.py(经 dashboard 包挂载路由);web/static 前端(dashboard 页)。
+上游:web/app.py(经 dashboard 包挂载路由);frontend/dist 前端(dashboard 页)。
 下游:web/workspace.py(视频发现与路径契约)、web/event_config.py(事件名
 索引)、web/evidence_api.py(_read_json)、web/dashboard/review.py(审核态)、
 scripts/batch_evaluate.py。

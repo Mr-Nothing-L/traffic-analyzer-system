@@ -20,7 +20,7 @@ FileResponse(支持 HTTP Range);其余监控码流(Xvid 类、H.265、MJPEG)先�
 可拖动进度。转码结果走小 LRU(上限 3,key=path+mtime+ss),淘汰/进程退出(atexit)
 时删除临时文件;全局转码信号量上限 3(超限 503);ffmpeg 非 0 退出或无输出 → 501;
 ffprobe 探测结果按 path+mtime 缓存。
-上游:web/app.py(挂载路由);web/static 前端 <video> 播放。
+上游:web/app.py(挂载路由);frontend/dist 前端 <video> 播放。
 下游:web/workspace.py(视频路径解析);系统 ffmpeg/ffprobe 外部命令。
 """
 

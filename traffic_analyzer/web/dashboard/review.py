@@ -8,7 +8,7 @@ by = request.state.user,与 evidence_api._atomic_write_json 同一原子写);
 落盘后 invalidate_caches 并经 realtime.publish_from_app 发布
 dashboard.changed。_load_review_states 供 metrics 行构建合并审核态
 (文件缺失/损坏 → {},GET 不被单个损坏文件拖垮)。
-上游:web/app.py(经 dashboard 包挂载路由);web/static 前端(dashboard 页)。
+上游:web/app.py(经 dashboard 包挂载路由);frontend/dist 前端(dashboard 页)。
 下游:web/workspace.py(require_workspace/validate_stem/invalidate_caches)、
 web/evidence_api.py(_read_json/_atomic_write_json)、web/realtime.py。
 """
