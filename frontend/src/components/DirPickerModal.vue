@@ -1,6 +1,7 @@
 <script setup lang="ts">
 /** 工作区目录选择弹窗:「快捷选择 | 手动浏览」双模式。
- * 快捷选择 = 白名单平铺清单(DirQuickPick);手动浏览 = 面包屑浏览器(进入/回上级/手动输入)。
+ * 快捷选择 = 白名单平铺清单(DirQuickPick);手动浏览 = 「默认工作区」树下拉(DirBrowseTree,
+ * 选中即跳目录)+ 面包屑浏览器(进入/回上级/手动输入)。
  * 上次模式记 localStorage(ta_dirpicker_mode);两模式共用底部路径栏 + 取消/选择按钮;
  * 确认期间锁定弹窗(applying),禁止任何途径关闭。 */
 import { computed, ref, watch } from 'vue'
@@ -8,6 +9,7 @@ import { NButton, NModal, useMessage } from 'naive-ui'
 import { ApiError, apiFetch } from '../api/client'
 import { useWorkspaceStore } from '../stores/workspace'
 import DirQuickPick from './DirQuickPick.vue'
+import DirBrowseTree from './DirBrowseTree.vue'
 import UiIcon from './UiIcon.vue'
 
 const MODE_KEY = 'ta_dirpicker_mode' // 上次使用的模式:quick=快捷选择 / browse=手动浏览
@@ -175,6 +177,7 @@ async function confirmDir() {
         @confirm="onQuickConfirm"
       />
       <template v-else>
+        <DirBrowseTree :active="show" :disabled="applying" @jump="navDir" />
         <div class="dir-pathbar">
           <div v-if="!showInput" class="dir-crumbs">
             <template v-for="(c, i) in crumbs" :key="c.path">

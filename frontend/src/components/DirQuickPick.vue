@@ -7,6 +7,7 @@ import { computed, nextTick, ref, watch } from 'vue'
 import { apiFetch } from '../api/client'
 import { useWorkspaceStore } from '../stores/workspace'
 import { buildQuickItems, filterQuickItems } from '../utils/quickPick'
+import { ellipsisMiddle } from '../utils/text'
 import type { QuickDirRoot, QuickItem } from '../utils/quickPick'
 import UiIcon from './UiIcon.vue'
 
@@ -175,8 +176,8 @@ function onConfirm(item: QuickItem) {
             @dblclick="onConfirm(row.item)"
           >
             <span class="dir-ico"><UiIcon :name="row.item.isRoot ? 'home' : 'folder'" :size="13" /></span>
-            <span class="qp-name">{{ row.item.label }}</span>
-            <span v-if="row.item.label !== row.item.path" class="qp-path">{{ row.item.path }}</span>
+            <span class="qp-name">{{ row.item.label === row.item.path ? ellipsisMiddle(row.item.label) : row.item.label }}</span>
+            <span v-if="row.item.label !== row.item.path" class="qp-path">{{ ellipsisMiddle(row.item.path) }}</span>
           </div>
         </template>
       </template>

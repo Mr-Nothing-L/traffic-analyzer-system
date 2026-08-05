@@ -213,3 +213,15 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* ---- 手动浏览:「默认工作区」树下拉(DirBrowseTree.vue,NTreeSelect 贴弹窗密度) ---- */
+.dbt {
+  margin: 0 16px 10px;
+}
+
+/* 树节点标签(renderLabel 渲染,传送至 body 的菜单内,需全局选择器):
+   与面包屑同密度(12px 等宽),完整路径在 title */
+.dbt-label {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
