@@ -1,4 +1,5 @@
 /** 树的展示计算:状态徽标 / 过滤 / 排序(迁移自 legacy tree.js 的纯计算部分)。 */
+import { computed } from 'vue'
 import { useJobsStore } from '../stores/jobs'
 import type { TreeEntry, VideoInfo } from '../stores/workspace'
 import { useWorkspaceStore } from '../stores/workspace'
@@ -130,5 +131,21 @@ export function useTreeView() {  const ws = useWorkspaceStore()
     })
   }
 
-  return { nameMatches, viewEntries, viewRows, videoFor, videoStatus }
+  /** 待推理集合:未推理(st-none)与失败(st-failed)视频的 rel,供「全选待推理」批量勾选。 */
+  const pendingRels = computed(() => {
+    const s = new Set<string>()
+    for (const v of ws.videos) {
+      const cls = videoStatusOf(v, jobs.latestJobForStem(v.stem)).cls
+      if (cls === 'st-none' || cls === 'st-failed') s.add(v.rel)
+    }
+    return s
+  })
+
+  /** 全选待推理:勾选=选中全部未推理+失败视频(替换当前勾选),取消=清空。 */
+  function setPendingChecked(on: boolean) {
+    ws.checked.clear()
+    if (on) pendingRels.value.forEach((rel) => ws.checked.add(rel))
+  }
+
+  return { nameMatches, viewEntries, viewRows, videoFor, videoStatus, pendingRels, setPendingChecked }
 }
