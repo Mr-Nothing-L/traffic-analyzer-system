@@ -1,5 +1,25 @@
 # 更新日志
 
+## [v6.0.0] 2026-08-05 — Web 前端全面重构(Vue 3 SPA 替换原生 JS)
+
+### 核心变更
+
+#### 1. 前端整体重写(`frontend/`)
+- **技术栈**:Vite + Vue 3 + TypeScript + Pinia + Vue Router + Naive UI,构建产物由 FastAPI 挂载于 `/`(SPA 回退,`/v2/*` 301 兼容旧书签)
+- **设计系统锁定**:根目录 `design.md` + OKLCH 命名 token(生成器 `frontend/scripts/hex_to_oklch.py`),保留像素字体与 Claude 浅色系视觉 DNA;Hallmark 纪律(token 引用、8 态组件、honest copy、reduced-motion)
+- **视图迁移**:文件树(懒加载/勾选/像素进度条/过滤排序)、数据看板、分析详情(视频流/逐帧降级、报告、证据编辑)、SFT 编辑器(contenteditable + chips 三层联动,与 legacy 保存字节级一致)、专家泳道面板、登录页
+- **工作区弹窗双模式**:快捷选择(白名单根 + 一层子目录平铺 + 过滤 + 键盘)+ 手动浏览(面包屑 + 白名单树下拉懒加载下钻)
+
+#### 2. 后端实时化与结构拆分
+- **结构化进度契约**:推理子进程经 `TRAFFIC_ANALYZER_PROGRESS_FILE` 写 JSONL 事件,废除 stdout `[x/4]`/`EXPERT_PROGRESS` 文本解析(stdout 标记保留供 CLI)
+- **SSE 总线**:`web/realtime.py`,`GET /api/events` 单连接推送 `job.progress`/`job.done`/`dashboard.changed`/`presence`,全面取代前端轮询
+- **长文件拆包**:`jobs.py`→`web/jobs/`、`evidence_api.py`→`web/evidence/`、`workspace.py`→`web/workspace/`、`dashboard.py`→`web/dashboard/`(老 import/monkeypatch 路径兼容)
+- **性能**:看板缓存 15s TTL→600s+主动失效、`_build_dashboard` 并发读 JSON、videos 冷路径 stat 合并;前端 rel/stem 预建 Map 消 O(N²)、浅响应式、SSE 节流、大目录分片渲染
+- **legacy 删除**:`traffic_analyzer/web/static/` 整体移除(原生 JS SPA、mock 体系);`scripts/e2e_mock_test.py`/`build_mock_data.py` 废弃存档,新增 `scripts/e2e_v2_smoke.py` 冒烟
+
+#### 3. 事件配置
+- 抛洒物(10)/ 实线变道(11)激活(`is_active: true`),`event_options.yaml` 补齐实线变道属性组(方向/车辆类型)
+
 ## [v5.0.0] 2026-07-22 — Web UI 可视化工作台、证据导出与 tmp_img 目录调整
 
 ### 核心变更

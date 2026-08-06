@@ -1,5 +1,5 @@
 // model.ts 行为锁定测试：草稿初始化 / description 解析 / 骨架句 / 签名与 dirty
-// 用例口径：交通事件数据标注说明文档 v4.5(事件名、action 编号、结论行格式)
+// 用例口径：docs/交通事件数据标注说明文档 v4.5(事件名、action 编号、结论行格式)
 import { describe, it, expect } from 'vitest';
 import {
   skeleton, sanitizeFileAttrs, missingRequired, parseSftDescription,

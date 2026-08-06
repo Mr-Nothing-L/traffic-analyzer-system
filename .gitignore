@@ -66,6 +66,7 @@ error/
 # Keep these root-level files
 !README.md
 !README.zh-CN.md
+!design.md
 !requirements.txt
 !analyze.sh
 yolov8n.pt

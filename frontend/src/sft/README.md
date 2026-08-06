@@ -48,4 +48,4 @@
 - 全角冒号 U+FF1A 仅作分隔符(事件名前缀/env 行/最终结论);文本内的逗号为半角(与 legacy 一致)。
 
 测试:`__tests__/`(vitest,58 例),夹具对齐 `traffic_analyzer/config/event_options.yaml`
-与 `交通事件数据标注说明文档_v4.5.md` 的事件名/action 编号。
+与 `docs/交通事件数据标注说明文档_v4.5.md` 的事件名/action 编号。
