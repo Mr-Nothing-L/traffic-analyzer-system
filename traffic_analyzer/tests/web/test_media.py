@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List
@@ -447,7 +448,10 @@ class TestTranscodeRobustness:
             _make_tiny_video(src)
             outs.append(video_stream._transcode_faststart(src, None))
         assert len(video_stream._transcode_cache) == 3
-        assert not outs[0].exists()  # 最久未用被淘汰,临时文件已删
+        assert outs[0].exists()  # 已淘汰但仍在途:转 pending,不立即删
+        for out in outs:  # 直接调用的调用方负责归还在途引用
+            video_stream._transcode_release(out)
+        assert not outs[0].exists()  # 引用归零后补删
         assert all(p.exists() for p in outs[1:])
 
     def test_semaphore_full_503(self, tmp_path: Path) -> None:
@@ -487,3 +491,73 @@ class TestTranscodeRobustness:
         argv = captured["argv"]
         assert "-nostdin" in argv
         assert "+faststart" in argv
+# ---------------------------------------------------------------------------
+# 任务B:转码 LRU 在途引用保护(淘汰不得删除响应尚未发完的临时文件)
+# ---------------------------------------------------------------------------
+class TestTranscodeInflight:
+    def test_eviction_defers_unlink_until_release(self, tmp_path: Path) -> None:
+        from traffic_analyzer.web import video_stream
+
+        # put 即登记一次在途引用;上限 3,第 4 次 put 触发 LRU 淘汰。
+        first = tmp_path / "t0.mp4"
+        first.write_bytes(b"x")
+        video_stream._transcode_cache_put(("a", 1.0, None), first)
+        rest = []
+        for i in range(3):
+            p = tmp_path / f"t{i + 1}.mp4"
+            p.write_bytes(b"x")
+            video_stream._transcode_cache_put((f"b{i}", 1.0, None), p)
+            rest.append(p)
+        assert len(video_stream._transcode_cache) == 3
+        assert first.exists()  # 在途引用未归还:淘汰只入 pending,不删文件
+        video_stream._transcode_release(first)
+        assert not first.exists()  # 引用归零后补删
+        for p in rest:
+            video_stream._transcode_release(p)
+            assert p.exists()  # 未被淘汰的项归还后仍在
+        assert not video_stream._inflight and not video_stream._pending_delete
+
+    def test_concurrent_same_video_both_playable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from traffic_analyzer.web import video_stream
+
+        # hevc 走转码分支;假 ffmpeg 瞬间产出,双 miss 时两请求各自转码,
+        # 后到的 put 会把先到的 tmp 当 previous 淘汰 —— 修复前会立刻 unlink。
+        monkeypatch.setattr(
+            "traffic_analyzer.web.video_stream.probe_video", lambda path: ("mp4", "hevc")
+        )
+        monkeypatch.setattr("traffic_analyzer.web.video_stream._FFMPEG", "ffmpeg")
+        payload = b"\x00\x00\x00\x18ftypisom" + b"\x00" * 64
+
+        class _FakeProc:
+            def __init__(self, argv: List[str]) -> None:
+                Path(argv[-1]).write_bytes(payload)
+
+            def wait(self) -> int:
+                return 0
+
+        monkeypatch.setattr(
+            "traffic_analyzer.web.video_stream.subprocess.Popen",
+            lambda argv, **kwargs: _FakeProc(argv),
+        )
+        workspace = _make_workspace(tmp_path)
+        responses: Dict[int, Any] = {}
+
+        def _request(i: int) -> None:  # 每线程自建 TestClient(portal 绑定本线程)
+            responses[i] = TestClient(create_app(workspace=str(workspace))).get(
+                "/api/videos/v1/stream"
+            )
+
+        threads = [threading.Thread(target=_request, args=(i,)) for i in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert len(responses) == 2
+        for resp in responses.values():
+            assert resp.status_code == 200
+            assert resp.headers["content-type"] == "video/mp4"
+            assert resp.content == payload
+        # 两个响应都发完后,在途引用全部归还,pending 补删也应清空。
+        assert not video_stream._inflight and not video_stream._pending_delete

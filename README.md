@@ -149,24 +149,25 @@ With a non-empty list, workspace selection and directory browsing are confined t
 those directories and their subdirectories (403 otherwise). **Delete the line (or
 leave it empty) and workspaces are unrestricted.**
 
-## Mock Demo Mode
+## Mock Demo Mode (removed)
 
-Open the UI with **`?mock=1`** appended (e.g. `http://127.0.0.1:8600/?mock=1`) for a
-zero-token demo: real video streaming from the demo clips, a simulated inference
-animation in the expert workshop, and real conclusion data (snapshotted from real
-runs by `scripts/build_mock_data.py`). A MOCK badge shows in the corner; no VLM
-calls are made.
+> **Deprecated:** the legacy `?mock=1` demo mode — and its supporting scripts
+> `scripts/build_mock_data.py` / `scripts/e2e_mock_test.py` — was removed along
+> with the legacy UI. The old commands no longer work; kept here only as
+> historical context.
 
-For a scripted looping demo / UI self-test (Playwright, drives every button and
-page, screenshots to `output/e2e_screenshots/`):
+For an end-to-end UI self-test (Playwright against the real backend: login →
+workspace load → sidebar → video detail → SFT editor → dashboard → logout,
+screenshots to `output/e2e_screenshots/v2_smoke_*.png`):
 
 ```bash
-python3 scripts/e2e_mock_test.py              # headed browser, loops until Ctrl+C
-python3 scripts/e2e_mock_test.py --headless --passes 3 --fast
+python3 scripts/e2e_v2_smoke.py                # headless Chrome, default port 8608
+python3 scripts/e2e_v2_smoke.py --headed       # headed browser
+python3 scripts/e2e_v2_smoke.py --port 8609 --video-fragment 01-02_Event_129
 ```
 
-The script starts the web service on 127.0.0.1:8600 itself if needed; when auth is
-enabled, provide `E2E_USER` / `E2E_PASS`.
+The script creates a temporary account/workspace and starts the real backend on
+127.0.0.1:<port> itself; it does not run real inference (needs VLM/GPU).
 
 ## Configuration Reference
 
@@ -229,8 +230,8 @@ python3 -m pytest traffic_analyzer/tests -q
 ```
 
 The suite mocks all VLM calls and covers config validation, the CLI, the analysis
-pipeline, and the web API. For an end-to-end UI check, use the mock demo script
-above (`scripts/e2e_mock_test.py`).
+pipeline, and the web API. For an end-to-end UI check, use the smoke script above
+(`scripts/e2e_v2_smoke.py`).
 
 ## Event Categories
 

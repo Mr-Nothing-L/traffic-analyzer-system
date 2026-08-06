@@ -70,7 +70,7 @@ _NAME_ZH: Dict[int, str] = {
 _EVENT_IDS: List[int] = sorted(_NAME_ZH)
 
 # present=true 事件的结构化属性(键/值均取自 event_options.yaml 封闭枚举;
-# 实线变道(11) 无属性组,为空对象)。
+# 实线变道(11) 已定义属性组,此处模拟改写模型未给出属性值,归一后为 null)。
 _PRESENT_ATTRS: Dict[int, Dict[str, Any]] = {
     1: {"lane_type": "应急车道", "direction": "来向", "vehicle_type": "工程车"},
     2: {"lane_type": "应急车道", "direction": "去向", "vehicle_type": "小型车"},
@@ -1051,9 +1051,9 @@ class TestBuildSampleAttributes:
         assert set(sample["event_attributes"].keys()) == {"2"}
         assert set(sample["attr_mentions"].keys()) == {"2"}
 
-    def test_event_without_options_is_excluded(self) -> None:
-        """实线变道(11) 无属性组:即使 present+detected 也不进结构化字段,
-        但 think 段仍使用其 detail。"""
+    def test_event_11_null_attributes_included(self) -> None:
+        """实线变道(11) 已有属性组:present+detected 时进结构化字段,
+        改写模型未给出属性值时归一为 null;无骨架模板,think 段仍只用其 detail。"""
         sample = build_sample(
             _make_resp_data(present_ids=(11,)),
             _make_event_results(detected_ids=(11,)),
@@ -1061,7 +1061,9 @@ class TestBuildSampleAttributes:
             _make_video_meta(),
         )
 
-        assert sample["event_attributes"] == {}
+        assert sample["event_attributes"] == {
+            "11": {"direction": None, "vehicle_type": None}
+        }
         assert sample["attr_mentions"] == {}
         assert "实线变道：，主体目标在原始帧中清晰可辨。" in sample["description"]
 

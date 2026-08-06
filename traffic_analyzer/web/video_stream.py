@@ -1,24 +1,14 @@
-"""Video streaming endpoint with on-the-fly transcoding.
-
-Browser-native files (h264 in .mp4/.mov, vp8/vp9/av1 in .webm/.mkv) are
-served directly via ``FileResponse`` (HTTP Range supported). Anything else
-the workspace may hold — the real surveillance clips are MPEG-4 Part 2
-(Xvid-class), plus possible H.265/MJPEG — is transcoded up front to a
-faststart MP4 (h264/yuv420p, moov atom before mdat) in the system temp dir
-and then served via ``FileResponse`` as well, so Safari/Chrome/Firefox can
-all play it and seek via Range requests. Transcodes are cached in a small
-LRU (max 3, keyed by path+mtime+ss); temp files are removed on eviction and
-at process exit. Probe results are cached per path+mtime. When
-ffprobe/ffmpeg is missing or the transcode fails, the endpoint answers 501
-so the frontend can fall back to frame-stepping.
+"""视频流播放接口 + 按需转码(详见下方[文件说明])。
 
 [文件说明]
 作用:视频流播放接口。浏览器可原生播放的编码(h264/mp4、vp8/vp9/av1 等)直接
 FileResponse(支持 HTTP Range);其余监控码流(Xvid 类、H.265、MJPEG)先用 ffmpeg
 整片转码为 faststart MP4(moov 前置,写到系统临时目录)再经 FileResponse 返回 —
 渐进式 fMP4 在 Safari <video> 不可播,faststart 整片 + Range 则三家浏览器通吃且
-可拖动进度。转码结果走小 LRU(上限 3,key=path+mtime+ss),淘汰/进程退出(atexit)
-时删除临时文件;全局转码信号量上限 3(超限 503);ffmpeg 非 0 退出或无输出 → 501;
+可拖动进度。转码结果走小 LRU(上限 3,key=path+mtime+ss),带在途引用保护:
+FileResponse 惰性 open,取出的路径在响应发送完成(或发送异常)前不得删除 ——
+淘汰项仍有引用时转入 pending,引用归零才补删;进程退出(atexit)全清。
+全局转码信号量上限 3(超限 503);ffmpeg 非 0 退出或无输出 → 501;
 ffprobe 探测结果按 path+mtime 缓存。
 上游:web/app.py(挂载路由);frontend/dist 前端 <video> 播放。
 下游:web/workspace.py(视频路径解析);系统 ffmpeg/ffprobe 外部命令。
@@ -35,7 +25,7 @@ import tempfile
 import threading
 from collections import OrderedDict
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse
@@ -78,12 +68,31 @@ _transcode_slots = threading.BoundedSemaphore(_MAX_TRANSCODES)
 _TRANSCODE_CACHE_MAX = 3
 _transcode_cache: "OrderedDict[Tuple[str, float, Optional[float]], Path]" = OrderedDict()
 
+# 在途引用保护:FileResponse 惰性 open,取出的路径在响应发完前不得被删;
+# inflight>0 的淘汰项转入 pending,引用归零(_transcode_release)时再补删。
+_inflight: Dict[Path, int] = {}
+_pending_delete: set = set()
+
 
 def _unlink_quiet(path: Path) -> None:
     try:
         path.unlink(missing_ok=True)
     except OSError:
         pass
+
+
+def _transcode_release(path: Path) -> None:
+    """归还一次在途引用;路径已被淘汰且引用归零时,此刻才真正删除。"""
+    with _cache_lock:
+        left = _inflight.get(path, 0) - 1
+        if left > 0:
+            _inflight[path] = left
+            return
+        _inflight.pop(path, None)
+        doomed = path in _pending_delete
+        _pending_delete.discard(path)
+    if doomed:
+        _unlink_quiet(path)
 
 
 def _transcode_cache_get(key: Tuple[str, float, Optional[float]]) -> Optional[Path]:
@@ -94,12 +103,14 @@ def _transcode_cache_get(key: Tuple[str, float, Optional[float]]) -> Optional[Pa
         if not path.exists():  # 临时文件被外部清掉,缓存条目作废
             _transcode_cache.pop(key, None)
             return None
+        _inflight[path] = _inflight.get(path, 0) + 1  # 调用方随响应归还
         _transcode_cache.move_to_end(key)
         return path
 
 
 def _transcode_cache_put(key: Tuple[str, float, Optional[float]], path: Path) -> None:
     with _cache_lock:
+        _inflight[path] = _inflight.get(path, 0) + 1  # 调用方随响应归还
         previous = _transcode_cache.get(key)
         _transcode_cache[key] = path
         _transcode_cache.move_to_end(key)
@@ -107,15 +118,23 @@ def _transcode_cache_put(key: Tuple[str, float, Optional[float]], path: Path) ->
         while len(_transcode_cache) > _TRANSCODE_CACHE_MAX:
             _, old = _transcode_cache.popitem(last=False)
             evicted.append(old)
-    for old in evicted:
+        doomed = []
+        for old in evicted:
+            if _inflight.get(old, 0):  # 仍在途:转入 pending,引用归零时补删
+                _pending_delete.add(old)
+            else:
+                doomed.append(old)
+    for old in doomed:
         _unlink_quiet(old)
 
 
 def _cleanup_transcode_cache() -> None:
-    """进程退出时尽量清理:删除缓存内全部临时文件(atexit)。"""
+    """进程退出时尽量清理:删除缓存内及 pending 的全部临时文件(atexit)。"""
     with _cache_lock:
-        paths = list(_transcode_cache.values())
+        paths = list(_transcode_cache.values()) + list(_pending_delete)
         _transcode_cache.clear()
+        _pending_delete.clear()
+        _inflight.clear()
     for path in paths:
         _unlink_quiet(path)
 
@@ -160,9 +179,11 @@ def _transcode_faststart(video: Path, ss: Optional[float]) -> Path:
 
     faststart moves the moov atom ahead of mdat, which requires a seekable
     output — hence a temp file instead of a pipe. The result is cached in a
-    small LRU; a hit skips the ffmpeg run entirely. Raises 501 when ffmpeg
-    is missing/fails (non-zero exit or no output), 503 when the global
-    transcode semaphore is full.
+    small LRU; a hit skips the ffmpeg run entirely. The returned path holds
+    one inflight reference: callers must hand it to ``_InflightFileResponse``
+    (or call ``_transcode_release`` themselves) to give it back. Raises 501
+    when ffmpeg is missing/fails (non-zero exit or no output), 503 when the
+    global transcode semaphore is full.
     """
     if _FFMPEG is None:
         raise HTTPException(status_code=501, detail="ffmpeg not found on server")
@@ -231,10 +252,20 @@ def stream_workspace_video(
     return _stream_response(video, ss)
 
 
+class _InflightFileResponse(FileResponse):
+    """发送完成(或发送异常)后归还转码产物在途引用的 FileResponse。"""
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            _transcode_release(Path(self.path))
+
+
 def _stream_response(video: Path, ss: Optional[float]) -> object:
     _container, codec = probe_video(video)
     if is_browser_native(codec, video.suffix):
         media_type = _MEDIA_TYPES.get(video.suffix.lower(), "application/octet-stream")
         return FileResponse(video, media_type=media_type)
-    # FileResponse 自带 Range 支持;临时文件不在这里删,留给 LRU 淘汰/atexit。
-    return FileResponse(_transcode_faststart(video, ss), media_type="video/mp4")
+    # FileResponse 自带 Range 支持;在途引用随响应发送完毕归还,临时文件留给 LRU 淘汰/atexit。
+    return _InflightFileResponse(_transcode_faststart(video, ss), media_type="video/mp4")

@@ -59,7 +59,7 @@ function onSearch(ev: Event) {
         <span class="dash-card-title">逐视频明细</span>
         <span class="dash-card-sub">{{ summaryText }}</span>
         <span class="dash-spacer" />
-        <span class="dash-card-sub">点击行进入该视频分析详情</span>
+        <span class="dash-card-sub">点击「打开」进入该视频分析详情</span>
       </div>
       <!-- 筛选条:一致性/审核多值 chip + 人工已改 + 名称搜索,全部走服务端(先过滤后分页) -->
       <div class="dash-filters">

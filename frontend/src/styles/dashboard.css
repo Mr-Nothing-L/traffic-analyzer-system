@@ -97,8 +97,7 @@
 /* 宏/微平均行:2px 顶部粗边框 + 加粗 */
 .dash-metrics-table tr.total td { font-weight: 700; border-top: 2px solid var(--color-line-strong); }
 
-/* ---------- 明细行:整行可点击(hover 覆盖列交替色,整行高亮) ---------- */
-.dash-rows-table tbody tr { cursor: pointer; }
+/* ---------- 明细行:整行不可点,仅最右列「打开」按钮跳转;行 hover 高亮保留 ---------- */
 .dash-rows-table tbody tr:hover td { background: var(--color-hover-bg); }
 .dash-rows-table { table-layout: fixed; }
 .dash-rows-table th:nth-child(1) { width: 26%; }
@@ -114,7 +113,23 @@
 .dash-nowrap { white-space: nowrap; }
 /* 一致性列(漏:x;误:x)允许换行,不溢出单元格 */
 .dash-rows-table td.dash-col-consistency { white-space: normal; }
-.dash-open { color: var(--color-accent); font-weight: 650; white-space: nowrap; }
+/* 「打开」按钮:文字型,hover 底色+下划线、focus-visible 环、active 按压 */
+.dash-open-btn {
+  background: none;
+  border: none;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  color: var(--color-accent);
+  font-weight: 650;
+  font-family: inherit;
+  font-size: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out);
+}
+.dash-open-btn:hover { background: var(--color-accent-soft); text-decoration: underline; }
+.dash-open-btn:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 1px; }
+.dash-open-btn:active { transform: scale(0.96); }
 
 /* ---------- 事件名 chips:中性底;漏检/误检用暖色 ---------- */
 .dash-ev-chip {

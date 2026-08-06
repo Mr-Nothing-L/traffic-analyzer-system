@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /** 逐视频明细表 + 翻页条(自建表格:NDataTable 对行内 chip 组/presence 徽章/整行
  * 点击跳得不顺手,自建更贴 legacy 密度)。迁移自 legacy renderTable/pagerHtml/bindPager。
- * 行点击:选中该视频并进分析详情页(与树行点击一致,对齐 legacy 回详情视图)。 */
+ * 跳转:整行不可点(避免误触 chip 时跳走),仅最右列「打开」按钮进分析详情。 */
 import { computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
@@ -95,7 +95,7 @@ async function openRow(rel: string, stem: string) {
           </tr>
         </thead>
         <tbody>
-          <tr v-for="r in rows" :key="r.rel" @click="openRow(r.rel, r.stem)">
+          <tr v-for="r in rows" :key="r.rel">
             <td class="dash-v" :title="r.rel">
               <span class="file-name">{{ r.rel }}</span>
               <span
@@ -154,7 +154,11 @@ async function openRow(rel: string, stem: string) {
               </span>
             </td>
             <td class="dash-nowrap"><ReviewChip :stem="r.stem" :review="r.review" /></td>
-            <td class="dash-nowrap"><span class="dash-open">打开 →</span></td>
+            <td class="dash-nowrap">
+              <button type="button" class="dash-open-btn" @click="openRow(r.rel, r.stem)">
+                打开 →
+              </button>
+            </td>
           </tr>
         </tbody>
       </table>

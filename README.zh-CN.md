@@ -133,22 +133,23 @@ TRAFFIC_ANALYZER_WORKSPACE_DIRS=/data/videos,/srv/datasets
 名单非空时，工作区选择与目录浏览只允许名单内目录及其子路径（越界返回 403）。**删掉该行
 （或留空）即不限制。**
 
-## mock 演示模式
+## mock 演示模式（已删除）
 
-在界面 URL 后加 **`?mock=1`**（如 `http://127.0.0.1:8600/?mock=1`）即进入零 token 演示：
-演示视频走真实视频流，专家工作间播放模拟推理动画，结论数据来自真实运行快照（由
-`scripts/build_mock_data.py` 生成）。界面右上角显示 MOCK 徽标，全程不调用 VLM。
+> **已废弃：** 旧的 `?mock=1` 演示模式及其配套脚本 `scripts/build_mock_data.py` /
+> `scripts/e2e_mock_test.py` 已随 legacy 界面一并删除，旧命令不再可用，此处仅作历史说明。
 
-脚本化循环演示 / 界面自测（Playwright 驱动全部按键与页面，截图存
-`output/e2e_screenshots/`）：
+端到端界面自测改用 `scripts/e2e_v2_smoke.py`（Playwright 驱动真实后端：登录 →
+加载工作区 → 侧栏树 → 视频详情 → SFT 编辑器 → 数据看板 → 登出，截图存
+`output/e2e_screenshots/v2_smoke_*.png`）：
 
 ```bash
-python3 scripts/e2e_mock_test.py              # 有头浏览器，循环到 Ctrl+C
-python3 scripts/e2e_mock_test.py --headless --passes 3 --fast
+python3 scripts/e2e_v2_smoke.py                # 无头 Chrome，默认端口 8608
+python3 scripts/e2e_v2_smoke.py --headed       # 有头浏览器
+python3 scripts/e2e_v2_smoke.py --port 8609 --video-fragment 01-02_Event_129
 ```
 
-脚本会在 127.0.0.1:8600 无服务时自动启动 web 服务；开启认证时需提供 `E2E_USER` /
-`E2E_PASS` 环境变量。
+脚本会自建临时账号/临时工作区，并在 127.0.0.1:<port> 自行启动真实后端；不跑真实
+推理（需 VLM/GPU）。
 
 ## 配置项速查
 
@@ -208,7 +209,7 @@ python3 -m pytest traffic_analyzer/tests -q
 ```
 
 测试套件 mock 全部 VLM 调用，覆盖配置校验、CLI、分析流水线与 Web API。端到端界面检查
-用上面的 mock 演示脚本（`scripts/e2e_mock_test.py`）。
+用上面的冒烟脚本（`scripts/e2e_v2_smoke.py`）。
 
 ## 事件类别
 

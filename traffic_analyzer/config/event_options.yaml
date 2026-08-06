@@ -12,7 +12,7 @@
 #   - groups 数组顺序即 UI 展示顺序与骨架模板槽位顺序;
 #   - multi: true 的组(如施工要素)值为选项列表,其余为单选字符串;
 #   - required: true 的组未选时,编辑器在事件名旁给黄色圆点软提醒(不拦截保存);
-#   - 未激活事件(如抛洒物)可定义选项,但编辑器不渲染 chips。
+#   - 编辑器仅对 is_active 的事件渲染 chips;未激活事件即使定义选项也不渲染。
 # =============================================================================
 
 event_options:
@@ -130,7 +130,7 @@ event_options:
         required: true
         options: [小型车, 大客车, 货车, 工程车]
 
-  # --- event_id: 10 | 抛洒物(未激活,定义但不默认展示) ---
+  # --- event_id: 10 | 抛洒物 ---
   - event_id: 10
     groups:
       - key: direction
@@ -141,3 +141,17 @@ event_options:
         label: 物体类型
         required: true
         options: [塑料袋/纸张, 水瓶/容器, 木板/构件, 泥土/散落物, 三角警示牌, 其他]
+
+  # --- event_id: 11 | 实线变道 ---
+  # 属性组与 sft_rewrite.yaml 必要描述元素一致:位置(来向/去向)+变道车辆类型;
+  # v4.5 边界条件「只针对机动车」,车辆类型复用机动车封闭枚举。
+  - event_id: 11
+    groups:
+      - key: direction
+        label: 方向
+        required: true
+        options: [来向, 去向]
+      - key: vehicle_type
+        label: 车辆类型
+        required: true
+        options: [小型车, 大客车, 货车, 工程车]
