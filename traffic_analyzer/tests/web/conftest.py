@@ -164,42 +164,60 @@ def _wait_until(cond: Any, timeout: float = 15.0) -> bool:
     return False
 
 
-_FAKE_INFER_SCRIPT = (
-    "print('[1/4] Preprocessing video...');"
-    "print('[2/4] Expert Agent Layer...');"
-    "print('[3/4] Adjudication...');"
-    "print('[3.5/4] SFT label rewrite...');"
-    "print('[4/4] Generating report...')"
+# Fake children write structured progress events (JSONL) to the file named by
+# TRAFFIC_ANALYZER_PROGRESS_FILE (the job worker creates it and sets the env
+# var); stdout stays free-form and only feeds log_tail.
+_PROGRESS_PREAMBLE = (
+    "import json, os, time\n"
+    "_pf = os.environ['TRAFFIC_ANALYZER_PROGRESS_FILE']\n"
+    "def ev(**kw):\n"
+    "    kw['ts'] = time.time()\n"
+    "    open(_pf, 'a', encoding='utf-8').write(json.dumps(kw, ensure_ascii=False) + '\\n')\n"
 )
 
 
-# Fake child emitting the EXPERT_PROGRESS contract with flush=True so the
-# parent's line-by-line reader sees lanes mid-run. Instead of fixed sleeps the
-# child parks on gate files that the test creates when it is done asserting a
-# mid-run state — this keeps the sampling windows race-free.
+_FAKE_INFER_SCRIPT = (
+    _PROGRESS_PREAMBLE
+    + "ev(type='step', step=1, total=4, name='预处理')\nprint('[1/4] Preprocessing video...');"
+    "print('[2/4] Expert Agent Layer...');"
+    "print('[3/4] Adjudication...');"
+    "print('[3.5/4] SFT label rewrite...');"
+    "print('[4/4] Generating report...')\n"
+    "ev(type='step', step=2, total=4, name='专家')\n"
+    "ev(type='step', step=3, total=4, name='裁决')\n"
+    "ev(type='step', step=3.5, total=4, name='SFT')\n"
+    "ev(type='step', step=4, total=4, name='报告')\n"
+)
+
+
+# Fake child emitting the structured lane-event contract; instead of fixed
+# sleeps the child parks on gate files that the test creates when it is done
+# asserting a mid-run state — this keeps the sampling windows race-free.
 def _fake_expert_script(gate1: Path, gate2: Path) -> str:
     return (
-        "import os, time\n"
-        "p = lambda s: print(s, flush=True)\n"
-        "def w(f):\n"
+        _PROGRESS_PREAMBLE
+        + "def w(f):\n"
         "    while not os.path.exists(f):\n"
         "        time.sleep(0.02)\n"
-        "p('[2/4] Expert Agent Layer...')\n"
-        "p('EXPERT_PROGRESS|register|3|违停,占道,裁决')\n"
-        "p('EXPERT_PROGRESS|start|违停')\n"
-        "p('EXPERT_PROGRESS|phase|违停|0.5|抽帧')\n"
-        "p('EXPERT_PROGRESS|start|占道')\n"
-        "p('EXPERT_PROGRESS|phase|占道|0.25|掩码')\n"
+        "ev(type='step', step=2, total=4, name='专家')\n"
+        "ev(type='register', total=3, lanes=['违停','占道','裁决'])\n"
+        "ev(type='start', lane='违停')\n"
+        "ev(type='phase', lane='违停', fraction=0.5, label='抽帧')\n"
+        "ev(type='start', lane='占道')\n"
+        "ev(type='phase', lane='占道', fraction=0.25, label='掩码')\n"
         f"w(r'{gate1}')\n"
-        "p('EXPERT_PROGRESS|done|1/3|违停|detected')\n"
-        "p('EXPERT_PROGRESS|done|2/3|占道|undetected')\n"
-        "p('[3/4] Adjudication...')\n"
-        "p('EXPERT_PROGRESS|start|裁决')\n"
-        "p('EXPERT_PROGRESS|phase|裁决|0.5|汇总')\n"
+        "ev(type='phase', lane='违停', fraction=1.0, label='检出')\n"
+        "ev(type='lane_done', done=1, total=3, lane='违停', result='detected')\n"
+        "ev(type='phase', lane='占道', fraction=1.0, label='未检出')\n"
+        "ev(type='lane_done', done=2, total=3, lane='占道', result='undetected')\n"
+        "ev(type='step', step=3, total=4, name='裁决')\n"
+        "ev(type='start', lane='裁决')\n"
+        "ev(type='phase', lane='裁决', fraction=0.5, label='汇总')\n"
         f"w(r'{gate2}')\n"
-        "p('EXPERT_PROGRESS|done|3/3|裁决|detected')\n"
-        "p('[3.5/4] SFT label rewrite...')\n"
-        "p('[4/4] Generating report...')\n"
+        "ev(type='phase', lane='裁决', fraction=1.0, label='检出')\n"
+        "ev(type='lane_done', done=3, total=3, lane='裁决', result='detected')\n"
+        "ev(type='step', step=3.5, total=4, name='SFT')\n"
+        "ev(type='step', step=4, total=4, name='报告')\n"
     )
 
 

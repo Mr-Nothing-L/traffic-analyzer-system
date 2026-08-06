@@ -163,14 +163,14 @@ event_categories:
     detection_mode: "expert_agent"
     prompt_template_id: "thrown_object_detection"
     confidence_threshold: 0.7
-    is_active: false
+    is_active: true
     definition: |
       抛洒物：遗落至车道内可能影响车辆通行的异物（塑料袋、瓶子、木板、泥土等）。
       进入车道的动物（牛、羊、野猪等）按抛洒物处理。
       排除：施工区域内正常放置的物品；事故碎片（由事故统一标注）；路面正常设施；车辆正常装载物。
       三角警示牌：起到提醒作用时不标；无提醒作用（倒地、不在事故车后正常放置）按抛洒物处理。
 
-  # --- event_id: 11 | 实线变道 (K) [关闭中] ---
+  # --- event_id: 11 | 实线变道 (K) ---
   - event_id: 11
     event_code: "K"
     name: "Lane Change over Solid Line"
@@ -179,7 +179,7 @@ event_categories:
     detection_mode: "expert_agent"
     prompt_template_id: "lane_change_solid_detection"
     confidence_threshold: 0.7
-    is_active: false
+    is_active: true
     definition: |
       实线变道：车辆主动跨越白色/黄色实线从一个车道驶入另一个车道。
       排除：车轮短暂压线但车身仍在原车道；跨越虚线变道；匝道正常汇入。

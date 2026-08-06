@@ -1,0 +1,137 @@
+/* ==========================================================================
+   专家工作间泳道面板(移植自 legacy css/expert.css,颜色全部改引 design.md token;
+   侧栏迷你像素条样式在 tree/PixelBar.vue 组件内,此处仅泳道面板)
+   ========================================================================== */
+
+/* 面板初次插入淡入(JS 挂载后加 .shown,同 legacy opacity 0 → 1) */
+.expert-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  opacity: 0;
+  transition: opacity var(--dur-med) ease;
+}
+.expert-panel.shown { opacity: 1; }
+
+.expert-head { display: flex; align-items: center; justify-content: flex-end; gap: 12px; }
+.expert-step {
+  font-size: var(--text-sm);
+  color: var(--color-text2);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.mini-wrap { display: inline-flex; align-items: center; }
+
+/* 行内停止键(同 legacy .stop-btn) */
+.stop-btn {
+  flex: 0 0 auto;
+  align-self: center;
+  border: 1px solid var(--color-border);
+  background: var(--color-card);
+  color: var(--color-text2);
+  border-radius: 4px;
+  font-size: var(--text-sm);
+  line-height: 1;
+  padding: 3px 5px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+.stop-btn:hover { border-color: var(--color-red); color: var(--color-red); background: var(--color-red-soft); }
+
+/* 专家卡片墙:列数随卡宽与专家数量自适应(auto-fit),每专家一张小卡 */
+.expert-lanes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 10px;
+}
+.expert-lane {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: var(--text-sm);
+  min-width: 0;
+  background: var(--color-surface-5);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+/* 裁决卡:虚线框区分"汇总者"角色 */
+.expert-lane.lane-judge { border-style: dashed; }
+.lane-top { display: flex; align-items: center; gap: 7px; min-width: 0; }
+
+/* 状态点:颜色即泳道状态,running 时呼吸脉冲 */
+.lane-dot { flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%; background: var(--color-dot-muted); }
+.expert-lane.lane-running .lane-dot { background: var(--color-accent); animation: dot-pulse 1.2s ease-in-out infinite; }
+.expert-lane.lane-detected .lane-dot { background: var(--color-sage); }
+.expert-lane.lane-clear .lane-dot { background: var(--color-sage); opacity: 0.45; }
+.expert-lane.lane-error .lane-dot { background: var(--color-red); }
+@keyframes dot-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+.expert-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  color: var(--color-text);
+}
+.expert-phase {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+  font-size: var(--text-sm);
+  color: var(--color-text2);
+}
+
+/* 泳道像素矩阵:每列 3 个均等方块像素(从上到下堆叠,点亮顺序亦从上到下);
+   未点亮为空像素底色,.on 点亮(颜色随泳道状态类);铺满卡宽用 space-between */
+.expert-lane .pixel-bar { display: flex; gap: 3px; width: 100%; justify-content: space-between; }
+.expert-lane .pixel-cell { flex: 0 0 auto; width: 10px; display: flex; flex-direction: column; gap: 2px; }
+.expert-lane .pixel-sub {
+  display: block;
+  width: 10px;
+  height: 10px;
+  border-radius: 1px;
+  background: var(--color-surface-3);
+}
+.expert-lane .pixel-sub.on { background: var(--color-accent); }
+/* frontier:格内下一条待点亮子像素的明暗脉冲(running 时由点亮逻辑打上) */
+.expert-lane .pixel-sub.frontier { animation: pixel-frontier 0.9s ease-in-out infinite; }
+@keyframes pixel-frontier {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
+
+/* 泳道状态色:queued 灰 / running 橙 / done+detected 绿 / done+undetected 灰绿 / error 红 */
+/* queued 泳道保持完整卡片 + 全灭像素格阵列(观感=等待中),仅名称/阶段置灰 */
+.expert-lane.lane-queued .expert-name,
+.expert-lane.lane-queued .expert-phase { color: var(--color-text2); }
+.expert-lane.lane-running .pixel-sub.on { background: var(--color-accent); }
+.expert-lane.lane-detected .pixel-sub.on { background: var(--color-sage); }
+.expert-lane.lane-clear .pixel-sub.on { background: var(--color-sage); opacity: 0.45; }
+.expert-lane.lane-error .pixel-sub.on { background: var(--color-red); }
+.expert-lane.lane-error .expert-name { color: var(--color-red); }
+
+@media (prefers-reduced-motion: reduce) {
+  .expert-lane .pixel-sub.frontier,
+  .expert-lane.lane-running .lane-dot { animation: none; }
+}
+
+/* ---------- ≤767px:专家泳道收窄最小列宽 ---------- */
+@media (max-width: 767px) {
+  .expert-lanes { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
+}
+
+/* ---------- ≤413px:专家泳道强制单列 ---------- */
+@media (max-width: 413px) {
+  .expert-lanes { grid-template-columns: 1fr; }
+}

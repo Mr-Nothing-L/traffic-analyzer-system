@@ -1,0 +1,136 @@
+/* ==========================================================================
+   v2 全局基础样式:reset + 像素字体骨架应用规则。
+   应用范围对齐 legacy static/css/tokens.css:46-56(骨架像素体、正文黑体)。
+   ========================================================================== */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  overflow-x: clip; /* design.md §7 响应式底线 */
+}
+
+body {
+  background: var(--color-paper);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-size: var(--text-md);
+  line-height: 1.6;
+}
+
+#app {
+  min-height: 100vh;
+}
+
+/* 像素字体骨架:工具条 / 侧栏 / 卡片头 / 按钮 / 空态(仅 UI 骨架,display 角色) */
+.app-topbar,
+.app-sidebar,
+.card-head,
+.btn {
+  font-family: var(--font-pixel);
+}
+
+/* 表单控件默认不继承字体(UA 样式),显式继承所在上下文 */
+input,
+select,
+button,
+textarea {
+  font-family: inherit;
+}
+
+/* 文件名/报告正文需要精确辨认,保持系统黑体 */
+.file-name,
+.report-body {
+  font-family: var(--font-sans);
+}
+
+/* 日志、代码、进度数值用等宽 */
+.mono {
+  font-family: var(--font-mono);
+}
+
+/* 长词兜底(design.md §7) */
+main {
+  overflow-wrap: anywhere;
+}
+
+/* ---------- 全局滚动条(移植 legacy base.css:8-22) ----------
+   hover/active 两档 legacy raw hex(#ACA18C/#948A76)无对应 token,
+   用 color-mix 由 --color-line-strong 向 --color-text 混出,保持纯 token 引用 */
+* {
+  scrollbar-width: thin; /* Firefox */
+  scrollbar-color: var(--color-line-strong) transparent;
+}
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background-color: var(--color-line-strong);
+  border-radius: 6px;
+  border: 3px solid transparent; /* 透明边制造内缩 padding 效果 */
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: color-mix(in oklab, var(--color-line-strong), var(--color-text) 16%);
+}
+::-webkit-scrollbar-thumb:active {
+  background-color: color-mix(in oklab, var(--color-line-strong), var(--color-text) 30%);
+}
+
+/* ---------- 卡片进场(移植 legacy layout.css:112-119 card-in:12px 上浮 + 淡入;
+   时长按 design.md §4 motion-cut 收敛为 --dur-med/--ease-out) ---------- */
+@keyframes card-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ---------- Naive 按钮物理感(移植 legacy base.css:59-80 .btn) ----------
+   Naive 自带 color/background-color/opacity/border-color 过渡(.3s var(--n-bezier)),
+   此处按其原值保留,叠加 transform/box-shadow;disabled 态除外 */
+.n-button:not(:disabled) {
+  transition:
+    color 0.3s var(--n-bezier),
+    background-color 0.3s var(--n-bezier),
+    opacity 0.3s var(--n-bezier),
+    border-color 0.3s var(--n-bezier),
+    transform var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out);
+}
+.n-button:not(:disabled):hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow);
+}
+.n-button:not(:disabled):active {
+  transform: scale(0.97);
+  box-shadow: none;
+}
+
+/* design.md §4:reduce 时折叠为短淡入 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 150ms !important;
+    animation-iteration-count: 1 !important; /* 循环动画(shimmer/dir-spin)只跑一遍,避免频闪 */
+    transition-duration: 150ms !important;
+  }
+}

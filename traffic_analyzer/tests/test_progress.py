@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 
 import pytest
@@ -168,3 +169,78 @@ class TestRobustness:
         for i, name in enumerate(names, start=1):
             assert f"EXPERT_PROGRESS|done|{i}/4|" in out
         assert out.count("EXPERT_PROGRESS|start|") == 4
+
+
+class TestProgressFileSink:
+    """结构化 sink:TRAFFIC_ANALYZER_PROGRESS_FILE 非空时写 JSONL,stdout 标记不变。"""
+
+    def test_events_appended_as_jsonl(self, reporter, monkeypatch, tmp_path, capsys):
+        path = tmp_path / "progress.jsonl"
+        monkeypatch.setenv(progress_mod.PROGRESS_FILE_ENV, str(path))
+        reporter.register(["违法停车", "裁决"])
+        reporter.start("违法停车")
+        reporter.phase("违法停车", "prepare")
+        reporter.done("违法停车", True)
+        reporter.done("裁决", None)
+
+        events = [
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+        ]
+        assert [e["type"] for e in events] == [
+            "register", "start", "phase",
+            "phase", "lane_done",  # 违法停车 收尾:phase 1.0 + lane_done
+            "phase", "lane_done",  # 裁决
+        ]
+        assert events[0]["total"] == 2
+        assert events[0]["lanes"] == ["违法停车", "裁决"]
+        assert events[1]["lane"] == "违法停车"
+        assert events[2]["lane"] == "违法停车"
+        assert events[2]["fraction"] == pytest.approx(0.05)
+        assert events[2]["label"] == "选帧备料"
+        assert events[4]["result"] == "detected"
+        assert events[4]["done"] == 1 and events[4]["total"] == 2
+        assert events[6]["result"] == "done"  # 裁决无检出语义
+        assert all(isinstance(e["ts"], float) for e in events)
+        # stdout 标记行保持不变(CLI 人类可读)。
+        out = capsys.readouterr().out
+        assert "EXPERT_PROGRESS|register|2|违法停车,裁决" in out
+        assert "EXPERT_PROGRESS|done|1/2|违法停车|detected" in out
+
+    def test_env_unset_is_noop(self, reporter, monkeypatch, tmp_path):
+        monkeypatch.delenv(progress_mod.PROGRESS_FILE_ENV, raising=False)
+        reporter.register(["裁决"])
+        reporter.start("裁决")
+        reporter.done("裁决", None)
+        assert list(tmp_path.iterdir()) == []  # 未创建任何文件
+
+    def test_emit_step_and_run_done(self, monkeypatch, tmp_path):
+        path = tmp_path / "progress.jsonl"
+        monkeypatch.setenv(progress_mod.PROGRESS_FILE_ENV, str(path))
+        progress_mod.emit_step(1, 4, "预处理")
+        progress_mod.emit_step(3.5, 4, "SFT")
+        progress_mod.emit_run_done()
+        events = [
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+        ]
+        assert events[0]["type"] == "step"
+        assert events[0]["step"] == 1 and events[0]["total"] == 4
+        assert events[0]["name"] == "预处理"
+        assert events[1]["step"] == 3.5
+        assert events[2] == {
+            "type": "done", "status": "ok", "ts": events[2]["ts"]
+        }
+
+    def test_emit_step_env_unset_noop(self, monkeypatch, tmp_path):
+        monkeypatch.delenv(progress_mod.PROGRESS_FILE_ENV, raising=False)
+        progress_mod.emit_step(1, 4, "预处理")  # must not raise
+        progress_mod.emit_run_done()
+        assert list(tmp_path.iterdir()) == []
+
+    def test_unwritable_path_never_raises(self, reporter, monkeypatch, tmp_path):
+        monkeypatch.setenv(
+            progress_mod.PROGRESS_FILE_ENV, str(tmp_path / "nope" / "p.jsonl")
+        )
+        reporter.register(["裁决"])  # 目录不存在:吞掉,绝不影响推理
+        reporter.done("裁决", None)

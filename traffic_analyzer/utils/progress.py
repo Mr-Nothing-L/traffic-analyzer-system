@@ -7,12 +7,18 @@ error 打点;phase 缺省 name 时取 threading.local 记录的当前线程专�
 (worker 首行 start 时设置)。后端选择:stdout 为 TTY 时渲染 rich Live
 面板(顶部总进度 + 每 lane 一条进度条,displayed fraction 向 target 线性
 缓行、到达后慢速爬升并封顶于下一里程碑);否则向 stdout 打印
-EXPERT_PROGRESS|... 标记行(flush=True),供 web 子进程解析。阶段
+EXPERT_PROGRESS|... 标记行(flush=True,CLI 人类可读保留)。结构化
+sink:环境变量 TRAFFIC_ANALYZER_PROGRESS_FILE 非空时,每个泳道事件
+(register/start/phase/lane_done)同时向该文件 append 一行 JSON(JSONL,
+带 ts);emit_step(step,total,name) 供 orchestrator 上报 [x/4] 粗粒度步骤,
+emit_run_done(status) 上报整次运行终态;env 未设置时均为 no-op。阶段
 fraction/label 定义见 web/expert_phases.json(类别定制→default→内置
 default 三级回落),任何异常均被吞掉,绝不影响推理。
 上游:core/pipeline_steps.py(ExpertAgentLayer/AdjudicationStep)、
-core/expert_agent.py、core/expert_agent_far_enhancement.py。
-下游:rich(仅 TTY);web/jobs.py 等解析 EXPERT_PROGRESS 标记行。
+core/expert_agent.py、core/expert_agent_far_enhancement.py、
+orchestrator/analysis_orchestrator.py(emit_step/emit_run_done)。
+下游:rich(仅 TTY);web/jobs 包尾随 TRAFFIC_ANALYZER_PROGRESS_FILE
+JSONL 驱动 web/progress.py 状态机。
 
 Run directly for a demo (8 experts + adjudication, staggered random sleeps):
 
@@ -24,12 +30,13 @@ from __future__ import annotations
 import atexit
 import json
 import logging
+import os
 import random
 import sys
 import threading
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +75,34 @@ _TICK_INTERVAL = 0.08
 _EASE_RATE = 0.18
 _CRAWL_RATE = 0.0015
 _LANE_NAME_WIDTH = 14
+
+# 结构化进度 sink:非空时每个事件向该文件 append 一行 JSON(JSONL)。
+# web 子进程模式下由 web/jobs 设置并尾随解析;未设置时所有 emit 为 no-op。
+PROGRESS_FILE_ENV = "TRAFFIC_ANALYZER_PROGRESS_FILE"
+
+
+def _emit_event(payload: Dict[str, Any]) -> None:
+    """Append one JSONL event to ``PROGRESS_FILE_ENV`` (never raises)."""
+    try:
+        path = os.environ.get(PROGRESS_FILE_ENV) or ""
+        if not path:
+            return
+        payload.setdefault("ts", time.time())
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except Exception as exc:  # never affect inference
+        logger.debug("[progress] emit event failed: %s", exc)
+
+
+def emit_step(step: float, total: int, name: str) -> None:
+    """上报 [x/4] 粗粒度步骤(orchestrator 调用;env 未设置时 no-op)。"""
+    _emit_event({"type": "step", "step": step, "total": total, "name": name})
+
+
+def emit_run_done(status: str = "ok") -> None:
+    """上报整次运行终态(正常结束 "ok";崩溃时文件可能截断,由 web 侧按
+    returncode 判定,不依赖本事件)。"""
+    _emit_event({"type": "done", "status": status})
 
 
 class _Lane:
@@ -192,6 +227,11 @@ class ProgressReporter:
                         f"EXPERT_PROGRESS|register|{self._total}|{','.join(lanes)}",
                         flush=True,
                     )
+                _emit_event({
+                    "type": "register",
+                    "total": self._total,
+                    "lanes": list(self._order),
+                })
         except Exception as exc:  # never affect inference
             logger.debug("[progress] register failed: %s", exc)
 
@@ -206,6 +246,7 @@ class ProgressReporter:
                 lane.status = "running"
                 if self._backend == "lines":
                     print(f"EXPERT_PROGRESS|start|{name}", flush=True)
+                _emit_event({"type": "start", "lane": name})
         except Exception as exc:
             logger.debug("[progress] start failed: %s", exc)
 
@@ -239,6 +280,12 @@ class ProgressReporter:
                     lane.crawl_cap = self._next_milestone(lane, fraction)
                 if self._backend == "lines":
                     print(f"EXPERT_PROGRESS|phase|{name}|{fraction:.2f}|{label}", flush=True)
+                _emit_event({
+                    "type": "phase",
+                    "lane": name,
+                    "fraction": fraction,
+                    "label": label,
+                })
         except Exception as exc:
             logger.debug("[progress] phase failed: %s", exc)
 
@@ -288,6 +335,20 @@ class ProgressReporter:
                         f"EXPERT_PROGRESS|done|{self._done_count}/{self._total}|{name}|{token}",
                         flush=True,
                     )
+                # JSONL 与 stdout 标记同序:先 phase 1.0(终态文案)再 lane_done
+                _emit_event({
+                    "type": "phase",
+                    "lane": name,
+                    "fraction": 1.0,
+                    "label": lane.status_text,
+                })
+                _emit_event({
+                    "type": "lane_done",
+                    "done": self._done_count,
+                    "total": self._total,
+                    "lane": name,
+                    "result": token,
+                })
                 if self._done_count >= self._total:
                     self._stop_event.set()
         except Exception as exc:

@@ -85,7 +85,7 @@ class TestCancelRace:
             return proc
 
         monkeypatch.setattr(
-            "traffic_analyzer.web.jobs.subprocess.Popen", _racy_popen
+            "traffic_analyzer.web.jobs.queue.subprocess.Popen", _racy_popen
         )
         manager.submit("infer", list(_SLEEP_CMD), stem="v1")
         job = manager._jobs[1]

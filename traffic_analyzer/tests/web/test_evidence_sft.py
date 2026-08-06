@@ -146,16 +146,15 @@ class TestConfigEvents:
             key=lambda e: e["event_id"],
         )
         assert resp.json() == expected
-        # 当前配置:0-7 激活,8 抛洒物 / 9 实线变道 未激活。
-        assert [e["is_active"] for e in resp.json()] == [True] * 8 + [False] * 2
+        # 当前配置:10 个类别全部激活(event_id 1-8、10 抛洒物、11 实线变道)。
+        assert [e["is_active"] for e in resp.json()] == [True] * 10
 
     def test_options_closed_enums(self) -> None:
         client = TestClient(create_app())
         events = {e["event_id"]: e for e in client.get("/api/config/events").json()}
-        # 8 个激活事件均有非空属性组;抛洒物(10)已定义但未激活;实线变道(11)未定义
-        for ev_id in (1, 2, 3, 4, 5, 6, 7, 8, 10):
+        # 10 个激活事件均有非空属性组(含抛洒物(10) 与实线变道(11))
+        for ev_id in (1, 2, 3, 4, 5, 6, 7, 8, 10, 11):
             assert events[ev_id]["options"], f"event {ev_id} missing options"
-        assert events[11]["options"] == []
         # 属性组契约:key/label/封闭 options/required;施工要素为多选
         for ev in events.values():
             for g in ev["options"]:
@@ -167,6 +166,11 @@ class TestConfigEvents:
         keys = [g["key"] for g in events[1]["options"]]
         assert keys == ["lane_type", "direction", "vehicle_type"]
         assert "应急车道" in events[1]["options"][0]["options"]
+        # 实线变道(11):方向 + 车辆类型两组必填(v4.5「只针对机动车」)
+        keys_11 = [g["key"] for g in events[11]["options"]]
+        assert keys_11 == ["direction", "vehicle_type"]
+        assert events[11]["options"][0]["options"] == ["来向", "去向"]
+        assert events[11]["options"][1]["options"] == ["小型车", "大客车", "货车", "工程车"]
 
 
 class TestSftPut:
@@ -244,6 +248,7 @@ class TestSftPut:
         payload["event_attributes"] = {
             "1": {"lane_type": "应急车道", "direction": "来向", "vehicle_type": "工程车"},
             "7": {"direction": "去向", "work_elements": ["施工车辆", "施工人员"]},
+            "11": {"direction": "来向", "vehicle_type": "小型车"},
         }
         resp = client.put("/api/results/v1/sft", json=payload)
         assert resp.status_code == 200
@@ -262,7 +267,7 @@ class TestSftPut:
             {"1": {"vehicle_type": "跑车"}},                # 枚举外取值
             {"1": {"color": "红"}},                         # 未定义的属性键
             {"99": {"direction": "来向"}},                  # 未定义的事件
-            {"11": {"direction": "来向"}},                  # 未定义选项的事件(实线变道)
+            {"11": {"vehicle_type": "警车"}},               # 实线变道枚举外取值
             {"1": {"direction": ""}},                       # 空串不是合法选项
             {"7": {"work_elements": "施工车辆"}},           # 多选组必须是列表
             {"7": {"work_elements": ["施工车辆", "烟花"]}},  # 列表内含枚举外取值

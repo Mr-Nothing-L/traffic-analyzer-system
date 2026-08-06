@@ -7,7 +7,40 @@ video: one video clip in, an **11-bit binary event code** plus a structured repo
 (Markdown / JSON) out — and, with SFT label mode, one **SFT training sample** per
 video, editable in the built-in web UI.
 
-**Current version: 5.0.0.**
+**Current version: 6.0.0.**
+
+## Architecture
+
+Three layers, decoupled by explicit contracts (REST schemas, a JSONL progress
+file, and the workspace directory layout):
+
+```
+┌──────────────────────────────────────────────┐
+│ Web UI — Vue 3 + TS + Naive UI SPA           │  frontend/
+│ file tree · detail view · SFT editor · board │
+└───────────────────┬──────────────────────────┘
+                    │ REST /api/* · SSE /api/events · Range video stream
+┌───────────────────▼──────────────────────────┐
+│ FastAPI web layer                            │  traffic_analyzer/web/
+│ auth · serial job queue · dashboard · SSE    │
+└───────────────────┬──────────────────────────┘
+                    │ one subprocess per analysis job
+┌───────────────────▼──────────────────────────┐
+│ Analysis pipeline (YAML-config-driven)       │  orchestrator + core/
+│ preprocess → expert agents → adjudication    │
+│   → grounding check → SFT label → report     │
+└───────────────────┬──────────────────────────┘
+                    │ writes progress events (JSONL), tailed by the web layer
+                    ▼
+              workspace dir (videos + analysis results)
+```
+
+- **Frontend** talks to the backend only via REST + one SSE channel (job
+  progress, dashboard changes, presence) — no polling.
+- The **web layer** runs inference as serial child processes and tails each
+  job's structured progress file to drive the UI in real time.
+- The **analysis core** is fully configured in YAML (`traffic_analyzer/config/`):
+  event definitions, prompt templates, logic chains — new events need no code.
 
 ## Quick Start
 
@@ -64,7 +97,8 @@ prefilter (no report file written).
 ## Web UI
 
 The web UI (FastAPI backend + SPA frontend) is the main interface for inference,
-SFT label editing, and dataset review:
+SFT label editing, and dataset review (the frontend is a Vue 3 SPA; source lives in
+`frontend/`, `npm run build` produces `frontend/dist`, which the backend serves at `/`):
 
 ```bash
 python3 -m traffic_analyzer web            # default http://127.0.0.1:8600
@@ -148,24 +182,25 @@ With a non-empty list, workspace selection and directory browsing are confined t
 those directories and their subdirectories (403 otherwise). **Delete the line (or
 leave it empty) and workspaces are unrestricted.**
 
-## Mock Demo Mode
+## Mock Demo Mode (removed)
 
-Open the UI with **`?mock=1`** appended (e.g. `http://127.0.0.1:8600/?mock=1`) for a
-zero-token demo: real video streaming from the demo clips, a simulated inference
-animation in the expert workshop, and real conclusion data (snapshotted from real
-runs by `scripts/build_mock_data.py`). A MOCK badge shows in the corner; no VLM
-calls are made.
+> **Deprecated:** the legacy `?mock=1` demo mode — and its supporting scripts
+> `scripts/build_mock_data.py` / `scripts/e2e_mock_test.py` — was removed along
+> with the legacy UI. The old commands no longer work; kept here only as
+> historical context.
 
-For a scripted looping demo / UI self-test (Playwright, drives every button and
-page, screenshots to `output/e2e_screenshots/`):
+For an end-to-end UI self-test (Playwright against the real backend: login →
+workspace load → sidebar → video detail → SFT editor → dashboard → logout,
+screenshots to `output/e2e_screenshots/v2_smoke_*.png`):
 
 ```bash
-python3 scripts/e2e_mock_test.py              # headed browser, loops until Ctrl+C
-python3 scripts/e2e_mock_test.py --headless --passes 3 --fast
+python3 scripts/e2e_v2_smoke.py                # headless Chrome, default port 8608
+python3 scripts/e2e_v2_smoke.py --headed       # headed browser
+python3 scripts/e2e_v2_smoke.py --port 8609 --video-fragment 01-02_Event_129
 ```
 
-The script starts the web service on 127.0.0.1:8600 itself if needed; when auth is
-enabled, provide `E2E_USER` / `E2E_PASS`.
+The script creates a temporary account/workspace and starts the real backend on
+127.0.0.1:<port> itself; it does not run real inference (needs VLM/GPU).
 
 ## Configuration Reference
 
@@ -228,8 +263,8 @@ python3 -m pytest traffic_analyzer/tests -q
 ```
 
 The suite mocks all VLM calls and covers config validation, the CLI, the analysis
-pipeline, and the web API. For an end-to-end UI check, use the mock demo script
-above (`scripts/e2e_mock_test.py`).
+pipeline, and the web API. For an end-to-end UI check, use the smoke script above
+(`scripts/e2e_v2_smoke.py`).
 
 ## Event Categories
 

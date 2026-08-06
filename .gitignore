@@ -66,6 +66,7 @@ error/
 # Keep these root-level files
 !README.md
 !README.zh-CN.md
+!design.md
 !requirements.txt
 !analyze.sh
 yolov8n.pt
@@ -85,3 +86,8 @@ architecture_diagram.html
 演示区/
 traffic_analyzer/config/users.db
 traffic_analyzer/config/.env
+frontend/node_modules/
+frontend/dist/
+
+# vitest 缓存(误生成于 src 下时)
+frontend/src/node_modules/

@@ -1,0 +1,244 @@
+/* ==========================================================================
+   详情页:上下分栏 / 视频预览卡 / 报告 markdown(移植自 legacy preview.css,
+   颜色全部改引 design.md token;舞台底色用 --color-stage-bg)
+   ========================================================================== */
+
+/* ---------- 上下分栏(预览常驻) ---------- */
+.app-main-detail {
+  overflow: hidden !important;
+  padding: 0 !important;
+  display: flex;
+  flex-direction: column;
+}
+
+.split-col {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.pane-top {
+  flex: 0 0 auto;
+  min-height: 150px;
+  max-height: 80%;
+  overflow: hidden;
+  padding: 18px 26px 0;
+}
+
+.pane-top .card-preview {
+  height: 100%;
+  width: 100%;
+  max-width: 1060px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 打通 NCard 包装层:.card-preview 的 flex 链被 n-card 内部 DOM 截断,
+   需让内容层继续传递 flex,视频才能随分隔条缩放(video height:100%) */
+.pane-top .card-preview .n-card-content {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.pane-top .preview-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.hsplit {
+  flex: 0 0 12px;
+  cursor: row-resize;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* 常驻细分隔线,让分栏边界在静止时也可辨识 */
+  background: linear-gradient(var(--color-border), var(--color-border)) center / 100% 1px no-repeat;
+  transition: background var(--dur-fast) var(--ease-out);
+}
+
+/* 双线握把,与侧栏竖向双线呼应 */
+.hsplit span {
+  width: 56px;
+  height: 6px;
+  border-top: 2px solid var(--color-line-strong);
+  border-bottom: 2px solid var(--color-line-strong);
+  transition: border-color var(--dur-fast) var(--ease-out);
+}
+
+.hsplit:hover,
+.hsplit.dragging {
+  background:
+    linear-gradient(var(--color-accent), var(--color-accent)) center / 100% 1px no-repeat,
+    var(--color-accent-soft);
+}
+
+.hsplit:hover span,
+.hsplit.dragging span {
+  border-color: var(--color-accent);
+}
+
+.hsplit:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -2px;
+}
+
+body.hsplit-dragging {
+  cursor: row-resize;
+  user-select: none;
+}
+
+.pane-bottom {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 26px 60px;
+}
+
+.detail-cards {
+  max-width: 1060px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+.detail-cards .n-card {
+  box-shadow: var(--shadow);
+  animation: card-in var(--dur-med) var(--ease-out) both; /* 卡片进场(legacy layout.css:112-119) */
+}
+
+/* 预览卡同样享受进场动画 */
+.pane-top .card-preview {
+  animation: card-in var(--dur-med) var(--ease-out) both;
+}
+
+/* ---------- 骨架屏 shimmer(移植 legacy base.css:100-111 .skel;
+   亮色档 legacy 为 raw hex #F7F3EA,无同名 token,就近取 --color-surface-2) ---------- */
+.skel {
+  border-radius: var(--radius);
+  background: linear-gradient(
+    90deg,
+    var(--color-surface-3) 25%,
+    var(--color-surface-2) 50%,
+    var(--color-surface-3) 75%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.3s linear infinite;
+}
+
+@keyframes shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+
+/* 上栏预览区骨架块:填满 pane-top(宽度对齐 .card-preview) */
+.skel-pane-top {
+  height: 100%;
+  width: 100%;
+  max-width: 1060px;
+  margin: 0 auto;
+}
+
+/* 下栏卡片区骨架块:占位一张结果卡的高度 */
+.skel-detail-card {
+  height: 220px;
+}
+
+.card-sub {
+  font-size: var(--text-sm);
+  color: var(--color-text2);
+  font-weight: 400;
+  margin-left: var(--space-sm);
+}
+
+.empty-note {
+  color: var(--color-text2);
+  font-size: var(--text-sm);
+  padding: var(--space-sm) 2px;
+}
+
+/* ---------- 视频预览卡 ---------- */
+.pv-wrap {
+  background: var(--color-stage-bg);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  display: flex;
+  justify-content: center;
+  flex: 1;
+  min-height: 0;
+}
+
+.pv-wrap video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  max-height: none;
+  object-fit: contain; /* 随面板缩放,letterbox 不变形 */
+  background: var(--color-stage-bg);
+}
+
+.pv-stepper {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.pv-stage {
+  background: var(--color-stage-bg);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  display: flex;
+  justify-content: center;
+}
+
+.pv-stage img {
+  display: block;
+  max-width: 100%;
+  max-height: 420px;
+}
+
+.pv-hint {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: var(--text-sm);
+  color: var(--color-text2);
+  margin-bottom: 10px;
+}
+
+.pv-slider-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.pv-slider-row input[type='range'] {
+  flex: 1;
+  accent-color: var(--color-accent);
+}
+
+.pv-idx {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--color-text2);
+  min-width: 72px;
+  text-align: right;
+}
+
+/* 单帧读取失败时的占位提示(不影响滑块) */
+.pv-frame-err {
+  color: var(--color-text2);
+  font-size: var(--text-sm);
+  padding: 24px 0;
+}

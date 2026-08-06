@@ -1,0 +1,102 @@
+/* Hallmark · macrostructure: Workbench · tone: technical/utilitarian · anchor hue: warm-orange · source: design.md (locked) */
+/* ==========================================================================
+   高速交通事件分析台 v2 — 设计 token(design.md §1 的 OKLCH 承载)
+   由 frontend/scripts/hex_to_oklch.py 生成,请勿手改色值;改色先改 design.md。
+   每条颜色两层::root 写 hex 兜底,@supports (color: oklch(...)) 内写 oklch
+   覆盖(老内核整个 @supports 块跳过,真正回退 hex;同块双行写法会因自定义
+   属性解析期不校验而失效)。
+   组件内只准引用 var(--token),禁止 inline hex/OKLCH(design.md §8)。
+   ========================================================================== */
+:root {
+  --color-paper: #F7F4EE;
+  --color-card: #FFFFFF;
+  --color-border: #E8E2D5;
+  --color-line-strong: #C9C0AF;
+  --color-text: #2A2620;
+  --color-text2: #6B6257;
+  --color-accent: #D97757;
+  --color-accent-hover: #C4664A;
+  --color-accent-soft: #F6E3DA;
+  --color-on-accent: #FFFFFF;
+  --color-sage: #7A9B76;
+  --color-sage-soft: #E6EEE3;
+  --color-red: #B26B5B;
+  --color-red-soft: #F3E2DD;
+  --color-blue: #3E7CB1;
+  --color-blue-soft: #E2ECF4;
+  --color-gold: #C9A227;
+  --color-surface-2: #FBF9F4;
+  --color-surface-3: #EFEAE0;
+  --color-surface-4: #F1EDE4;
+  --color-surface-5: #FCFAF6;
+  --color-hover-bg: #F4EFE5;
+  --color-stage-bg: #1C1A17;
+  --color-accent-deep: #F0C4AB;
+  --color-dot-muted: #D8D1C2;
+
+  --shadow: 0 1px 2px rgba(42, 38, 32, 0.05), 0 4px 14px rgba(42, 38, 32, 0.06);
+  --shadow-hover: 0 2px 4px rgba(42, 38, 32, 0.07), 0 8px 22px rgba(42, 38, 32, 0.10);
+  --font-pixel: "Fusion Pixel", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+               "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  --radius: 12px;
+  --radius-sm: 8px;
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 32px;
+  --space-2xl: 48px;
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-md: 13px;
+  --text-lg: 15px;
+  --text-xl: 18px;
+  --text-2xl: 22px;
+  --text-display: 28px;
+  --ease-out: cubic-bezier(.22, 1, .36, 1);
+  --ease-in: cubic-bezier(.64, 0, .78, 0);
+  --ease-in-out: cubic-bezier(.83, 0, .17, 1);
+  --dur-fast: 120ms;
+  --dur-med: 200ms;
+}
+
+@supports (color: oklch(0 0 0)) {
+:root {
+  --color-paper: oklch(0.9678 0.0085 84.59); /* 源 #F7F4EE */
+  --color-card: oklch(1.0000 0.0001 0.00); /* 源 #FFFFFF */
+  --color-border: oklch(0.9140 0.0185 86.17); /* 源 #E8E2D5 */
+  --color-line-strong: oklch(0.8105 0.0254 83.41); /* 源 #C9C0AF */
+  --color-text: oklch(0.2709 0.0123 78.07); /* 源 #2A2620 */
+  --color-text2: oklch(0.5013 0.0205 72.84); /* 源 #6B6257 */
+  --color-accent: oklch(0.6724 0.1308 38.74); /* 源 #D97757 */
+  --color-accent-hover: oklch(0.6145 0.1271 37.37); /* 源 #C4664A */
+  --color-accent-soft: oklch(0.9287 0.0241 47.00); /* 源 #F6E3DA */
+  --color-on-accent: oklch(1.0000 0.0001 0.00); /* 源 #FFFFFF */
+  --color-sage: oklch(0.6543 0.0653 142.04); /* 源 #7A9B76 */
+  --color-sage-soft: oklch(0.9400 0.0169 137.25); /* 源 #E6EEE3 */
+  --color-red: oklch(0.6020 0.0947 33.49); /* 源 #B26B5B */
+  --color-red-soft: oklch(0.9250 0.0199 36.87); /* 源 #F3E2DD */
+  --color-blue: oklch(0.5690 0.1044 246.76); /* 源 #3E7CB1 */
+  --color-blue-soft: oklch(0.9379 0.0153 241.89); /* 源 #E2ECF4 */
+  --color-gold: oklch(0.7280 0.1379 89.73); /* 源 #C9A227 */
+  --color-surface-2: oklch(0.9823 0.0069 88.71); /* 源 #FBF9F4 */
+  --color-surface-3: oklch(0.9382 0.0143 84.60); /* 源 #EFEAE0 */
+  --color-surface-4: oklch(0.9467 0.0127 86.86); /* 源 #F1EDE4 */
+  --color-surface-5: oklch(0.9855 0.0056 84.59); /* 源 #FCFAF6 */
+  --color-hover-bg: oklch(0.9533 0.0143 84.59); /* 源 #F4EFE5 */
+  --color-stage-bg: oklch(0.2189 0.0065 78.17); /* 源 #1C1A17 */
+  --color-accent-deep: oklch(0.8524 0.0607 51.15); /* 源 #F0C4AB */
+  --color-dot-muted: oklch(0.8622 0.0217 85.96); /* 源 #D8D1C2 */
+}
+}
+
+/* 缝合像素字体(SIL OFL 1.1,保留字体名「缝合像素 / Fusion Pixel」):
+   仅用于 UI 骨架。public/fonts/ 下的文件被 Vite 原样拷到 dist/fonts/,
+   此处用相对路径(css 在 dist/assets/,../fonts 即 dist/fonts),兼容任意 base。 */
+@font-face {
+  font-family: "Fusion Pixel";
+  src: url("../fonts/fusion-pixel-12px.woff2") format("woff2");
+  font-display: swap;
+}

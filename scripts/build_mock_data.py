@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """把「演示区」的真实推理结果打包成前端 mock 数据(?mock=1 零 token 演示)。
 
+!!! 已废弃:mock 体系已随 legacy 前端(traffic_analyzer/web/static/)删除,
+    本脚本保留存档,不再可用。 !!!
+
 读取:
   演示区/analysis/<stem>/<stem>.json            SFT 标注(含 event_attributes/attr_mentions)
   演示区/analysis/<stem>/report.md              分析报告
@@ -91,8 +94,9 @@ def main() -> int:
         })
 
     real_mock = {
-        # 演示区绝对路径:mock 初始化时把后端工作区切到这里,/api/workspace/stream 才能服务真实视频流
-        "workspacePath": str(DEMO_DIR),
+        # 演示区路径(相对仓库根,服务进程以仓库根为 CWD 启动时解析正确):
+        # mock 初始化时把后端工作区切到这里,/api/workspace/stream 才能服务真实视频流
+        "workspacePath": "演示区",
         "videos": videos,
         "eventConfig": load_event_config(),
         "detectedMap": detected,

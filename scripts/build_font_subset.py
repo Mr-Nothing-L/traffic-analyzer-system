@@ -7,14 +7,14 @@
     python3 scripts/build_font_subset.py
 
 流程:
-  1. 扫描 traffic_analyzer/web/static/ 下全部 .js/.html/.css 文本,
+  1. 扫描 frontend/(index.html 与 src/ 下 .ts/.vue/.css)文本,
      收集唯一字符 + 可打印 ASCII + 常用中文标点,写入 output/font_subset_chars.txt;
   2. 用 pyftsubset 从原始字体子集化,覆盖输出
-     traffic_analyzer/web/static/fonts/fusion-pixel-12px.woff2。
+     frontend/public/fonts/fusion-pixel-12px.woff2(下次 npm run build 带入 dist)。
 
 原始字体(未子集化)默认取 /tmp/fontpix/fp_woff2/fusion-pixel-12px-proportional-zh_hans.ttf.woff2,
 不存在时自动从 fusion-pixel-font GitHub release 下载(经 ghfast.top 镜像);
-也可用 --source 指定本地路径。字体: SIL OFL 1.1, 许可见 static/fonts/OFL.txt。
+也可用 --source 指定本地路径。字体: SIL OFL 1.1, 许可见 frontend/public/fonts/OFL.txt。
 """
 
 import argparse
@@ -27,8 +27,8 @@ import urllib.request
 import zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-STATIC_DIR = os.path.join(ROOT, 'traffic_analyzer', 'web', 'static')
-OUT_FONT = os.path.join(STATIC_DIR, 'fonts', 'fusion-pixel-12px.woff2')
+FRONTEND_DIR = os.path.join(ROOT, 'frontend')
+OUT_FONT = os.path.join(FRONTEND_DIR, 'public', 'fonts', 'fusion-pixel-12px.woff2')
 CHARS_FILE = os.path.join(ROOT, 'output', 'font_subset_chars.txt')
 
 FONT_NAME = 'fusion-pixel-12px-proportional-zh_hans.ttf.woff2'
@@ -44,10 +44,12 @@ EXTRA_PUNCT = '。「」『』、,…—·()【】?!:;~'
 
 
 def collect_chars():
-    """扫描静态前端文本,收集唯一字符集。"""
+    """扫描新前端(frontend/)文本,收集唯一字符集。"""
     chars = set(string.printable) | set(EXTRA_PUNCT)
-    for path in glob.glob(os.path.join(STATIC_DIR, '**', '*'), recursive=True):
-        if path.endswith(('.js', '.html', '.css')):
+    paths = [os.path.join(FRONTEND_DIR, 'index.html')]
+    paths += glob.glob(os.path.join(FRONTEND_DIR, 'src', '**', '*'), recursive=True)
+    for path in paths:
+        if path.endswith(('.ts', '.vue', '.css', '.html')) and os.path.isfile(path):
             with open(path, encoding='utf-8', errors='ignore') as f:
                 chars |= set(f.read())
     return sorted(c for c in chars if not c.isspace() or c == ' ')
@@ -73,7 +75,7 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--source', default=DEFAULT_SOURCE,
                     help='未子集化的原始字体路径(默认 %(default)s,缺失时自动下载)')
-    ap.add_argument('--output', default=OUT_FONT, help='输出 woff2 路径(默认覆盖 static/fonts)')
+    ap.add_argument('--output', default=OUT_FONT, help='输出 woff2 路径(默认覆盖 frontend/public/fonts)')
     args = ap.parse_args()
 
     ensure_source_font(args.source)

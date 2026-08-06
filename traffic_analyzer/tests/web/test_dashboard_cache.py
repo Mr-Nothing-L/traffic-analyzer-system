@@ -55,7 +55,9 @@ class TestDashboardCache:
     def test_ttl_expiry_recomputes(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(workspace_mod, "_CACHE_TTL_SEC", 0.05)
+        # 看板缓存为实例级长 TTL(_LongTTLCache,主动失效主导,不再跟随全局
+        # _CACHE_TTL_SEC);把本实例 TTL 调短,验证过期后仍会重算。
+        monkeypatch.setattr(dashboard_mod._dashboard_cache, "_ttl_sec", 0.05)
         workspace = _make_dash_workspace(tmp_path)
         count = _count_spy(monkeypatch, dashboard_mod, "_build_dashboard")
         client = TestClient(create_app(workspace=str(workspace)))

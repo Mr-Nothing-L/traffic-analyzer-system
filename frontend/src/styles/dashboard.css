@@ -1,0 +1,198 @@
+/* ==========================================================================
+   数据看板 v2:卡片 / 筛选条 / 表格 / 徽章 / 审核 chip / 搜索框。
+   迁移自 legacy static/css/dashboard.css,颜色全部映射 design.md token
+   (legacy 的少数 raw hex 就近归并到 --color-paper / --color-line-strong);
+   像素体仅用于表头/卡标题/按钮等 UI 骨架;表格内容 --font-sans。
+   写法沿用 legacy/tree.css 的紧凑单行规则。
+   ========================================================================== */
+
+/* ---------- 卡片(对齐 legacy .card:白面 + 描边 + 圆角 + 阴影) ---------- */
+.dash-card {
+  max-width: 1280px;
+  background: var(--color-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  margin-bottom: var(--space-md);
+  animation: card-in var(--dur-med) var(--ease-out) both; /* 卡片进场(legacy layout.css:112-119) */
+}
+.dash-card-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-sm);
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--color-border);
+}
+.dash-card-title { font-family: var(--font-pixel); font-size: var(--text-lg); font-weight: 650; }
+.dash-card-sub { font-family: var(--font-pixel); font-size: var(--text-sm); color: var(--color-text2); }
+.dash-spacer { flex: 1; }
+.dash-card-body { padding: 18px; }
+.dash-body { padding-top: 12px; }
+.dash-empty {
+  font-family: var(--font-pixel);
+  color: var(--color-text2);
+  font-size: var(--text-md);
+  padding: var(--space-lg);
+  text-align: center;
+}
+
+/* ---------- 筛选条:一致性 / 审核 两组 chip + 人工已改,可叠加 ---------- */
+.dash-filters {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface-2);
+}
+.dash-filter-label { font-family: var(--font-pixel); font-size: var(--text-sm); color: var(--color-text2); margin-right: 2px; }
+.dash-filter-sep { width: 1px; height: 18px; background: var(--color-border); margin: 0 8px; }
+
+/* ---------- chip(筛选/翻页共用):default/hover/focus-visible/active/disabled + on ---------- */
+.dash-chip {
+  font-family: var(--font-pixel);
+  font-size: var(--text-sm);
+  line-height: 1;
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--color-border);
+  background: var(--color-card);
+  color: var(--color-text2);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+.dash-chip b { font-weight: 700; margin-left: 2px; }
+.dash-chip:hover:not(:disabled) { border-color: var(--color-accent); color: var(--color-accent); }
+.dash-chip:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 1px; }
+.dash-chip:active:not(:disabled) { background: var(--color-accent-soft); }
+.dash-chip:disabled { opacity: 0.5; cursor: not-allowed; }
+.dash-chip.on { color: var(--color-text); border-color: currentColor; }
+.dash-chip-ok.on { background: var(--color-sage-soft); border-color: var(--color-sage); color: var(--color-sage); }
+.dash-chip-warn.on { background: var(--color-accent-soft); border-color: var(--color-accent); color: var(--color-accent-hover); }
+.dash-chip-mute.on { background: var(--color-surface-3); border-color: var(--color-line-strong); color: var(--color-text2); }
+.dash-chip-edit.on { background: var(--color-blue-soft); border-color: var(--color-blue); color: var(--color-blue); }
+.dash-chip-clear { border-style: dashed; }
+
+/* ---------- 表格:内容保持系统黑体(像素字体仅 UI 骨架) ---------- */
+.dash-pager { display: flex; align-items: center; gap: 12px; justify-content: center; padding: 10px 0 2px; }
+.dash-table-wrap { overflow-x: auto; border: 1px solid var(--color-border); border-radius: var(--radius-sm); }
+.dash-table { border-collapse: collapse; width: 100%; font-family: var(--font-sans); font-size: 12.5px; }
+.dash-table th,
+.dash-table td { border-bottom: 1px solid var(--color-border); padding: 7px 10px; text-align: center; vertical-align: middle; }
+.dash-table thead th {
+  font-family: var(--font-pixel);
+  color: var(--color-text2);
+  font-size: var(--text-xs);
+  letter-spacing: 0.04em;
+  background: var(--color-surface-2);
+  white-space: nowrap;
+  text-align: center;
+}
+.dash-table tbody tr:last-child td { border-bottom: none; }
+/* 行斑马:偶数行浅米底(legacy 浅米 → --color-paper),悬停行 --color-hover-bg 覆盖 */
+.dash-table tbody tr:nth-child(even) td { background: var(--color-paper); }
+.dash-table td.num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; text-align: center; white-space: nowrap; }
+/* 宏/微平均行:2px 顶部粗边框 + 加粗 */
+.dash-metrics-table tr.total td { font-weight: 700; border-top: 2px solid var(--color-line-strong); }
+
+/* ---------- 明细行:整行不可点,仅最右列「打开」按钮跳转;行 hover 高亮保留 ---------- */
+.dash-rows-table tbody tr:hover td { background: var(--color-hover-bg); }
+.dash-rows-table { table-layout: fixed; }
+.dash-rows-table th:nth-child(1) { width: 26%; }
+.dash-rows-table th:nth-child(2) { width: 21%; }
+.dash-rows-table th:nth-child(3) { width: 21%; }
+.dash-rows-table th:nth-child(4) { width: 11%; }
+.dash-rows-table th.dash-col-edit { width: 92px; }
+.dash-rows-table th.dash-col-review { width: 208px; }
+.dash-rows-table th.dash-col-open { width: 72px; }
+/* 长文件名允许任意断行(design.md §7);presence 徽章跟在名后 */
+.dash-v span:first-child { overflow-wrap: anywhere; }
+.dash-v .presence-badge { margin-left: 6px; }
+.dash-nowrap { white-space: nowrap; }
+/* 一致性列(漏:x;误:x)允许换行,不溢出单元格 */
+.dash-rows-table td.dash-col-consistency { white-space: normal; }
+/* 「打开」按钮:文字型,hover 底色+下划线、focus-visible 环、active 按压 */
+.dash-open-btn {
+  background: none;
+  border: none;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  color: var(--color-accent);
+  font-weight: 650;
+  font-family: inherit;
+  font-size: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out);
+}
+.dash-open-btn:hover { background: var(--color-accent-soft); text-decoration: underline; }
+.dash-open-btn:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 1px; }
+.dash-open-btn:active { transform: scale(0.96); }
+
+/* ---------- 事件名 chips:中性底;漏检/误检用暖色 ---------- */
+.dash-ev-chip {
+  display: inline-block;
+  margin: 1px 4px 1px 0;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--color-surface-3);
+  color: var(--color-text2);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+}
+.dash-ev-chip-warm { background: var(--color-accent-soft); color: var(--color-accent-hover); }
+.dash-none { color: var(--color-text2); }
+
+/* ---------- 一致性 / 人工徽章 ---------- */
+.dash-badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: var(--text-sm); font-weight: 650; white-space: nowrap; }
+.dash-badge-ok { background: var(--color-sage-soft); color: var(--color-sage); }
+.dash-badge-warn { background: var(--color-accent-soft); color: var(--color-accent-hover); }
+.dash-badge-mute { background: var(--color-surface-3); color: var(--color-text2); }
+.dash-badge-edit { background: var(--color-blue-soft); color: var(--color-blue); cursor: help; }
+.dash-diff-detail { margin-left: 6px; font-size: var(--text-sm); color: var(--color-text2); white-space: nowrap; }
+
+/* ---------- 行内审核三 chip:当前态实心,非当前 ghost(含 8 态) ---------- */
+.dash-review-group { display: inline-flex; gap: 4px; }
+.dash-review-chip {
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  line-height: 1;
+  padding: 4px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-text2);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+.dash-review-chip:hover:not(:disabled) { border-color: var(--color-accent); color: var(--color-accent); }
+.dash-review-chip:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 1px; }
+.dash-review-chip:active:not(:disabled) { background: var(--color-accent-soft); }
+.dash-review-chip:disabled { opacity: 0.5; cursor: wait; }
+.dash-review-chip.dash-chip-ok.on { background: var(--color-sage); border-color: var(--color-sage); color: var(--color-on-accent); }
+.dash-review-chip.dash-chip-warn.on { background: var(--color-accent); border-color: var(--color-accent); color: var(--color-on-accent); }
+.dash-review-chip.dash-chip-mute.on { background: var(--color-line-strong); border-color: var(--color-line-strong); color: var(--color-on-accent); }
+
+/* ---------- 名称搜索框 ---------- */
+.dash-search {
+  font-family: var(--font-pixel);
+  font-size: var(--text-sm);
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-card);
+  color: var(--color-text);
+  padding: 5px 12px;
+  width: 180px;
+  outline: none;
+  transition: border-color var(--dur-fast) var(--ease-out);
+}
+.dash-search:hover { border-color: var(--color-line-strong); }
+.dash-search:focus-visible { border-color: var(--color-accent); outline: 2px solid var(--color-accent); outline-offset: 1px; }
+
+/* ≤413px:看板名称搜索框全宽折行(同 legacy) */
+@media (max-width: 413px) {
+  .dash-search { width: 100%; }
+}

@@ -1,16 +1,20 @@
-"""Swimlane progress state machine for analyzer subprocess output.
+"""Swimlane progress state machine for analyzer progress events.
 
-The analyzer child emits coarse ``[x/4]`` step markers and fine-grained
-``EXPERT_PROGRESS|<kind>|...`` lane markers on stdout; the functions here
-turn one such line into updates of ``job.experts`` (expert lanes plus the
+The analyzer child writes structured progress events as JSONL to the file
+named by ``TRAFFIC_ANALYZER_PROGRESS_FILE`` (see utils/progress.py); the
+worker tails that file and feeds each parsed event dict to
+:func:`apply_event`, which updates ``job.experts`` (expert lanes plus the
 SFT/report stage lanes) and the monotonic overall ``job.fraction``.
 
 [文件说明]
-作用:泳道进度状态机(自 jobs.py 抽出,纯函数、操作 duck-typed Job,不反向依赖)。
-解析 EXPERT_PROGRESS|register/start/phase/done 标记与 [x/4] 步骤标记,维护
-Job.experts 泳道列表(类别专家 + 裁决 + SFT 标注/报告 阶段泳道)与整体
-fraction(全部泳道均值,单调不降;无泳道时退化为 step_index/5)。
-上游:web/jobs.py 的 worker 读循环按行调用(持 JobManager 锁)。
+作用:泳道进度状态机(自 jobs 抽出,纯函数、操作 duck-typed Job,不反向依赖)。
+消费子进程进度文件的 JSONL 事件(register/start/phase/lane_done 泳道事件与
+step 粗粒度步骤事件),维护 Job.experts 泳道列表(类别专家 + 裁决 + SFT 标注/
+报告 阶段泳道)与整体 fraction(全部泳道均值,单调不降;无泳道时退化为
+step_index/5)。非法/截断行由调用方(jobs 尾随循环)丢弃,事件字段缺失或
+非法时整条事件忽略。终态不由事件流判定:子进程崩溃时文件可能截断/无
+done 事件,web 侧按 returncode 定终态。
+上游:web/jobs/queue.py 的进度文件尾随循环按事件调用(持 JobManager 锁)。
 下游:无包内依赖。
 """
 
@@ -21,20 +25,17 @@ from typing import Any, Dict, List, Optional
 
 TOTAL_STEPS = 5
 
-# Analyzer stdout also emits EXPERT_PROGRESS|<kind>|... lanes markers.
-_EXPERT_MARKER = "EXPERT_PROGRESS|"
+# step 事件的 step 值([x/4] 中的 x)-> (step_index, step_label),与旧 stdout
+# 文本标记的映射一致;"[3.5/4]" 落在步骤 4(SFT)。
+_STEP_EVENTS = {
+    1: (1, "预处理"),
+    2: (2, "专家"),
+    3: (3, "裁决"),
+    3.5: (4, "SFT"),
+    4: (5, "报告"),
+}
 
-# stdout step marker -> (step_index, step_label). "[3.5/4]" must be matched
-# before "[3/4]".
-_STEP_MARKERS = (
-    ("[3.5/4]", 4, "SFT"),
-    ("[1/4]", 1, "预处理"),
-    ("[2/4]", 2, "专家"),
-    ("[3/4]", 3, "裁决"),
-    ("[4/4]", 5, "报告"),
-)
-
-# 专家/裁决之后的流水线阶段泳道(SFT 标注、报告):由 [3.5/4]、[4/4] 步骤标记驱动,
+# 专家/裁决之后的流水线阶段泳道(SFT 标注、报告):由 step 3.5/4 事件驱动,
 # 让泳道覆盖整个任务周期(此前裁决完成后泳道全满,但任务仍在 SFT/报告阶段)
 _SFT_LANE = "SFT 标注"
 _REPORT_LANE = "报告"
@@ -54,56 +55,87 @@ def _expert_lane(job: Any, name: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _apply_expert_progress(job: Any, line: str) -> None:
-    """Update ``job.experts`` from one ``EXPERT_PROGRESS|...`` stdout line.
+def apply_event(job: Any, event: Any) -> bool:
+    """Consume one structured progress event dict; True when state changed.
 
-    Contract (emitted by the analyzer child)::
+    Contract (emitted by the analyzer child via utils/progress.py)::
 
-        EXPERT_PROGRESS|register|<total>|<name1>,<name2>,…   (last is 裁决)
-        EXPERT_PROGRESS|start|<name>
-        EXPERT_PROGRESS|phase|<name>|<fraction 0-1>|<label>
-        EXPERT_PROGRESS|done|<done>/<total>|<name>|<detected|undetected|error>
+        {"type": "register", "total": N, "lanes": [name, ...]}  (last is 裁决)
+        {"type": "start", "lane": name}
+        {"type": "phase", "lane": name, "fraction": 0..1, "label": str}
+        {"type": "lane_done", "done": k, "total": N, "lane": name,
+         "result": "detected"|"undetected"|"error"|"done"}
+        {"type": "step", "step": 1|2|3|3.5|4, "total": 4, "name": str}
+        {"type": "done", "status": "ok"}   (整次运行终态;仅作心跳,不驱动状态)
 
-    Malformed lines are ignored. Caller must hold the job lock.
+    Malformed events are ignored. Caller must hold the job lock.
     """
-    parts = line[len(_EXPERT_MARKER):].split("|")
-    kind = parts[0]
-    if kind == "register" and len(parts) >= 3:
-        # 重复 register(如重发标记)合并而非重置:保留已有 lane 的进度与
+    if not isinstance(event, dict):
+        return False
+    etype = event.get("type")
+    if etype == "step":
+        return _apply_step(job, event)
+    if etype in ("register", "start", "phase", "lane_done"):
+        _apply_expert_progress(job, event)
+        return True
+    return False  # "done"(运行终态)/未知类型:不驱动状态机
+
+
+def _apply_step(job: Any, event: Dict[str, Any]) -> bool:
+    mapping = _STEP_EVENTS.get(event.get("step"))
+    if mapping is None:
+        return False
+    step_index, step_label = mapping
+    job.step_index = step_index
+    job.step_label = step_label
+    _advance_stage_lanes(job, step_index)
+    _recompute_fraction(job)
+    return True
+
+
+def _apply_expert_progress(job: Any, event: Dict[str, Any]) -> None:
+    """Update ``job.experts`` from one lane event. Caller must hold the job lock."""
+    kind = event["type"]
+    if kind == "register":
+        lanes = event.get("lanes")
+        if not isinstance(lanes, list):
+            return
+        # 重复 register(如重发事件)合并而非重置:保留已有 lane 的进度与
         # 阶段泳道,只补充缺失的 lane。
-        for name in parts[2].split(","):
-            if name and _expert_lane(job, name) is None:
+        for name in lanes:
+            if isinstance(name, str) and name and _expert_lane(job, name) is None:
                 job.experts.append(_new_lane(name))
         # 阶段泳道从一开始就占位(排队态),面板即刻展示完整流水线
         for stage in (_SFT_LANE, _REPORT_LANE):
             if _expert_lane(job, stage) is None:
                 job.experts.append(_new_lane(stage))
-    elif kind == "start" and len(parts) >= 2:
-        lane = _expert_lane(job, parts[1])
+    elif kind == "start":
+        lane = _expert_lane(job, str(event.get("lane")))
         if lane is not None:
             lane["status"] = "running"
-    elif kind == "phase" and len(parts) >= 4:
-        lane = _expert_lane(job, parts[1])
+    elif kind == "phase":
+        lane = _expert_lane(job, str(event.get("lane")))
         if lane is not None:
             try:
-                fraction = float(parts[2])
-            except ValueError:
+                fraction = float(event.get("fraction"))
+            except (TypeError, ValueError):
                 fraction = math.nan
-            # 只接受有限的 0..1 进度;非法值(含 nan/inf)整行忽略
+            # 只接受有限的 0..1 进度;非法值(含 nan/inf)整事件忽略
             if math.isfinite(fraction) and 0.0 <= fraction <= 1.0:
                 lane["fraction"] = fraction
-                lane["label"] = parts[3]
-    elif kind == "done" and len(parts) >= 4:
-        lane = _expert_lane(job, parts[2])
+                lane["label"] = str(event.get("label", ""))
+    elif kind == "lane_done":
+        lane = _expert_lane(job, str(event.get("lane")))
         if lane is not None:
-            if parts[3] == "error":
+            result = event.get("result")
+            if result == "error":
                 lane["status"] = "error"
             else:
                 lane["status"] = "done"
-                # "done" token(裁决收尾)→ detected 保持 None(无检出语义)
+                # "done" result(裁决收尾)→ detected 保持 None(无检出语义)
                 lane["detected"] = (
-                    True if parts[3] == "detected"
-                    else False if parts[3] == "undetected"
+                    True if result == "detected"
+                    else False if result == "undetected"
                     else None
                 )
             lane["fraction"] = 1.0
@@ -119,7 +151,7 @@ def _stage_lane(job: Any, name: str) -> Dict[str, Any]:
 
 
 def _advance_stage_lanes(job: Any, step_index: int) -> None:
-    """Sync the SFT/report lanes from the coarse step markers. Caller holds lock."""
+    """Sync the SFT/report lanes from the coarse step events. Caller holds lock."""
     if not job.experts:
         return
     if step_index >= 4:
@@ -153,7 +185,7 @@ def _recompute_fraction(job: Any) -> None:
     """Overall fraction = mean of ALL lane fractions (类别 + 裁决 + SFT/报告
     阶段泳道),与「专家工作间」面板同刻度:侧栏迷你条满格 ⟺ 全部泳道完成。
 
-    Monotonic guard: register 初期均值远低于 [x/4] 阶段估算值,因此
+    Monotonic guard: register 初期均值远低于 step 阶段估算值,因此
     fraction 只升不降。No lanes (legacy children): step_index / 5.
     Caller must hold the job lock.
     """

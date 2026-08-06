@@ -4,7 +4,7 @@
 作用:按需抽帧接口。read_frame_jpeg 用 OpenCV 读取指定帧并 JPEG 编码,带 128 项 LRU
 缓存(key 含 mtime,防视频替换后返回陈旧帧);read_video_meta 返回帧数/fps/分辨率。
 提供 /api/videos/{stem}/meta|frame 与 /api/workspace/meta|frame(嵌套目录视频)路由。
-上游:web/app.py(挂载路由);web/static 前端(逐帧步进浏览与元信息展示)。
+上游:web/app.py(挂载路由);frontend/dist 前端(逐帧步进浏览与元信息展示)。
 下游:web/workspace.py(视频路径解析);cv2(OpenCV)。
 """
 

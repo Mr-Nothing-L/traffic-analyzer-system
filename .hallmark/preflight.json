@@ -1,0 +1,18 @@
+{
+  "scanned_at": "2026-08-04",
+  "font_stack": {
+    "pixel": "Fusion Pixel (缝合像素, woff2 子集, SIL OFL 1.1) — UI 骨架/标题",
+    "sans": "系统黑体栈 (PingFang SC / Microsoft YaHei 等) — 正文/文件名",
+    "mono": "SFMono-Regular / Consolas / Menlo — 代码与日志",
+    "source": "traffic_analyzer/web/static/css/tokens.css :root --pixel/--sans/--mono + @font-face"
+  },
+  "palette": {
+    "source": "traffic_analyzer/web/static/css/tokens.css :root(Claude 浅色系,米白纸面 #F7F4EE + 橙 accent #D97757)",
+    "format": "hex 为现状源,新前端 tokens.css 以 OKLCH 命名 token 承载"
+  },
+  "motion": "motion-cut(无 framer-motion/gsap 等;仅 CSS transition,已有 prefers-reduced-motion 处理)",
+  "spacing": "无显式 4pt scale,新前端引入 --space-* token",
+  "framework": "无框架原生 JS(legacy);新前端 Vite + Vue 3 + TS + Pinia + Naive UI",
+  "preserve": ["像素字体 + 系统黑体双字体角色", "Claude 浅色系调色板", "radius 12/8, 阴影语义"],
+  "introduce": ["OKLCH 命名 token 单一来源", "8 态组件纪律", "Hallmark slop test 门槛", "honest-copy 硬门"]
+}

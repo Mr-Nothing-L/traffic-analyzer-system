@@ -219,10 +219,8 @@ def _verify_cookie(
 
 
 # 登录页与其所需静态资源不鉴权;其余页面 302、API 401。
-_EXACT_EXEMPT = frozenset(
-    {"/login", "/login.html", "/style.css", "/usability.css", "/favicon.ico"}
-)
-_PREFIX_EXEMPT = ("/js/", "/fonts/")
+_EXACT_EXEMPT = frozenset({"/login", "/favicon.ico"})
+_PREFIX_EXEMPT = ("/assets/", "/fonts/")
 
 
 def _is_exempt(path: str, method: str) -> bool:

@@ -6,7 +6,37 @@
 **11 位二进制事件编码**和一份结构化分析报告（Markdown / JSON）；开启 SFT label 模式时
 每个视频再产出一条 **SFT 训练样本**，可在自带的 Web 界面中编辑。
 
-> 当前版本：v5.0.0。
+> 当前版本：v6.0.0。
+
+## 架构
+
+三层结构，靠明确契约（REST schema、JSONL 进度文件、工作区目录约定）解耦：
+
+```
+┌──────────────────────────────────────────────┐
+│ Web 界面 — Vue 3 + TS + Naive UI 单页应用     │  frontend/
+│ 文件树 · 分析详情 · SFT 标注编辑器 · 数据看板  │
+└───────────────────┬──────────────────────────┘
+                    │ REST /api/* · SSE /api/events · Range 视频流
+┌───────────────────▼──────────────────────────┐
+│ FastAPI web 层                               │  traffic_analyzer/web/
+│ 认证 · 串行任务队列 · 数据看板 · SSE 推送      │
+└───────────────────┬──────────────────────────┘
+                    │ 每个分析任务一个子进程
+┌───────────────────▼──────────────────────────┐
+│ 分析管线(YAML 配置驱动)                       │  orchestrator + core/
+│ 预处理 → 专家并行检测 → 裁决 → 锚定核验        │
+│   → SFT 标签改写 → 生成报告                   │
+└───────────────────┬──────────────────────────┘
+                    │ 写出结构化进度事件(JSONL),由 web 层尾随
+                    ▼
+              工作区目录(视频 + 分析结果)
+```
+
+- **前端**只经 REST 和一条 SSE 通道（任务进度、看板变更、在线名册）与后端交互，无轮询。
+- **web 层**以串行子进程跑推理，尾随任务的结构化进度文件驱动界面实时更新。
+- **分析核心**全部由 YAML 配置（`traffic_analyzer/config/`）：事件定义、Prompt 模板、
+  逻辑链——新增事件无需改代码。
 
 ## 快速开始
 
@@ -58,7 +88,9 @@ Web 前端解析。退出码：`0` 成功，`1` 错误，`2` 视频被预过滤�
 
 ## Web 界面
 
-Web 界面（FastAPI 后端 + SPA 前端）是推理、SFT 标注编辑与数据集审核的主入口：
+Web 界面（FastAPI 后端 + SPA 前端）是推理、SFT 标注编辑与数据集审核的主入口
+（前端为 Vue 3 单页应用，源码在 `frontend/`，`npm run build` 产出 `frontend/dist`，
+由后端挂载在 `/`）：
 
 ```bash
 python3 -m traffic_analyzer web            # 默认 http://127.0.0.1:8600
@@ -131,22 +163,23 @@ TRAFFIC_ANALYZER_WORKSPACE_DIRS=/data/videos,/srv/datasets
 名单非空时，工作区选择与目录浏览只允许名单内目录及其子路径（越界返回 403）。**删掉该行
 （或留空）即不限制。**
 
-## mock 演示模式
+## mock 演示模式（已删除）
 
-在界面 URL 后加 **`?mock=1`**（如 `http://127.0.0.1:8600/?mock=1`）即进入零 token 演示：
-演示视频走真实视频流，专家工作间播放模拟推理动画，结论数据来自真实运行快照（由
-`scripts/build_mock_data.py` 生成）。界面右上角显示 MOCK 徽标，全程不调用 VLM。
+> **已废弃：** 旧的 `?mock=1` 演示模式及其配套脚本 `scripts/build_mock_data.py` /
+> `scripts/e2e_mock_test.py` 已随 legacy 界面一并删除，旧命令不再可用，此处仅作历史说明。
 
-脚本化循环演示 / 界面自测（Playwright 驱动全部按键与页面，截图存
-`output/e2e_screenshots/`）：
+端到端界面自测改用 `scripts/e2e_v2_smoke.py`（Playwright 驱动真实后端：登录 →
+加载工作区 → 侧栏树 → 视频详情 → SFT 编辑器 → 数据看板 → 登出，截图存
+`output/e2e_screenshots/v2_smoke_*.png`）：
 
 ```bash
-python3 scripts/e2e_mock_test.py              # 有头浏览器，循环到 Ctrl+C
-python3 scripts/e2e_mock_test.py --headless --passes 3 --fast
+python3 scripts/e2e_v2_smoke.py                # 无头 Chrome，默认端口 8608
+python3 scripts/e2e_v2_smoke.py --headed       # 有头浏览器
+python3 scripts/e2e_v2_smoke.py --port 8609 --video-fragment 01-02_Event_129
 ```
 
-脚本会在 127.0.0.1:8600 无服务时自动启动 web 服务；开启认证时需提供 `E2E_USER` /
-`E2E_PASS` 环境变量。
+脚本会自建临时账号/临时工作区，并在 127.0.0.1:<port> 自行启动真实后端；不跑真实
+推理（需 VLM/GPU）。
 
 ## 配置项速查
 
@@ -206,7 +239,7 @@ python3 -m pytest traffic_analyzer/tests -q
 ```
 
 测试套件 mock 全部 VLM 调用，覆盖配置校验、CLI、分析流水线与 Web API。端到端界面检查
-用上面的 mock 演示脚本（`scripts/e2e_mock_test.py`）。
+用上面的冒烟脚本（`scripts/e2e_v2_smoke.py`）。
 
 ## 事件类别
 
