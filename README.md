@@ -7,7 +7,40 @@ video: one video clip in, an **11-bit binary event code** plus a structured repo
 (Markdown / JSON) out — and, with SFT label mode, one **SFT training sample** per
 video, editable in the built-in web UI.
 
-**Current version: 5.0.0.**
+**Current version: 6.0.0.**
+
+## Architecture
+
+Three layers, decoupled by explicit contracts (REST schemas, a JSONL progress
+file, and the workspace directory layout):
+
+```
+┌──────────────────────────────────────────────┐
+│ Web UI — Vue 3 + TS + Naive UI SPA           │  frontend/
+│ file tree · detail view · SFT editor · board │
+└───────────────────┬──────────────────────────┘
+                    │ REST /api/* · SSE /api/events · Range video stream
+┌───────────────────▼──────────────────────────┐
+│ FastAPI web layer                            │  traffic_analyzer/web/
+│ auth · serial job queue · dashboard · SSE    │
+└───────────────────┬──────────────────────────┘
+                    │ one subprocess per analysis job
+┌───────────────────▼──────────────────────────┐
+│ Analysis pipeline (YAML-config-driven)       │  orchestrator + core/
+│ preprocess → expert agents → adjudication    │
+│   → grounding check → SFT label → report     │
+└───────────────────┬──────────────────────────┘
+                    │ writes progress events (JSONL), tailed by the web layer
+                    ▼
+              workspace dir (videos + analysis results)
+```
+
+- **Frontend** talks to the backend only via REST + one SSE channel (job
+  progress, dashboard changes, presence) — no polling.
+- The **web layer** runs inference as serial child processes and tails each
+  job's structured progress file to drive the UI in real time.
+- The **analysis core** is fully configured in YAML (`traffic_analyzer/config/`):
+  event definitions, prompt templates, logic chains — new events need no code.
 
 ## Quick Start
 
