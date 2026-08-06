@@ -146,8 +146,8 @@ class TestConfigEvents:
             key=lambda e: e["event_id"],
         )
         assert resp.json() == expected
-        # 当前配置:0-7 激活,8 抛洒物 / 9 实线变道 未激活。
-        assert [e["is_active"] for e in resp.json()] == [True] * 8 + [False] * 2
+        # 当前配置:10 个类别全部激活(event_id 1-8、10 抛洒物、11 实线变道)。
+        assert [e["is_active"] for e in resp.json()] == [True] * 10
 
     def test_options_closed_enums(self) -> None:
         client = TestClient(create_app())

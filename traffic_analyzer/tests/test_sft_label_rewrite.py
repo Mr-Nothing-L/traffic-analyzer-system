@@ -544,7 +544,10 @@ class TestSftLabelRewriteStep:
         )
         verdicts = json.loads(context_vars["verdicts_json"])
         assert len(verdicts) == active_count  # 未激活类别不进入 prompt
-        assert all(v["event_id"] not in (10, 11) for v in verdicts)
+        inactive_ids = {
+            c.event_id for c in config_manager.get_event_categories() if not c.is_active
+        }
+        assert all(v["event_id"] not in inactive_ids for v in verdicts)
         assert verdicts[1]["detected"] is True
         assert verdicts[1]["instances"][0]["start_time_sec"] == 1.0
         assert verdicts[0]["detected"] is False
