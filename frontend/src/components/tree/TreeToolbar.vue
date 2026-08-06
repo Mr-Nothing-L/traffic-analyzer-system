@@ -9,14 +9,13 @@ import { useTreeView } from '../../composables/useTree'
 const ws = useWorkspaceStore()
 const { pendingRels, setPendingChecked } = useTreeView()
 
-/** 「待推理」勾选态:全部待推理项已勾 → checked;部分 → 半选。 */
-const pendingAllChecked = computed(
+/** 「待推理」勾选态:选中集恰好等于待推理集合时才点亮(精确匹配,
+ * 与「全选」解耦——点全选不会连带点亮它);不做半选态。 */
+const pendingActive = computed(
   () =>
     pendingRels.value.size > 0 &&
+    ws.checked.size === pendingRels.value.size &&
     [...pendingRels.value].every((r) => ws.checked.has(r)),
-)
-const pendingSomeChecked = computed(
-  () => !pendingAllChecked.value && [...pendingRels.value].some((r) => ws.checked.has(r)),
 )
 
 const sortOptions: { label: string; value: SortKey }[] = [
@@ -32,8 +31,7 @@ const sortOptions: { label: string; value: SortKey }[] = [
     <span class="side-title">工作区文件</span>
     <span class="side-checks">
       <n-checkbox
-        :checked="pendingAllChecked"
-        :indeterminate="pendingSomeChecked"
+        :checked="pendingActive"
         size="small"
         title="全选未推理与推理失败的视频"
         aria-label="全选未推理与推理失败的视频"
@@ -48,7 +46,9 @@ const sortOptions: { label: string; value: SortKey }[] = [
         title="全选/取消全选"
         aria-label="全选/取消全选"
         @update:checked="ws.setAllChecked"
-      />
+      >
+        <span class="side-check-label">全选</span>
+      </n-checkbox>
     </span>
   </div>
   <div class="side-filter">
