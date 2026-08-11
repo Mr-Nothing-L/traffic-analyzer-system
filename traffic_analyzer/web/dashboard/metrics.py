@@ -1,8 +1,8 @@
 """Dashboard metrics + aggregate endpoint (split from the old monolithic dashboard.py).
 
 [文件说明]
-作用:看板构建与汇总视图。按工作区视频逐行合并文件名 GT(importlib 按路径
-加载 scripts/batch_evaluate.py 的 extract_gt_from_filename,脚本非包)与
+作用:看板构建与汇总视图。按工作区视频逐行合并文件名 GT(从
+traffic_analyzer.evaluation 导入 extract_gt_from_filename)与
 analysis/<stem>/<stem>.json 的 action 预测,产出四态行
 (consistent/diff/no_gt/no_results;missing/extra 仅 diff 行填充);存在冻结
 快照 <stem>_raw.json 时附 edited 与编辑前后 action 差异
@@ -19,18 +19,18 @@ monkeypatch traffic_analyzer.web.dashboard._build_dashboard 即生效。
 上游:web/app.py(经 dashboard 包挂载路由);frontend/dist 前端(dashboard 页)。
 下游:web/workspace.py(视频发现与路径契约)、web/event_config.py(事件名
 索引)、web/evidence_api.py(_read_json)、web/dashboard/review.py(审核态)、
-scripts/batch_evaluate.py。
+traffic_analyzer.evaluation(extract_gt_from_filename)。
 """
 
 from __future__ import annotations
 
-import importlib.util
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from fastapi import APIRouter, HTTPException, Request
 
+from traffic_analyzer.evaluation import extract_gt_from_filename
 from traffic_analyzer.web import dashboard as _dashboard_pkg
 from traffic_analyzer.web import event_config
 from traffic_analyzer.web import evidence_api
@@ -42,30 +42,6 @@ from traffic_analyzer.web.dashboard.review import (
 from traffic_analyzer.web.workspace.videos import _LongTTLCache
 
 router = APIRouter()
-
-# scripts/batch_evaluate.py 不是包(脚本),按路径加载,与 tests 的加载方式一致。
-_BATCH_EVALUATE_PY = (
-    Path(__file__).resolve().parents[3] / "scripts" / "batch_evaluate.py"
-)
-
-_extract_gt_from_filename: Optional[Callable[[str], Set[int]]] = None
-
-
-def _gt_extractor() -> Callable[[str], Set[int]]:
-    """Lazy-load ``extract_gt_from_filename`` from scripts/batch_evaluate.py."""
-    global _extract_gt_from_filename
-    if _extract_gt_from_filename is None:
-        spec = importlib.util.spec_from_file_location(
-            "batch_evaluate", _BATCH_EVALUATE_PY
-        )
-        if spec is None or spec.loader is None:  # pragma: no cover - defensive
-            raise HTTPException(
-                status_code=500, detail="scripts/batch_evaluate.py not loadable"
-            )
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        _extract_gt_from_filename = module.extract_gt_from_filename
-    return _extract_gt_from_filename
 
 
 def _action_ids(payload: Optional[Any]) -> List[int]:
@@ -157,7 +133,6 @@ def _read_video_payloads(
 
 def _build_dashboard(workspace: Path) -> Dict[str, Any]:
     """Full unfiltered dashboard: rows + summary + event_names + metrics."""
-    extract_gt = _gt_extractor()
     reviews = _load_review_states(workspace)
     # event_categories 索引(name_zh → event_id)反转为契约的 str(event_id) → name_zh。
     event_names = {
@@ -175,7 +150,7 @@ def _build_dashboard(workspace: Path) -> Dict[str, Any]:
     rows: List[Dict[str, Any]] = []
     for video, (has_results, sft, raw) in zip(videos, payloads):
         stem = video["stem"]
-        gt_ids = sorted(extract_gt(video["name"]))
+        gt_ids = sorted(extract_gt_from_filename(video["name"]))
         pred_ids = _action_ids(sft)
         pred_raw_ids = _action_ids(raw) if raw is not None else None
 

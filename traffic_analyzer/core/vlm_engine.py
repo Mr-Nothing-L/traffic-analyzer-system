@@ -8,8 +8,7 @@ and usage tracking.
 
 [文件说明]
 作用:VLM 统一推理引擎入口。VLMInferenceEngine 封装 prompt 渲染(Jinja2)、
-  内存/磁盘两级缓存、per-provider 重试与 sticky failover 及 token 用量统计;
-  并重导出各子模块内部函数供测试与旧导入兼容。
+  内存/磁盘两级缓存、per-provider 重试与 sticky failover 及 token 用量统计。
 上游:orchestrator/analysis_orchestrator.py(构造 VLMInferenceEngine 并注入各步骤)、
   core/pipeline_steps.py、core/expert_agent.py、core/expert_agent_far_enhancement.py、
   core/sft_label_rewrite.py、core/grounding_verification.py。
@@ -91,9 +90,9 @@ logger = logging.getLogger(__name__)
 # Compatibility re-exports
 # ---------------------------------------------------------------------------
 
-# Internal helpers that were previously defined in this module are now
-# implemented in focused submodules.  Re-export them here so existing
-# imports (e.g. from tests and expert_agent) continue to work unchanged.
+# Public interface re-exported by this module.  Internal helpers
+# (underscore-prefixed) live in the focused submodules and should be
+# imported directly from there by callers that need them.
 
 __all__ = [
     "VLMInferenceEngine",
@@ -104,22 +103,6 @@ __all__ = [
     "SchemaValidationError",
     "FatalAPIError",
     "DiskCache",
-    "_compute_cache_key",
-    "_encode_image_to_base64",
-    "_extract_json_from_text",
-    "_repair_json",
-    "_validate_schema_basic",
-    "_is_retryable_error",
-    "_is_fatal_api_error",
-    "_is_image_path",
-    "_build_anthropic_payload",
-    "_build_openai_payload",
-    "_build_google_payload",
-    "_build_aliyun_payload",
-    "_call_anthropic",
-    "_call_openai",
-    "_call_google",
-    "_call_aliyun",
 ]
 
 

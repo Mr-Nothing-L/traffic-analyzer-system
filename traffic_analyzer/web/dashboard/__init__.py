@@ -8,9 +8,8 @@ with filtering (``consistency``/``review`` comma-separated multi-value,
 ``edited=1``, ``q`` = case-insensitive rel/stem substring) and pagination
 (``page``/``size``, filter before paginate, size capped at 200; out-of-range
 page → empty rows with the correct ``total_pages``). Each row joins the
-filename ground truth (via ``scripts/batch_evaluate.py``'s
-``extract_gt_from_filename``, loaded by path with importlib since the script
-is not a package) with the prediction read from ``analysis/<stem>/<stem>.json``
+filename ground truth (via ``traffic_analyzer.evaluation``'s
+``extract_gt_from_filename``) with the prediction read from ``analysis/<stem>/<stem>.json``
 (``action`` field). Rows carry a four-state status
 (``consistent`` / ``diff`` / ``no_gt`` / ``no_results``); ``missing``/``extra``
 are only populated for ``diff`` rows. When the frozen raw snapshot
@@ -50,14 +49,11 @@ from traffic_analyzer.web.dashboard import metrics as _metrics_mod
 from traffic_analyzer.web.dashboard import review as _review_mod
 from traffic_analyzer.web.dashboard import rows as _rows_mod
 from traffic_analyzer.web.dashboard.metrics import (
-    _BATCH_EVALUATE_PY,
     _action_ids,
     _build_dashboard,
     _compute_metrics,
     _dashboard_cache,
-    _extract_gt_from_filename,
     _get_dashboard,
-    _gt_extractor,
     _precision_recall_f1,
     get_dashboard,
 )

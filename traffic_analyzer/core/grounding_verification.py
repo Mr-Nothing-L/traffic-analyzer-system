@@ -18,8 +18,8 @@ Grounding verification 步骤(在 AdjudicationStep 之后执行)。
 下游:core/vlm_engine.py 的 VLMInferenceEngine.call;config/prompts/
 grounding_verification.yaml(经 ConfigManager.get_prompt_template 加载);
 utils/event_detection.py 的 select_event_images;core/pipeline_steps.py 的
-PipelineStep 基类;core/sft_label_rewrite.py 的 _build_event_definitions_json /
-_build_verdicts_json(only_positive=True)。
+PipelineStep 基类;core/verdict_format.py 的 build_event_definitions_json /
+build_verdicts_json(only_positive=True)。
 """
 
 from __future__ import annotations
@@ -28,9 +28,9 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from traffic_analyzer.core.pipeline_steps import PipelineStep
-from traffic_analyzer.core.sft_label_rewrite import (
-    _build_event_definitions_json,
-    _build_verdicts_json,
+from traffic_analyzer.core.verdict_format import (
+    build_event_definitions_json,
+    build_verdicts_json,
 )
 from traffic_analyzer.core.vlm_engine import FatalAPIError
 from traffic_analyzer.models.schemas import AnalysisContext
@@ -113,10 +113,10 @@ class GroundingVerificationStep(PipelineStep):
             return None
 
         context_vars = {
-            "verdicts_json": _build_verdicts_json(
+            "verdicts_json": build_verdicts_json(
                 context.event_results, categories, only_positive=True
             ),
-            "event_definitions_json": _build_event_definitions_json(categories),
+            "event_definitions_json": build_event_definitions_json(categories),
         }
 
         # 4. Verification VLM call (fail-open except FatalAPIError, which must propagate).
@@ -192,7 +192,6 @@ class GroundingVerificationStep(PipelineStep):
                     analysis[:100],
                 )
 
-        context.local_vars["grounding_verification"] = records
         overturned = sum(1 for r in records if not r["grounded"])
         logger.info(
             "[grounding_verification] DONE | positives=%d overturned=%d",

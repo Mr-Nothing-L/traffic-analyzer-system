@@ -400,7 +400,6 @@ class AnalysisOrchestrator:
                 llm_usage_stats=usage_stats,
             )
         step_times["report_generation"] = time.perf_counter() - t0
-        context.final_report = report
 
         analysis_duration_sec = time.perf_counter() - analysis_start
         report.analysis_duration_sec = round(analysis_duration_sec, 2)

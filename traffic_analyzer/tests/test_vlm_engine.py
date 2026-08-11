@@ -28,7 +28,9 @@ from traffic_analyzer.core.vlm_engine import (
     ResponseParseError,
     SchemaValidationError,
     VLMInferenceEngine,
-    _encode_image_to_base64,
+)
+from traffic_analyzer.core.vlm_provider_clients import _encode_image_to_base64
+from traffic_analyzer.core.vlm_response_parser import (
     _extract_json_from_text,
     _validate_schema_basic,
 )

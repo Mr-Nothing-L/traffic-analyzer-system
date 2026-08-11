@@ -23,11 +23,8 @@ import httpx
 import openai
 import pytest
 
-from traffic_analyzer.core.vlm_engine import (
-    FatalAPIError,
-    VLMInferenceEngine,
-    _compute_cache_key,
-)
+from traffic_analyzer.core.vlm_engine import FatalAPIError, VLMInferenceEngine
+from traffic_analyzer.core.vlm_cache import _compute_cache_key
 from traffic_analyzer.models.schemas import LLMProviderConfig, PromptTemplate
 
 

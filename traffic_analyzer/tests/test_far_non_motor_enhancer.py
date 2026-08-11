@@ -3,7 +3,7 @@
 [文件说明]
 作用:测试远距非机动车增强工具函数,覆盖 bbox 面积/宽高比/放大计算、运动评分与多 ROI 合成图生成。
 上游:pytest 自动发现并执行本文件测试。
-下游:traffic_analyzer/utils/far_non_motor_enhancer.py(被测模块)。
+下游:traffic_analyzer/utils/{bbox_geometry,image_drawing,roi_composite,roi_motion,construction_evidence_gallery}.py(被测模块)。
 """
 
 from __future__ import annotations
@@ -17,17 +17,21 @@ import pytest
 from PIL import Image
 
 from traffic_analyzer.models.schemas import FarObjectEnhancementConfig
-from traffic_analyzer.utils.far_non_motor_enhancer import (
+from traffic_analyzer.utils.bbox_geometry import (
     compute_bbox_area_px,
     compute_bbox_aspect_ratio,
     compute_enlarged_bbox,
-    compute_roi_motion_score,
-    create_composite,
-    create_motion_comparison_composite,
-    create_multi_roi_gallery,
     is_bbox_aspect_valid,
     is_bbox_large_enough,
-    load_image,
+)
+from traffic_analyzer.utils.construction_evidence_gallery import (
+    create_multi_roi_gallery,
+)
+from traffic_analyzer.utils.image_drawing import load_image
+from traffic_analyzer.utils.roi_composite import create_composite
+from traffic_analyzer.utils.roi_motion import (
+    compute_roi_motion_score,
+    create_motion_comparison_composite,
 )
 
 

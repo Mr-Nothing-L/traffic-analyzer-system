@@ -23,6 +23,8 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, List, Optional
 
+from traffic_analyzer.utils.progress import LANE_EVENT_TYPES, ProgressEvent
+
 TOTAL_STEPS = 5
 
 # step 事件的 step 值([x/4] 中的 x)-> (step_index, step_label),与旧 stdout
@@ -55,7 +57,7 @@ def _expert_lane(job: Any, name: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def apply_event(job: Any, event: Any) -> bool:
+def apply_event(job: Any, event: ProgressEvent) -> bool:
     """Consume one structured progress event dict; True when state changed.
 
     Contract (emitted by the analyzer child via utils/progress.py)::
@@ -75,13 +77,13 @@ def apply_event(job: Any, event: Any) -> bool:
     etype = event.get("type")
     if etype == "step":
         return _apply_step(job, event)
-    if etype in ("register", "start", "phase", "lane_done"):
+    if etype in LANE_EVENT_TYPES:
         _apply_expert_progress(job, event)
         return True
     return False  # "done"(运行终态)/未知类型:不驱动状态机
 
 
-def _apply_step(job: Any, event: Dict[str, Any]) -> bool:
+def _apply_step(job: Any, event: ProgressEvent) -> bool:
     mapping = _STEP_EVENTS.get(event.get("step"))
     if mapping is None:
         return False
@@ -93,7 +95,7 @@ def _apply_step(job: Any, event: Dict[str, Any]) -> bool:
     return True
 
 
-def _apply_expert_progress(job: Any, event: Dict[str, Any]) -> None:
+def _apply_expert_progress(job: Any, event: ProgressEvent) -> None:
     """Update ``job.experts`` from one lane event. Caller must hold the job lock."""
     kind = event["type"]
     if kind == "register":

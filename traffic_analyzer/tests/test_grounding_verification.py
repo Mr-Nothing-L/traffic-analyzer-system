@@ -22,7 +22,7 @@ import pytest
 
 from traffic_analyzer.core.config_manager import ConfigManager
 from traffic_analyzer.core.grounding_verification import GroundingVerificationStep
-from traffic_analyzer.core.sft_label_rewrite import _build_verdicts_json
+from traffic_analyzer.core.verdict_format import build_verdicts_json
 from traffic_analyzer.core.vlm_exceptions import FatalAPIError
 from traffic_analyzer.models.schemas import (
     AnalysisContext,
@@ -155,7 +155,7 @@ class TestBuildVerdictsJson:
     def test_only_positive_events_serialized(self, config_manager: ConfigManager) -> None:
         """核验 prompt 只包含阳性事件（与 sft_label_rewrite 的字段口径一致）。"""
         verdicts = json.loads(
-            _build_verdicts_json(
+            build_verdicts_json(
                 _make_event_results(detected_ids=(7,)),
                 config_manager.get_event_categories(),
                 only_positive=True,
@@ -189,7 +189,6 @@ class TestGroundingVerificationStep:
         assert er.grounding_note == analysis
         assert "锚定核验推翻" in er.summary
         assert records == [{"event_id": 7, "grounded": False, "analysis": analysis}]
-        assert context.local_vars["grounding_verification"] == records
 
     def test_keep_grounded_positive(self, config_manager: ConfigManager) -> None:
         """(b) grounded=true 不推翻且写入 note。"""
@@ -249,7 +248,6 @@ class TestGroundingVerificationStep:
         assert er.detected is True
         assert len(er.instances) == 1
         assert er.grounding_overturned is False
-        assert "grounding_verification" not in context.local_vars
 
     def test_vlm_call_failure_is_fail_open(self, config_manager: ConfigManager) -> None:
         """(d) VLM 调用抛普通异常：结果不变、不抛出。"""
@@ -262,7 +260,6 @@ class TestGroundingVerificationStep:
         assert er.detected is True
         assert len(er.instances) == 1
         assert er.grounding_overturned is False
-        assert "grounding_verification" not in context.local_vars
 
     def test_fatal_api_error_propagates(self, config_manager: ConfigManager) -> None:
         engine = _MockVLMEngine(error=FatalAPIError("quota exhausted"))

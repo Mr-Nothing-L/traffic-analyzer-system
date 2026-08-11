@@ -25,7 +25,7 @@ editor's token mapping.
 写入 quarantine/ 子目录。
 上游:traffic_analyzer/orchestrator/analysis_orchestrator.py 的 [3.5/4]
 SFT label rewrite 步骤;另被 core/grounding_verification.py 复用
-_build_event_definitions_json。
+build_event_definitions_json(见 core/verdict_format.py)。
 下游:core/vlm_engine.py 的 VLMInferenceEngine.call;config/prompts/
 sft_rewrite.yaml(template_id=sft_label_rewrite,经
 ConfigManager.get_prompt_template 加载);utils/event_detection.py 的
@@ -43,6 +43,10 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
 import yaml
 
 from traffic_analyzer.core.pipeline_steps import PipelineStep
+from traffic_analyzer.core.verdict_format import (
+    build_event_definitions_json,
+    build_verdicts_json,
+)
 from traffic_analyzer.core.vlm_engine import FatalAPIError
 from traffic_analyzer.models.schemas import (
     AnalysisContext,
@@ -605,73 +609,6 @@ def write_sample(
     return file_path
 
 
-def _build_verdicts_json(
-    event_results: Mapping[int, EventResult],
-    categories: Sequence[EventCategory],
-    only_positive: bool = False,
-) -> str:
-    """Serialize adjudicated verdicts (privileged hints) for the prompt.
-
-    ``only_positive=True`` 时只序列化裁决阳性事件(grounding 核验口径):
-    不含 ``detected`` 字段,``event_name`` 取 EventResult 上的名称。
-    """
-    verdicts: List[Dict[str, Any]] = []
-    for cat in sorted(categories, key=lambda c: c.event_id):
-        if not cat.is_active:
-            continue  # 未激活类别不进入 prompt
-        er = event_results.get(cat.event_id)
-        if only_positive:
-            if er is None or not getattr(er, "detected", False):
-                continue  # 非阳性事件不进入核验 prompt
-            verdicts.append(
-                {
-                    "event_id": cat.event_id,
-                    "event_name": er.event_name,
-                    "summary": er.summary,
-                    "instances": [
-                        {
-                            "start_time_sec": inst.start_time_sec,
-                            "end_time_sec": inst.end_time_sec,
-                            "description": inst.description,
-                            "reasoning": inst.reasoning,
-                        }
-                        for inst in er.instances
-                    ],
-                }
-            )
-            continue
-        verdicts.append(
-            {
-                "event_id": cat.event_id,
-                "event_name": cat.name_zh,
-                "detected": bool(er.detected) if er is not None else False,
-                "summary": er.summary if er is not None else "",
-                "instances": [
-                    {
-                        "start_time_sec": inst.start_time_sec,
-                        "end_time_sec": inst.end_time_sec,
-                        "description": inst.description,
-                        "reasoning": inst.reasoning,
-                    }
-                    for inst in (er.instances if er is not None else [])
-                ],
-            }
-        )
-    return json.dumps(verdicts, ensure_ascii=False, indent=2)
-
-
-def _build_event_definitions_json(categories: Sequence[EventCategory]) -> str:
-    """Serialize event definitions for the prompt."""
-    definitions = [
-        {
-            "event_id": cat.event_id,
-            "event_name": cat.name_zh,
-            "definition": cat.definition,
-        }
-        for cat in sorted(categories, key=lambda c: c.event_id)
-        if cat.is_active
-    ]
-    return json.dumps(definitions, ensure_ascii=False, indent=2)
 
 
 class SftLabelRewriteStep(PipelineStep):
@@ -725,8 +662,8 @@ class SftLabelRewriteStep(PipelineStep):
             return None
 
         context_vars = {
-            "verdicts_json": _build_verdicts_json(context.event_results, categories),
-            "event_definitions_json": _build_event_definitions_json(categories),
+            "verdicts_json": build_verdicts_json(context.event_results, categories),
+            "event_definitions_json": build_event_definitions_json(categories),
         }
 
         # 4. Rewrite VLM call (fail-open except FatalAPIError, which must propagate).

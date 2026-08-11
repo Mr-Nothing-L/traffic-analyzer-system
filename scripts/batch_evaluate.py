@@ -60,6 +60,8 @@ import yaml
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
+from traffic_analyzer.evaluation import extract_gt_from_filename
+
 
 # ---------------------------------------------------------------------------
 # Event metadata (aligned with event_categories.yaml)
@@ -98,45 +100,6 @@ def _setup_logging(log_level: str = "INFO") -> logging.Logger:
 # ---------------------------------------------------------------------------
 # Ground truth extraction
 # ---------------------------------------------------------------------------
-def extract_gt_from_filename(filename: str) -> Set[int]:
-    """Extract ground-truth event IDs from a video filename.
-
-    Default pattern: numbers before ``_Event_`` are action IDs from the
-    annotation document (v4.5), which are used directly as global event_ids.
-    Examples:
-        ``01-02-07-11_Event_65536_...``  -> {1, 2, 7, 11}
-        ``02-04-07-08-10_Event_...``     -> {2, 4, 7, 8, 10}
-        ``06_Event_...``                  -> {6}
-
-    Action ID ``9`` (Normal) and any number not in ``EVENT_NAMES`` are
-    silently skipped.
-
-    Supports two filename patterns:
-        ``01-02-08_Event_xxx_...``  -> standard format
-        ``01-02-08_20260514-...``    -> date-stamp format (no _Event_)
-    """
-    # Try standard pattern first: prefix before _Event_
-    match = re.match(r"^([\d\-]+)_Event_", filename)
-    if match:
-        prefix = match.group(1)
-    else:
-        # Fallback: leading digit-dash prefix before any _ that is NOT _Event_
-        # Handles date-stamp filenames like 01-02-08_20260514-173730_前半段.mp4
-        match = re.match(r"^([\d\-]+)_(?!Event_)", filename)
-        if not match:
-            return set()
-        prefix = match.group(1)
-    event_ids: Set[int] = set()
-    for part in prefix.split("-"):
-        part = part.strip()
-        if not part.isdigit():
-            continue
-        num = int(part)
-        if num in EVENT_NAMES:
-            event_ids.add(num)
-    return event_ids
-
-
 def load_annotations_json(path: Path) -> Dict[str, Set[int]]:
     """Load annotations from a JSON file.
 

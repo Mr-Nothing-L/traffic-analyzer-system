@@ -15,7 +15,7 @@ veto helpers used by that flow.  No new functionality was added.
 加载各事件模板的 far_object_enhancement 配置、ROI 模板及
 emergency_lane_calibration / emergency_lane_vehicle_roi 等辅助模板;
 utils/emergency_lane_occupancy.py(应急车道掩膜/缩放网格/区域重叠);
-utils/far_non_motor_enhancer.py(ROI 合成图、运动分数);utils/
+utils/{bbox_geometry,image_drawing,roi_composite,roi_motion,construction_evidence_gallery}.py(ROI 合成图、运动分数);utils/
 event_detection.py 的 parse_expert_response 等解析工具。
 """
 
@@ -49,16 +49,20 @@ from traffic_analyzer.utils.event_detection import (
     _safe_float,
     parse_expert_response,
 )
-from traffic_analyzer.utils.far_non_motor_enhancer import (
+from traffic_analyzer.utils.bbox_geometry import (
     compute_bbox_area_px,
     compute_bbox_aspect_ratio,
-    compute_roi_motion_score,
-    create_composite,
-    create_motion_comparison_composite,
-    create_multi_roi_gallery,
     is_bbox_aspect_valid,
     is_bbox_large_enough,
-    load_image,
+)
+from traffic_analyzer.utils.construction_evidence_gallery import (
+    create_multi_roi_gallery,
+)
+from traffic_analyzer.utils.image_drawing import load_image
+from traffic_analyzer.utils.roi_composite import create_composite
+from traffic_analyzer.utils.roi_motion import (
+    compute_roi_motion_score,
+    create_motion_comparison_composite,
 )
 from traffic_analyzer.utils.progress import get_reporter as _get_progress_reporter
 
