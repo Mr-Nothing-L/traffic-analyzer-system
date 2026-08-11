@@ -20,7 +20,12 @@ from .video import VideoMetadata
 
 
 class BinaryEncoding(BaseModel):
-    """Binary encoding of detected events."""
+    """Binary encoding of detected events.
+
+    Bit 9 is the normal indicator: set to 1 when no events detected, 0
+    otherwise. An all-underscore encoding means the video was rejected by
+    the prefilter (no analysis performed).
+    """
     encoding_string: str = ""
     event_count: int = 0
     detected_events: List[int] = Field(default_factory=list)

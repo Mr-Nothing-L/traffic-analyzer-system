@@ -67,6 +67,8 @@ error/
 !README.md
 !README.zh-CN.md
 !design.md
+!CONTEXT.md
+!CLAUDE.md
 !requirements.txt
 !analyze.sh
 yolov8n.pt

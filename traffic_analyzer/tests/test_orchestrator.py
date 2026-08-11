@@ -755,7 +755,7 @@ class TestRejectReportFactory:
         )
         assert report.rejected
         assert report.reject_reason == "画面模糊"
-        assert report.binary_encoding.encoding_string == "0_0_0_0_0_0_0_0_0_0_0"
+        assert report.binary_encoding.encoding_string == "_".join(["_"] * 11)
         assert report.binary_encoding.event_count == 0
         assert report.binary_encoding.detected_events == []
         assert "未进行事件检测" in report.final_classification

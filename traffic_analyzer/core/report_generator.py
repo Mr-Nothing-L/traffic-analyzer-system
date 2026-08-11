@@ -185,7 +185,7 @@ class ReportGenerator:
         where *bit_i* is ``1`` when the event category with global
         ``event_id == i`` was detected and ``0`` otherwise. Bit positions
         follow the annotation document v4.5 action numbers (1..11); id 9 is
-        the "normal" placeholder and is always ``0``.
+        the normal indicator: set to 1 when no events detected, 0 otherwise.
 
         Parameters
         ----------
@@ -214,6 +214,11 @@ class ReportGenerator:
                     detected_events.append(eid)
                 else:
                     bits.append("0")
+
+            # ADR-0001: bit 9 is the normal indicator — set to 1 when no
+            # events were detected at all and bit 9 exists in the encoding.
+            if len(detected_events) == 0 and total_categories >= 9:
+                bits[8] = "1"
 
             encoding_string = "_".join(bits)
             return BinaryEncoding(

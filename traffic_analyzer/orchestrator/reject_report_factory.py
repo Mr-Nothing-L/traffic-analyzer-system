@@ -12,7 +12,7 @@ import logging
 from typing import Any, Dict, Optional
 
 from traffic_analyzer.core.report_generator import ReportGenerator
-from traffic_analyzer.models.schemas import Report, VideoMetadata
+from traffic_analyzer.models.schemas import BinaryEncoding, Report, VideoMetadata
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +49,11 @@ def generate_reject_report(
         total_categories=total_categories,
     )
     report.rejected = True
+    report.binary_encoding = BinaryEncoding(
+        encoding_string="_".join(["_"] * 11),
+        event_count=0,
+        detected_events=[],
+    )
     report.reject_reason = reject_reason
     report.final_classification = "视频被筛除/无法分析，未进行事件检测。"
     # Store prefilter checks in context for debugging

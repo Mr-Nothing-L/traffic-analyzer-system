@@ -589,6 +589,27 @@ class TestToBinaryEncoding:
         assert be.encoding_string == "0_0"
         assert be.detected_events == []
 
+    def test_normal_sets_bit_9(self, generator: ReportGenerator) -> None:
+        """When no events detected and total_categories >= 9, bit 9 must be 1."""
+        results = [
+            EventResult(event_id=1, event_name="A", detected=False),
+            EventResult(event_id=3, event_name="C", detected=False),
+        ]
+        be = generator.to_binary_encoding(results, total_categories=11)
+        assert be.encoding_string == "0_0_0_0_0_0_0_0_1_0_0"
+        assert be.detected_events == []
+        assert be.event_count == 0
+
+    def test_event_detected_keeps_bit_9_zero(self, generator: ReportGenerator) -> None:
+        """When events are detected, bit 9 must remain 0."""
+        results = [
+            EventResult(event_id=1, event_name="A", detected=True),
+            EventResult(event_id=3, event_name="C", detected=False),
+        ]
+        be = generator.to_binary_encoding(results, total_categories=11)
+        assert be.encoding_string == "1_0_0_0_0_0_0_0_0_0_0"
+        assert be.detected_events == [1]
+
     def test_returns_binary_encoding_model(
         self, generator: ReportGenerator
     ) -> None:
