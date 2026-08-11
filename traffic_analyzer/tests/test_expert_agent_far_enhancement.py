@@ -20,6 +20,10 @@ from PIL import Image
 
 from traffic_analyzer.core.config_manager import ConfigManager
 from traffic_analyzer.core.expert_agent import ExpertAgent, _FAR_ENHANCEMENT_OUTPUT_DIR
+from traffic_analyzer.core.car_semantic_veto import (
+    is_explicitly_car_reasoning_for_non_motor,
+    is_no_structure_reasoning,
+)
 from traffic_analyzer.core.expert_agent_far_enhancement import FarEnhancementDetector
 from traffic_analyzer.models.schemas import (
     AnalysisContext,
@@ -701,7 +705,7 @@ def test_fallback_rejected_when_occluded(make_agent) -> None:
 def test_is_no_structure_reasoning(config_manager, non_motor_category, reason, expected_no_structure) -> None:
     """Pure uncertainty expressions must not be treated as 'no structure'."""
     detector = FarEnhancementDetector(non_motor_category, None, config_manager)
-    assert detector._is_no_structure_reasoning(reason) is expected_no_structure
+    assert is_no_structure_reasoning(reason) is expected_no_structure
 
 
 def test_fallback_accepts_uncertainty_reasoning(make_agent) -> None:
@@ -874,7 +878,7 @@ def test_motion_score_ranking(make_agent, side_effect, expected_frame) -> None:
     )
 
     with patch(
-        "traffic_analyzer.core.expert_agent_far_enhancement.compute_roi_motion_score",
+        "traffic_analyzer.core.far_per_frame.compute_roi_motion_score",
         side_effect=side_effect,
     ):
         candidate = _detect_with_patched_dir(agent, context)
@@ -958,7 +962,7 @@ def test_pedestrian_far_enhancement_success(make_agent, pedestrian_category, ana
     )
 
     with patch(
-        "traffic_analyzer.core.expert_agent_far_enhancement.compute_roi_motion_score",
+        "traffic_analyzer.core.far_per_frame.compute_roi_motion_score",
         return_value=_motion_score(10.0),
     ):
         candidate = _detect_with_patched_dir(agent, analysis_context)
@@ -1215,7 +1219,7 @@ def test_pedestrian_far_enhancement_not_overridden_near_vehicle(
     )
 
     with patch(
-        "traffic_analyzer.core.expert_agent_far_enhancement.compute_roi_motion_score",
+        "traffic_analyzer.core.far_per_frame.compute_roi_motion_score",
         return_value=_motion_score(10.0),
     ):
         candidate = _detect_with_patched_dir(agent, analysis_context)
@@ -1589,7 +1593,7 @@ def test_construction_gallery_fallback_not_triggered_for_worker_vehicle_only(
 def test_is_explicitly_car_reasoning_for_non_motor(config_manager, non_motor_category, reason, expected) -> None:
     """The event-aware car veto distinguishes car-context from car-conclusion."""
     detector = FarEnhancementDetector(non_motor_category, None, config_manager)
-    assert detector._is_explicitly_car_reasoning_for_non_motor(reason) is expected
+    assert is_explicitly_car_reasoning_for_non_motor(reason) is expected
 
 
 def test_non_motor_car_context_does_not_override_positive(make_agent) -> None:
@@ -1977,7 +1981,7 @@ def test_pedestrian_structured_veto_false_keeps_detected(
     )
 
     with patch(
-        "traffic_analyzer.core.expert_agent_far_enhancement.compute_roi_motion_score",
+        "traffic_analyzer.core.far_per_frame.compute_roi_motion_score",
         return_value=_motion_score(10.0),
     ):
         candidate = _detect_with_patched_dir(agent, analysis_context)
@@ -2047,7 +2051,7 @@ def test_pedestrian_low_confidence_filter_excludes_below_threshold(
     )
 
     with patch(
-        "traffic_analyzer.core.expert_agent_far_enhancement.compute_roi_motion_score",
+        "traffic_analyzer.core.far_per_frame.compute_roi_motion_score",
         return_value=_motion_score(10.0),
     ):
         candidate = _detect_with_patched_dir(agent, analysis_context)
@@ -2088,7 +2092,7 @@ def test_pedestrian_all_candidates_below_confidence_gate_generate_evidence(
     )
 
     with patch(
-        "traffic_analyzer.core.expert_agent_far_enhancement.compute_roi_motion_score",
+        "traffic_analyzer.core.far_per_frame.compute_roi_motion_score",
         return_value=_motion_score(10.0),
     ):
         candidate = _detect_with_patched_dir(agent, analysis_context)

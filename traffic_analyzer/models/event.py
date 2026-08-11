@@ -96,6 +96,36 @@ class EventCandidate(BaseModel):
     is_target_explicitly_four_wheel_vehicle: Optional[bool] = None
     target_type: str = Field(default="", description="结构化目标类型，如行人/非机动车/汽车/施工元素等")
 
+    def to_adjudication_json(self) -> dict:
+        """Return the dict shape consumed by the AdjudicationStep prompt."""
+        return {
+            "event_id": self.event_id,
+            "event_name": self.event_name,
+            "detected": self.detected,
+            "summary": self.summary,
+            "instances": [
+                {
+                    "start_time_sec": i.start_time_sec,
+                    "end_time_sec": i.end_time_sec,
+                    "description": i.description,
+                    "reasoning": i.reasoning,
+                }
+                for i in self.instances
+            ],
+        }
+
+    def to_report_dict(self) -> dict:
+        """Return the dict shape consumed by the orchestrator report builder."""
+        return {
+            "event_id": self.event_id,
+            "event_name": self.event_name,
+            "detected": self.detected,
+            "summary": self.summary,
+            "reasoning": self.instances[0].reasoning if self.instances else "",
+            "raw_vlm_text": self.raw_vlm_text[:500] if self.raw_vlm_text else "",
+            "raw_vlm_response": self.raw_vlm_response,
+        }
+
 
 class AuditEntry(BaseModel):
     """Single exclusion/inclusion decision record from adjudication."""

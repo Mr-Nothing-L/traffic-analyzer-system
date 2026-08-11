@@ -358,24 +358,7 @@ class AdjudicationStep(PipelineStep):
         for attempt in range(1, MAX_ADJUDICATION_RETRIES + 1):
             candidates = list(context.event_candidates.values())
             candidates_json = json.dumps(
-                [
-                    {
-                        "event_id": c.event_id,
-                        "event_name": c.event_name,
-                        "detected": c.detected,
-                        "summary": c.summary,
-                        "instances": [
-                            {
-                                "start_time_sec": i.start_time_sec,
-                                "end_time_sec": i.end_time_sec,
-                                "description": i.description,
-                                "reasoning": i.reasoning,
-                            }
-                            for i in c.instances
-                        ],
-                    }
-                    for c in candidates
-                ],
+                [c.to_adjudication_json() for c in candidates],
                 ensure_ascii=False,
                 indent=2,
             )
