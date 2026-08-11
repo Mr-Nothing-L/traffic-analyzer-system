@@ -1,6 +1,6 @@
 // chips 三层联动的计算侧(纯函数,零 DOM):chip 变更 → attrs/文本/声明提及同步
 // 逐语义移植自 legacy sft.js applyChipChange 的非 DOM 部分;视图层(chip 选中态、
-// token 重渲染、必填圆点、dirty 徽标)由 Vue 壳负责,这里只改草稿数据。
+// token 重渲染、dirty 徽标)由 Vue 壳负责,这里只改草稿数据。
 import type { AttrGroup, EventDef, MentionValue, SftDraft } from './types';
 import { skeleton } from './model';
 import {

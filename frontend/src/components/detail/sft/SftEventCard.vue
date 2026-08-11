@@ -1,9 +1,9 @@
 <script setup lang="ts">
-/** 单事件 SFT 编辑卡:事件头(名称/必填圆点/未激活标/检出勾选)+ chips + 富文本框。
+/** 单事件 SFT 编辑卡:事件头(名称/未激活标/检出勾选)+ chips + 富文本框。
  * chip 变更编排:改草稿(纯函数)→ 重渲染文本框(pulse 该组);hover 双向联动在此桥接。 */
 import { computed, ref } from 'vue'
 import { applyChipChange } from '../../../sft/chips'
-import { evOptions, missingRequired } from '../../../sft/model'
+import { evOptions } from '../../../sft/model'
 import type { AttrGroup, EventDef } from '../../../sft/types'
 import { useSftStore } from '../../../stores/sft'
 import ChipGroup from './ChipGroup.vue'
@@ -22,12 +22,6 @@ const hasDecl = computed(() => {
   return !!(m && m[props.ev.event_id])
 })
 const attrs = computed(() => store.draft?.attrs[props.ev.event_id])
-// 检出 + 必填缺失 → 事件名旁黄色圆点(hover 显示缺哪项)
-const missing = computed(() => {
-  const d = store.draft
-  if (!d || !d.checks[props.ev.event_id]) return [] as string[]
-  return missingRequired(props.ev, d.attrs[props.ev.event_id])
-})
 
 function onChipChange(group: AttrGroup, value: string) {
   const d = store.draft
@@ -60,12 +54,6 @@ function onCheck(e: Event) {
   <div ref="root" class="sft-ev" :class="{ inactive: !ev.is_active }">
     <div class="sft-ev-head">
       <span class="sft-ev-name">{{ ev.name_zh }}</span>
-      <span
-        v-if="opts.length && hasDecl"
-        class="sft-warn-dot"
-        :hidden="!missing.length"
-        :title="missing.length ? '缺少:' + missing.join('、') : ''"
-      />
       <span v-if="!ev.is_active" class="sft-ev-tag">未激活</span>
       <label class="sft-ev-check">
         <input

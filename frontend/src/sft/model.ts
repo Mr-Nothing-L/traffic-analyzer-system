@@ -60,17 +60,6 @@ export function sanitizeFileAttrs(ev: EventDef, raw: unknown): EventAttrs {
   return attrs;
 }
 
-// 必填缺失(软提醒,不拦截保存):返回缺失属性组的中文名
-export function missingRequired(ev: EventDef, attrs?: EventAttrs): string[] {
-  const miss: string[] = [];
-  evOptions(ev).forEach(g => {
-    if (!g.required) return;
-    const v = (attrs || {})[g.key];
-    if (Array.isArray(v) ? !v.length : !v) miss.push(g.label);
-  });
-  return miss;
-}
-
 export interface ParsedDescription {
   sections: Record<number, string>; // event_id → 段落正文(去掉「事件名:」前缀)
   unmatched: string[];              // 匹配不到任何事件名的段落(原样保留,保存时回写)

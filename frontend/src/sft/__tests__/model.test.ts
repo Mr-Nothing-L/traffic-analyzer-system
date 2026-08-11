@@ -2,7 +2,7 @@
 // 用例口径：docs/交通事件数据标注说明文档 v4.5(事件名、action 编号、结论行格式)
 import { describe, it, expect } from 'vitest';
 import {
-  skeleton, sanitizeFileAttrs, missingRequired, parseSftDescription,
+  skeleton, sanitizeFileAttrs, parseSftDescription,
   envLines, conclusionLines, buildRevision, signature, initDraft, isDirty,
 } from '../model';
 import { EVENTS, ev, makeSft, makeDeclSft } from './fixtures';
@@ -80,17 +80,6 @@ describe('sanitizeFileAttrs:只保留当前选项定义内的合法键值', () =
 
   it('非对象输入回退空', () => {
     expect(sanitizeFileAttrs(ev(1), null)).toEqual({});
-  });
-});
-
-describe('missingRequired:必填缺失返回属性组中文名(软提醒)', () => {
-  it('全空时报全部必填组', () => {
-    expect(missingRequired(ev(1), {})).toEqual(['车道类型', '方向', '车辆类型']);
-  });
-
-  it('部分填写只报缺失项;多选空数组算缺失', () => {
-    expect(missingRequired(ev(1), { direction: '来向' })).toEqual(['车道类型', '车辆类型']);
-    expect(missingRequired(ev(7), { direction: '来向', work_elements: [] })).toEqual(['施工要素']);
   });
 });
 

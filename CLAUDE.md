@@ -5,8 +5,8 @@
 基于多模态大模型 (VLM) 的高速公路监控视频交通事件检测框架。
 
 - **输入**:监控视频片段
-- **输出**:10 位二进制编码 + Markdown 分析报告
-- **设计核心**:事件定义 / 检测模式 / Prompt 模板 / 逻辑链 / 推断规则 全部通过 YAML 配置,新增事件无需改代码
+- **输出**:11 位二进制编码 + Markdown 分析报告
+- **设计核心**:事件定义 / Prompt 模板 / 裁决规则 全部通过 YAML 配置,新增事件无需改代码
 
 ---
 
@@ -22,16 +22,16 @@ event_id 全局采用 v4.5 的 action 编号，不再做 0-based 映射；action
 
 | event_id | 名称 | 检测模式 | 备注 |
 |---|---|---|---|
-| 1 | 违法停车 | direct_vlm | 主车道,30s+ |
-| 2 | 应急车道占用 | scene_tag | 含主路应急道 |
-| 3 | 交通事故 | logic_chain | v4.5:机械故障≠事故 |
-| 4 | 行人出现 | scene_tag | 含 reflective vest |
-| 5 | 摩托车出现 | scene_tag | 摩托/自行车/三轮 |
-| 6 | 严重拥堵 | direct_vlm | 静止 30s+ |
-| 7 | 道路施工 | direct_vlm | v4.5:仅停车+捡垃圾不标 |
-| 8 | 车辆逆行/倒车 | logic_chain | 多步链,像素位移估计 |
-| 10 | 抛洒物 | direct_vlm | v4.5:三角牌起提醒作用不标 |
-| 11 | 实线变道 | logic_chain | 已于 2026-08 激活(is_active=true),options 见 event_options.yaml |
+| 1 | 违法停车 | expert_agent | 主车道,30s+ |
+| 2 | 应急车道占用 | expert_agent | 含主路应急道 |
+| 3 | 交通事故 | expert_agent | v4.5:机械故障≠事故 |
+| 4 | 行人出现 | expert_agent | 含 reflective vest |
+| 5 | 摩托车出现 | expert_agent | 摩托/自行车/三轮 |
+| 6 | 严重拥堵 | expert_agent | 静止 30s+ |
+| 7 | 道路施工 | expert_agent | v4.5:仅停车+捡垃圾不标 |
+| 8 | 车辆逆行/倒车 | expert_agent | 像素位移估计 |
+| 10 | 抛洒物 | expert_agent | v4.5:三角牌起提醒作用不标 |
+| 11 | 实线变道 | expert_agent | 已于 2026-08 激活,is_active=true |
 | 9 | normal | — | 正常指示位:无事件检出时为 1,有事件检出时为 0;预筛拒绝时编码全 _ |
 
 ### v4.5 vs v4.4 新增条款(尚未完全落入代码)
@@ -58,14 +58,12 @@ event_id 全局采用 v4.5 的 action 编号，不再做 0-based 映射；action
 ├── frontend/                            Web 前端(Vue 3 + TS + Naive UI,构建挂 /)
 ├── traffic_analyzer/
 │   ├── config/
-│   │   ├── event_categories.yaml      事件定义 + cross_event_inference_rules
+│   │   ├── event_categories.yaml      事件定义 + 裁决规则
 │   │   ├── event_options.yaml         SFT 结构化属性选项(封闭枚举)
-│   │   ├── logic_chains.yaml          多步逻辑链
 │   │   └── prompt_templates.yaml      VLM Prompt 模板(多版本)
 │   ├── core/
-│   │   ├── pipeline_steps.py          SceneUnderstanding / EventDetection / PostProcess
+│   │   ├── pipeline_steps.py          ExpertAgentLayer / AdjudicationStep
 │   │   ├── grounding_verification.py  裁决后原始帧锚定核验(GROUNDING_CHECK_ENABLE)
-│   │   ├── logic_engine.py            逻辑链执行
 │   │   ├── vlm_engine.py              VLM 封装 + 缓存
 │   │   ├── video_preprocessor.py      帧提取(coarse + precision)
 │   │   ├── config_manager.py          配置加载/校验
@@ -90,32 +88,27 @@ python3 -m traffic_analyzer validate-config \
 # 分析视频
 python3 -m traffic_analyzer analyze \
   --video <path> --format markdown --output report.md
-# 可选: --min-frames N (默认 30)、--cv-tracks tracks.json
+# 可选: --min-frames N (默认 10)
 ```
 
 LLM 配置在 `traffic_analyzer/config/.env`(`LLM_PROVIDER` / `LLM_API_KEY` / `LLM_MODEL` 等)。详细参数见 README §快速开始。
 
 ---
 
-## 三种检测模式简表
+## 检测模式
 
-| 模式 | 数量 | 说明 |
-|---|---|---|
-| `direct_vlm` | 4 个事件 | 专用 Prompt + 单次 VLM;`ThreadPoolExecutor` 并行 |
-| `logic_chain` | 3 个事件 | YAML 多步链(vlm_call→compute→condition→aggregate) |
-| `scene_tag` | 3 个事件 | 零 VLM,从 scene_understanding 推断 |
-
-> **现状**:目前仅 `expert_agent` 模式已落地(`core/pipeline_steps.py` 只执行该模式的类别);上表三种模式暂无执行路径。活跃类别若配置为这三种模式,`validate-config` 会报错拒绝。
+| 模式 | 说明 |
+|---|---|
+| `expert_agent` | 每个事件类别由独立的事件专家(单次 VLM 调用)进行事实识别,`ThreadPoolExecutor` 并行执行。所有 10 个活跃事件均采用此模式。 |
 
 ---
 
-## 对齐进度(对照 24 项 spec)
+## 当前状态
 
-- ✅ **已完成 5**:event_categories.yaml 重构、scene_understanding 增字段、3 个 scene_tag 事件落地、cross_event_inference 框架、并行 direct_vlm
-- 🚧 **部分完成 5**:违停/拥堵/施工 Prompt 精细化、跨事件 *互斥* 规则(目前只有 inference 没有 exclusion)、报告 markdown 格式、像素位移估计、is_active 关闭实线变道
-- ⏳ **待办 14**:见 `docs/superpowers/specs/2026-05-11-align-events-with-annotation-doc.md`
-
-**注意**:该 spec 基于 v4.4,v4.5 新增 4 项条款尚未纳入。下一次扩展应同时更新 spec。
+- 10 个事件类别全部激活,统一使用 `expert_agent` 模式
+- 三层审查架构:事件专家 → 裁决 → 锚定核验(可选),详见 [ADR-0003](docs/adr/0003-three-layer-review-architecture.md)
+- v4.5 标注文档新增条款部分已落入 definition,详见 `docs/交通事件数据标注说明文档_v4.5.md`
+- 领域术语表见 [CONTEXT.md](CONTEXT.md),架构决策记录见 [docs/adr/](docs/adr/)
 
 ---
 
@@ -140,4 +133,4 @@ LLM 配置在 `traffic_analyzer/config/.env`(`LLM_PROVIDER` / `LLM_API_KEY` / `L
 
 ---
 
-*Last reviewed: 2026-08-05 — web 前端 v6 重构(Vue 3 SPA)后更新。*
+*Last reviewed: 2026-08-11 — 遗留检测模式清理后更新。*

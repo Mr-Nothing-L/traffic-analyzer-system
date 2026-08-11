@@ -23,19 +23,12 @@ class EventCategory(BaseModel):
     name: str = Field(..., description="Human-readable name")
     name_zh: str = Field(..., description="Chinese name")
     description: str = Field(..., description="What this event is")
-    detection_mode: DetectionMode = DetectionMode.DIRECT_VLM
-    logic_chain_id: Optional[str] = Field(None, description="Reference to logic chain if mode=logic_chain")
+    detection_mode: DetectionMode = DetectionMode.EXPERT_AGENT
     definition: str = Field("", description="Detailed definition for LLM prompt")
     visual_indicators: List[str] = Field(default_factory=list)
     confidence_threshold: float = 0.7
     prompt_template_id: Optional[str] = Field(
-        None, description="Template ID for direct_vlm mode. Required when detection_mode=direct_vlm."
-    )
-    scene_boolean_field: Optional[str] = Field(
-        None, description="SceneInfo boolean field name for scene_tag inference (e.g. 'pedestrian_present')"
-    )
-    scene_tag_key: Optional[str] = Field(
-        None, description="Tag key in scene_description for scene_tag inference (e.g. '行人')"
+        None, description="Template ID for expert_agent mode. Required for expert_agent mode."
     )
     tools: List[str] = Field(
         default_factory=list,

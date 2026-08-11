@@ -918,7 +918,16 @@ class TestEventIdIntegrity:
         assert any("continuous" in e for e in errors)
 
     def test_active_non_expert_detection_mode_rejected(self, temp_config_dir: Path) -> None:
-        """Active categories with detection_mode != expert_agent have no execution path."""
+        """Active categories with detection_mode != expert_agent have no execution path.
+
+        DetectionMode only admits expert_agent now, so we bypass enum
+        validation to exercise the defensive validate_config() guard that
+        still protects against bad/stale YAML.
+        """
+        from types import SimpleNamespace
+
+        # Write valid expert_agent categories so the annotation-spec and
+        # event-id continuity checks line up; we override the mode below.
         categories = [
             {
                 "event_id": 1,
@@ -926,7 +935,7 @@ class TestEventIdIntegrity:
                 "name": "Direct Active",
                 "name_zh": "直接活跃",
                 "description": "desc",
-                "detection_mode": "direct_vlm",
+                "detection_mode": "expert_agent",
                 "is_active": True,
             },
             {
@@ -935,7 +944,7 @@ class TestEventIdIntegrity:
                 "name": "Direct Inactive",
                 "name_zh": "直接未激活",
                 "description": "desc",
-                "detection_mode": "direct_vlm",
+                "detection_mode": "expert_agent",
                 "is_active": False,
             },
         ]
@@ -943,6 +952,13 @@ class TestEventIdIntegrity:
 
         mgr = ConfigManager(str(temp_config_dir))
         mgr.load_all()
+
+        # Force a non-expert_agent detection mode, bypassing the enum (which
+        # no longer admits these values).
+        fake_mode = SimpleNamespace(value="direct_vlm")
+        mgr._event_categories[1].detection_mode = fake_mode
+        mgr._event_categories[2].detection_mode = fake_mode
+
         errors = mgr.validate_config()
         mode_errors = [e for e in errors if "detection_mode" in e]
         # Only the active category is rejected; the inactive one just holds its bit.

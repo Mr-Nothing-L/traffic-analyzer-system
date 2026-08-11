@@ -23,7 +23,3 @@ class SceneInfo(BaseModel):
     total_vehicles_estimate: int = 0
     scene_description: str = ""
     confidence: float = 0.0
-    # Simple presence indicators (structured bools for unambiguous events)
-    pedestrian_present: Optional[bool] = None
-    non_motor_vehicle_present: Optional[bool] = None
-    thrown_object_present: Optional[bool] = None

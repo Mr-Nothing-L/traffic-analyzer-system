@@ -19,3 +19,9 @@
 - `DetectionMode` 枚举中 `direct_vlm`/`logic_chain`/`scene_tag` 可移除或标注 deprecated。
 - `core/config_manager.py` 中针对这三种模式的校验分支可简化。
 - `logic_chains.yaml` 若仅服务遗留模式,可考虑移除。
+
+---
+
+## 执行状态:已完成 (2026-08-11)
+
+三项遗留枚举值(DIRECT_VLM/LOGIC_CHAIN/SCENE_TAG)及其关联死字段(logic_chain_id/scene_boolean_field/scene_tag_key/SceneInfo 布尔字段)已删除。CLAUDE.md 已同步更新。

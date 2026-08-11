@@ -5,9 +5,7 @@ import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import { ApiError } from '../api/client'
 import { getEventConfig, putSft } from '../api/results'
-import {
-  buildPutPayload, initDraft, isDirty, missingRequired, signature,
-} from '../sft/model'
+import { buildPutPayload, initDraft, isDirty, signature } from '../sft/model'
 import type { EventDef, SftDraft, SftLabel, SftPutPayload } from '../sft/types'
 
 /** action 结果:组件据此弹提示;conflict=true 表示 409 乐观锁冲突。 */
@@ -63,19 +61,6 @@ export const useSftStore = defineStore('sft', () => {
     draft.value && events.value ? isDirty(draft.value, events.value, savedSig.value) : false,
   )
 
-  /** 必填缺失(已勾选事件):任务要求未过禁保存(legacy 仅软提醒圆点,此处叠加拦截)。 */
-  const missing = computed(() => {
-    if (!draft.value || !events.value) return [] as string[]
-    const out: string[] = []
-    events.value.forEach((ev) => {
-      if (!draft.value!.checks[ev.event_id]) return
-      missingRequired(ev, draft.value!.attrs[ev.event_id]).forEach((label) => {
-        out.push(ev.name_zh + '·' + label)
-      })
-    })
-    return out
-  })
-
   /** 重置为磁盘版本(内存中的 sftLabel 即载入时的磁盘内容,同 legacy 不重新 GET)。 */
   function resetLocal() {
     if (!sftLabel.value || !events.value) return
@@ -90,7 +75,6 @@ export const useSftStore = defineStore('sft', () => {
   async function save(): Promise<SftSaveResult> {
     const d = draft.value
     if (!d || !events.value || !sftLabel.value || saving.value) return { ok: false }
-    if (missing.value.length) return { ok: false, message: '必填项未填完' }
     saving.value = true
     const saveStem = stem.value
     const inFlightSig = signature(d, events.value)
@@ -134,6 +118,6 @@ export const useSftStore = defineStore('sft', () => {
 
   return {
     events, draft, savedSig, saving, baseSig, sftLabel, stem, configError,
-    dirty, missing, ensureEvents, init, resetLocal, save, clear,
+    dirty, ensureEvents, init, resetLocal, save, clear,
   }
 })

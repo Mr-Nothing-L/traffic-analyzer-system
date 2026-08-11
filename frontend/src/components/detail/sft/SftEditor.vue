@@ -110,9 +110,6 @@ function onReset() {
         </template>
         <SftAnswer />
         <div class="sft-actions">
-          <span v-if="store.missing.length" class="sft-save-hint">
-            必填项未填完:{{ store.missing.join('、') }}
-          </span>
           <span v-if="store.dirty" class="dirty-flag">● 未保存</span>
           <n-button size="small" quaternary :disabled="!store.dirty" @click="onReset">
             重置
@@ -120,9 +117,8 @@ function onReset() {
           <n-button
             size="small"
             type="primary"
-            :disabled="!store.dirty || !!store.missing.length"
+            :disabled="!store.dirty"
             :loading="store.saving"
-            :title="store.missing.length ? '必填项未填完,不能保存' : ''"
             @click="onSave"
           >
             {{ savedFlash ? '已保存' : '保存' }}

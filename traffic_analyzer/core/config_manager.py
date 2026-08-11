@@ -508,8 +508,8 @@ class ConfigManager:
                 f"(9 reserved as the normal placeholder), got {sorted_ids}."
             )
 
-        # 7. Only expert_agent has an execution path; an active category using
-        # any other detection mode would silently pin its encoding bit to 0.
+        # 7. Only expert_agent has an execution path; a non-expert active
+        # category (only reachable via stale/bad YAML) would pin its bit to 0.
         for cat in self._event_categories.values():
             if cat.is_active and cat.detection_mode.value != "expert_agent":
                 errors.append(

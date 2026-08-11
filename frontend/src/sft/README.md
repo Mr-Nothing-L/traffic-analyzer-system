@@ -11,7 +11,6 @@
 | `evOptions(ev)` | model.ts 同名 | EventDef → AttrGroup[] | 属性组(无 options 字段回退空) |
 | `skeleton(ev, attrs)` | model.ts 同名 | → string | 骨架句,空值从句整体省略,多选「、」连接 |
 | `sanitizeFileAttrs(ev, raw)` | model.ts 同名 | → EventAttrs | 只保留封闭枚举内合法键值 |
-| `missingRequired(ev, attrs)` | model.ts 同名 | → string[] | 必填缺失组中文名(软提醒) |
 | `parseSftDescription(desc, events)` | model.ts 同名 | → {sections, unmatched, env} | think 按空行分段匹配「事件名:」;answer 提取天气/时间/场景 |
 | `sftEnvLines()` | model.ts `envLines(env)` | → string[] | 空值回退「未知」;不再读全局 state |
 | `sftConclusionLines()` | model.ts `conclusionLines(events, checks)` | → string[] | 由「检出」勾选生成结论行 |
@@ -35,7 +34,7 @@
 - `const { draft, savedSig } = initDraft(events, sftLabel)`;之后所有编辑都改 `draft`。
 - 文本输入:直接写 `draft.texts[id]`;blur 时用 `declaredSpans(draft, ev, text)` + `tokenizeSpans` 重取 token 段。
 - chip 点击:`applyChipChange(draft, events, ev, group, value)`,然后用 `draft.texts[id]` 与 `tokenizeSpans(declaredSpans(...), text)` 重渲染。
-- dirty:`isDirty(draft, events, savedSig)`;必填提醒:`missingRequired(ev, draft.attrs[id])`。
+- dirty:`isDirty(draft, events, savedSig)`。
 - 保存:`buildPutPayload(draft, events, sftLabel, baseSig)`,`baseSig` 来自 GET /api/results/{stem}
   响应的 `file_sig`(注意:body 字段名是 `base_sig`;与证据的 `evidence_sig` 是两个字段)。
 - chips 仅在 `draft.mentions && draft.mentions[event_id]` 非空时渲染(声明通道);否则纯文本卡。
