@@ -133,8 +133,7 @@ watch(() => dash.scrollToStem, (stem) => {
             <!-- GT 事件:漏检(在 missing)的事件 chip 用暖色,其余中性底(同 legacy) -->
             <td>
               <template v-if="r.status !== 'no_gt'">
-                <span v-if="r.gt_ids.length === 1 && r.gt_ids[0] === 9" class="dash-none">无异常事件</span>
-                <template v-else-if="(r.gt_ids || []).length">
+                <template v-if="(r.gt_ids || []).length">
                   <span
                     v-for="id in r.gt_ids"
                     :key="id"
@@ -150,8 +149,7 @@ watch(() => dash.scrollToStem, (stem) => {
             <!-- 模型检出:误检(在 extra)的事件 chip 用暖色 -->
             <td>
               <template v-if="r.status !== 'no_results'">
-                <span v-if="r.pred_ids.length === 1 && r.pred_ids[0] === 9" class="dash-none">无异常事件</span>
-                <template v-else-if="(r.pred_ids || []).length">
+                <template v-if="(r.pred_ids || []).length">
                   <span
                     v-for="id in r.pred_ids"
                     :key="id"
@@ -172,7 +170,7 @@ watch(() => dash.scrollToStem, (stem) => {
                 {{ consistencyOf(r).detail }}
               </span>
             </td>
-            <td class="dash-nowrap">
+            <td class="dash-nowrap" style="text-align: center;">
               <span v-if="r.edited" class="dash-badge dash-badge-edit" :title="editedTitle(r)">
                 人工已改
               </span>
@@ -220,6 +218,7 @@ watch(() => dash.scrollToStem, (stem) => {
   color: var(--color-text2);
   display: block;
   margin-top: 2px;
+  text-align: center;
 }
 .dash-row-flash {
   animation: dash-flash 2s ease;
