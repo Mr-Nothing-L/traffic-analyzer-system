@@ -170,13 +170,15 @@ watch(() => dash.scrollToStem, (stem) => {
                 {{ consistencyOf(r).detail }}
               </span>
             </td>
-            <td class="dash-nowrap" style="text-align: center;">
-              <span v-if="r.edited" class="dash-badge dash-badge-edit" :title="editedTitle(r)">
-                人工已改
-              </span>
-              <span v-if="r.edited && r.edited_at" class="dash-edited-time">
-                {{ formatTime(r.edited_at) }}
-              </span>
+            <td class="dash-nowrap">
+              <div v-if="r.edited" class="dash-edit-cell">
+                <span class="dash-badge dash-badge-edit" :title="editedTitle(r)">
+                  人工已改
+                </span>
+                <span v-if="r.edited_at" class="dash-edited-time">
+                  {{ formatTime(r.edited_at) }}
+                </span>
+              </div>
             </td>
             <td class="dash-nowrap"><ReviewChip :stem="r.stem" :review="r.review" /></td>
             <td class="dash-nowrap">
@@ -213,12 +215,15 @@ watch(() => dash.scrollToStem, (stem) => {
 </template>
 
 <style scoped>
+.dash-edit-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
 .dash-edited-time {
   font-size: var(--text-xs);
   color: var(--color-text2);
-  display: block;
-  margin-top: 2px;
-  text-align: center;
 }
 .dash-row-flash {
   animation: dash-flash 2s ease;
