@@ -9,6 +9,7 @@ import { useSftStore } from '../../../stores/sft'
 import { useWorkspaceStore } from '../../../stores/workspace'
 import ChipGroup from './ChipGroup.vue'
 import TokenText from './TokenText.vue'
+import UiIcon from './../../UiIcon.vue'
 
 const props = defineProps<{ ev: EventDef }>()
 const store = useSftStore()
@@ -78,13 +79,13 @@ function onCheck(e: Event) {
     <div class="sft-ev-head">
       <span class="sft-ev-name">{{ ev.name_zh }}</span>
       <span class="sft-mark sft-mark-gt" :class="{ 'mark-yes': gtHas, 'mark-no': !gtHas }">
-        标注{{ gtHas ? '✓' : '✗' }}
+        标注<UiIcon :name="gtHas ? 'check' : 'dash'" :size="11" />
       </span>
       <span
         class="sft-mark sft-mark-inf"
         :class="{ 'mark-yes': infHas && !corrected, 'mark-amber': corrected, 'mark-no': !infHas && !corrected }"
       >
-        推理{{ infHas ? '✓' : '✗' }}
+        推理<UiIcon :name="infHas ? 'check' : 'dash'" :size="11" />
       </span>
       <span v-if="!ev.is_active" class="sft-ev-tag">未激活</span>
       <label class="sft-ev-check">

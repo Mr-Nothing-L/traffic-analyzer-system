@@ -17,6 +17,8 @@ const PATHS: Record<string, string> = {
   home: '<path d="M4 11l8-7 8 7"/><path d="M6 9.5V20h12V9.5"/>',
   logo: '<rect x="3.5" y="3.5" width="17" height="17" rx="2"/><path d="M3.5 9.5h17"/><path d="M9.5 9.5V20.5"/>'
     + '<path d="M15 3.5v6"/><path d="M9.5 15H20.5"/>',
+  check: '<path d="M5 12l5 5L20 7"/>',
+  dash: '<path d="M6 12h12"/>',
 }
 
 const d = computed(() => PATHS[props.name] || '')

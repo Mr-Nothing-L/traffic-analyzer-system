@@ -51,12 +51,16 @@
   padding: 1px 8px;
 }
 
-/* 标注/推理对比标记(事件名旁的 ✓/✗ 指示器) */
+/* 标注/推理对比标记(事件名旁的 check/dash 图标指示器) */
 .sft-mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
   font-size: var(--text-xs);
   margin-left: 6px;
   white-space: nowrap;
 }
+.sft-mark svg { flex-shrink: 0; }
 .sft-mark.mark-yes { color: var(--color-sage); }
 .sft-mark.mark-no { color: var(--color-text2); }
 .sft-mark.mark-amber { color: var(--color-gold); }
