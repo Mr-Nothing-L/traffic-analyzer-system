@@ -52,10 +52,22 @@ def get_results(stem: str, request: Request) -> Dict[str, Any]:
         raise HTTPException(
             status_code=500, detail=f"Corrupt analysis JSON for '{stem}': {exc}"
         )
+    # 原始推理 action(模型未修改前的 action 数组):前端据此区分「模型原始推理」与
+    # 「人工修正后结果」,即使保存后 sft_label.action 被覆盖也能保持推理标记。
+    raw_action = None
+    raw_path = out_dir / f"{stem}_raw.json"
+    if raw_path.exists():
+        try:
+            raw_data = _read_json(raw_path)
+            if isinstance(raw_data, dict):
+                raw_action = raw_data.get("action")
+        except _CorruptJsonError:
+            pass
     return {
         "report_md": report_md,
         "sft_label": sft_label,
         "evidence": evidence,
+        "raw_action": raw_action,
         # 乐观锁指纹:当前 SFT json 内容 sha256 前 16;PUT 回传 base_sig 做冲突检测。
         "file_sig": _file_sig(out_dir / f"{stem}.json"),
         # 证据文件指纹:证据 PUT 的 base_sig 以此为准(与 SFT 分开,互不误伤)。

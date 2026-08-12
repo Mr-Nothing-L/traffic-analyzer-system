@@ -124,7 +124,7 @@ const emptyNote = computed(() => {
           <div class="empty-note">加载结果失败:{{ ev.loadError }}</div>
         </n-card>
         <template v-else-if="hasResults && results">
-          <SftEditor :stem="stem" :sft="results.sft_label" :file-sig="results.file_sig" />
+          <SftEditor :stem="stem" :sft="results.sft_label" :file-sig="results.file_sig" :raw-action="results.raw_action" />
           <ReportCard :stem="stem" :report-md="results.report_md" />
           <EvidenceCard v-if="results.evidence" :stem="stem" :source="source" />
         </template>

@@ -38,6 +38,7 @@ class TestResults:
             "report_md": None,
             "sft_label": None,
             "evidence": None,
+            "raw_action": None,
             "file_sig": None,
             "evidence_sig": None,
         }

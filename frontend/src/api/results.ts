@@ -58,6 +58,7 @@ export interface ResultsResponse {
   report_md: string | null
   sft_label: SftLabel | null
   evidence: Evidence | null
+  raw_action: number[] | null
   file_sig: string | null
   evidence_sig: string | null
 }

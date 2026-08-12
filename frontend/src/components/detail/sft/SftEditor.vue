@@ -11,7 +11,7 @@ import { useSftStore } from '../../../stores/sft'
 import SftAnswer from './SftAnswer.vue'
 import SftEventCard from './SftEventCard.vue'
 
-const props = defineProps<{ stem: string; sft: ApiSftLabel | null; fileSig: string | null }>()
+const props = defineProps<{ stem: string; sft: ApiSftLabel | null; fileSig: string | null; rawAction: number[] | null }>()
 const store = useSftStore()
 const evStore = useEvidenceStore()
 const message = useMessage()
@@ -23,13 +23,13 @@ const unmatchedEl = ref<HTMLTextAreaElement | null>(null)
 const sec = (v: unknown) => (typeof v === 'number' ? v.toFixed(1) : String(v))
 
 watch(
-  () => [props.stem, props.sft, props.fileSig] as const,
-  async ([stem, sft, fileSig]) => {
+  () => [props.stem, props.sft, props.fileSig, props.rawAction] as const,
+  async ([stem, sft, fileSig, rawAction]) => {
     if (!sft) {
       store.clear() // 无 SFT 标注:清掉上一个视频的草稿,避免幽灵 dirty 态
       return
     }
-    await store.init(stem, sft as unknown as SftLabel, fileSig)
+    await store.init(stem, sft as unknown as SftLabel, fileSig, rawAction)
     nextTick(() => unmatchedEl.value && grow(unmatchedEl.value))
   },
   { immediate: true },

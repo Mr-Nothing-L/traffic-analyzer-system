@@ -25,6 +25,7 @@ traffic_analyzer.evaluation(extract_gt_from_filename)。
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -170,6 +171,13 @@ def _build_dashboard(workspace: Path) -> Dict[str, Any]:
 
         edited = raw is not None
         edited_at = sft.get("last_edited_at", "") if isinstance(sft, dict) else ""
+        # 旧数据 last_edited_at 缺失时,用 _raw.json 的 mtime 作为编辑时间回退。
+        if not edited_at and edited:
+            raw_path = workspace_mod.analysis_dir(workspace, stem) / f"{stem}_raw.json"
+            if raw_path.exists():
+                edited_at = datetime.fromtimestamp(
+                    raw_path.stat().st_mtime, tz=timezone.utc
+                ).isoformat()
         raw_set = set(pred_raw_ids or [])
         review_entry = reviews.get(stem)
         review = (

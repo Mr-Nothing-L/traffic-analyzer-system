@@ -23,15 +23,14 @@ const gtSet = computed(() => {
 })
 const gtHas = computed(() => gtSet.value.has(props.ev.event_id))
 
-// 推理:SFT 样本的 action 数组(模型原始推理结果),该事件在数组中 → ✓
+// 推理:优先使用模型原始推理(rawAction,保存后仍不变),回退到当前 sftLabel.action
 const infHas = computed(() => {
-  const action = store.sftLabel?.action
+  const action = store.rawAction ?? store.sftLabel?.action
   return Array.isArray(action) && action.includes(props.ev.event_id)
 })
 
-// 人工修正中:有未保存编辑且检出勾选与推理态不一致 → 推理标记变琥珀色
+// 人工修正:当前草稿检出勾选与原始推理态不一致 → 推理标记变琥珀色(保存后仍保持)
 const corrected = computed(() => {
-  if (!store.dirty) return false
   const draftChecked = !!store.draft?.checks[props.ev.event_id]
   return draftChecked !== infHas.value
 })
@@ -83,7 +82,7 @@ function onCheck(e: Event) {
       </span>
       <span
         class="sft-mark sft-mark-inf"
-        :class="{ 'mark-yes': infHas && !corrected, 'mark-amber': corrected, 'mark-no': !infHas }"
+        :class="{ 'mark-yes': infHas && !corrected, 'mark-amber': corrected, 'mark-no': !infHas && !corrected }"
       >
         推理{{ infHas ? '✓' : '✗' }}
       </span>

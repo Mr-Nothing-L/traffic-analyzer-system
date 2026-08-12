@@ -29,6 +29,7 @@ export const useSftStore = defineStore('sft', () => {
   const saving = ref(false)
   const baseSig = ref<string | null>(null) // 乐观锁指纹(GET 响应的 file_sig;保存后随响应更新)
   const sftLabel = ref<SftLabel | null>(null) // 磁盘版本(重置/保存载荷的其余字段来源)
+  const rawAction = ref<number[] | null>(null) // 模型原始推理 action(来自 _raw.json,保存后仍不变)
   const stem = ref('')
   const configError = ref<string | null>(null)
 
@@ -45,12 +46,18 @@ export const useSftStore = defineStore('sft', () => {
   }
 
   /** 从结果初始化/重建草稿(切换视频、保存成功重建、重置共用;同 legacy renderSftBody)。 */
-  async function init(newStem: string, sft: SftLabel, fileSig: string | null): Promise<boolean> {
+  async function init(
+    newStem: string,
+    sft: SftLabel,
+    fileSig: string | null,
+    rawActionData: number[] | null = null,
+  ): Promise<boolean> {
     if (!(await ensureEvents())) return false
     const { draft: d, savedSig: sig } = initDraft(events.value!, sft)
     stem.value = newStem
     sftLabel.value = sft
     baseSig.value = fileSig
+    rawAction.value = rawActionData
     draft.value = d
     savedSig.value = sig
     return true
@@ -112,12 +119,13 @@ export const useSftStore = defineStore('sft', () => {
     saving.value = false
     baseSig.value = null
     sftLabel.value = null
+    rawAction.value = null
     stem.value = ''
     configError.value = null
   }
 
   return {
-    events, draft, savedSig, saving, baseSig, sftLabel, stem, configError,
+    events, draft, savedSig, saving, baseSig, sftLabel, rawAction, stem, configError,
     dirty, ensureEvents, init, resetLocal, save, clear,
   }
 })
