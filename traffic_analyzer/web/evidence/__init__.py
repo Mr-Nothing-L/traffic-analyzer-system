@@ -162,6 +162,7 @@ def _strip_sft_editable(payload: Dict[str, Any]) -> Dict[str, Any]:
     """与 ``_strip_editable`` 同理:仅 description / action / event_attributes / attr_mentions 允许不同。"""
     copy = json.loads(json.dumps(payload, ensure_ascii=False))
     copy.pop("last_edited_by", None)  # 服务端追溯字段,不参与比对
+    copy.pop("last_edited_at", None)  # 服务端追溯字段,不参与比对
     copy["description"] = _MASK
     copy["action"] = _MASK
     copy["event_attributes"] = _MASK

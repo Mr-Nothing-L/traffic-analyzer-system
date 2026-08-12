@@ -199,6 +199,7 @@ class TestSftPut:
             (tmp_path / "analysis" / "v1" / "v1.json").read_text(encoding="utf-8")
         )
         assert disk.pop("last_edited_by") == "local"
+        disk.pop("last_edited_at", None)
         assert disk == payload
 
     @pytest.mark.parametrize(
@@ -259,6 +260,7 @@ class TestSftPut:
             (tmp_path / "analysis" / "v1" / "v1.json").read_text(encoding="utf-8")
         )
         assert disk.pop("last_edited_by") == "local"
+        disk.pop("last_edited_at", None)
         assert disk == payload
 
     @pytest.mark.parametrize(
@@ -301,6 +303,7 @@ class TestSftPut:
             (tmp_path / "analysis" / "v1" / "v1.json").read_text(encoding="utf-8")
         )
         assert disk.pop("last_edited_by") == "local"
+        disk.pop("last_edited_at", None)
         assert disk == payload
         assert "event_attributes" not in disk
 
@@ -325,6 +328,7 @@ class TestSftPut:
             (tmp_path / "analysis" / "v1" / "v1.json").read_text(encoding="utf-8")
         )
         assert disk.pop("last_edited_by") == "local"
+        disk.pop("last_edited_at", None)
         assert disk == payload
 
     def _roadwork_payload(self) -> Dict[str, Any]:
@@ -360,6 +364,7 @@ class TestSftPut:
             (tmp_path / "analysis" / "v1" / "v1.json").read_text(encoding="utf-8")
         )
         assert disk.pop("last_edited_by") == "local"
+        disk.pop("last_edited_at", None)
         assert disk == payload
 
     def test_put_attr_mentions_flat_multi_still_ok(self, tmp_path: Path) -> None:

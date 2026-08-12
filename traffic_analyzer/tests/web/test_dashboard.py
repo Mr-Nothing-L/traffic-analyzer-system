@@ -405,6 +405,7 @@ class TestDashboardRows:
             "extra",
             "pred_raw_ids",
             "edited",
+            "edited_at",
             "edit_missing",
             "edit_extra",
             "review",

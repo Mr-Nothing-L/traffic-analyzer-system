@@ -152,6 +152,10 @@ def _build_dashboard(workspace: Path) -> Dict[str, Any]:
         stem = video["stem"]
         gt_ids = sorted(extract_gt_from_filename(video["name"]))
         pred_ids = _action_ids(sft)
+        # 正常视频(无事件)推理结果 action 为空 → 记为 {9}(正常),与文件名 GT={9} 对齐。
+        # 仅对有推理结果的行生效:no_results 行 pred_ids 须保持空。
+        if has_results and not pred_ids:
+            pred_ids = [9]
         pred_raw_ids = _action_ids(raw) if raw is not None else None
 
         if not has_results:
@@ -165,6 +169,7 @@ def _build_dashboard(workspace: Path) -> Dict[str, Any]:
         is_diff = status == "diff"
 
         edited = raw is not None
+        edited_at = sft.get("last_edited_at", "") if isinstance(sft, dict) else ""
         raw_set = set(pred_raw_ids or [])
         review_entry = reviews.get(stem)
         review = (
@@ -185,6 +190,7 @@ def _build_dashboard(workspace: Path) -> Dict[str, Any]:
                 "extra": sorted(set(pred_ids) - set(gt_ids)) if is_diff else [],
                 "pred_raw_ids": pred_raw_ids,
                 "edited": edited,
+                "edited_at": edited_at,
                 "edit_missing": sorted(raw_set - set(pred_ids)) if edited else [],
                 "edit_extra": sorted(set(pred_ids) - raw_set) if edited else [],
                 "review": review,

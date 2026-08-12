@@ -3,14 +3,38 @@
  * chip 变更编排:改草稿(纯函数)→ 重渲染文本框(pulse 该组);hover 双向联动在此桥接。 */
 import { computed, ref } from 'vue'
 import { applyChipChange } from '../../../sft/chips'
-import { evOptions } from '../../../sft/model'
+import { evOptions, extractGtFromFilename } from '../../../sft/model'
 import type { AttrGroup, EventDef } from '../../../sft/types'
 import { useSftStore } from '../../../stores/sft'
+import { useWorkspaceStore } from '../../../stores/workspace'
 import ChipGroup from './ChipGroup.vue'
 import TokenText from './TokenText.vue'
 
 const props = defineProps<{ ev: EventDef }>()
 const store = useSftStore()
+const ws = useWorkspaceStore()
+
+// 标注(GT):从视频文件名解析的事件 ID 集,该事件在集中 → ✓
+const gtSet = computed(() => {
+  const rel = ws.currentRel
+  if (!rel) return new Set<number>()
+  const v = ws.videoByRel.get(rel)
+  return v ? extractGtFromFilename(v.name) : new Set<number>()
+})
+const gtHas = computed(() => gtSet.value.has(props.ev.event_id))
+
+// 推理:SFT 样本的 action 数组(模型原始推理结果),该事件在数组中 → ✓
+const infHas = computed(() => {
+  const action = store.sftLabel?.action
+  return Array.isArray(action) && action.includes(props.ev.event_id)
+})
+
+// 人工修正中:有未保存编辑且检出勾选与推理态不一致 → 推理标记变琥珀色
+const corrected = computed(() => {
+  if (!store.dirty) return false
+  const draftChecked = !!store.draft?.checks[props.ev.event_id]
+  return draftChecked !== infHas.value
+})
 
 const root = ref<HTMLElement | null>(null)
 const textRef = ref<InstanceType<typeof TokenText> | null>(null)
@@ -54,6 +78,15 @@ function onCheck(e: Event) {
   <div ref="root" class="sft-ev" :class="{ inactive: !ev.is_active }">
     <div class="sft-ev-head">
       <span class="sft-ev-name">{{ ev.name_zh }}</span>
+      <span class="sft-mark sft-mark-gt" :class="{ 'mark-yes': gtHas, 'mark-no': !gtHas }">
+        标注{{ gtHas ? '✓' : '✗' }}
+      </span>
+      <span
+        class="sft-mark sft-mark-inf"
+        :class="{ 'mark-yes': infHas && !corrected, 'mark-amber': corrected, 'mark-no': !infHas }"
+      >
+        推理{{ infHas ? '✓' : '✗' }}
+      </span>
       <span v-if="!ev.is_active" class="sft-ev-tag">未激活</span>
       <label class="sft-ev-check">
         <input

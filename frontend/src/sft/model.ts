@@ -268,3 +268,17 @@ export function buildPutPayload(
   if (baseSig) payload.base_sig = baseSig;
   return payload;
 }
+
+/** 从文件名解析 GT 事件 ID,如 "01-02-07_Event_xxx" → Set{1,2,7}。
+  * 与后端 extract_gt_from_filename 不同:前端保留 1-11 全部 ID(含 9=正常),
+  * 以便在事件卡上对事件 9 显示 ✓。 */
+export function extractGtFromFilename(filename: string): Set<number> {
+  const m = filename.match(/^([\d-]+)_Event_/) || filename.match(/^([\d-]+)_/);
+  if (!m) return new Set();
+  const ids = new Set<number>();
+  for (const part of m[1].split('-')) {
+    const n = parseInt(part, 10);
+    if (!isNaN(n) && n >= 1 && n <= 11) ids.add(n);
+  }
+  return ids;
+}

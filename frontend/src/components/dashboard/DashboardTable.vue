@@ -2,7 +2,7 @@
 /** 逐视频明细表 + 翻页条(自建表格:NDataTable 对行内 chip 组/presence 徽章/整行
  * 点击跳得不顺手,自建更贴 legacy 密度)。迁移自 legacy renderTable/pagerHtml/bindPager。
  * 跳转:整行不可点(避免误触 chip 时跳走),仅最右列「打开」按钮进分析详情。 */
-import { computed } from 'vue'
+import { computed, nextTick, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
 import { useAppStore } from '../../stores/app'
@@ -73,6 +73,28 @@ async function openRow(rel: string, stem: string) {
     message.error(`打开视频失败:${(e as Error).message}`)
   }
 }
+
+/** 编辑时间戳格式化:ISO → YYYY-MM-DD HH:MM。 */
+function formatTime(iso: string): string {
+  try {
+    const d = new Date(iso)
+    const pad = (n: number) => String(n).padStart(2, '0')
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+  } catch { return '' }
+}
+
+/** 侧边树点击视频 → 看板模式下滚动到对应行并高亮(由 dashboard.scrollToStem 驱动)。 */
+watch(() => dash.scrollToStem, (stem) => {
+  if (!stem) return
+  nextTick(() => {
+    const el = document.querySelector(`tr[data-stem="${CSS.escape(stem)}"]`) as HTMLElement | null
+    if (el) {
+      el.scrollIntoView({ block: 'center', behavior: 'smooth' })
+      el.classList.add('dash-row-flash')
+      setTimeout(() => el.classList.remove('dash-row-flash'), 2000)
+    }
+  })
+})
 </script>
 
 <template>
@@ -95,7 +117,7 @@ async function openRow(rel: string, stem: string) {
           </tr>
         </thead>
         <tbody>
-          <tr v-for="r in rows" :key="r.rel">
+          <tr v-for="r in rows" :key="r.rel" :data-stem="r.stem">
             <td class="dash-v" :title="r.rel">
               <span class="file-name">{{ r.rel }}</span>
               <span
@@ -152,6 +174,9 @@ async function openRow(rel: string, stem: string) {
               <span v-if="r.edited" class="dash-badge dash-badge-edit" :title="editedTitle(r)">
                 人工已改
               </span>
+              <span v-if="r.edited && r.edited_at" class="dash-edited-time">
+                {{ formatTime(r.edited_at) }}
+              </span>
             </td>
             <td class="dash-nowrap"><ReviewChip :stem="r.stem" :review="r.review" /></td>
             <td class="dash-nowrap">
@@ -186,3 +211,19 @@ async function openRow(rel: string, stem: string) {
     </div>
   </template>
 </template>
+
+<style scoped>
+.dash-edited-time {
+  font-size: var(--text-xs);
+  color: var(--color-text2);
+  display: block;
+  margin-top: 2px;
+}
+.dash-row-flash {
+  animation: dash-flash 2s ease;
+}
+@keyframes dash-flash {
+  0% { background: var(--color-accent-soft); }
+  100% { background: transparent; }
+}
+</style>

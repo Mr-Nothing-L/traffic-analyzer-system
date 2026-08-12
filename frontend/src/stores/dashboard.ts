@@ -58,6 +58,7 @@ export interface DashboardRow {
   gt_ids: number[]; pred_ids: number[]
   status: ConsistencyKey; missing: number[]; extra: number[]
   pred_raw_ids: number[] | null; edited: boolean
+  edited_at?: string
   edit_missing: number[]; edit_extra: number[]
   review: ReviewStatus
 }
@@ -85,6 +86,9 @@ export const useDashboardStore = defineStore('dashboard', () => {
   // 正在提交审核的 stem:重拉回包不回滚这些行的本地乐观值(同 legacy)
   const pendingReviews = reactive(new Set<string>())
   let searchTimer: ReturnType<typeof setTimeout> | null = null
+
+  const scrollToStem = ref<string | null>(null)
+  function triggerScroll(stem: string) { scrollToStem.value = stem }
 
   const summary = computed(() => data.value?.summary || {})
   const hasFilters = computed(
@@ -234,5 +238,6 @@ export const useDashboardStore = defineStore('dashboard', () => {
     curPage, filters, pendingReviews, summary, hasFilters,
     eventName, namesText, fetchSummary, fetchRows, refresh,
     toggleConsistency, toggleReview, toggleEdited, clearFilters, setName, setReview,
+    scrollToStem, triggerScroll,
   }
 })

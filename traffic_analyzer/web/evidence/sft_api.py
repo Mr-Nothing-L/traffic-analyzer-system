@@ -20,6 +20,7 @@ web/evidence_schema.py(SftSample 请求体模型与封闭枚举校验)。
 from __future__ import annotations
 
 import shutil
+from datetime import datetime, timezone
 from typing import Any, Dict
 
 from fastapi import HTTPException, Request
@@ -90,6 +91,7 @@ def put_sft(stem: str, body: SftSample, request: Request) -> Dict[str, Any]:
         # 追溯字段只落盘;响应仍返回用户提交的 payload 本身。
         to_write = dict(new_payload)
         to_write["last_edited_by"] = getattr(request.state, "user", "local")
+        to_write["last_edited_at"] = datetime.now(timezone.utc).isoformat()
         _atomic_write_json(sft_path, to_write)
     # SFT 落盘 → 看板/视频缓存失效(pred_ids / edited / has_results 可能变化)
     workspace_mod.invalidate_caches()

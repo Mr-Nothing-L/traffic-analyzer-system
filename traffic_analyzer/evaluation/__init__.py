@@ -14,7 +14,7 @@ import re
 from typing import Set
 
 
-# event_id 全局采用标注文档 v4.5 的 action 编号;9 = 正常占位,不对应任何事件。
+# event_id 全局采用标注文档 v4.5 的 action 编号;9 = 正常(无事件)。
 EVENT_NAMES: dict[int, str] = {
     1: "违法停车",
     2: "应急车道占用",
@@ -24,6 +24,7 @@ EVENT_NAMES: dict[int, str] = {
     6: "严重拥堵",
     7: "道路施工",
     8: "车辆逆行/倒车",
+    9: "正常",
     10: "抛洒物",
     11: "实线变道",
 }
@@ -39,8 +40,8 @@ def extract_gt_from_filename(filename: str) -> Set[int]:
         ``02-04-07-08-10_Event_...``     -> {2, 4, 7, 8, 10}
         ``06_Event_...``                  -> {6}
 
-    Action ID ``9`` (Normal) and any number not in ``EVENT_NAMES`` are
-    silently skipped.
+    Action ID ``9`` (Normal) is included as 'normal'; any other number not
+    in ``EVENT_NAMES`` is silently skipped.
 
     Supports two filename patterns:
         ``01-02-08_Event_xxx_...``  -> standard format

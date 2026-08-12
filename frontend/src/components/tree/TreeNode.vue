@@ -2,9 +2,10 @@
 /** 递归树节点(自建,不用 NTree:行内有勾选/徽标/像素条/重试/停止/presence 徽章)。
  * 行为迁移自 legacy tree.js treeRowsHtml + toggleDir。 */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
 import { useAppStore } from '../../stores/app'
+import { useDashboardStore } from '../../stores/dashboard'
 import { useJobsStore } from '../../stores/jobs'
 import { usePresenceStore } from '../../stores/presence'
 import type { TreeEntry } from '../../stores/workspace'
@@ -22,6 +23,8 @@ const presence = usePresenceStore()
 const tree = useTreeView()
 const message = useMessage()
 const router = useRouter()
+const route = useRoute()
+const dashboardStore = useDashboardStore()
 
 /** 全量渲染行(过滤+排序+视频行状态/进度预取,每行只算一次);visible 按分片截断后真正挂载。 */
 const rows = computed(() => tree.viewRows(props.entries))
@@ -119,13 +122,19 @@ function onCheck(rel: string, ev: Event) {
   ws.setChecked(rel, (ev.target as HTMLInputElement).checked)
 }
 
-/** 点视频行:选中(行高亮 + presence viewing)并进分析详情页。 */
+/** 点视频行:选中(行高亮 + presence viewing)并进分析详情页。
+ * 看板模式:滚动到对应行,不跳转。 */
 function onSelect(rel: string) {
   ws.currentRel = rel
   const v = ws.videoByRel.get(rel) // O(1) 索引
   // 全量列表缺失时由文件名退 stem(同 legacy tree.js 合成逻辑)
   const stem = v ? v.stem : rel.split('/').pop()!.replace(/\.[^.]+$/, '')
-  router.push({ name: 'detail', params: { stem }, query: { rel } })
+  if (route.name === 'dashboard') {
+    // 看板模式:滚动到对应行,不跳转
+    dashboardStore.triggerScroll(stem)
+  } else {
+    router.push({ name: 'detail', params: { stem }, query: { rel } })
+  }
 }
 
 /** 行内「■ 停止」:取该视频最新任务的 id(运行中行必有 running job)。 */
