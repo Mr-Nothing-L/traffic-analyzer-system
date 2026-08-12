@@ -139,6 +139,8 @@ def _build_dashboard(workspace: Path) -> Dict[str, Any]:
     event_names = {
         str(eid): name for name, eid in event_config.event_name_index().items()
     }
+    # event_id=9(无异常事件)不在 event_categories.yaml 中,补入供前端渲染 chip。
+    event_names.setdefault("9", "无异常事件")
 
     videos = workspace_mod.list_videos_cached(workspace)
     # 逐视频的 has_results 探测与两个 JSON 读取是纯 IO(大工作区外接盘上为冷建
