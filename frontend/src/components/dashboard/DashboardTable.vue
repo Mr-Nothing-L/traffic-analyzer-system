@@ -133,7 +133,8 @@ watch(() => dash.scrollToStem, (stem) => {
             <!-- GT 事件:漏检(在 missing)的事件 chip 用暖色,其余中性底(同 legacy) -->
             <td>
               <template v-if="r.status !== 'no_gt'">
-                <template v-if="(r.gt_ids || []).length">
+                <span v-if="r.gt_ids.length === 1 && r.gt_ids[0] === 9" class="dash-none">无异常事件</span>
+                <template v-else-if="(r.gt_ids || []).length">
                   <span
                     v-for="id in r.gt_ids"
                     :key="id"
@@ -149,7 +150,8 @@ watch(() => dash.scrollToStem, (stem) => {
             <!-- 模型检出:误检(在 extra)的事件 chip 用暖色 -->
             <td>
               <template v-if="r.status !== 'no_results'">
-                <template v-if="(r.pred_ids || []).length">
+                <span v-if="r.pred_ids.length === 1 && r.pred_ids[0] === 9" class="dash-none">无异常事件</span>
+                <template v-else-if="(r.pred_ids || []).length">
                   <span
                     v-for="id in r.pred_ids"
                     :key="id"
@@ -158,7 +160,7 @@ watch(() => dash.scrollToStem, (stem) => {
                     >{{ dash.eventName(id) }}</span
                   >
                 </template>
-                <span v-else class="dash-none">无检出</span>
+                <span v-else class="dash-none">无异常事件</span>
               </template>
               <span v-else class="dash-none">—</span>
             </td>
