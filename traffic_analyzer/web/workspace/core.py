@@ -216,8 +216,13 @@ def analysis_dir(workspace: Path, stem: str) -> Path:
 
 
 def has_results(workspace: Path, stem: str) -> bool:
-    """A video "has results" when its SFT sample JSON exists."""
-    return (analysis_dir(workspace, stem) / f"{stem}.json").is_file()
+    """A video "has results" when its SFT sample JSON exists.
+
+    Checks both the normal location and the ``quarantine/`` subdirectory
+    (samples whose positive events couldn't be grounded in raw frames).
+    """
+    adir = analysis_dir(workspace, stem)
+    return (adir / f"{stem}.json").is_file() or (adir / "quarantine" / f"{stem}.json").is_file()
 
 
 def find_video(workspace: Path, stem: str) -> Optional[Path]:

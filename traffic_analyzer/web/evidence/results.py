@@ -46,7 +46,13 @@ def get_results(stem: str, request: Request) -> Dict[str, Any]:
         pass
 
     try:
-        sft_label = _read_json(out_dir / f"{stem}.json")
+        sft_path = out_dir / f"{stem}.json"
+        if not sft_path.is_file():
+            # Fall back to quarantine/ (sample isolated due to ungroundable positives)
+            quarantined = out_dir / "quarantine" / f"{stem}.json"
+            if quarantined.is_file():
+                sft_path = quarantined
+        sft_label = _read_json(sft_path)
         evidence = _read_json(out_dir / f"{stem}_evidence.json")
     except _CorruptJsonError as exc:
         raise HTTPException(

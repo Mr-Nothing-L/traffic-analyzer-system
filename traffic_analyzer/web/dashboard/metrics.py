@@ -125,7 +125,12 @@ def _read_video_payloads(
     """
     out_dir = workspace_mod.analysis_dir(workspace, stem)
     try:
-        sft = evidence_api._read_json(out_dir / f"{stem}.json")
+        sft_path = out_dir / f"{stem}.json"
+        if not sft_path.is_file():
+            quarantined = out_dir / "quarantine" / f"{stem}.json"
+            if quarantined.is_file():
+                sft_path = quarantined
+        sft = evidence_api._read_json(sft_path)
         raw = evidence_api._read_json(out_dir / f"{stem}_raw.json")
     except evidence_api._CorruptJsonError:
         sft = raw = None
