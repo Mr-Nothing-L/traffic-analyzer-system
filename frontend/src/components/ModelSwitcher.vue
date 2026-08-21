@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /** 顶栏「模型管理」按钮 + 居中弹窗:provider 列表(选主用/加入自动切换池/删除)+ 新增编辑区
  * + 底部「失败时自动切换」总开关。数据走 stores/llm(/api/llm/providers*,操作后整体回填)。
- * 触发按钮样式对齐 TopBar 的 .ws-btn。 */
+ * 触发按钮与「数据看板」同为 NButton,视觉统一。 */
 import { ref, watch } from 'vue'
 import {
   NButton, NCheckbox, NInput, NModal, NPopconfirm, NRadio, NRadioGroup, NSelect, NSwitch,
@@ -148,10 +148,10 @@ async function onSaveNew() {
 </script>
 
 <template>
-  <button class="ms-btn" title="管理 LLM provider" @click="modalShow = true">
-    <UiIcon name="chip" :size="14" />
-    <span class="ms-label">模型管理</span>
-  </button>
+  <n-button size="small" title="管理 LLM provider" @click="modalShow = true">
+    <template #icon><UiIcon name="chip" :size="14" /></template>
+    模型管理
+  </n-button>
 
   <n-modal
     v-model:show="modalShow"
@@ -239,42 +239,6 @@ async function onSaveNew() {
 </template>
 
 <style scoped>
-/* 触发按钮:对齐 TopBar .ws-btn(scoped 无法直接复用,复制同套样式)。 */
-.ms-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  border: 1px solid var(--color-border);
-  background: var(--color-card);
-  color: var(--color-text);
-  border-radius: var(--radius-sm);
-  padding: 5px 10px;
-  cursor: pointer;
-  font-family: var(--font-pixel);
-  font-size: var(--text-sm);
-  transition:
-    border-color var(--dur-fast) var(--ease-out),
-    background var(--dur-fast) var(--ease-out);
-}
-
-.ms-btn:hover {
-  border-color: var(--color-accent);
-  background: var(--color-hover-bg);
-}
-
-.ms-btn:focus-visible {
-  outline: 2px solid var(--color-accent);
-  outline-offset: 1px;
-}
-
-.ms-btn:active {
-  background: var(--color-accent-soft);
-}
-
-.ms-label {
-  font-weight: 600;
-}
-
 .ms-list {
   display: flex;
   flex-direction: column;
