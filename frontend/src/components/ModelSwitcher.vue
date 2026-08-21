@@ -1,175 +1,241 @@
 <script setup lang="ts">
-/** 顶栏「模型切换」按钮 + 面板:查看/切换 LLM provider,或手动输入新 provider。
- * 数据走 stores/llm(GET/POST /api/llm/providers);触发按钮样式对齐 TopBar 的 .ws-btn。 */
-import { computed, ref, watch } from 'vue'
-import { NButton, NInput, NPopover, NRadio, NRadioGroup, NSwitch, useMessage } from 'naive-ui'
+/** 顶栏「模型管理」按钮 + 居中弹窗:provider 列表(选主用/加入自动切换池/删除)+ 新增编辑区
+ * + 底部「失败时自动切换」总开关。数据走 stores/llm(/api/llm/providers*,操作后整体回填)。
+ * 触发按钮样式对齐 TopBar 的 .ws-btn。 */
+import { ref, watch } from 'vue'
+import {
+  NButton, NCheckbox, NInput, NModal, NPopconfirm, NRadio, NRadioGroup, NSelect, NSwitch,
+  useMessage,
+} from 'naive-ui'
 import { useLlmStore } from '../stores/llm'
+import type { LlmProvider } from '../stores/llm'
 import UiIcon from './UiIcon.vue'
 
 const llm = useLlmStore()
 const message = useMessage()
 
-const popoverShow = ref(false)
-const selectedIndex = ref<number | null>(null)
-const manualMode = ref(false)
-const manualProvider = ref('')
-const manualModel = ref('')
-const manualBaseUrl = ref('')
-const manualApiKey = ref('')
+const PROVIDER_OPTIONS = [
+  { label: 'anthropic', value: 'anthropic' },
+  { label: 'google', value: 'google' },
+  { label: 'aliyun', value: 'aliyun' },
+]
+
+const modalShow = ref(false)
+const activeIndex = ref<number | null>(null) // radio 选中 = 主用行 index(主用恒为列表 index 0 行)
+
+/* ---- 各操作忙态(防重复点击) ---- */
+const activating = ref(false)
+const togglingIndex = ref<number | null>(null)
+const deletingIndex = ref<number | null>(null)
+const switching = ref(false)
+
+/* ---- 新增编辑区 ---- */
+const editOpen = ref(false)
+const editProvider = ref<string | null>(null)
+const editModel = ref('')
+const editBaseUrl = ref('')
+const editApiKey = ref('')
 const saving = ref(false)
 
-/** 当前激活 provider(index 0);按钮文案据此显示。 */
-const activeProvider = computed(() => llm.llmProviders[0] ?? null)
-const triggerLabel = computed(() => {
-  const p = activeProvider.value
-  if (!p) return '模型…'
-  return p.model ? `${p.provider} / ${p.model}` : p.provider
-})
-
-function fmtProviderLine(p: { provider: string; model: string | null; api_key_masked: string | null }) {
-  return [p.provider, p.model, p.api_key_masked].filter(Boolean).join(' · ')
+/** 回填 radio 选中:主用永远是响应重排后列表的第一行。 */
+function syncActive() {
+  activeIndex.value = llm.llmProviders[0]?.index ?? null
 }
 
-function clearManual() {
-  manualProvider.value = ''
-  manualModel.value = ''
-  manualBaseUrl.value = ''
-  manualApiKey.value = ''
-}
-
-/** 打开面板:首次拉取;每次打开按最新状态回填选择与开关。 */
-async function onShowChange(show: boolean) {
-  popoverShow.value = show
-  if (!show) return
+watch(modalShow, async (open) => {
+  if (!open) return
+  editOpen.value = false
   if (!llm.llmLoaded) {
     const r = await llm.fetchLlmProviders()
     if (!r.ok) message.error(r.message || '加载模型配置失败')
   }
-  selectedIndex.value = activeProvider.value?.index ?? null
-  manualMode.value = false
-  clearManual()
+  syncActive()
+})
+
+function fmtLine(p: LlmProvider): string {
+  return [p.provider, p.model, p.base_url, p.api_key_masked].filter(Boolean).join(' · ')
 }
 
-/** 手动模式开关:进手动清 radio,退手动清输入并回到当前激活项。 */
-watch(manualMode, (on) => {
-  if (on) selectedIndex.value = null
-  else {
-    clearManual()
-    selectedIndex.value = activeProvider.value?.index ?? null
+/** 改 radio → 设为主用(后端把该行移到首位)。 */
+async function onSetActive(index: number) {
+  if (activating.value || index === activeIndex.value) return
+  activating.value = true
+  try {
+    const r = await llm.setActive(index)
+    if (r.ok) message.success('已设为主用')
+    else message.error(r.message || '操作失败')
+  } finally {
+    activating.value = false
+    syncActive() // 成功取重排后的 index 0;失败回退到原主用
   }
-})
+}
 
-/** 选 radio 即退出手动模式(互斥)。 */
-watch(selectedIndex, (v) => {
-  if (v != null && manualMode.value) manualMode.value = false
-})
+/** 改 checkbox → 该行加入/移出自动切换池(model/base_url/api_key 不传 = 沿用)。 */
+async function onToggleEnabled(p: LlmProvider, enabled: boolean) {
+  if (togglingIndex.value != null) return
+  togglingIndex.value = p.index
+  try {
+    const r = await llm.saveProvider({ index: p.index, provider: p.provider, enabled })
+    if (r.ok) message.success('已更新')
+    else message.error(r.message || '操作失败')
+  } finally {
+    togglingIndex.value = null
+    syncActive()
+  }
+}
 
-async function onSave() {
+async function onDelete(p: LlmProvider) {
+  if (deletingIndex.value != null) return
+  deletingIndex.value = p.index
+  try {
+    const r = await llm.deleteProvider(p.index)
+    if (r.ok) message.success('已删除')
+    else message.error(r.message || '删除失败')
+  } finally {
+    deletingIndex.value = null
+    syncActive()
+  }
+}
+
+async function onAutoSwitch(v: boolean) {
+  if (switching.value) return
+  switching.value = true
+  try {
+    const r = await llm.setAutoSwitch(v)
+    if (r.ok) message.success('已更新')
+    else message.error(r.message || '操作失败')
+  } finally {
+    switching.value = false
+  }
+}
+
+function clearEdit() {
+  editProvider.value = null
+  editModel.value = ''
+  editBaseUrl.value = ''
+  editApiKey.value = ''
+}
+
+/** 编辑区保存 = 新增(index=null);改已有行的 key = 删除后重新添加(不提供行内编辑)。 */
+async function onSaveNew() {
   if (saving.value) return
-  let payload
-  if (manualMode.value) {
-    const provider = manualProvider.value.trim()
-    if (!provider) {
-      message.warning('请填写 provider 名称')
-      return
-    }
-    payload = {
-      active_index: null,
-      new_provider: {
-        provider,
-        ...(manualModel.value.trim() ? { model: manualModel.value.trim() } : {}),
-        ...(manualBaseUrl.value.trim() ? { base_url: manualBaseUrl.value.trim() } : {}),
-        ...(manualApiKey.value ? { api_key: manualApiKey.value } : {}),
-      },
-      auto_switch: llm.autoSwitch,
-    }
-  } else {
-    if (selectedIndex.value == null) {
-      message.warning('请选择一个 provider')
-      return
-    }
-    payload = { active_index: selectedIndex.value, new_provider: null, auto_switch: llm.autoSwitch }
+  if (!editProvider.value) {
+    message.warning('请选择 provider')
+    return
   }
   saving.value = true
   try {
-    const r = await llm.saveLlmProviders(payload)
+    const r = await llm.saveProvider({
+      index: null,
+      provider: editProvider.value,
+      enabled: true,
+      ...(editModel.value.trim() ? { model: editModel.value.trim() } : {}),
+      ...(editBaseUrl.value.trim() ? { base_url: editBaseUrl.value.trim() } : {}),
+      ...(editApiKey.value ? { api_key: editApiKey.value } : {}),
+    })
     if (r.ok) {
       message.success('已保存')
-      popoverShow.value = false
+      editOpen.value = false
+      clearEdit()
     } else {
       message.error(r.message || '保存失败')
     }
   } finally {
     saving.value = false
+    syncActive()
   }
 }
 </script>
 
 <template>
-  <n-popover
-    :show="popoverShow"
-    trigger="click"
-    placement="bottom-end"
-    @update:show="onShowChange"
+  <button class="ms-btn" title="管理 LLM provider" @click="modalShow = true">
+    <UiIcon name="chip" :size="14" />
+    <span class="ms-label">模型管理</span>
+  </button>
+
+  <n-modal
+    v-model:show="modalShow"
+    preset="card"
+    title="模型管理"
+    style="width: 680px"
   >
-    <template #trigger>
-      <button class="ms-btn" title="切换 LLM provider">
-        <UiIcon name="chip" :size="14" />
-        <span class="ms-label">{{ triggerLabel }}</span>
-      </button>
-    </template>
-    <div class="ms-pop">
-      <div class="ms-section-title">选择 provider(当前为第一项)</div>
-      <n-radio-group v-model:value="selectedIndex" class="ms-radios">
-        <n-radio
-          v-for="p in llm.llmProviders"
-          :key="p.index"
-          :value="p.index"
-          :disabled="manualMode"
-          class="ms-radio"
-        >
-          {{ fmtProviderLine(p) }}
-        </n-radio>
-        <div v-if="!llm.llmProviders.length" class="ms-empty">
-          {{ llm.llmLoaded ? '暂无已配置 provider' : '加载中…' }}
-        </div>
-      </n-radio-group>
-
-      <div class="ms-manual-toggle">
-        <n-switch v-model:value="manualMode" size="small" />
-        <span>手动输入 provider</span>
-      </div>
-      <div v-show="manualMode" class="ms-manual">
-        <n-input v-model:value="manualProvider" size="small" placeholder="provider 名称(必填)" />
-        <n-input v-model:value="manualModel" size="small" placeholder="model(可选)" />
-        <n-input v-model:value="manualBaseUrl" size="small" placeholder="base_url(可选)" />
-        <n-input
-          v-model:value="manualApiKey"
-          size="small"
-          type="password"
-          show-password-on="click"
-          placeholder="留空则沿用 .env 已保存密钥"
+    <n-radio-group
+      :value="activeIndex"
+      class="ms-list"
+      @update:value="onSetActive"
+    >
+      <div v-for="p in llm.llmProviders" :key="p.index" class="ms-row">
+        <n-radio :value="p.index" :disabled="activating" class="ms-radio" />
+        <n-checkbox
+          :checked="p.enabled"
+          :disabled="togglingIndex != null"
+          @update:checked="(v: boolean) => onToggleEnabled(p, v)"
         />
+        <span class="ms-info" :title="fmtLine(p)">{{ fmtLine(p) }}</span>
+        <span v-if="p.index === 0" class="ms-tag">主用</span>
+        <n-popconfirm @positive-click="onDelete(p)">
+          <template #trigger>
+            <n-button
+              quaternary
+              size="tiny"
+              :loading="deletingIndex === p.index"
+              :disabled="deletingIndex != null"
+              title="删除"
+            >
+              <UiIcon name="close" :size="12" />
+            </n-button>
+          </template>
+          删除该 provider?
+        </n-popconfirm>
       </div>
-
-      <div class="ms-autoswitch">
-        <n-switch v-model:value="llm.autoSwitch" size="small" />
-        <span>失败时自动切换到其他 provider</span>
+      <div v-if="!llm.llmProviders.length" class="ms-empty">
+        {{ llm.llmLoaded ? '暂无已配置 provider' : '加载中…' }}
       </div>
+    </n-radio-group>
 
-      <div class="ms-hint">保存后对之后新提交的推理任务生效,运行中任务不受影响</div>
+    <n-button dashed size="small" class="ms-add" @click="editOpen = !editOpen">+</n-button>
 
+    <div v-show="editOpen" class="ms-edit">
+      <n-select
+        v-model:value="editProvider"
+        :options="PROVIDER_OPTIONS"
+        placeholder="provider"
+        size="small"
+      />
+      <n-input v-model:value="editModel" size="small" placeholder="模型名称" />
+      <n-input v-model:value="editBaseUrl" size="small" placeholder="Base URL" />
+      <n-input
+        v-model:value="editApiKey"
+        size="small"
+        type="password"
+        show-password-on="click"
+        placeholder="API Key"
+      />
       <n-button
         type="primary"
         size="small"
-        class="ms-save"
         :loading="saving"
-        @click="onSave"
+        @click="onSaveNew"
       >
         保存
       </n-button>
     </div>
-  </n-popover>
+
+    <template #footer>
+      <div class="ms-footer">
+        <span class="ms-hint">所有改动立即写入 .env,对之后新提交的推理任务生效</span>
+        <span class="ms-autoswitch">
+          <n-switch
+            :value="llm.autoSwitch"
+            size="small"
+            :loading="switching"
+            @update:value="onAutoSwitch"
+          />
+          <span>失败时自动切换</span>
+        </span>
+      </div>
+    </template>
+  </n-modal>
 </template>
 
 <style scoped>
@@ -207,32 +273,40 @@ async function onSave() {
 
 .ms-label {
   font-weight: 600;
-  max-width: 220px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
-.ms-pop {
-  width: 300px;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-sm);
-}
-
-.ms-section-title {
-  font-size: var(--text-sm);
-  font-weight: 600;
-}
-
-.ms-radios {
+.ms-list {
   display: flex;
   flex-direction: column;
   gap: 6px;
 }
 
+.ms-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
 .ms-radio {
+  margin-right: 0;
+}
+
+.ms-info {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+.ms-tag {
+  flex-shrink: 0;
+  padding: 0 6px;
+  border-radius: var(--radius-sm);
+  background: var(--color-accent-soft);
+  color: var(--color-accent);
   font-size: var(--text-sm);
 }
 
@@ -241,18 +315,23 @@ async function onSave() {
   font-size: var(--text-sm);
 }
 
-.ms-manual-toggle,
-.ms-autoswitch {
-  display: flex;
-  align-items: center;
-  gap: var(--space-sm);
-  font-size: var(--text-sm);
+.ms-add {
+  width: 100%;
+  margin-top: var(--space-sm);
 }
 
-.ms-manual {
+.ms-edit {
   display: flex;
-  flex-direction: column;
+  align-items: center;
   gap: 6px;
+  margin-top: var(--space-sm);
+}
+
+.ms-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
 }
 
 .ms-hint {
@@ -260,7 +339,11 @@ async function onSave() {
   font-size: var(--text-sm);
 }
 
-.ms-save {
-  align-self: flex-end;
+.ms-autoswitch {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  font-size: var(--text-sm);
+  flex-shrink: 0;
 }
 </style>

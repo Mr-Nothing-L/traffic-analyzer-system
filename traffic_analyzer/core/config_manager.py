@@ -836,8 +836,10 @@ class ConfigManager:
 
         if not indices:
             providers = [self._build_llm_config_from_env(env, prefix=None)]
+            orig_indices: List[Optional[int]] = [None]
         else:
             providers = []
+            orig_indices = []
             # Only build providers for indices that are actually defined; iterating
             # 0..max would fabricate an empty default provider for each gap (e.g.
             # only LLM_PROVIDER_1_* set -> phantom anthropic provider at index 0).
@@ -845,6 +847,7 @@ class ConfigManager:
                 providers.append(
                     self._build_llm_config_from_env(env, prefix=f"LLM_PROVIDER_{i}")
                 )
+                orig_indices.append(i)
 
         # LLM_AUTO_SWITCH=0/false/no/off disables failover: only the first
         # (active) provider is used. Anything else / unset keeps auto-switch on.
@@ -855,4 +858,28 @@ class ConfigManager:
                 providers[0].provider if providers else "<none>",
             )
             return providers[:1]
-        return providers
+
+        # Auto-switch on: the primary always stays; failover candidates are
+        # filtered by their LLM_PROVIDER_{i}_ENABLED flag (original .env index;
+        # 0/false/no/off disables, anything else / unset keeps enabled).
+        kept = providers[:1]
+        for pos in range(1, len(providers)):
+            orig = orig_indices[pos]
+            enabled = (
+                True
+                if orig is None
+                else str(env.get(f"LLM_PROVIDER_{orig}_ENABLED") or "")
+                .strip()
+                .lower()
+                not in ("0", "false", "no", "off")
+            )
+            if enabled:
+                kept.append(providers[pos])
+            else:
+                logger.info(
+                    "LLM provider %s (index %d) disabled via LLM_PROVIDER_%d_ENABLED; skipped",
+                    providers[pos].provider,
+                    orig,
+                    orig,
+                )
+        return kept
