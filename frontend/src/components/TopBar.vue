@@ -10,6 +10,7 @@ import type { MeInfo } from '../stores/app'
 import { useJobsStore } from '../stores/jobs'
 import { useWorkspaceStore } from '../stores/workspace'
 import DirPickerModal from './DirPickerModal.vue'
+import ModelSwitcher from './ModelSwitcher.vue'
 import UiIcon from './UiIcon.vue'
 
 const app = useAppStore()
@@ -61,6 +62,7 @@ async function onLogout() {
       <span v-if="ws.path" class="ws-path" :title="ws.path">{{ ws.path }}</span>
     </button>
     <span class="tb-spacer" />
+    <ModelSwitcher />
     <n-button size="small" @click="router.push('/dashboard')">数据看板</n-button>
     <n-button
       type="primary"

@@ -7,7 +7,7 @@ forward arguments).
 
 [文件说明]
 作用:FastAPI 应用工厂 create_app():装配 workspace/fs/jobs/evidence_api/frames/
-video_stream/dashboard/auth/presence/realtime 各路由,提供 /api/expert-phases
+video_stream/dashboard/auth/presence/realtime/llm_settings 各路由,提供 /api/expert-phases
 专家阶段定义接口,挂载 frontend/dist(/,Vue 3 SPA 构建产物,未构建时跳过)
 并为其禁用缓存,/v2/* 旧书签 301 重定向到对应 / 路径,在 no-cache 之后注册
 auth middleware(未配置 TRAFFIC_ANALYZER_USERS 时认证完全关闭),注册
@@ -17,7 +17,7 @@ loop.call_soon_threadsafe 投递);通过 TRAFFIC_ANALYZER_WEB_WORKSPACE
 环境变量接收预设工作区(工厂模式无法转发参数)。
 上游:traffic_analyzer/cli.py 的 web 子命令(uvicorn "traffic_analyzer.web.app:create_app")。
 下游:web/ 下 workspace、fs、jobs、evidence_api、frames、video_stream、dashboard、
-auth、presence、realtime 路由模块;frontend/dist 前端构建产物。
+auth、presence、realtime、llm_settings 路由模块;frontend/dist 前端构建产物。
 """
 
 from __future__ import annotations
@@ -43,6 +43,7 @@ from traffic_analyzer.web import (
     frames,
     fs,
     jobs,
+    llm_settings,
     presence,
     realtime,
     video_stream,
@@ -115,6 +116,7 @@ def create_app(workspace: Optional[str] = None) -> FastAPI:
     app.include_router(frames.router)
     app.include_router(video_stream.router)
     app.include_router(dashboard.router)
+    app.include_router(llm_settings.router)
     app.include_router(auth.router)
     app.include_router(presence.router)
     app.include_router(realtime.router)

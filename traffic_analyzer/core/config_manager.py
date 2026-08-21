@@ -835,14 +835,24 @@ class ConfigManager:
                     pass
 
         if not indices:
-            return [self._build_llm_config_from_env(env, prefix=None)]
+            providers = [self._build_llm_config_from_env(env, prefix=None)]
+        else:
+            providers = []
+            # Only build providers for indices that are actually defined; iterating
+            # 0..max would fabricate an empty default provider for each gap (e.g.
+            # only LLM_PROVIDER_1_* set -> phantom anthropic provider at index 0).
+            for i in sorted(indices):
+                providers.append(
+                    self._build_llm_config_from_env(env, prefix=f"LLM_PROVIDER_{i}")
+                )
 
-        providers: List[LLMProviderConfig] = []
-        # Only build providers for indices that are actually defined; iterating
-        # 0..max would fabricate an empty default provider for each gap (e.g.
-        # only LLM_PROVIDER_1_* set -> phantom anthropic provider at index 0).
-        for i in sorted(indices):
-            providers.append(
-                self._build_llm_config_from_env(env, prefix=f"LLM_PROVIDER_{i}")
+        # LLM_AUTO_SWITCH=0/false/no/off disables failover: only the first
+        # (active) provider is used. Anything else / unset keeps auto-switch on.
+        auto_switch = str(env.get("LLM_AUTO_SWITCH") or "").strip().lower()
+        if auto_switch in ("0", "false", "no", "off"):
+            logger.info(
+                "LLM_AUTO_SWITCH disabled; using only the first LLM provider (%s)",
+                providers[0].provider if providers else "<none>",
             )
+            return providers[:1]
         return providers
