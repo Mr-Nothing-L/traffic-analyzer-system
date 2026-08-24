@@ -7,17 +7,18 @@ forward arguments).
 
 [文件说明]
 作用:FastAPI 应用工厂 create_app():装配 workspace/fs/jobs/evidence_api/frames/
-video_stream/dashboard/auth/presence/realtime/llm_settings 各路由,提供 /api/expert-phases
+video_stream/dashboard/auth/presence/realtime/llm_settings/chat 各路由,提供 /api/expert-phases
 专家阶段定义接口,挂载 frontend/dist(/,Vue 3 SPA 构建产物,未构建时跳过)
 并为其禁用缓存,/v2/* 旧书签 301 重定向到对应 / 路径,在 no-cache 之后注册
 auth middleware(未配置 TRAFFIC_ANALYZER_USERS 时认证完全关闭),注册
 lifespan/atexit 钩子以在服务退出时停止所有排队/运行中的分析子进程;lifespan
 启动时为 realtime EventBus 绑定事件循环(跨线程 publish 经
-loop.call_soon_threadsafe 投递);通过 TRAFFIC_ANALYZER_WEB_WORKSPACE
+loop.call_soon_threadsafe 投递),并创建 chat 上传目录清理后台任务(随退出
+cancel);通过 TRAFFIC_ANALYZER_WEB_WORKSPACE
 环境变量接收预设工作区(工厂模式无法转发参数)。
 上游:traffic_analyzer/cli.py 的 web 子命令(uvicorn "traffic_analyzer.web.app:create_app")。
 下游:web/ 下 workspace、fs、jobs、evidence_api、frames、video_stream、dashboard、
-auth、presence、realtime、llm_settings 路由模块;frontend/dist 前端构建产物。
+auth、presence、realtime、llm_settings、chat 路由模块;frontend/dist 前端构建产物。
 """
 
 from __future__ import annotations
@@ -38,6 +39,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from traffic_analyzer.web import (
     auth,
+    chat,
     dashboard,
     evidence_api,
     frames,
@@ -83,7 +85,14 @@ def create_app(workspace: Optional[str] = None) -> FastAPI:
         # 跨线程 publish(jobs worker 线程、线程池里的同步端点)经
         # loop.call_soon_threadsafe 投递,需先绑定运行中的事件循环。
         bus.bind_loop(asyncio.get_running_loop())
+        # 快速对话上传目录清理:启动时先立即扫一次,之后每小时一次。
+        janitor_task = asyncio.create_task(chat.run_janitor())
         yield
+        janitor_task.cancel()
+        try:
+            await janitor_task
+        except asyncio.CancelledError:
+            pass
         bus.unbind_loop()
         # Uvicorn runs this on SIGINT/SIGTERM (Ctrl+C): stop every queued or
         # running analyze child so no orphan keeps writing analysis/<stem>/.
@@ -117,6 +126,7 @@ def create_app(workspace: Optional[str] = None) -> FastAPI:
     app.include_router(video_stream.router)
     app.include_router(dashboard.router)
     app.include_router(llm_settings.router)
+    app.include_router(chat.router)
     app.include_router(auth.router)
     app.include_router(presence.router)
     app.include_router(realtime.router)

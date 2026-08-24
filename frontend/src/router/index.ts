@@ -1,4 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import ChatView from '../views/ChatView.vue'
 import DashboardView from '../views/DashboardView.vue'
 import DetailView from '../views/DetailView.vue'
 import LoginView from '../views/LoginView.vue'
@@ -20,6 +21,7 @@ const router = createRouter({
         { path: '', name: 'tree', component: WelcomeView },
         { path: 'video/:stem', name: 'detail', component: DetailView },
         { path: 'dashboard', name: 'dashboard', component: DashboardView },
+        { path: 'chat', name: 'chat', component: ChatView },
       ],
     },
   ],
