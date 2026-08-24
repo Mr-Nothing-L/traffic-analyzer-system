@@ -1,5 +1,4 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import AgentChatView from '../views/AgentChatView.vue'
 import ChatView from '../views/ChatView.vue'
 import DashboardView from '../views/DashboardView.vue'
 import DetailView from '../views/DetailView.vue'
@@ -23,7 +22,6 @@ const router = createRouter({
         { path: 'video/:stem', name: 'detail', component: DetailView },
         { path: 'dashboard', name: 'dashboard', component: DashboardView },
         { path: 'chat', name: 'chat', component: ChatView },
-        { path: 'agent', name: 'agent', component: AgentChatView },
       ],
     },
   ],

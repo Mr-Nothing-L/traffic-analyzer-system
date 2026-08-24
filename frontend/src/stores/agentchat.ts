@@ -1,19 +1,21 @@
-/** Agent 对话检测:会话(权限模式)+ 时间线条目 + SSE 流式轮次。
+/** 统一对话(问答 + 检测):会话列表/切换/删除 + 时间线条目 + SSE 流式轮次。
  * 后端契约(FastAPI /api/agent/* 代理 → Node agent 服务,workspaceDir 由后端注入):
- * POST /api/agent/sessions({mode}) → {sessionId};
- * POST /api/agent/chat({sessionId,input,videoPath?}) → SSE(每事件一行 'data: {json}\n\n',
- *   事件:text_delta/think_delta/tool_call_start/tool_result/step_done/
- *   approval_request/detection/done);
- * POST /api/agent/approval({requestId,decision,scope?}) → {status:'ok'}。
- * 与 stores/chat.ts 同模式:fetch+ReadableStream 按 \n\n 分块解析 data: 行,
- * 组件只接线,状态全部在这里。 */
+ * POST   /api/agent/sessions({mode}) → {sessionId};
+ * GET    /api/agent/sessions → {sessions:[{id,workspaceDir,mode,title,createdAt,lastActiveAt}]};
+ * GET    /api/agent/sessions/{id}/history → {entries:[...]}(五类条目,见 mapHistoryEntry);
+ * DELETE /api/agent/sessions/{id} → {status:'ok'};
+ * POST   /api/agent/chat({sessionId,input,videoPath?,images?(dataURL,≤4)}) → SSE
+ *   (每事件一行 'data: {json}\n\n',事件:text_delta/think_delta/tool_call_start/
+ *   tool_result/step_done/approval_request/detection/done);
+ * POST   /api/agent/approval({requestId,decision,scope?}) → {status:'ok'}。
+ * fetch+ReadableStream 按 \n\n 分块解析 data: 行,组件只接线,状态全部在这里。 */
 import { ref } from 'vue'
 import { defineStore } from 'pinia'
 import { ApiError } from '../api/client'
 
 export type AgentMode = 'manual' | 'yolo'
 
-/** idle 待开始 / connecting 连接中(建会话或流发起)/ running 运行中 /
+/** idle 待开始 / connecting 连接中(建会话、切会话或流发起)/ running 运行中 /
  * awaiting_approval 等待审批 / done 已完成 / failed 失败(可重试)。 */
 export type AgentStatus =
   | 'idle'
@@ -31,10 +33,22 @@ export interface AgentAccess {
   recursive?: boolean
 }
 
+/** GET /sessions 的列表项(createdAt/lastActiveAt 为 epoch ms)。 */
+export interface AgentSessionInfo {
+  id: string
+  workspaceDir?: string
+  mode?: string
+  title?: string
+  createdAt?: number
+  lastActiveAt?: number
+}
+
 export interface AgentUserEntry {
   kind: 'user'
   text: string
   videoPath?: string
+  /** dataURL 图片附件(发送时随消息上传,历史原样返回)。 */
+  images?: string[]
 }
 
 export interface AgentAssistantEntry {
@@ -62,8 +76,10 @@ export interface AgentApprovalEntry {
   approvalRule: string
   description?: string
   accesses: AgentAccess[]
-  /** 已回执后记录:'approved' | 'rejected' | 'approved_session'。 */
+  /** 已回执后记录:'approved' | 'rejected' | 'approved_session' | 'cancelled'(历史)。 */
   decision?: string
+  /** 历史载入的未决审批:后端不再接受回执,UI 显示「已失效」,不渲染按钮。 */
+  stale?: boolean
 }
 
 /** detection 事件的 data:submit_detection 的结构化 payload(解析失败时为原始字符串)。 */
@@ -127,6 +143,18 @@ async function postJson(path: string, body: unknown): Promise<unknown> {
   return res.json()
 }
 
+/** GET/DELETE 封装(与 postJson 同一套错误语义)。 */
+async function reqJson(path: string, method: 'GET' | 'DELETE'): Promise<unknown> {
+  let res: Response
+  try {
+    res = await fetch(path, { method })
+  } catch {
+    throw new ApiError(0, '网络错误,无法连接后端')
+  }
+  if (!res.ok) throw await toApiError(res)
+  return res.json()
+}
+
 /** tool_result 的 output:string 原样;ContentPart[] 取 text 拼接;其他 JSON 化。 */
 function formatToolOutput(output: unknown): string {
   if (typeof output === 'string') return output
@@ -145,6 +173,52 @@ function formatToolOutput(output: unknown): string {
   }
 }
 
+/** GET history 的条目 → 本地时间线条目;不认识/缺 kind 的条目丢弃。 */
+function mapHistoryEntry(raw: unknown): AgentEntry | null {
+  if (!raw || typeof raw !== 'object') return null
+  const e = raw as Record<string, unknown>
+  if (e.kind === 'user') {
+    return {
+      kind: 'user',
+      text: String(e.text ?? ''),
+      ...(Array.isArray(e.images) && e.images.length
+        ? { images: e.images.map(String) }
+        : {}),
+      ...(e.videoPath != null ? { videoPath: String(e.videoPath) } : {}),
+    }
+  }
+  if (e.kind === 'assistant') {
+    return { kind: 'assistant', text: String(e.text ?? ''), think: String(e.think ?? '') }
+  }
+  if (e.kind === 'tool') {
+    return {
+      kind: 'tool',
+      id: String(e.toolCallId ?? ''),
+      name: String(e.name ?? ''),
+      args:
+        typeof e.arguments === 'string' ? e.arguments : JSON.stringify(e.arguments ?? ''),
+      result: formatToolOutput(e.output),
+      isError: e.isError === true,
+      done: true,
+    }
+  }
+  if (e.kind === 'approval') {
+    const decision = e.decision != null ? String(e.decision) : undefined
+    return {
+      kind: 'approval',
+      requestId: String(e.requestId ?? ''),
+      toolName: String(e.toolName ?? ''),
+      approvalRule: String(e.approvalRule ?? ''),
+      ...(e.description != null ? { description: String(e.description) } : {}),
+      accesses: [],
+      // 历史里仍挂起的审批:后端已不回溯,标记失效(UI 显示「已失效」)
+      ...(decision ? { decision } : { stale: true }),
+    }
+  }
+  if (e.kind === 'detection') return { kind: 'detection', data: e.data }
+  return null
+}
+
 export const useAgentChatStore = defineStore('agentchat', () => {
   const sessionId = ref<string | null>(null)
   const mode = ref<AgentMode>('manual')
@@ -152,21 +226,48 @@ export const useAgentChatStore = defineStore('agentchat', () => {
   const error = ref<string | null>(null)
   /** 时间线条目(user/assistant/工具/审批/检测结果),渲染顺序 = 到达顺序。 */
   const entries = ref<AgentEntry[]>([])
+  /** 历史会话列表(GET /sessions),进入页面/新建/发送/删除后刷新。 */
+  const sessions = ref<AgentSessionInfo[]>([])
 
   let ctrl: AbortController | null = null
+  /** 轮次代际:切换/新建会话会中断在途流并递增,旧 runTurn 的收尾不再写状态。 */
+  let turnSeq = 0
   let lastInput = ''
   let lastVideoPath: string | undefined
+  let lastImages: string[] | undefined
 
   function stop() {
     ctrl?.abort()
   }
 
+  /** 切换/新建会话前调用:中断在途流,并使其 AbortError 收尾失效(不得覆盖新状态)。 */
+  function supersedeTurn() {
+    turnSeq += 1
+    ctrl?.abort()
+  }
+
+  /** 上次输入快照清空(新建/切换会话后,失败重试不得把旧输入重放进新会话)。 */
+  function resetLastTurn() {
+    lastInput = ''
+    lastVideoPath = undefined
+    lastImages = undefined
+  }
+
+  /** 拉历史会话列表(失败抛错,调用方提示)。 */
+  async function fetchSessions() {
+    const r = (await reqJson('/api/agent/sessions', 'GET')) as {
+      sessions?: AgentSessionInfo[]
+    }
+    sessions.value = Array.isArray(r.sessions) ? r.sessions : []
+  }
+
   /** 创建会话:workspaceDir 由后端代理注入,前端只传权限模式。 */
   async function createSession() {
-    stop()
+    supersedeTurn()
     status.value = 'connecting'
     error.value = null
     sessionId.value = null
+    resetLastTurn()
     try {
       const r = (await postJson('/api/agent/sessions', { mode: mode.value })) as {
         sessionId?: string
@@ -174,9 +275,57 @@ export const useAgentChatStore = defineStore('agentchat', () => {
       if (!r.sessionId) throw new ApiError(0, '后端未返回 sessionId')
       sessionId.value = r.sessionId
       status.value = 'idle'
+      await fetchSessions().catch(() => {}) // 列表出现新会话(无标题)
     } catch (e) {
       status.value = 'failed'
       error.value = (e as Error).message
+    }
+  }
+
+  /** 切换历史会话:拉 history 重建时间线;权限模式跟随会话属性。 */
+  async function selectSession(id: string) {
+    if (id === sessionId.value && entries.value.length) return
+    supersedeTurn()
+    status.value = 'connecting'
+    error.value = null
+    resetLastTurn()
+    try {
+      const r = (await reqJson(`/api/agent/sessions/${id}/history`, 'GET')) as {
+        entries?: unknown[]
+      }
+      entries.value = (Array.isArray(r.entries) ? r.entries : [])
+        .map(mapHistoryEntry)
+        .filter((e): e is AgentEntry => e !== null)
+      sessionId.value = id
+      const info = sessions.value.find((s) => s.id === id)
+      if (info?.mode === 'manual' || info?.mode === 'yolo') mode.value = info.mode
+      status.value = 'idle'
+    } catch (e) {
+      status.value = 'failed'
+      error.value = (e as Error).message
+    }
+  }
+
+  /** 删除会话:列表先移除(optimistic),失败回滚重拉并抛错;
+   * 删的是当前会话则切到最近会话,没有则新建。 */
+  async function deleteSession(id: string) {
+    const wasCurrent = sessionId.value === id
+    sessions.value = sessions.value.filter((s) => s.id !== id)
+    try {
+      await reqJson(`/api/agent/sessions/${id}`, 'DELETE')
+    } catch (e) {
+      await fetchSessions().catch(() => {})
+      throw e
+    }
+    if (wasCurrent) {
+      stop()
+      sessionId.value = null
+      entries.value = []
+      const latest = [...sessions.value].sort(
+        (a, b) => (b.lastActiveAt ?? 0) - (a.lastActiveAt ?? 0),
+      )[0]
+      if (latest) await selectSession(latest.id)
+      else await createSession()
     }
   }
 
@@ -260,6 +409,7 @@ export const useAgentChatStore = defineStore('agentchat', () => {
 
   /** 发起一轮 /chat SSE(不压 user 条目;send/retry 共用)。 */
   async function runTurn() {
+    const seq = ++turnSeq
     status.value = 'running'
     error.value = null
     ctrl = new AbortController()
@@ -273,6 +423,7 @@ export const useAgentChatStore = defineStore('agentchat', () => {
             sessionId: sessionId.value,
             input: lastInput,
             ...(lastVideoPath ? { videoPath: lastVideoPath } : {}),
+            ...(lastImages ? { images: lastImages } : {}),
           }),
           signal: ctrl.signal,
         })
@@ -313,19 +464,20 @@ export const useAgentChatStore = defineStore('agentchat', () => {
       }
     } catch (e) {
       if ((e as Error).name === 'AbortError') {
-        // stop() 主动中断:静默收尾,已收到内容保留在条目里
-        status.value = 'done'
+        // stop() 主动中断:静默收尾,已收到内容保留在条目里;
+        // 已被 supersedeTurn 接管的旧轮次不写状态(切换/新建会话场景)
+        if (seq === turnSeq) status.value = 'done'
         return
       }
       status.value = 'failed'
       error.value = (e as Error).message
     } finally {
-      ctrl = null
+      if (seq === turnSeq) ctrl = null
     }
   }
 
-  /** 发送一轮检测指令(压 user 条目);进行中/审批中忽略。 */
-  async function send(input: string, videoPath?: string) {
+  /** 发送一轮(压 user 条目);images 为 dataURL 数组(≤4)。进行中/审批中忽略。 */
+  async function send(input: string, videoPath?: string, images?: string[]) {
     const busy =
       status.value === 'connecting' ||
       status.value === 'running' ||
@@ -333,12 +485,16 @@ export const useAgentChatStore = defineStore('agentchat', () => {
     if (!sessionId.value || busy) return
     lastInput = input
     lastVideoPath = videoPath || undefined
+    lastImages = images?.length ? [...images] : undefined
     entries.value.push({
       kind: 'user',
       text: input,
       ...(lastVideoPath ? { videoPath: lastVideoPath } : {}),
+      ...(lastImages ? { images: lastImages } : {}),
     })
     await runTurn()
+    // 首轮后标题/lastActiveAt 已变,刷新会话列表(失败不阻断)
+    await fetchSessions().catch(() => {})
   }
 
   /** 失败重试:会话都没建上则重建;否则用上次输入重跑一轮(不重复压 user 条目)。 */
@@ -376,7 +532,11 @@ export const useAgentChatStore = defineStore('agentchat', () => {
     status,
     error,
     entries,
+    sessions,
+    fetchSessions,
     createSession,
+    selectSession,
+    deleteSession,
     setMode,
     newSession,
     send,

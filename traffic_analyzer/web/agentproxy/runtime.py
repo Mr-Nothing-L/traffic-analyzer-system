@@ -7,20 +7,25 @@
 ``npx tsx src/server/main.ts``(cwd=agent/,env 注入 AGENT_PORT=8602 与
 TOOLSERVER_URL)。端口被占用 / Popen 失败仅记日志降级(state 记为
 port_occupied/failed),不影响 web 其他功能;/api/agent/health 据此与下游
-探测报告 unavailable。stop() 复用 jobs 的终止语义(SIGTERM→SIGKILL)。
-AGENT_RUNTIME_ENABLE(默认 true)可整体关闭。子进程 stdout 由守护线程
-逐行 drain 进 logger,避免管道写满阻塞子进程。
+探测报告 unavailable。stop() 对整个进程组 SIGTERM→SIGKILL(子进程经
+start_new_session 独立成组;agent 是 npx/tsx 包装器,只杀直接子进程会把
+node 孙进程孤儿化)。
+AGENT_RUNTIME_ENABLE(默认 true)可整体关闭;AGENT_RUNTIME_AGENT_PORT /
+AGENT_RUNTIME_TOOLSERVER_PORT 可覆盖默认端口(多实例并存时避免降级到
+外部旧实例)。子进程 stdout 由守护线程逐行 drain 进 logger,避免管道写满
+阻塞子进程。
 上游:web/agentproxy/__init__.py(聚合导出);web/app.py(lifespan 调
 start/stop);web/agentproxy/routes.py(读取 agent_url/toolserver_url 与
 enabled)。
-下游:web/jobs/job.py 的 REPO_ROOT/_terminate_proc;traffic_analyzer
-toolserver;agent/src/server/main.ts。
+下游:web/jobs/job.py 的 REPO_ROOT;traffic_analyzer toolserver;
+agent/src/server/main.ts。
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -28,11 +33,13 @@ import threading
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from traffic_analyzer.web.jobs.job import REPO_ROOT, _terminate_proc
+from traffic_analyzer.web.jobs.job import REPO_ROOT
 
 logger = logging.getLogger(__name__)
 
 ENABLE_ENV_VAR = "AGENT_RUNTIME_ENABLE"
+AGENT_PORT_ENV_VAR = "AGENT_RUNTIME_AGENT_PORT"
+TOOLSERVER_PORT_ENV_VAR = "AGENT_RUNTIME_TOOLSERVER_PORT"
 DEFAULT_TOOLSERVER_PORT = 8601
 DEFAULT_AGENT_PORT = 8602
 
@@ -45,6 +52,19 @@ def runtime_enabled() -> bool:
     if raw is None:
         return True
     return raw.strip().lower() not in _FALSE_VALUES
+
+
+def _port_from_env(name: str, default: int) -> int:
+    """读端口覆盖环境变量;非整数仅告警并回落默认值。"""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning("agent runtime: invalid %s=%r, using default %s",
+                       name, raw, default)
+        return default
 
 
 def _port_in_use(port: int, host: str = "127.0.0.1", timeout: float = 0.5) -> bool:
@@ -66,11 +86,40 @@ def _drain_stdout(proc: subprocess.Popen, name: str) -> None:
         pass
 
 
+def _terminate_proc_group(proc: subprocess.Popen, timeout: float = 3.0) -> None:
+    """对整个进程组 SIGTERM→SIGKILL(jobs._terminate_proc 的进程组变体)。
+
+    子进程 spawn 时用 start_new_session 独立成组,killpg 连带 npx/tsx
+    包装器下的 node 孙进程一起终止,避免孤儿化。
+    """
+    if proc.poll() is not None:
+        return
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+    except ProcessLookupError:
+        return  # 竞态:poll 之后进程刚好退出
+    try:
+        proc.wait(timeout=timeout)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # SIGKILL 后仍不退出(如 D 状态):不再无限阻塞调用方。
+        logger.warning("pid %s did not exit after SIGKILL", proc.pid)
+
+
 class AgentRuntimeManager:
     """toolserver + TS agent server 两个子进程的生命周期。
 
     ``workspace``: toolserver 的 --workspace(未选工作区时用项目根)。
     ``enabled``: None 时读 AGENT_RUNTIME_ENABLE(默认 true)。
+    ``agent_port``/``toolserver_port``: None 时读对应环境变量,缺省 8602/8601。
     ``spawn``/``port_probe`` 可注入,便于测试不起真实子进程。
     """
 
@@ -79,16 +128,22 @@ class AgentRuntimeManager:
         workspace: Optional[Path] = None,
         *,
         enabled: Optional[bool] = None,
-        agent_port: int = DEFAULT_AGENT_PORT,
-        toolserver_port: int = DEFAULT_TOOLSERVER_PORT,
+        agent_port: Optional[int] = None,
+        toolserver_port: Optional[int] = None,
         repo_root: Path = REPO_ROOT,
         spawn: Callable[..., subprocess.Popen] = subprocess.Popen,
         port_probe: Callable[[int], bool] = _port_in_use,
     ) -> None:
         self._workspace = workspace
         self._enabled = runtime_enabled() if enabled is None else enabled
-        self._agent_port = agent_port
-        self._toolserver_port = toolserver_port
+        self._agent_port = (
+            _port_from_env(AGENT_PORT_ENV_VAR, DEFAULT_AGENT_PORT)
+            if agent_port is None else agent_port
+        )
+        self._toolserver_port = (
+            _port_from_env(TOOLSERVER_PORT_ENV_VAR, DEFAULT_TOOLSERVER_PORT)
+            if toolserver_port is None else toolserver_port
+        )
         self._repo_root = Path(repo_root)
         self._spawn = spawn
         self._port_probe = port_probe
@@ -196,13 +251,13 @@ class AgentRuntimeManager:
         )
 
     def stop(self) -> None:
-        """SIGTERM→SIGKILL 终止两个子进程(jobs 的终止语义);可重复调用。
+        """对两个子进程的进程组 SIGTERM→SIGKILL;可重复调用。
 
         可能阻塞数秒(等待 SIGTERM 生效),async 调用方应经
         ``asyncio.to_thread`` 执行。
         """
         for name, proc in self._procs.items():
             if proc is not None and proc.poll() is None:
-                _terminate_proc(proc)
+                _terminate_proc_group(proc)
             if proc is not None and self._states.get(name) == "running":
                 self._states[name] = "not_started"

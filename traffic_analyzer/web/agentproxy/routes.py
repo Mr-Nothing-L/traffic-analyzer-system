@@ -8,6 +8,9 @@
   附带 AgentRuntimeManager.snapshot() 进程状态)。
 - POST /sessions  透传;body 缺 workspaceDir 时注入 web 层当前工作区路径
   (未选工作区 → 400)。
+- GET  /sessions                  透传(session 列表)。
+- GET  /sessions/{id}/history     透传(entries 时间线)。
+- DELETE /sessions/{id}           透传(删除 session)。
 - POST /chat      SSE 透传:httpx AsyncClient stream 读下游,
   StreamingResponse 逐块转发(不缓冲);客户端断连时在 generator finally
   里 aclose 下游响应与 client,取消下游请求。
@@ -111,6 +114,19 @@ async def agent_health(request: Request) -> Dict[str, Any]:
     }
 
 
+async def _simple_passthrough(
+    runtime: AgentRuntimeManager, method: str, path: str
+) -> JSONResponse:
+    """无 body 的 JSON 透传(GET/DELETE):下游错误原样,连接失败 503。"""
+    try:
+        async with AsyncClient(base_url=runtime.agent_url, timeout=_JSON_TIMEOUT) as client:
+            resp = await client.request(method, path)
+    except httpx.HTTPError as exc:
+        logger.warning("agent %s %s unreachable: %s", method, path, exc)
+        return _unavailable(f"agent server unreachable: {exc}")
+    return _passthrough_error(resp.status_code, resp.content)
+
+
 @router.post("/sessions")
 async def create_session(request: Request) -> JSONResponse:
     """透传 POST /sessions;body 缺 workspaceDir 时注入当前工作区路径。"""
@@ -135,6 +151,35 @@ async def create_session(request: Request) -> JSONResponse:
         logger.warning("agent /sessions unreachable: %s", exc)
         return _unavailable(f"agent server unreachable: {exc}")
     return _passthrough_error(resp.status_code, resp.content)
+
+
+@router.get("/sessions")
+async def list_sessions(request: Request) -> JSONResponse:
+    """透传 GET /sessions(session 列表)。"""
+    runtime = _runtime(request)
+    if runtime is None or not runtime.enabled:
+        return _unavailable()
+    return await _simple_passthrough(runtime, "GET", "/sessions")
+
+
+@router.get("/sessions/{session_id}/history")
+async def session_history(session_id: str, request: Request) -> JSONResponse:
+    """透传 GET /sessions/{id}/history(entries 时间线)。"""
+    runtime = _runtime(request)
+    if runtime is None or not runtime.enabled:
+        return _unavailable()
+    return await _simple_passthrough(
+        runtime, "GET", f"/sessions/{session_id}/history"
+    )
+
+
+@router.delete("/sessions/{session_id}")
+async def delete_session(session_id: str, request: Request) -> JSONResponse:
+    """透传 DELETE /sessions/{id}(删除 session)。"""
+    runtime = _runtime(request)
+    if runtime is None or not runtime.enabled:
+        return _unavailable()
+    return await _simple_passthrough(runtime, "DELETE", f"/sessions/{session_id}")
 
 
 @router.post("/approval")

@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import signal
+import subprocess
 import threading
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -249,6 +251,146 @@ class TestSessions:
 
 
 # ---------------------------------------------------------------------------
+# GET /api/agent/sessions(列表)
+# ---------------------------------------------------------------------------
+
+
+class TestListSessions:
+    def test_passthrough(
+        self, proxy_app: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.method == "GET"
+            assert request.url.path == "/sessions"
+            return httpx.Response(
+                200,
+                json={"sessions": [{"id": "s-1", "title": "检测演示视频"}]},
+            )
+
+        _patch_downstream(monkeypatch, handler)
+        client = TestClient(proxy_app)
+        resp = client.get("/api/agent/sessions")
+        assert resp.status_code == 200
+        assert resp.json() == {"sessions": [{"id": "s-1", "title": "检测演示视频"}]}
+
+    def test_downstream_unreachable(
+        self, proxy_app: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("connection refused", request=request)
+
+        _patch_downstream(monkeypatch, handler)
+        client = TestClient(proxy_app)
+        resp = client.get("/api/agent/sessions")
+        assert resp.status_code == 503
+        assert resp.json()["error"]["code"] == "agent_unavailable"
+
+
+# ---------------------------------------------------------------------------
+# GET /api/agent/sessions/{id}/history
+# ---------------------------------------------------------------------------
+
+
+class TestSessionHistory:
+    def test_passthrough(
+        self, proxy_app: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        entries = [
+            {"kind": "user", "text": "检测这个视频", "images": [], "at": 1},
+            {"kind": "tool", "name": "video_meta", "toolCallId": "c1",
+             "arguments": None, "output": {}, "isError": False, "at": 2},
+        ]
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.method == "GET"
+            assert request.url.path == "/sessions/s-1/history"
+            return httpx.Response(200, json={"entries": entries})
+
+        _patch_downstream(monkeypatch, handler)
+        client = TestClient(proxy_app)
+        resp = client.get("/api/agent/sessions/s-1/history")
+        assert resp.status_code == 200
+        assert resp.json() == {"entries": entries}
+
+    def test_not_found_passthrough(
+        self, proxy_app: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                404,
+                json={"error": {"code": "session_not_found",
+                                "message": "unknown session: s-x"}},
+            )
+
+        _patch_downstream(monkeypatch, handler)
+        client = TestClient(proxy_app)
+        resp = client.get("/api/agent/sessions/s-x/history")
+        assert resp.status_code == 404
+        assert resp.json()["error"]["code"] == "session_not_found"
+
+    def test_downstream_unreachable(
+        self, proxy_app: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("connection refused", request=request)
+
+        _patch_downstream(monkeypatch, handler)
+        client = TestClient(proxy_app)
+        resp = client.get("/api/agent/sessions/s-1/history")
+        assert resp.status_code == 503
+        assert resp.json()["error"]["code"] == "agent_unavailable"
+
+
+# ---------------------------------------------------------------------------
+# DELETE /api/agent/sessions/{id}
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteSession:
+    def test_passthrough(
+        self, proxy_app: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.method == "DELETE"
+            assert request.url.path == "/sessions/s-1"
+            return httpx.Response(200, json={"status": "ok"})
+
+        _patch_downstream(monkeypatch, handler)
+        client = TestClient(proxy_app)
+        resp = client.delete("/api/agent/sessions/s-1")
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "ok"}
+
+    def test_not_found_passthrough(
+        self, proxy_app: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                404,
+                json={"error": {"code": "session_not_found",
+                                "message": "unknown session: s-x"}},
+            )
+
+        _patch_downstream(monkeypatch, handler)
+        client = TestClient(proxy_app)
+        resp = client.delete("/api/agent/sessions/s-x")
+        assert resp.status_code == 404
+        assert resp.json()["error"]["code"] == "session_not_found"
+
+    def test_downstream_unreachable(
+        self, proxy_app: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("connection refused", request=request)
+
+        _patch_downstream(monkeypatch, handler)
+        client = TestClient(proxy_app)
+        resp = client.delete("/api/agent/sessions/s-1")
+        assert resp.status_code == 503
+        assert resp.json()["error"]["code"] == "agent_unavailable"
+
+
+# ---------------------------------------------------------------------------
 # POST /api/agent/approval
 # ---------------------------------------------------------------------------
 
@@ -473,22 +615,24 @@ class _FakeProc:
         self.pid = 4242
         self.stdout = io.StringIO("")
         self.returncode: Optional[int] = None
-        self.terminated = threading.Event()
-        self.killed = threading.Event()
 
     def poll(self) -> Optional[int]:
         return self.returncode
 
-    def terminate(self) -> None:
-        self.terminated.set()
-        self.returncode = -15
-
     def wait(self, timeout: Optional[float] = None) -> Optional[int]:
+        # 模拟 SIGTERM 后退出:首次 wait 即置返回码。
+        if self.returncode is None:
+            self.returncode = -15
         return self.returncode
 
-    def kill(self) -> None:
-        self.killed.set()
-        self.returncode = -9
+
+class _StubbornProc(_FakeProc):
+    """SIGTERM 不退出、SIGKILL 才退出的子进程(wait 按 returncode 驱动)。"""
+
+    def wait(self, timeout: Optional[float] = None) -> Optional[int]:
+        if self.returncode is None:
+            raise subprocess.TimeoutExpired(self.argv, timeout)
+        return self.returncode
 
 
 class TestRuntimeManager:
@@ -505,6 +649,25 @@ class TestRuntimeManager:
     def test_enabled_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(runtime_mod.ENABLE_ENV_VAR, raising=False)
         assert runtime_mod.runtime_enabled() is True
+
+    def test_ports_overridable_by_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(runtime_mod.AGENT_PORT_ENV_VAR, "8711")
+        monkeypatch.setenv(runtime_mod.TOOLSERVER_PORT_ENV_VAR, "8611")
+        mgr = AgentRuntimeManager(enabled=False)
+        assert mgr.agent_url == "http://127.0.0.1:8711"
+        assert mgr.toolserver_url == "http://127.0.0.1:8611"
+        snap = mgr.snapshot()
+        assert snap["agent"]["port"] == 8711
+        assert snap["toolserver"]["port"] == 8611
+
+    def test_invalid_port_env_falls_back(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(runtime_mod.AGENT_PORT_ENV_VAR, "not-a-port")
+        monkeypatch.delenv(runtime_mod.TOOLSERVER_PORT_ENV_VAR, raising=False)
+        mgr = AgentRuntimeManager(enabled=False)
+        assert mgr.agent_url == "http://127.0.0.1:8602"
+        assert mgr.toolserver_url == "http://127.0.0.1:8601"
 
     def test_spawn_commands_and_env(self, tmp_path: Path) -> None:
         procs: Dict[str, _FakeProc] = {}
@@ -577,11 +740,21 @@ class TestRuntimeManager:
         assert snap["toolserver"]["state"] == "failed"
         assert snap["agent"]["state"] == "failed"
 
-    def test_stop_terminates_children(self, tmp_path: Path) -> None:
+    def test_stop_sigterm_process_group(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """stop() 对每个子进程的进程组发 SIGTERM;正常退出不升级 SIGKILL。"""
+        killpg_calls: List[Any] = []
+        monkeypatch.setattr(runtime_mod.os, "getpgid", lambda pid: pid + 100)
+        monkeypatch.setattr(
+            runtime_mod.os, "killpg",
+            lambda pgid, sig: killpg_calls.append((pgid, sig)),
+        )
         procs: List[_FakeProc] = []
 
         def fake_spawn(argv: List[str], **kwargs: Any) -> _FakeProc:
             proc = _FakeProc(argv, **kwargs)
+            proc.pid = 1000 + len(procs)
             procs.append(proc)
             return proc
 
@@ -591,5 +764,61 @@ class TestRuntimeManager:
         mgr.start()
         assert len(procs) == 2
         mgr.stop()
-        assert all(p.terminated.is_set() for p in procs)
-        mgr.stop()  # 幂等:不抛异常
+        assert killpg_calls == [
+            (1100, signal.SIGTERM),
+            (1101, signal.SIGTERM),
+        ]
+        assert all(p.returncode == -15 for p in procs)
+        mgr.stop()  # 幂等:进程已退出,不再发信号
+        assert len(killpg_calls) == 2
+
+    def test_stop_escalates_to_sigkill(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """SIGTERM 超时不退出 → 对进程组升级 SIGKILL。"""
+        killpg_calls: List[Any] = []
+
+        def fake_killpg(pgid: int, sig: int) -> None:
+            killpg_calls.append((pgid, sig))
+            if sig == signal.SIGKILL:
+                for p in procs:
+                    if p.pid + 100 == pgid:
+                        p.returncode = -9
+
+        monkeypatch.setattr(runtime_mod.os, "getpgid", lambda pid: pid + 100)
+        monkeypatch.setattr(runtime_mod.os, "killpg", fake_killpg)
+        procs: List[_StubbornProc] = []
+
+        def fake_spawn(argv: List[str], **kwargs: Any) -> _StubbornProc:
+            proc = _StubbornProc(argv, **kwargs)
+            proc.pid = 2000 + len(procs)
+            procs.append(proc)
+            return proc
+
+        mgr = AgentRuntimeManager(
+            enabled=True, spawn=fake_spawn, port_probe=lambda port: False
+        )
+        mgr.start()
+        mgr.stop()
+        assert killpg_calls == [
+            (2100, signal.SIGTERM), (2100, signal.SIGKILL),
+            (2101, signal.SIGTERM), (2101, signal.SIGKILL),
+        ]
+        assert all(p.returncode == -9 for p in procs)
+
+    def test_stop_process_group_already_gone(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """竞态:poll 后进程刚好退出,getpgid 抛 ProcessLookupError → 不抛异常。"""
+        def bad_getpgid(pid: int) -> int:
+            raise ProcessLookupError(pid)
+
+        monkeypatch.setattr(runtime_mod.os, "getpgid", bad_getpgid)
+        procs: List[_FakeProc] = []
+        mgr = AgentRuntimeManager(
+            enabled=True,
+            spawn=lambda argv, **k: (procs.append(_FakeProc(argv)), procs[-1])[1],
+            port_probe=lambda port: False,
+        )
+        mgr.start()
+        mgr.stop()  # 不抛异常

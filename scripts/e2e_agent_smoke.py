@@ -8,11 +8,18 @@
 行为:在 127.0.0.1:<port> 启动真实后端(python3 -m traffic_analyzer web,
 工作区 = 项目根;web 启动时会自动 spawn toolserver:8601 与 TS agent:8602,
 端口被健康实例占用时按 port_occupied 降级,只要代理能连通下游即视为通过)。
+8601/8602 被外部实例占用时(如 8610 试用实例跑的是旧 agent 构建,缺新路由),
+自动另选空闲端口并经 AGENT_RUNTIME_TOOLSERVER_PORT / AGENT_RUNTIME_AGENT_PORT
+注入,保证打到新构建的下游。
 随后验证:
   1. GET  /api/agent/health   → 返回且 agent/toolserver 下游探测健康
   2. POST /api/agent/sessions → {mode:'yolo'} 拿到 sessionId
   3. POST /api/agent/chat     → 有界指令(只调 video_meta 查时长),解析 SSE:
      断言出现 tool_call_start 且工具名 video_meta,最终收到 done
+  4. GET  /api/agent/sessions → 列表包含该 session 且 title 非空
+  5. GET  /api/agent/sessions/{id}/history → entries 含 user 条目与
+     tool(video_meta)条目
+  6. DELETE /api/agent/sessions/{id} → 成功,且列表不再包含该 session
 认证处理同 e2e_v2_smoke:config/users.db 已有账号时,自建临时账号
 (写入 users.db,结束后删除),TRAFFIC_ANALYZER_SECRET 经环境注入,
 POST /api/auth/login 拿 ta_session cookie;库为空(认证关闭)则跳过。
@@ -81,13 +88,39 @@ def server_up(base: str) -> bool:
         return False
 
 
+def _port_in_use(port: int) -> bool:
+    import socket
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
+def _free_port(start: int) -> int:
+    for port in range(start, start + 100):
+        if not _port_in_use(port):
+            return port
+    raise RuntimeError(f"{start} 起 100 个端口均被占用")
+
+
 def start_backend(port: int) -> subprocess.Popen:
-    """经 CLI web 子命令启动真实后端;BROWSER=true 抑制自动打开浏览器。"""
+    """经 CLI web 子命令启动真实后端;BROWSER=true 抑制自动打开浏览器。
+
+    8601/8602 被外部实例占用时另选空闲端口注入(避免代理降级打到旧构建)。
+    """
     import os
 
     env = dict(os.environ)
     env["TRAFFIC_ANALYZER_SECRET"] = SMOKE_SECRET
     env["BROWSER"] = "true"  # webbrowser 走 BROWSER 命令,'true' 直接返回
+    if _port_in_use(8601):
+        env["AGENT_RUNTIME_TOOLSERVER_PORT"] = str(_free_port(8611))
+        print(f"8601 被占用,toolserver 改用 {env['AGENT_RUNTIME_TOOLSERVER_PORT']}",
+              flush=True)
+    if _port_in_use(8602):
+        env["AGENT_RUNTIME_AGENT_PORT"] = str(_free_port(8711))
+        print(f"8602 被占用,agent 改用 {env['AGENT_RUNTIME_AGENT_PORT']}", flush=True)
     proc = subprocess.Popen(
         [
             sys.executable, "-m", "traffic_analyzer", "web",
@@ -231,6 +264,76 @@ def step_chat(base: str, cookie: str, session_id: str, video: str,
     record("SSE: 收到 done", done_ok, note)
 
 
+def _list_sessions(base: str, cookie: str):
+    """GET /api/agent/sessions;成功返回 sessions 列表,失败返回 None。"""
+    try:
+        status, _, payload = api_request(
+            base, "GET", "/api/agent/sessions", cookie=cookie)
+        if status == 200:
+            sessions = json.loads(payload).get("sessions")
+            if isinstance(sessions, list):
+                return sessions
+    except Exception:
+        pass
+    return None
+
+
+def step_list_sessions(base: str, cookie: str, session_id: str) -> None:
+    """GET /api/agent/sessions:列表包含该 session 且 title 非空。"""
+    sessions = _list_sessions(base, cookie)
+    if sessions is None:
+        record("GET /api/agent/sessions(列表)", False, "请求失败或响应非 sessions 列表")
+        return
+    match = [s for s in sessions if s.get("id") == session_id]
+    ok = bool(match) and bool(match[0].get("title"))
+    note = (f"title={match[0].get('title')!r}" if match
+            else f"列表 {len(sessions)} 条中无 {session_id}")
+    record("GET /api/agent/sessions(列表含新 session,title 非空)", ok, note)
+
+
+def step_history(base: str, cookie: str, session_id: str) -> None:
+    """GET /api/agent/sessions/{id}/history:entries 含 user 与 tool(video_meta)。"""
+    try:
+        status, _, payload = api_request(
+            base, "GET", f"/api/agent/sessions/{session_id}/history", cookie=cookie)
+    except Exception as e:
+        record("GET /api/agent/sessions/{id}/history", False, str(e))
+        return
+    entries = None
+    try:
+        entries = json.loads(payload).get("entries")
+    except ValueError:
+        pass
+    if status != 200 or not isinstance(entries, list):
+        record("GET /api/agent/sessions/{id}/history", False,
+               f"HTTP {status}: {payload[:200]!r}")
+        return
+    has_user = any(e.get("kind") == "user" for e in entries)
+    has_video_meta = any(
+        e.get("kind") == "tool" and e.get("name") == "video_meta" for e in entries)
+    kinds = "/".join(str(e.get("kind")) for e in entries)
+    record("history: entries 含 user 与 tool(video_meta)",
+           has_user and has_video_meta, f"entries[{len(entries)}]: {kinds}")
+
+
+def step_delete_session(base: str, cookie: str, session_id: str) -> None:
+    """DELETE /api/agent/sessions/{id}:成功,且列表不再包含该 session。"""
+    try:
+        status, _, payload = api_request(
+            base, "DELETE", f"/api/agent/sessions/{session_id}", cookie=cookie)
+    except Exception as e:
+        record("DELETE /api/agent/sessions/{id}", False, str(e))
+        return
+    ok = status == 200 and json.loads(payload).get("status") == "ok"
+    record("DELETE /api/agent/sessions/{id}", ok,
+           "" if ok else f"HTTP {status}: {payload[:200]!r}")
+    sessions = _list_sessions(base, cookie)
+    gone = sessions is not None and all(
+        s.get("id") != session_id for s in sessions)
+    record("DELETE 后列表不再包含该 session", gone,
+           f"列表 {len(sessions)} 条" if sessions is not None else "列表请求失败")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -290,10 +393,28 @@ def main() -> int:
             except Exception as e:
                 record("登录(临时账号)", False, str(e))
 
+        # 下游 toolserver/agent 由本次实例新拉起(npx tsx 启动较慢),
+        # 先轮询 /api/agent/health 等其就绪,再进入正式步骤。
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            status, _, payload = api_request(
+                base, "GET", "/api/agent/health", cookie=cookie, timeout=3)
+            try:
+                data = json.loads(payload) if status == 200 else {}
+            except ValueError:
+                data = {}
+            if (data.get("agent") or {}).get("healthy") \
+                    and (data.get("toolserver") or {}).get("healthy"):
+                break
+            time.sleep(0.5)
+
         # 下游不通时后续步骤无意义,仅在前一步通过时继续
         session_id = step_create_session(base, cookie) if step_health(base, cookie) else None
         if session_id is not None:
             step_chat(base, cookie, session_id, args.video, args.timeout)
+            step_list_sessions(base, cookie, session_id)
+            step_history(base, cookie, session_id)
+            step_delete_session(base, cookie, session_id)
     finally:
         _cleanup(proc, user_created)
 
