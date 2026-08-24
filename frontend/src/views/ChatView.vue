@@ -1,6 +1,6 @@
 <script setup lang="ts">
-/** 快速对话整卡:来源条(上传/预览/清空记忆)+ 消息列表(SSE 流式气泡)
- * + 输入区(Enter 发送 / Shift+Enter 换行 / 发送中可停止)。
+/** 快速对话整卡:来源条(预览/清空记忆)+ 消息列表(SSE 流式气泡,带撤回/复制/时间)
+ * + 输入区(「+」暂存附件随消息一同上传、Enter 发送 / Shift+Enter 换行 / 发送中可停止)。
  * 与数据看板同模式:TreeView 子路由,整卡替换主区;状态在 stores/chat.ts,组件只接线。 */
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import {
@@ -14,6 +14,7 @@ import {
   useMessage,
 } from 'naive-ui'
 import { useChatStore } from '../stores/chat'
+import type { ChatMessage } from '../stores/chat'
 import { useAppStore } from '../stores/app'
 import UiIcon from '../components/UiIcon.vue'
 
@@ -27,6 +28,43 @@ const userInitial = computed(() => (app.user ? app.user[0].toUpperCase() : '我'
 const question = ref('')
 const uploading = ref(false)
 const fileInput = ref<HTMLInputElement | null>(null)
+
+/* ---- 暂存附件(随消息一同发出):图片给缩略图 objectURL,视频给图标+文件名 ---- */
+interface PendingFile {
+  file: File
+  url: string
+  isVideo: boolean
+}
+const pending = ref<PendingFile[]>([])
+const VIDEO_EXT = ['.mp4', '.avi', '.mov', '.mkv', '.ts']
+const isVideoFile = (f: File) => VIDEO_EXT.some((e) => f.name.toLowerCase().endsWith(e))
+
+function onFiles(ev: Event) {
+  const input = ev.target as HTMLInputElement
+  const files = Array.from(input.files || [])
+  input.value = '' // 允许重复选择同一文件再次触发 change
+  if (!files.length) return
+  // 预校验(与后端一致):视频恰 1 个且不能与图片混选;违规不予暂存
+  const all = [...pending.value.map((p) => p.file), ...files]
+  const videos = all.filter(isVideoFile)
+  if (videos.length && (videos.length !== 1 || videos.length !== all.length)) {
+    message.warning('视频只能选 1 个,且不能与图片混选')
+    return
+  }
+  for (const f of files) {
+    pending.value.push({ file: f, url: URL.createObjectURL(f), isVideo: isVideoFile(f) })
+  }
+}
+
+function removeAttachment(i: number) {
+  const [a] = pending.value.splice(i, 1)
+  if (a) URL.revokeObjectURL(a.url)
+}
+
+function clearPending() {
+  for (const a of pending.value) URL.revokeObjectURL(a.url)
+  pending.value = []
+}
 
 /* ---- 来源预览面板(上传的视频/图片) ---- */
 const previewOpen = ref(false)
@@ -64,25 +102,12 @@ onMounted(async () => {
   }
 })
 
-onUnmounted(() => chat.stop()) // 离开页面中断在途流
+onUnmounted(() => {
+  chat.stop() // 离开页面中断在途流
+  clearPending() // 释放全部 objectURL
+})
 
 /* ---- 来源条动作 ---- */
-async function onFiles(ev: Event) {
-  const input = ev.target as HTMLInputElement
-  if (!input.files?.length) return
-  uploading.value = true
-  try {
-    await chat.upload(input.files)
-    previewOpen.value = true // 上传成功后直接展示预览
-    message.success('已加载来源,可以开始提问')
-  } catch (e) {
-    message.error(`上传失败:${(e as Error).message}`)
-  } finally {
-    uploading.value = false
-    input.value = '' // 允许重复选择同一文件再次触发 change
-  }
-}
-
 async function onClear() {
   try {
     await chat.clear()
@@ -93,15 +118,54 @@ async function onClear() {
   }
 }
 
-/* ---- 提问 ---- */
+/* ---- 提问:有暂存附件先上传(失败则保留附件、不发问题),成功后再走 SSE ---- */
 async function onSend() {
   const q = question.value.trim()
-  if (!q || chat.sending) return
+  if (!q || chat.sending || uploading.value) return
+  if (pending.value.length) {
+    uploading.value = true
+    try {
+      await chat.upload(pending.value.map((p) => p.file))
+    } catch (e) {
+      message.error(`上传失败:${(e as Error).message}`)
+      return
+    } finally {
+      uploading.value = false
+    }
+    clearPending()
+    previewOpen.value = true // 上传成功后直接展示预览
+  }
   question.value = ''
   try {
     await chat.ask(q)
   } catch (e) {
     message.error((e as Error).message)
+  }
+}
+
+/* ---- 气泡操作栏:撤回(仅 user 且已落库有 id)/ 复制 / 时间 ---- */
+function fmtTime(ts: number) {
+  const d = new Date(ts * 1000)
+  const hh = String(d.getHours()).padStart(2, '0')
+  const mm = String(d.getMinutes()).padStart(2, '0')
+  return `${hh}:${mm}`
+}
+
+async function onCopy(m: ChatMessage) {
+  try {
+    await navigator.clipboard.writeText(m.content)
+    message.success('已复制')
+  } catch {
+    message.warning('复制失败,请手动选择文本复制')
+  }
+}
+
+async function onRecall(m: ChatMessage) {
+  if (m.id == null) return
+  try {
+    question.value = await chat.recall(m.id) // 原文放回输入框供重新编辑
+  } catch (e) {
+    message.error(`撤回失败:${(e as Error).message}`)
   }
 }
 </script>
@@ -123,9 +187,6 @@ async function onSend() {
           预览
         </n-button>
         <span class="chat-spacer" />
-        <n-button size="small" :loading="uploading" @click="fileInput?.click()">
-          上传视频/图片
-        </n-button>
         <n-popconfirm @positive-click="onClear">
           <template #trigger>
             <n-button size="small">清空记忆</n-button>
@@ -133,14 +194,6 @@ async function onSend() {
           清空全部对话记忆?
         </n-popconfirm>
       </div>
-      <input
-        ref="fileInput"
-        type="file"
-        hidden
-        multiple
-        accept=".mp4,.avi,.mov,.mkv,.ts,.jpg,.jpeg,.png,.webp"
-        @change="onFiles"
-      />
 
       <!-- 来源预览:视频内嵌播放 / 图片缩略图(点击放大) -->
       <div v-if="previewOpen && chat.source?.files?.length" class="source-preview">
@@ -197,6 +250,21 @@ async function onSend() {
                     @click="previewUrl = u"
                   />
                 </div>
+                <!-- 操作栏:user 有撤回(仅已落库消息);复制/时间两侧都有 -->
+                <div class="msg-actions">
+                  <button
+                    v-if="m.role === 'user' && m.id != null"
+                    class="msg-action"
+                    title="撤回并重新编辑"
+                    @click="onRecall(m)"
+                  >
+                    <UiIcon name="undo" :size="12" />
+                  </button>
+                  <button class="msg-action" title="复制" @click="onCopy(m)">
+                    <UiIcon name="copy" :size="12" />
+                  </button>
+                  <span class="msg-time">{{ fmtTime(m.created_at) }}</span>
+                </div>
               </div>
               <div v-if="m.role === 'user'" class="avatar avatar-user">{{ userInitial }}</div>
             </div>
@@ -204,26 +272,52 @@ async function onSend() {
         </div>
       </n-scrollbar>
 
-      <!-- 输入区 -->
-      <div class="chat-input">
-        <n-input
-          v-model:value="question"
-          type="textarea"
-          :autosize="{ minRows: 1, maxRows: 4 }"
-          placeholder="输入问题,Enter 发送,Shift+Enter 换行"
-          @keydown.enter.exact.prevent="onSend"
+      <!-- 输入区:暂存附件区 + 「+」选择文件 + 输入框 + 停止/发送 -->
+      <div class="chat-composer">
+        <div v-if="pending.length" class="attach-list">
+          <div v-for="(a, i) in pending" :key="a.url" class="attach-item">
+            <img v-if="!a.isVideo" class="attach-thumb" :src="a.url" alt="" />
+            <span v-else class="attach-video" :title="a.file.name">
+              <UiIcon name="video" :size="14" />
+              <span class="attach-name">{{ a.file.name }}</span>
+            </span>
+            <button class="attach-remove" title="移除" @click="removeAttachment(i)">
+              <UiIcon name="close" :size="10" />
+            </button>
+          </div>
+        </div>
+        <div class="chat-input">
+          <n-button size="small" quaternary title="添加视频/图片" @click="fileInput?.click()">
+            <template #icon><UiIcon name="plus" :size="14" /></template>
+          </n-button>
+          <n-input
+            v-model:value="question"
+            type="textarea"
+            :autosize="{ minRows: 1, maxRows: 4 }"
+            placeholder="输入问题,Enter 发送,Shift+Enter 换行"
+            @keydown.enter.exact.prevent="onSend"
+          />
+          <n-button v-if="chat.sending" size="small" @click="chat.stop()">停止</n-button>
+          <n-button
+            v-else
+            type="primary"
+            size="small"
+            :loading="uploading"
+            :disabled="!question.trim() || uploading"
+            @click="onSend"
+          >
+            <template v-if="!uploading" #icon><UiIcon name="send" :size="12" /></template>
+            {{ uploading ? '上传中…' : '发送' }}
+          </n-button>
+        </div>
+        <input
+          ref="fileInput"
+          type="file"
+          hidden
+          multiple
+          accept=".mp4,.avi,.mov,.mkv,.ts,.jpg,.jpeg,.png,.webp"
+          @change="onFiles"
         />
-        <n-button v-if="chat.sending" size="small" @click="chat.stop()">停止</n-button>
-        <n-button
-          v-else
-          type="primary"
-          size="small"
-          :disabled="!question.trim()"
-          @click="onSend"
-        >
-          <template #icon><UiIcon name="send" :size="12" /></template>
-          发送
-        </n-button>
       </div>
     </section>
 
@@ -409,13 +503,107 @@ async function onSend() {
   cursor: zoom-in;
 }
 
+/* ---- 气泡操作栏(撤回/复制/时间) ---- */
+.msg-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-sm);
+  margin-top: var(--space-xs);
+  color: var(--color-text2);
+  font-size: var(--text-xs);
+}
+
+.msg-action {
+  display: inline-flex;
+  align-items: center;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--color-text2);
+  cursor: pointer;
+}
+
+.msg-action:hover {
+  color: var(--color-accent);
+}
+
+.msg-time {
+  line-height: 1;
+}
+
 /* ---- 输入区 ---- */
+.chat-composer {
+  border-top: 1px solid var(--color-border);
+}
+
 .chat-input {
   display: flex;
   align-items: flex-end;
   gap: var(--space-sm);
   padding: var(--space-sm) var(--space-lg);
-  border-top: 1px solid var(--color-border);
+}
+
+/* ---- 暂存附件区 ---- */
+.attach-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-lg) 0;
+}
+
+.attach-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.attach-thumb {
+  width: 64px;
+  height: 48px;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+}
+
+.attach-video {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  max-width: 180px;
+  padding: var(--space-xs) var(--space-sm);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-2);
+  color: var(--color-text2);
+  font-size: var(--text-xs);
+}
+
+.attach-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attach-remove {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--color-border);
+  border-radius: 50%;
+  background: var(--color-card);
+  color: var(--color-text2);
+  cursor: pointer;
+  padding: 0;
+}
+
+.attach-remove:hover {
+  color: var(--color-accent);
 }
 
 /* ---- 图片放大 ---- */

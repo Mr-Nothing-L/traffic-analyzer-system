@@ -6,7 +6,8 @@
 JSON)与压缩摘要 summary;chat_messages 表按 IP 保存消息(role:
 user|assistant|divider,think 为思考链全文,images 为产出图文件名 JSON 数组)。
 提供 get_state/set_source/set_summary/add_message/list_messages/clear/
-delete_messages_up_to;全部参数化 SQL,每函数新建连接(同 web/user_store.py
+delete_messages_up_to/delete_message_and_reply(撤回:删消息及其后的
+assistant 回复);全部参数化 SQL,每函数新建连接(同 web/user_store.py
 模式);读操作在库文件不存在时返回空结果,写操作才创建文件。
 上游:web/chat/routes.py(状态/历史接口)、web/chat/qa.py(问答读写与压缩)。
 下游:仅 SQLite 文件;DB_PATH 常量供测试 monkeypatch。
@@ -189,3 +190,33 @@ def delete_messages_up_to(
         conn.execute(
             "DELETE FROM chat_messages WHERE ip = ? AND id <= ?", (ip, msg_id)
         )
+
+
+def delete_message_and_reply(
+    ip: str, msg_id: int, db_path: Optional[Union[str, Path]] = None
+) -> bool:
+    """Delete message ``msg_id`` plus the assistant reply right after it.
+
+    The next message (by id, same ``ip``) is removed only when its role is
+    ``assistant``. Returns False when ``msg_id`` does not belong to ``ip``.
+    """
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT id FROM chat_messages WHERE ip = ? AND id = ?", (ip, msg_id)
+        ).fetchone()
+        if row is None:
+            return False
+        nxt = conn.execute(
+            "SELECT id, role FROM chat_messages WHERE ip = ? AND id > ?"
+            " ORDER BY id LIMIT 1",
+            (ip, msg_id),
+        ).fetchone()
+        ids = [msg_id]
+        if nxt is not None and nxt[1] == "assistant":
+            ids.append(int(nxt[0]))
+        placeholders = ", ".join("?" for _ in ids)
+        conn.execute(
+            f"DELETE FROM chat_messages WHERE ip = ? AND id IN ({placeholders})",
+            (ip, *ids),
+        )
+        return True

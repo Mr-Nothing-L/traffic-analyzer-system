@@ -2,11 +2,12 @@
 
 [文件说明]
 作用:快速对话路由。GET /api/chat/state 返回当前信源(display_name + 可预览
-文件 URL)与消息列表(images 转 /api/chat/files/<name> URL);POST /api/chat/upload
+文件 URL)与消息列表(含消息 id,images 转 /api/chat/files/<name> URL);POST /api/chat/upload
 接收视频(恰1个)或图片(≥1张,混合 400,扩展名白名单,单文件 ≤500MB 流式写盘,
 超限 413)写入 output/chat_uploads/incoming/ 并切换信源;POST /api/chat/ask
 SSE 流式问答(text/event-stream,异常兜底 error 事件);DELETE /api/chat/history
-清空(204);GET /api/chat/files/{name} 提供上传/产出图(限制在 chat_uploads 根内)。
+清空(204);POST /api/chat/messages/delete 撤回一条消息及其后的 assistant
+回复(非本 IP 消息 404,成功 204);GET /api/chat/files/{name} 提供上传/产出图(限制在 chat_uploads 根内)。
 状态/消息按 IP 隔离(auth._request_ip)。切换信源写 divider 消息「已切换到 …」。
 上游:web/app.py(include_router)、前端快速对话面板。
 下游:web/chat/store.py、qa.py、paths.py。
@@ -42,6 +43,10 @@ class AskRequest(BaseModel):
     question: str
 
 
+class DeleteMessageRequest(BaseModel):
+    id: int
+
+
 def _file_url(abs_path: str) -> str | None:
     """Map an absolute path under the uploads root to its /api/chat/files URL."""
     try:
@@ -66,6 +71,7 @@ def _state_payload(ip: str) -> Dict[str, Any]:
         source = {"kind": kind, "display_name": display_name, "files": file_urls}
     messages = [
         {
+            "id": m["id"],
             "role": m["role"],
             "content": m["content"],
             "think": m.get("think") or "",
@@ -160,6 +166,15 @@ def ask_chat(body: AskRequest, request: Request) -> StreamingResponse:
 @router.delete("/api/chat/history", status_code=204)
 def clear_chat_history(request: Request) -> Response:
     store.clear(_request_ip(request))
+    return Response(status_code=204)
+
+
+@router.post("/api/chat/messages/delete", status_code=204)
+def delete_chat_message(body: DeleteMessageRequest, request: Request) -> Response:
+    """Recall one message and its assistant reply (own-IP only, else 404)."""
+    ok = store.delete_message_and_reply(_request_ip(request), body.id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="message not found")
     return Response(status_code=204)
 
 

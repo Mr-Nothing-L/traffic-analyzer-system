@@ -1,6 +1,7 @@
 /** 快速对话:来源(上传视频/多图)+ 消息历史 + SSE 流式提问。
  * 后端契约:GET /api/chat/state、POST /api/chat/upload(FormData 字段 files)、
- * POST /api/chat/ask({question},SSE 流)、DELETE /api/chat/history(204)。 */
+ * POST /api/chat/ask({question},SSE 流)、DELETE /api/chat/history(204)、
+ * POST /api/chat/messages/delete({id},撤回消息及其后的 assistant 回复,204)。 */
 import { ref } from 'vue'
 import { defineStore } from 'pinia'
 import { ApiError, apiFetch } from '../api/client'
@@ -13,6 +14,8 @@ export interface ChatSource {
 }
 
 export interface ChatMessage {
+  /** 后端消息 id;流式中的气泡尚无 id(撤回按钮仅对有 id 的消息显示)。 */
+  id?: number
   role: 'user' | 'assistant' | 'divider'
   content: string
   think: string
@@ -62,7 +65,7 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   /** 上传视频/图片:FormData 走原生 fetch(apiFetch 会强制 JSON header,不能带 boundary)。 */
-  async function upload(files: FileList) {
+  async function upload(files: FileList | File[]) {
     const fd = new FormData()
     for (const f of Array.from(files)) fd.append('files', f)
     let res: Response
@@ -144,6 +147,9 @@ export const useChatStore = defineStore('chat', () => {
         }
       }
       if (errMsg) throw new Error(errMsg)
+      // 正常收尾:回拉一次状态,让刚落库的消息带上后端 id(撤回/时间需要);
+      // 失败不阻断(消息已在本地,仅缺 id)。applyState 会清掉 current,finally 的 finalizeCurrent 幂等。
+      await fetchState().catch(() => {})
     } catch (e) {
       if ((e as Error).name === 'AbortError') return // stop() 中断:静默收尾,已收到文本在 finally 落库
       throw e
@@ -161,5 +167,20 @@ export const useChatStore = defineStore('chat', () => {
     current.value = null
   }
 
-  return { source, messages, current, sending, fetchState, upload, ask, stop, clear }
+  /** 撤回一条 user 消息:后端删除该消息及其后的 assistant 回复,
+   * 成功后本地同步移除;返回被撤回消息的原文(供调用方放回输入框重新编辑)。 */
+  async function recall(id: number): Promise<string> {
+    await apiFetch('/chat/messages/delete', {
+      method: 'POST',
+      body: JSON.stringify({ id }),
+    })
+    const i = messages.value.findIndex((m) => m.id === id)
+    if (i < 0) return ''
+    const content = messages.value[i].content
+    messages.value.splice(i, 1)
+    if (messages.value[i]?.role === 'assistant') messages.value.splice(i, 1)
+    return content
+  }
+
+  return { source, messages, current, sending, fetchState, upload, ask, stop, clear, recall }
 })
