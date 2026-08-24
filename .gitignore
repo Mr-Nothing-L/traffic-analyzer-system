@@ -93,3 +93,6 @@ frontend/dist/
 
 # vitest 缓存(误生成于 src 下时)
 frontend/src/node_modules/
+vendor/
+agent/node_modules/
+agent/dist/

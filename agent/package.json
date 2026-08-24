@@ -1,0 +1,30 @@
+{
+  "name": "traffic-agent",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "TypeScript agent runtime for traffic event detection (architecture inspired by MoonshotAI/kimi-code)",
+  "imports": {
+    "#/*": "./src/kosong/*.ts"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "serve": "tsx src/server/main.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.95.2",
+    "@google/genai": "^1.49.0",
+    "openai": "^6.34.0",
+    "zod": "^4.3.6",
+    "zod-to-json-schema": "^3.25.2"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "~5.8.0",
+    "vitest": "^4.1.10"
+  }
+}
