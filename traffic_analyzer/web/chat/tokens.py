@@ -16,7 +16,8 @@ from typing import List
 
 CONTEXT_LIMIT = 256_000
 COMPACT_AT = 200_000
-IMAGE_TOKENS_EST = 1500
+# 1080p 帧 ≈ (1920/28)×(1080/28) ≈ 68×39 ≈ 2600 patch tokens(vLLM 按 28×28 patch 计数)。
+IMAGE_TOKENS_EST = 2600
 
 _ASCII_RUN = re.compile(r"[\x00-\x7f]+")
 

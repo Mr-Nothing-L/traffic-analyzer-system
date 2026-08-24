@@ -4,10 +4,11 @@
 作用:快速对话问答编排。ask(ip, question) 为 SSE 事件生成器:maybe_compact
 (超 COMPACT_AT 时用主用 provider 非流式压缩旧消息为中文摘要)→ classify
 (主用 provider 非流式判定 event_analysis|content_query|chitchat,失败兜底
-content_query)→ 按信源组装上下文(workspace_video: 均匀采样≤8帧(单 prompt
-图片上限 10,留余量),证据帧
+content_query)→ 按信源组装上下文(workspace_video: 智能自适应抽帧,上限
+.env CHAT_MAX_VIDEO_FRAMES(缺省 30;约 1 fps 候选、96x54 灰度相邻差自适应
+阈值,静止段稀疏/动态段密集),证据帧
 优先,analysis/<stem>/<stem>_evidence.json 的 detected 事件摘要注入系统
-prompt;upload_video 同抽帧;upload_images ≤8 张;none/chitchat 不带图)→
+prompt;upload_video 同抽帧;upload_images ≤ CHAT_MAX_VIDEO_FRAMES 张;none/chitchat 不带图)→
 历史(summary + 近10轮文本)→ 流式调用(provider 按 .env 顺序 failover,
 首块前失败切下一个,流式中失败 yield error 结束)→ event_analysis 时解析
 尾部 ```json boxes 块并用 PIL 画框落盘(output/chat_uploads/<sha1(ip)[:12]>/)→
@@ -27,6 +28,7 @@ import hashlib
 import io
 import json
 import logging
+import os
 import re
 import uuid
 import zlib
@@ -44,15 +46,42 @@ from traffic_analyzer.utils.image_drawing import (
 )
 from traffic_analyzer.web.chat import paths, store, tokens
 from traffic_analyzer.web.frames import read_frame_jpeg, read_video_meta
+from traffic_analyzer.web.llm_settings import _locate_env
 
 logger = logging.getLogger(__name__)
 
 _CONFIG_DIR = Path(__file__).resolve().parents[2] / "config"
 
-_MAX_VIDEO_FRAMES = 8  # 服务端单 prompt 图片上限 10,抽帧留余量
-_MAX_UPLOAD_IMAGES = 8  # 同样 ≤10 上限
+_DEFAULT_MAX_VIDEO_FRAMES = 30  # CHAT_MAX_VIDEO_FRAMES 未配置时的缺省(30 帧 × 2600 ≈ 78k tokens,256k 预算吃得下)
 _HISTORY_TURNS = 10  # 近 10 轮 user/assistant 文本
 _EVIDENCE_SUMMARY_CHARS = 2000
+
+
+def _max_frames() -> int:
+    """视频抽帧/上传图片上限:.env 的 CHAT_MAX_VIDEO_FRAMES,缺省 30。
+
+    .env 不一定进了 os.environ,优先走 llm_settings._locate_env 读文件,
+    再兜底 os.environ(环境变量注入的部署);解析失败/非正数回退缺省。
+    """
+    raw: Optional[str] = None
+    try:
+        raw = _locate_env()[1].get("CHAT_MAX_VIDEO_FRAMES")
+    except Exception as exc:
+        logger.warning("[chat] read CHAT_MAX_VIDEO_FRAMES failed: %s", exc)
+    if not raw:
+        raw = os.getenv("CHAT_MAX_VIDEO_FRAMES")
+    try:
+        value = int(str(raw).strip()) if raw else 0
+    except ValueError:
+        value = 0
+    return value if value > 0 else _DEFAULT_MAX_VIDEO_FRAMES
+
+# 智能抽帧参数:候选约 1 fps(长视频放大步长,候选 ≤240);96x54 灰度相邻差
+# 自适应阈值(中位数 × 0.5,下限 6.0);至少保留 3 帧(不足用均匀帧补齐)。
+_SMART_CANDIDATE_MAX = 240
+_SMART_DIFF_FLOOR = 6.0
+_SMART_DIFF_RATIO = 0.5
+_SMART_MIN_KEPT = 3
 
 # 画框颜色调色板,按 label 哈希取色(同 label 恒同色)。
 _PALETTE = (
@@ -361,6 +390,104 @@ def _uniform_indices(frame_count: int, limit: int) -> List[int]:
     return sorted({min(frame_count - 1, int(i * step)) for i in range(limit)})
 
 
+def _smart_frame_indices(
+    video_path: Path, frame_count: int, fps: float, limit: int = 10
+) -> List[int]:
+    """Scene-adaptive frame indices: static spans sampled sparsely, dynamic densely.
+
+    Candidates at ~1 fps (step enlarged so candidates ≤ 240 on long videos),
+    read sequentially (grab-skip between candidates instead of repeated
+    seeks) and downscaled to 96x54 gray. First frame always kept; a later
+    candidate is kept only when its mean-abs-diff to the last KEPT frame
+    reaches the adaptive threshold (median adjacent diff × 0.5, floored at
+    6.0). Over-``limit`` results are pruned by repeatedly dropping the frame
+    with the smallest neighbor-diff sum (endpoints kept for time coverage);
+    fewer than 3 are padded with uniform frames. Returns ascending indices.
+    """
+    if frame_count <= 0:
+        return []
+    if frame_count <= limit:
+        return list(range(frame_count))
+    step = max(1, int(fps)) if fps and fps > 1 else 25
+    if -(-frame_count // step) > _SMART_CANDIDATE_MAX:
+        step = -(-frame_count // _SMART_CANDIDATE_MAX)
+    candidates = [min(frame_count - 1, i * step) for i in range(-(-frame_count // step))]
+
+    import cv2
+    import numpy as np
+
+    cand_frames: List[int] = []
+    smalls: List[Any] = []
+    cap = cv2.VideoCapture(str(video_path))
+    try:
+        if not cap.isOpened():
+            logger.warning("[chat] smart sample: cannot open %s; uniform fallback", video_path)
+            return _uniform_indices(frame_count, limit)
+        pos = 0
+        for idx in candidates:
+            while pos < idx:  # grab 只解包不解码,比逐候选 seek 便宜
+                if not cap.grab():
+                    pos = idx
+                    break
+                pos += 1
+            ok, frame = cap.read()
+            if not ok:
+                break
+            pos = idx + 1
+            cand_frames.append(idx)
+            smalls.append(
+                cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), (96, 54))
+            )
+    finally:
+        cap.release()
+
+    if not smalls:
+        logger.warning("[chat] smart sample: no frames read %s; uniform fallback", video_path)
+        return _uniform_indices(frame_count, limit)
+    arrs = [s.astype(np.int16) for s in smalls]
+
+    def diff(a: int, b: int) -> float:
+        return float(np.abs(arrs[a] - arrs[b]).mean())
+
+    adjacent = [diff(i, i - 1) for i in range(1, len(arrs))]
+    threshold = _SMART_DIFF_FLOOR
+    if adjacent:
+        threshold = max(_SMART_DIFF_FLOOR, float(np.median(adjacent)) * _SMART_DIFF_RATIO)
+
+    kept = [0]
+    for i in range(1, len(arrs)):
+        if diff(i, kept[-1]) >= threshold:
+            kept.append(i)
+
+    while len(kept) > limit:  # 端点保留(时间覆盖),删邻居差异和最小的帧
+        costs = [
+            (diff(kept[j], kept[j - 1]) + diff(kept[j], kept[j + 1]), j)
+            for j in range(1, len(kept) - 1)
+        ]
+        if not costs:
+            break
+        del kept[min(costs)[1]]
+
+    target_min = min(_SMART_MIN_KEPT, len(cand_frames))
+    if len(kept) < target_min:
+        for i in _uniform_indices(len(cand_frames), target_min):
+            if i not in kept:
+                kept.append(i)
+            if len(kept) >= target_min:
+                break
+        kept.sort()
+
+    chosen = sorted(cand_frames[i] for i in kept)
+    logger.info(
+        "[chat] smart sample: video=%s candidates=%d chosen=%d limit=%d",
+        video_path,
+        len(cand_frames),
+        len(chosen),
+        limit,
+    )
+    return chosen
+
+
 def _evidence_summary(evidence_path: Path) -> Tuple[str, List[int]]:
     """Detected-event summary (truncated) plus evidence frame indices."""
     try:
@@ -389,17 +516,20 @@ def _evidence_summary(evidence_path: Path) -> Tuple[str, List[int]]:
 def _sample_video_frames(
     video_path: Path, priority_frames: List[int]
 ) -> List[bytes]:
-    """Uniform ≤8 frames; evidence frames are kept preferentially."""
+    """Smart adaptive sampling (≤ CHAT_MAX_VIDEO_FRAMES, default 30); evidence first."""
     meta = read_video_meta(video_path)
     if meta is None:
         logger.warning("[chat] video metadata unreadable: %s", video_path)
         return []
     frame_count = int(meta["frame_count"])
-    uniform = _uniform_indices(frame_count, _MAX_VIDEO_FRAMES)
+    limit = _max_frames()
+    smart = _smart_frame_indices(
+        video_path, frame_count, float(meta.get("fps") or 0), limit
+    )
     priority = sorted({i for i in priority_frames if 0 <= i < frame_count})
-    chosen = priority[: _MAX_VIDEO_FRAMES]
-    for idx in uniform:
-        if len(chosen) >= _MAX_VIDEO_FRAMES:
+    chosen = priority[:limit]
+    for idx in smart:
+        if len(chosen) >= limit:
             break
         if idx not in chosen:
             chosen.append(idx)
@@ -442,7 +572,7 @@ def _gather_context(state: Dict[str, Any], intent: str) -> Tuple[List[bytes], st
             return _sample_video_frames(Path(files[0]), []), ""
         if kind == "upload_images":
             images: List[bytes] = []
-            for f in (ref.get("files") or [])[:_MAX_UPLOAD_IMAGES]:
+            for f in (ref.get("files") or [])[: _max_frames()]:
                 try:
                     images.append(Path(f).read_bytes())
                 except OSError as exc:
@@ -564,7 +694,7 @@ def maybe_compact(ip: str) -> None:
     for m in messages:
         texts.append(m["content"])
         texts.append(m.get("think") or "")
-    est = tokens.estimate_request(texts, _MAX_VIDEO_FRAMES)
+    est = tokens.estimate_request(texts, _max_frames())
     if est <= tokens.COMPACT_AT:
         return
     keep = _HISTORY_TURNS * 2

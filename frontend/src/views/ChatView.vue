@@ -185,13 +185,24 @@ const lastThinkLine = (think: string) =>
     .filter((l) => l.trim())
     .pop() || ''
 
-/* ---- 消息列表:历史 + 流式中气泡;新增/增长时自动滚底 ---- */
+/* ---- 消息列表:历史 + 流式中气泡;贴底粘性(stick-to-bottom):
+ * 上翻 >80px 停止跟随(阅读思考过程不被拽回),回到底部 ≤80px 恢复跟随 ---- */
 const scrollbar = ref<InstanceType<typeof NScrollbar> | null>(null)
+const stickToBottom = ref(true)
 const displayMessages = computed(() => {
   const arr = [...chat.messages]
   if (chat.current) arr.push(chat.current)
   return arr
 })
+
+function onScroll(ev: Event) {
+  const el = ev.target as HTMLElement
+  stickToBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight <= 80
+}
+
+function scrollToBottom() {
+  scrollbar.value?.scrollTo({ top: Number.MAX_SAFE_INTEGER })
+}
 
 watch(
   () => [
@@ -201,8 +212,9 @@ watch(
     chat.current?.images.length,
   ],
   async () => {
+    if (!stickToBottom.value) return
     await nextTick()
-    scrollbar.value?.scrollTo({ top: Number.MAX_SAFE_INTEGER })
+    scrollToBottom()
   },
 )
 
@@ -211,6 +223,9 @@ onMounted(async () => {
   window.addEventListener('drop', preventWindowDrop)
   try {
     await chat.fetchState()
+    stickToBottom.value = true
+    await nextTick()
+    scrollToBottom() // 进入页面初始滚到底
   } catch (e) {
     message.error(`加载对话状态失败:${(e as Error).message}`)
   }
@@ -252,6 +267,9 @@ async function onSend() {
     clearPending()
   }
   question.value = ''
+  stickToBottom.value = true // 自己发消息:强制跟随到底
+  await nextTick()
+  scrollToBottom()
   try {
     await chat.ask(q, sentUrls)
   } catch (e) {
@@ -313,7 +331,7 @@ async function onRecall(m: ChatMessage) {
       </div>
 
       <!-- 消息列表:微信式布局(头像 + 气泡);padding 放在 inner 上,不依赖 n-scrollbar 根元素 -->
-      <n-scrollbar ref="scrollbar" class="chat-scroll">
+      <n-scrollbar ref="scrollbar" class="chat-scroll" @scroll="onScroll">
         <div class="chat-scroll-inner">
           <div v-if="!displayMessages.length" class="chat-empty">
             上传视频/图片,然后开始提问
