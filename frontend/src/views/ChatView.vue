@@ -1,6 +1,7 @@
 <script setup lang="ts">
 /** 快速对话整卡:来源条(预览/清空记忆)+ 消息列表(SSE 流式气泡,带撤回/复制/时间)
- * + 输入区(「+」暂存附件随消息一同上传、Enter 发送 / Shift+Enter 换行 / 发送中可停止)。
+ * + 输入区(「+」/ Ctrl+V 粘贴 / 拖拽三种方式暂存附件随消息一同上传、
+ * Enter 发送 / Shift+Enter 换行 / 发送中可停止)。
  * 与数据看板同模式:TreeView 子路由,整卡替换主区;状态在 stores/chat.ts,组件只接线。 */
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import {
@@ -39,21 +40,75 @@ const pending = ref<PendingFile[]>([])
 const VIDEO_EXT = ['.mp4', '.avi', '.mov', '.mkv', '.ts']
 const isVideoFile = (f: File) => VIDEO_EXT.some((e) => f.name.toLowerCase().endsWith(e))
 
+/** 公共入口(「+」选择 / Ctrl+V 粘贴 / 拖拽均走这里):
+ * 校验(视频恰 1 个且不能与图片混选,与后端一致,合并已暂存一起判)→ 加入 pending。
+ * 违规 message.warning 且不予暂存;返回是否暂存成功。 */
+function stageFiles(files: Iterable<File>): boolean {
+  const list = Array.from(files)
+  if (!list.length) return false
+  const all = [...pending.value.map((p) => p.file), ...list]
+  const videos = all.filter(isVideoFile)
+  if (videos.length && (videos.length !== 1 || videos.length !== all.length)) {
+    message.warning('视频只能选 1 个,且不能与图片混选')
+    return false
+  }
+  for (const f of list) {
+    pending.value.push({ file: f, url: URL.createObjectURL(f), isVideo: isVideoFile(f) })
+  }
+  return true
+}
+
 function onFiles(ev: Event) {
   const input = ev.target as HTMLInputElement
   const files = Array.from(input.files || [])
   input.value = '' // 允许重复选择同一文件再次触发 change
-  if (!files.length) return
-  // 预校验(与后端一致):视频恰 1 个且不能与图片混选;违规不予暂存
-  const all = [...pending.value.map((p) => p.file), ...files]
-  const videos = all.filter(isVideoFile)
-  if (videos.length && (videos.length !== 1 || videos.length !== all.length)) {
-    message.warning('视频只能选 1 个,且不能与图片混选')
-    return
-  }
-  for (const f of files) {
-    pending.value.push({ file: f, url: URL.createObjectURL(f), isVideo: isVideoFile(f) })
-  }
+  stageFiles(files)
+}
+
+/* ---- Ctrl+V 粘贴:有文件(如截图)才拦截,纯文本粘贴不受影响 ---- */
+function onPaste(ev: ClipboardEvent) {
+  const files = ev.clipboardData?.files
+  if (!files?.length) return
+  ev.preventDefault()
+  if (stageFiles(files)) message.success('已添加附件')
+}
+
+/* ---- 拖拽上传:计数器防子元素进出导致的 dragenter/dragleave 抖动 ---- */
+const dragOver = ref(false)
+let dragDepth = 0
+
+const hasDragFiles = (ev: DragEvent) =>
+  Array.from(ev.dataTransfer?.types || []).includes('Files')
+
+function onDragEnter(ev: DragEvent) {
+  if (!hasDragFiles(ev)) return
+  ev.preventDefault()
+  dragDepth += 1
+  dragOver.value = true
+}
+
+function onDragOver(ev: DragEvent) {
+  if (!hasDragFiles(ev)) return
+  ev.preventDefault() // 必须,否则浏览器不会触发 drop
+}
+
+function onDragLeave(ev: DragEvent) {
+  if (!hasDragFiles(ev)) return
+  dragDepth = Math.max(0, dragDepth - 1)
+  if (dragDepth === 0) dragOver.value = false
+}
+
+function onDrop(ev: DragEvent) {
+  ev.preventDefault()
+  dragDepth = 0
+  dragOver.value = false
+  const files = ev.dataTransfer?.files
+  if (files?.length && stageFiles(files)) message.success('已添加附件')
+}
+
+/** 卡片外区域拖放文件时阻止浏览器默认的导航打开行为。 */
+function preventWindowDrop(ev: Event) {
+  ev.preventDefault()
 }
 
 function removeAttachment(i: number) {
@@ -95,6 +150,8 @@ watch(
 )
 
 onMounted(async () => {
+  window.addEventListener('dragover', preventWindowDrop)
+  window.addEventListener('drop', preventWindowDrop)
   try {
     await chat.fetchState()
   } catch (e) {
@@ -103,6 +160,8 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  window.removeEventListener('dragover', preventWindowDrop)
+  window.removeEventListener('drop', preventWindowDrop)
   chat.stop() // 离开页面中断在途流
   clearPending() // 释放全部 objectURL
 })
@@ -172,7 +231,17 @@ async function onRecall(m: ChatMessage) {
 
 <template>
   <div class="chat-page">
-    <section class="chat-card">
+    <section
+      class="chat-card"
+      @dragenter="onDragEnter"
+      @dragover="onDragOver"
+      @dragleave="onDragLeave"
+      @drop="onDrop"
+    >
+      <!-- 拖拽提示覆盖层(pointer-events: none,不干扰 dragleave 计数) -->
+      <div v-show="dragOver" class="drop-overlay">
+        松开鼠标,将图片/视频添加为附件
+      </div>
       <!-- 来源条 -->
       <div class="chat-source">
         <UiIcon name="chat" :size="14" />
@@ -272,8 +341,8 @@ async function onRecall(m: ChatMessage) {
         </div>
       </n-scrollbar>
 
-      <!-- 输入区:暂存附件区 + 「+」选择文件 + 输入框 + 停止/发送 -->
-      <div class="chat-composer">
+      <!-- 输入区:暂存附件区 + 「+」选择文件 + 输入框 + 停止/发送;粘贴事件冒泡到此处统一处理 -->
+      <div class="chat-composer" @paste="onPaste">
         <div v-if="pending.length" class="attach-list">
           <div v-for="(a, i) in pending" :key="a.url" class="attach-item">
             <img v-if="!a.isVideo" class="attach-thumb" :src="a.url" alt="" />
@@ -341,11 +410,29 @@ async function onRecall(m: ChatMessage) {
   min-height: 0;
   display: flex;
   flex-direction: column;
+  position: relative; /* 拖拽覆盖层定位基准 */
   background: var(--color-card);
   border: 1px solid var(--color-border);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
   overflow: hidden;
+}
+
+/* ---- 拖拽提示覆盖层 ---- */
+.drop-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px dashed var(--color-accent);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--color-card) 82%, transparent);
+  color: var(--color-accent);
+  font-size: var(--text-md);
+  font-weight: 600;
+  pointer-events: none;
 }
 
 /* ---- 来源条 ---- */
