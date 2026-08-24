@@ -138,8 +138,25 @@ const fileName = (u: string) => {
   const i = base.indexOf('_')
   return i >= 0 ? base.slice(i + 1) : base
 }
-/** 视频播放走 /api/chat/video/(Range + 按需转码,H.265/.ts 浏览器原生放不了)。 */
-const videoStreamUrl = (u: string) => u.replace('/api/chat/files/', '/api/chat/video/')
+/** 视频播放走 /api/chat/video/(Range + 按需转码,H.265/.ts 浏览器原生放不了)。
+ * 幂等:已是 /api/chat/video/ 的 URL 原样返回;仅转换 /api/chat/files/ 前缀。 */
+const videoStreamUrl = (u: string) =>
+  u.includes('/api/chat/video/') ? u : u.replace('/api/chat/files/', '/api/chat/video/')
+
+/* ---- 视频播放 modal:首次播放 mpeg4/HEVC 需等整片转码,给加载遮罩 ---- */
+const videoLoading = ref(false)
+function openVideo(u: string) {
+  previewVideo.value = videoStreamUrl(u)
+  videoLoading.value = true // 立即显示遮罩,不等 loadstart(转码时首包很慢)
+}
+function closeVideo() {
+  previewVideo.value = null
+  videoLoading.value = false
+}
+function onVideoError() {
+  videoLoading.value = false
+  message.error('视频加载失败,请稍后重试')
+}
 
 /* ---- 来源条标题:第一个 user 问题的缩略;无问题时显示「快速对话」 ---- */
 const chatTitle = computed(() => {
@@ -323,9 +340,10 @@ async function onRecall(m: ChatMessage) {
                     <button
                       v-for="u in vidOnly(m.images)"
                       :key="u"
+                      type="button"
                       class="vid-chip"
                       :title="fileName(u)"
-                      @click="previewVideo = videoStreamUrl(u)"
+                      @click="openVideo(u)"
                     >
                       <UiIcon name="video" :size="14" />
                       <span class="vid-name">{{ fileName(u) }}</span>
@@ -440,9 +458,19 @@ async function onRecall(m: ChatMessage) {
       <img v-if="previewUrl" class="preview-img" :src="previewUrl" alt="" @click="previewUrl = null" />
     </n-modal>
 
-    <!-- 视频播放预览(user 气泡内的视频 chip) -->
-    <n-modal :show="!!previewVideo" @update:show="previewVideo = null">
-      <video v-if="previewVideo" class="preview-video" :src="previewVideo" controls autoplay />
+    <!-- 视频播放预览(user 气泡内的视频 chip):转码期间显示加载遮罩 -->
+    <n-modal :show="!!previewVideo" @update:show="closeVideo">
+      <div v-if="previewVideo" class="video-wrap">
+        <video
+          class="preview-video"
+          :src="previewVideo"
+          controls
+          autoplay
+          @canplay="videoLoading = false"
+          @error="onVideoError"
+        />
+        <div v-if="videoLoading" class="video-loading">转码/加载中…</div>
+      </div>
     </n-modal>
   </div>
 </template>
@@ -622,8 +650,9 @@ async function onRecall(m: ChatMessage) {
   line-height: 1.6;
 }
 
-/* 收起时的单行流式指示:最新一行,溢出省略号 */
+/* 收起时的单行流式指示:固定宽度(气泡不随文本长短伸缩),溢出省略号 */
 .think-line {
+  width: min(320px, 60vw);
   color: var(--color-text2);
   font-size: var(--text-sm);
   line-height: 1.6;
@@ -713,12 +742,18 @@ async function onRecall(m: ChatMessage) {
 }
 
 .img-group img {
-  width: 120px;
-  height: 80px;
+  width: 300px;
+  height: 190px;
   object-fit: cover;
   border-radius: var(--radius-sm);
   border: 1px solid var(--color-border);
   cursor: zoom-in;
+}
+
+/* user 附件缩略图适度放大,保持小于 assistant 结果图(规则在后覆盖) */
+.img-group-top img {
+  width: 160px;
+  height: 107px;
 }
 
 /* ---- user 气泡内的视频附件 chip ---- */
@@ -867,8 +902,27 @@ async function onRecall(m: ChatMessage) {
 }
 
 /* ---- 视频播放 ---- */
+.video-wrap {
+  position: relative;
+  min-width: min(480px, calc(100vw - 96px));
+  min-height: 180px; /* 转码等待期间遮罩有可见区域 */
+}
+
+.video-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  background: rgb(0 0 0 / 55%);
+  color: #fff;
+  font-size: var(--text-sm);
+  pointer-events: none; /* 不挡 video controls */
+}
+
 .preview-video {
-  max-width: calc(100vw - 96px);
+  width: min(720px, calc(100vw - 96px));
   max-height: calc(100vh - 96px);
   border-radius: var(--radius-sm);
   background: #000;
