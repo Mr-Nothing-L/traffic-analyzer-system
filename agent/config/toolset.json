@@ -1,0 +1,154 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "toolset.json",
+  "title": "检测场景工具清单",
+  "description": "交通事件检测 agent 的可用工具清单。每个工具含:给模型看的描述草案(description)、何时用(when_to_use)、参数 JSON Schema(parameters)、返回值(returns)、限制(limits)。视频类工具(video_meta/extract_frames/draw_boxes)由 TS 层经 HTTP 调用 Python 工具服务实现;submit_detection 为结构化输出契约;read_file/write_file/run_script 为沙盒内工具。",
+  "tools": [
+    {
+      "name": "video_meta",
+      "description": "获取视频文件的元信息:时长(秒)、fps、总帧数、分辨率。",
+      "when_to_use": "分析任何视频的第一步。先拿真实元信息,再据时长规划抽帧密度;禁止在调用本工具前假设视频长度。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "video_path": { "type": "string", "description": "视频文件绝对路径" }
+        },
+        "required": ["video_path"]
+      },
+      "returns": "{frame_count, fps, duration_sec, width, height};视频无法打开时返回 {error}",
+      "limits": [
+        "只读操作,不修改视频文件",
+        "duration_sec 可能为 null(fps 不可用时)"
+      ]
+    },
+    {
+      "name": "extract_frames",
+      "description": "从视频中按时间范围均匀抽帧,保存为 JPEG 文件,返回文件路径和对应时间戳(秒)。start_sec/end_sec 为秒,会自动换算为帧号。",
+      "when_to_use": "需要查看画面时。短视频均匀覆盖全片;长视频先大范围粗采样建立全局理解,再对可疑时段缩小范围精细采样。返回的帧会作为图片输入给你逐张观察。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "video_path": { "type": "string", "description": "视频文件绝对路径" },
+          "start_sec": { "type": "number", "description": "起始秒", "minimum": 0 },
+          "end_sec": { "type": "number", "description": "结束秒(含),需 >= start_sec", "minimum": 0 },
+          "max_frames": { "type": "integer", "description": "最多抽取帧数,默认 4,上限 8", "default": 4, "minimum": 1, "maximum": 8 }
+        },
+        "required": ["video_path", "start_sec", "end_sec"]
+      },
+      "returns": "{paths: string[], timestamps: number[], fps};空区间或视频无法打开时返回 {error}",
+      "limits": [
+        "单次调用最多 8 帧;需要更密覆盖时分多次调用不同时间区间",
+        "start_sec/end_sec 越界会被截断到实际帧范围",
+        "帧文件写入沙盒帧目录,不要假设其目录位置,以返回的 paths 为准"
+      ]
+    },
+    {
+      "name": "draw_boxes",
+      "description": "在图片上绘制归一化 xyxy 边界框(0~1 浮点)并标注标签,返回标注后图片的输出路径。",
+      "when_to_use": "对疑似目标做锚定核对时:远距离、过小、运动模糊或拿不准的目标(如远处行人/摩托车、车道内小异物),在帧上框出你判断的位置,生成标注图后再看一次,核对类别与位置是否成立。也用于为证据帧生成可视化标注。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "image_path": { "type": "string", "description": "输入图片路径(通常来自 extract_frames 的 paths)" },
+          "boxes": {
+            "type": "array",
+            "description": "归一化 xyxy 框列表,如 [[0.1, 0.2, 0.3, 0.4]]",
+            "items": {
+              "type": "array",
+              "items": { "type": "number", "minimum": 0, "maximum": 1 },
+              "minItems": 4,
+              "maxItems": 4
+            }
+          },
+          "labels": {
+            "type": "array",
+            "description": "与 boxes 一一对应的标签(如 [\"疑似行人\"])",
+            "items": { "type": "string" }
+          }
+        },
+        "required": ["image_path", "boxes", "labels"]
+      },
+      "returns": "{output_path, n_boxes};box 格式错误时返回 {error}",
+      "limits": [
+        "坐标必须是 0~1 归一化 xyxy,越界会被截断到图像边缘",
+        "boxes 与 labels 数量应一致;labels 缺失时自动使用 obj0/obj1...",
+        "不修改原图,输出为新文件"
+      ]
+    },
+    {
+      "name": "submit_detection",
+      "description": "提交本次检测的最终结构化结果:逐事件判定(events)、11 位二进制编码(binary_encoding)、正常标志(normal)与中文 Markdown 报告(report_markdown)。",
+      "when_to_use": "分析全部完成后调用,且每次分析恰好调用一次。这是唯一有效输出——禁止只在文本回复里给结论。",
+      "parameters": { "$ref": "./submit_detection.schema.json" },
+      "returns": "{accepted: true} 或 {accepted: false, errors: [...]}(schema 校验失败,需修正后重新调用)",
+      "limits": [
+        "参数必须符合 submit_detection.schema.json;位 9 恒为 0 由正则强制",
+        "binary_encoding、normal 与 events 的 detected 必须互相一致(运行时校验,不一致会被拒绝)",
+        "detected=true 的事件 evidence_frames 不得为空",
+        "提交后本轮分析即结束,不再进行其他工具调用"
+      ]
+    },
+    {
+      "name": "read_file",
+      "description": "读取沙盒工作区内文本文件的内容。",
+      "when_to_use": "查看之前写入的笔记、脚本或中间结果时。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string", "description": "文件路径(相对沙盒工作区,或其内的绝对路径)" }
+        },
+        "required": ["path"]
+      },
+      "returns": "{content} 或 {error}",
+      "limits": [
+        "仅限沙盒工作区内路径,越界访问会被硬性拒绝",
+        "敏感文件(.env、私钥、credentials 等)不可读",
+        "仅文本文件;二进制/超大文件可能被拒绝或截断"
+      ]
+    },
+    {
+      "name": "write_file",
+      "description": "在沙盒工作区内写入文本文件(新建或覆盖)。",
+      "when_to_use": "记录分析笔记、编写辅助脚本(如多帧像素对比)、保存中间结构化结果时。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string", "description": "文件路径(相对沙盒工作区,或其内的绝对路径)" },
+          "content": { "type": "string", "description": "要写入的完整文本内容" }
+        },
+        "required": ["path", "content"]
+      },
+      "returns": "{path, bytes_written} 或 {error}",
+      "limits": [
+        "仅限沙盒工作区内路径,越界写入会被硬性拒绝",
+        "敏感文件名(.env、私钥、credentials 等)不可写",
+        "覆盖已有文件前先用 read_file 确认不会误毁有用内容"
+      ]
+    },
+    {
+      "name": "run_script",
+      "description": "在沙盒内执行一个脚本文件并返回其标准输出/标准错误。",
+      "when_to_use": "需要程序化批量处理时(如对多帧做差异对比、统计时间戳间隔)。简单判断优先直接看图,不要为了用脚本而用脚本。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string", "description": "脚本文件路径(沙盒内,需先用 write_file 创建)" },
+          "args": {
+            "type": "array",
+            "description": "命令行参数列表",
+            "items": { "type": "string" },
+            "default": []
+          },
+          "timeout_sec": { "type": "integer", "description": "超时秒数,默认 60", "default": 60, "minimum": 1, "maximum": 300 }
+        },
+        "required": ["path"]
+      },
+      "returns": "{exit_code, stdout, stderr} 或 {error}",
+      "limits": [
+        "仅执行沙盒工作区内的脚本,越界路径会被硬性拒绝",
+        "无网络访问;不得修改沙盒外的任何文件或全局环境",
+        "受 timeout_sec 限制,超时会被终止"
+      ]
+    }
+  ]
+}
