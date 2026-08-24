@@ -1,14 +1,13 @@
 <script setup lang="ts">
-/** 快速对话整卡:来源条(来源名/清空记忆)+ 消息列表(SSE 流式气泡,附件随 user
- * 消息进气泡:图片缩略图/视频 chip 在文字上方,带撤回/复制/时间操作栏)
+/** 快速对话整卡:来源条(会话标题 = 首个问题缩略/清空记忆)+ 消息列表(SSE 流式气泡,
+ * 附件随 user 消息进气泡:图片缩略图/视频 chip 在文字上方;assistant 正文 markdown
+ * 渲染;思考过程折叠块收起时单行流式指示;带撤回/复制/时间操作栏)
  * + 输入区(「+」/ Ctrl+V 粘贴 / 拖拽三种方式暂存附件随消息一同上传、
  * Enter 发送 / Shift+Enter 换行 / 发送中可停止)。
  * 与数据看板同模式:TreeView 子路由,整卡替换主区;状态在 stores/chat.ts,组件只接线。 */
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import {
   NButton,
-  NCollapse,
-  NCollapseItem,
   NInput,
   NModal,
   NPopconfirm,
@@ -18,6 +17,7 @@ import {
 import { useChatStore } from '../stores/chat'
 import type { ChatMessage } from '../stores/chat'
 import { useAppStore } from '../stores/app'
+import { mdToHtml } from '../utils/markdown'
 import UiIcon from '../components/UiIcon.vue'
 
 const chat = useChatStore()
@@ -132,7 +132,36 @@ const previewVideo = ref<string | null>(null)
 const isVideoUrl = (u: string) => VIDEO_EXT.some((e) => u.toLowerCase().endsWith(e))
 const imgOnly = (images: string[]) => images.filter((u) => !isVideoUrl(u))
 const vidOnly = (images: string[]) => images.filter(isVideoUrl)
-const fileName = (u: string) => u.split('/').pop() || u
+/** 落盘名 <uuid>_<原名>:显示时剥掉 uuid 前缀(取第一个 _ 之后,无则全显,兼容历史文件)。 */
+const fileName = (u: string) => {
+  const base = u.split('/').pop() || u
+  const i = base.indexOf('_')
+  return i >= 0 ? base.slice(i + 1) : base
+}
+/** 视频播放走 /api/chat/video/(Range + 按需转码,H.265/.ts 浏览器原生放不了)。 */
+const videoStreamUrl = (u: string) => u.replace('/api/chat/files/', '/api/chat/video/')
+
+/* ---- 来源条标题:第一个 user 问题的缩略;无问题时显示「快速对话」 ---- */
+const chatTitle = computed(() => {
+  const first = chat.messages.find((m) => m.role === 'user')
+  if (!first) return '快速对话'
+  const t = first.content.trim().replace(/\s+/g, ' ')
+  return t.length > 24 ? `${t.slice(0, 24)}…` : t
+})
+
+/* ---- 思考过程折叠块:每条消息独立展开状态;折叠时显示最新一行(流式实时) ---- */
+const thinkOpen = reactive(new Set<string>())
+const thinkKey = (m: ChatMessage, i: number) => (m.id != null ? `id-${m.id}` : `idx-${i}`)
+function toggleThink(m: ChatMessage, i: number) {
+  const k = thinkKey(m, i)
+  if (thinkOpen.has(k)) thinkOpen.delete(k)
+  else thinkOpen.add(k)
+}
+const lastThinkLine = (think: string) =>
+  think
+    .split('\n')
+    .filter((l) => l.trim())
+    .pop() || ''
 
 /* ---- 消息列表:历史 + 流式中气泡;新增/增长时自动滚底 ---- */
 const scrollbar = ref<InstanceType<typeof NScrollbar> | null>(null)
@@ -248,12 +277,10 @@ async function onRecall(m: ChatMessage) {
       <div v-show="dragOver" class="drop-overlay">
         松开鼠标,将图片/视频添加为附件
       </div>
-      <!-- 来源条 -->
+      <!-- 来源条:标题 = 第一个问题的缩略 -->
       <div class="chat-source">
         <UiIcon name="chat" :size="14" />
-        <span class="chat-source-name" :title="chat.source?.display_name || ''">
-          {{ chat.source ? chat.source.display_name : '未选择视频/图片' }}
-        </span>
+        <span class="chat-source-name" :title="chatTitle">{{ chatTitle }}</span>
         <span class="chat-spacer" />
         <n-popconfirm @positive-click="onClear">
           <template #trigger>
@@ -276,11 +303,20 @@ async function onRecall(m: ChatMessage) {
                 <UiIcon name="chip" :size="18" />
               </div>
               <div class="bubble">
-                <n-collapse v-if="m.role === 'assistant' && m.think" class="think">
-                  <n-collapse-item title="思考过程" name="think">
-                    <div class="think-text">{{ m.think }}</div>
-                  </n-collapse-item>
-                </n-collapse>
+                <!-- 思考过程:自控折叠;收起时单行显示最新思考(流式实时),展开显示全文 -->
+                <div v-if="m.role === 'assistant' && m.think" class="think">
+                  <button class="think-head" @click="toggleThink(m, i)">
+                    <UiIcon
+                      name="up"
+                      :size="10"
+                      class="think-caret"
+                      :class="{ open: thinkOpen.has(thinkKey(m, i)) }"
+                    />
+                    <span>思考过程</span>
+                  </button>
+                  <div v-if="thinkOpen.has(thinkKey(m, i))" class="think-text">{{ m.think }}</div>
+                  <div v-else class="think-line">{{ lastThinkLine(m.think) }}</div>
+                </div>
                 <!-- user 附件在文字上方(微信式):视频 chip 点击 modal 播放,图片缩略图点击放大 -->
                 <template v-if="m.role === 'user'">
                   <div v-if="vidOnly(m.images).length" class="vid-group">
@@ -289,7 +325,7 @@ async function onRecall(m: ChatMessage) {
                       :key="u"
                       class="vid-chip"
                       :title="fileName(u)"
-                      @click="previewVideo = u"
+                      @click="previewVideo = videoStreamUrl(u)"
                     >
                       <UiIcon name="video" :size="14" />
                       <span class="vid-name">{{ fileName(u) }}</span>
@@ -308,7 +344,14 @@ async function onRecall(m: ChatMessage) {
                     />
                   </div>
                 </template>
-                <div v-if="m.content" class="bubble-text">{{ m.content }}</div>
+                <!-- assistant 正文渲染 markdown(utils/markdown.ts,esc 先行可安全 v-html);
+                     user 保持纯文本;think 区不渲染 -->
+                <div
+                  v-if="m.role === 'assistant' && m.content"
+                  class="bubble-text bubble-md"
+                  v-html="mdToHtml(m.content)"
+                />
+                <div v-else-if="m.content" class="bubble-text">{{ m.content }}</div>
                 <div v-if="m.role === 'assistant' && m.images.length" class="img-group">
                   <img
                     v-for="u in m.images"
@@ -546,12 +589,114 @@ async function onRecall(m: ChatMessage) {
   margin-bottom: var(--space-xs);
 }
 
+.think-head {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--color-text2);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+.think-head:hover {
+  color: var(--color-accent);
+}
+
+.think-caret {
+  transform: rotate(180deg); /* 收起:向下 */
+  transition: transform 0.15s ease;
+}
+
+.think-caret.open {
+  transform: rotate(0deg); /* 展开:向上 */
+}
+
 .think-text {
   white-space: pre-wrap;
   word-break: break-word;
   color: var(--color-text2);
   font-size: var(--text-sm);
   line-height: 1.6;
+}
+
+/* 收起时的单行流式指示:最新一行,溢出省略号 */
+.think-line {
+  color: var(--color-text2);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---- assistant 正文 markdown(mdToHtml 输出的 .md 容器) ---- */
+.bubble-md {
+  white-space: normal; /* 覆盖 .bubble-text 的 pre-wrap,交由 md 标签排版 */
+}
+
+.bubble-md :deep(.md) > :first-child {
+  margin-top: 0;
+}
+
+.bubble-md :deep(.md) > :last-child {
+  margin-bottom: 0;
+}
+
+.bubble-md :deep(.md p),
+.bubble-md :deep(.md ul),
+.bubble-md :deep(.md ol),
+.bubble-md :deep(.md blockquote),
+.bubble-md :deep(.md pre),
+.bubble-md :deep(.md table) {
+  margin: var(--space-xs) 0;
+}
+
+.bubble-md :deep(.md h1),
+.bubble-md :deep(.md h2),
+.bubble-md :deep(.md h3),
+.bubble-md :deep(.md h4) {
+  margin: var(--space-sm) 0 var(--space-xs);
+  font-size: var(--text-md);
+}
+
+.bubble-md :deep(.md ul),
+.bubble-md :deep(.md ol) {
+  padding-left: var(--space-lg);
+}
+
+.bubble-md :deep(.md code) {
+  padding: 0 4px;
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  font-size: var(--text-sm);
+}
+
+.bubble-md :deep(.md pre) {
+  padding: var(--space-sm);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  overflow-x: auto;
+}
+
+.bubble-md :deep(.md pre code) {
+  padding: 0;
+  border: none;
+  background: none;
+}
+
+.bubble-md :deep(.md a) {
+  color: var(--color-accent);
+}
+
+.bubble-md :deep(.md blockquote) {
+  padding-left: var(--space-sm);
+  border-left: 2px solid var(--color-border);
+  color: var(--color-text2);
 }
 
 .img-group {

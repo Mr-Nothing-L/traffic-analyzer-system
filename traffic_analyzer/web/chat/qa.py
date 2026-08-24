@@ -4,7 +4,8 @@
 作用:快速对话问答编排。ask(ip, question) 为 SSE 事件生成器:maybe_compact
 (超 COMPACT_AT 时用主用 provider 非流式压缩旧消息为中文摘要)→ classify
 (主用 provider 非流式判定 event_analysis|content_query|chitchat,失败兜底
-content_query)→ 按信源组装上下文(workspace_video: 均匀采样≤12帧,证据帧
+content_query)→ 按信源组装上下文(workspace_video: 均匀采样≤8帧(单 prompt
+图片上限 10,留余量),证据帧
 优先,analysis/<stem>/<stem>_evidence.json 的 detected 事件摘要注入系统
 prompt;upload_video 同抽帧;upload_images ≤8 张;none/chitchat 不带图)→
 历史(summary + 近10轮文本)→ 流式调用(provider 按 .env 顺序 failover,
@@ -48,8 +49,8 @@ logger = logging.getLogger(__name__)
 
 _CONFIG_DIR = Path(__file__).resolve().parents[2] / "config"
 
-_MAX_VIDEO_FRAMES = 12
-_MAX_UPLOAD_IMAGES = 8
+_MAX_VIDEO_FRAMES = 8  # 服务端单 prompt 图片上限 10,抽帧留余量
+_MAX_UPLOAD_IMAGES = 8  # 同样 ≤10 上限
 _HISTORY_TURNS = 10  # 近 10 轮 user/assistant 文本
 _EVIDENCE_SUMMARY_CHARS = 2000
 
@@ -388,7 +389,7 @@ def _evidence_summary(evidence_path: Path) -> Tuple[str, List[int]]:
 def _sample_video_frames(
     video_path: Path, priority_frames: List[int]
 ) -> List[bytes]:
-    """Uniform ≤12 frames; evidence frames are kept preferentially."""
+    """Uniform ≤8 frames; evidence frames are kept preferentially."""
     meta = read_video_meta(video_path)
     if meta is None:
         logger.warning("[chat] video metadata unreadable: %s", video_path)

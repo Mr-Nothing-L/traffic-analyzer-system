@@ -4,31 +4,35 @@
 作用:快速对话路由。GET /api/chat/state 返回当前信源(display_name + 可预览
 文件 URL)与消息列表(含消息 id,images 转 /api/chat/files/<name> URL);POST /api/chat/upload
 接收视频(恰1个)或图片(≥1张,混合 400,扩展名白名单,单文件 ≤500MB 流式写盘,
-超限 413)写入 output/chat_uploads/incoming/ 并切换信源;POST /api/chat/ask
+超限 413,落盘名 <uuid>_<安全化原名>)写入 output/chat_uploads/incoming/ 并切换信源;POST /api/chat/ask
 SSE 流式问答(text/event-stream,异常兜底 error 事件;body 可带 attachments
 相对名,校验在上传根内且存在后随 user 消息落库,供气泡内展示附件);DELETE /api/chat/history
 清空(204);POST /api/chat/messages/delete 撤回一条消息及其后的 assistant
-回复(非本 IP 消息 404,成功 204);GET /api/chat/files/{name} 提供上传/产出图(限制在 chat_uploads 根内)。
+回复(非本 IP 消息 404,成功 204);GET /api/chat/files/{name} 提供上传/产出图(限制在 chat_uploads 根内);
+GET /api/chat/video/{name} 视频流播放(同 /api/videos/{stem}/stream:Range +
+非浏览器兼容编码按需 ffmpeg 转 faststart H.264,复用 video_stream._stream_response)。
 状态/消息按 IP 隔离(auth._request_ip)。切换信源写 divider 消息「已切换到 …」。
 上游:web/app.py(include_router)、前端快速对话面板。
-下游:web/chat/store.py、qa.py、paths.py。
+下游:web/chat/store.py、qa.py、paths.py;web/video_stream.py(视频流/转码)。
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFile
+from fastapi import APIRouter, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from traffic_analyzer.web.auth import _request_ip
 from traffic_analyzer.web.chat import paths, qa, store
+from traffic_analyzer.web.video_stream import _stream_response
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +113,16 @@ def _write_upload(file: UploadFile, dest: Path) -> None:
         raise HTTPException(status_code=413, detail="file exceeds 500MB limit")
 
 
+def _dest_name(original: str, ext: str) -> str:
+    """``<uuid>_<安全化原始文件名><ext>``:非法字符替换为 _,原名截断 ~60 字符。
+
+    前端展示时剥掉 uuid 前缀(取第一个 _ 之后);历史无原名文件按全显兜底。
+    """
+    stem = Path(original).stem
+    safe = re.sub(r"[^\w.-]", "_", stem)[:60].strip("._") or "file"
+    return f"{uuid.uuid4().hex}_{safe}{ext}"
+
+
 @router.post("/api/chat/upload")
 def upload_chat_files(
     request: Request, files: List[UploadFile] = File(...)
@@ -134,7 +148,7 @@ def upload_chat_files(
     saved: List[str] = []
     names: List[str] = []
     for file, ext in zip(files, exts):
-        dest = paths.INCOMING_DIR / f"{uuid.uuid4().hex}{ext}"
+        dest = paths.INCOMING_DIR / _dest_name(file.filename or "", ext)
         _write_upload(file, dest)
         saved.append(str(dest))
         names.append(file.filename or dest.name)
@@ -198,3 +212,21 @@ def get_chat_file(name: str) -> FileResponse:
     if not target.is_file():
         raise HTTPException(status_code=404, detail="file not found")
     return FileResponse(target)
+
+
+@router.get("/api/chat/video/{name:path}")
+def get_chat_video(name: str, ss: Optional[float] = Query(None, ge=0)) -> object:
+    """Stream a chat-upload video, confined to output/chat_uploads/.
+
+    Same behavior as /api/videos/{stem}/stream (video_stream._stream_response):
+    browser-native codecs served directly with Range; H.265/.ts/.mkv etc.
+    transcoded on demand to faststart H.264 MP4 (LRU-cached, 501/503 on
+    ffmpeg failure/overload).
+    """
+    root = paths.UPLOAD_DIR.resolve()
+    target = (root / name).resolve()
+    if target != root and root not in target.parents:
+        raise HTTPException(status_code=404, detail="file not found")
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="file not found")
+    return _stream_response(target, ss)

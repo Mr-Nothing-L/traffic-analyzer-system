@@ -19,6 +19,12 @@ export function mdInline(text: string, resolveImg?: ImgResolver): string {
     const url = /^https?:|^data:/.test(src) ? src : resolveImg ? resolveImg(src) : src
     return '<img alt="' + alt + '" src="' + esc(url) + '">'
   })
+  // 链接:仅 http(s)(esc 后 javascript: 等伪协议无特殊字符可拦,必须白名单协议);
+  // 新窗口打开,noopener 防反向标签劫持。须在图片规则之后,避免吃掉 ![alt](src)。
+  s = s.replace(
+    /\[([^\]]+)\]\((https?:[^)\s]+)\)/g,
+    '<a href="$2" target="_blank" rel="noopener">$1</a>',
+  )
   s = s.replace(/`([^`]+)`/g, '<code>$1</code>')
   s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
   s = s.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>')
