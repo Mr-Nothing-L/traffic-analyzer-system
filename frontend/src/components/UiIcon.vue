@@ -25,6 +25,8 @@ const PATHS: Record<string, string> = {
   send: '<path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4z"/>',
   plus: '<path d="M12 5v14"/><path d="M5 12h14"/>',
   play: '<path d="M7 5l12 7-12 7z"/>',
+  left: '<path d="M15 18l-6-6 6-6"/>',
+  right: '<path d="M9 6l6 6-6 6"/>',
   copy: '<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
   undo: '<path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-15-6.7L3 13"/>',
 }

@@ -124,9 +124,9 @@ function clearPending() {
 
 /* ---- 来源预览:附件随消息进气泡,不再有顶部预览条 ---- */
 
-/* ---- 图片:加载失败隐藏(onerror);点击放大(NModal);视频 chip 点击 modal 播放 ---- */
+/* ---- 图片:加载失败隐藏(onerror);点击进画廊(modal 内左右切换);视频 chip 点击 modal 播放 ---- */
 const broken = reactive(new Set<string>())
-const previewUrl = ref<string | null>(null)
+const previewIndex = ref<number | null>(null)
 const previewVideo = ref<string | null>(null)
 
 const isVideoUrl = (u: string) => VIDEO_EXT.some((e) => u.toLowerCase().endsWith(e))
@@ -185,47 +185,77 @@ const lastThinkLine = (think: string) =>
     .filter((l) => l.trim())
     .pop() || ''
 
-/* ---- 消息列表:历史 + 流式中气泡;贴底粘性(stick-to-bottom):
- * 上翻 >80px 停止跟随(阅读思考过程不被拽回),回到底部 ≤80px 恢复跟随 ---- */
+/* ---- 消息列表:历史 + 流式中气泡;不做任何流式跟随滚动,
+ * 仅在进入页面(fetchState 后)与自己发送消息(onSend)时主动滚底各一次 ---- */
 const scrollbar = ref<InstanceType<typeof NScrollbar> | null>(null)
-const stickToBottom = ref(true)
 const displayMessages = computed(() => {
   const arr = [...chat.messages]
   if (chat.current) arr.push(chat.current)
   return arr
 })
 
-function onScroll(ev: Event) {
-  const el = ev.target as HTMLElement
-  stickToBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight <= 80
-}
-
 function scrollToBottom() {
   scrollbar.value?.scrollTo({ top: Number.MAX_SAFE_INTEGER })
 }
 
-watch(
-  () => [
-    chat.messages.length,
-    chat.current?.content.length,
-    chat.current?.think.length,
-    chat.current?.images.length,
-  ],
-  async () => {
-    if (!stickToBottom.value) return
-    await nextTick()
-    scrollToBottom()
-  },
+/* ---- 图片画廊:全对话可预览图(user 附件图 + assistant 结果图,对话时间序,
+ * 视频封面不进画廊——它进播放 modal;broken 图天然被跳过) ---- */
+const galleryImages = computed(() => {
+  const urls: string[] = []
+  for (const m of displayMessages.value) {
+    if (m.role === 'divider') continue
+    for (const u of m.images) {
+      if (!isVideoUrl(u) && !broken.has(u)) urls.push(u)
+    }
+  }
+  return urls
+})
+const previewUrl = computed(() =>
+  previewIndex.value != null ? (galleryImages.value[previewIndex.value] ?? null) : null,
 )
+
+/* 画廊打开期间列表收缩(撤回消息/图片 broken):收敛或关闭,防越界空 modal */
+watch(galleryImages, (imgs) => {
+  if (previewIndex.value == null) return
+  if (!imgs.length) previewIndex.value = null
+  else if (previewIndex.value >= imgs.length) previewIndex.value = imgs.length - 1
+})
+
+function openPreview(u: string) {
+  const i = galleryImages.value.indexOf(u)
+  if (i >= 0) previewIndex.value = i
+}
+
+function previewNav(delta: number) {
+  if (previewIndex.value == null) return
+  const next = previewIndex.value + delta
+  if (next < 0 || next >= galleryImages.value.length) return // 边界不循环
+  previewIndex.value = next
+}
+
+/** 画廊内当前图加载失败:进 broken(列表自动跳过该图),越界则收敛/关闭。 */
+function onPreviewError(u: string) {
+  broken.add(u)
+  const n = galleryImages.value.length
+  if (!n) previewIndex.value = null
+  else if (previewIndex.value != null && previewIndex.value >= n) previewIndex.value = n - 1
+}
+
+/** 仅画廊打开时响应 ←/→(挂在 window,组件卸载移除;关闭时不拦截任何按键)。 */
+function onGalleryKey(ev: KeyboardEvent) {
+  if (previewIndex.value == null) return
+  if (ev.key === 'ArrowLeft') previewNav(-1)
+  else if (ev.key === 'ArrowRight') previewNav(1)
+}
 
 onMounted(async () => {
   window.addEventListener('dragover', preventWindowDrop)
   window.addEventListener('drop', preventWindowDrop)
+  window.addEventListener('keydown', onGalleryKey)
   try {
     await chat.fetchState()
-    stickToBottom.value = true
     await nextTick()
-    scrollToBottom() // 进入页面初始滚到底
+    scrollToBottom() // 进入页面初始滚到底(仅这一次主动滚动)
   } catch (e) {
     message.error(`加载对话状态失败:${(e as Error).message}`)
   }
@@ -234,6 +264,7 @@ onMounted(async () => {
 onUnmounted(() => {
   window.removeEventListener('dragover', preventWindowDrop)
   window.removeEventListener('drop', preventWindowDrop)
+  window.removeEventListener('keydown', onGalleryKey)
   chat.stop() // 离开页面中断在途流
   clearPending() // 释放全部 objectURL
 })
@@ -267,9 +298,8 @@ async function onSend() {
     clearPending()
   }
   question.value = ''
-  stickToBottom.value = true // 自己发消息:强制跟随到底
   await nextTick()
-  scrollToBottom()
+  scrollToBottom() // 滚到自己刚发的消息处(另一次主动滚动)
   try {
     await chat.ask(q, sentUrls)
   } catch (e) {
@@ -331,7 +361,7 @@ async function onRecall(m: ChatMessage) {
       </div>
 
       <!-- 消息列表:微信式布局(头像 + 气泡);padding 放在 inner 上,不依赖 n-scrollbar 根元素 -->
-      <n-scrollbar ref="scrollbar" class="chat-scroll" @scroll="onScroll">
+      <n-scrollbar ref="scrollbar" class="chat-scroll">
         <div class="chat-scroll-inner">
           <div v-if="!displayMessages.length" class="chat-empty">
             上传视频/图片,然后开始提问
@@ -395,7 +425,7 @@ async function onRecall(m: ChatMessage) {
                       alt=""
                       loading="lazy"
                       @error="broken.add(u)"
-                      @click="previewUrl = u"
+                      @click="openPreview(u)"
                     />
                   </div>
                 </template>
@@ -416,7 +446,7 @@ async function onRecall(m: ChatMessage) {
                     alt=""
                     loading="lazy"
                     @error="broken.add(u)"
-                    @click="previewUrl = u"
+                    @click="openPreview(u)"
                   />
                 </div>
                 <!-- 操作栏:user 有撤回(仅已落库消息);复制/时间两侧都有 -->
@@ -490,9 +520,35 @@ async function onRecall(m: ChatMessage) {
       </div>
     </section>
 
-    <!-- 图片放大预览 -->
-    <n-modal :show="!!previewUrl" @update:show="previewUrl = null">
-      <img v-if="previewUrl" class="preview-img" :src="previewUrl" alt="" @click="previewUrl = null" />
+    <!-- 图片画廊:单图放大 + 左右切换(按钮/键盘 ←→,边界禁用) -->
+    <n-modal :show="previewIndex != null" @update:show="previewIndex = null">
+      <div v-if="previewUrl" class="gallery-wrap">
+        <img
+          class="preview-img"
+          :src="previewUrl"
+          alt=""
+          @error="onPreviewError(previewUrl!)"
+          @click="previewIndex = null"
+        />
+        <button
+          type="button"
+          class="gallery-nav gallery-prev"
+          title="上一张 (←)"
+          :disabled="previewIndex === 0"
+          @click.stop="previewNav(-1)"
+        >
+          <UiIcon name="left" :size="18" />
+        </button>
+        <button
+          type="button"
+          class="gallery-nav gallery-next"
+          title="下一张 (→)"
+          :disabled="previewIndex === galleryImages.length - 1"
+          @click.stop="previewNav(1)"
+        >
+          <UiIcon name="right" :size="18" />
+        </button>
+      </div>
     </n-modal>
 
     <!-- 视频播放预览(user 气泡内的视频 chip):转码期间显示加载遮罩 -->
@@ -981,13 +1037,52 @@ async function onRecall(m: ChatMessage) {
   color: var(--color-accent);
 }
 
-/* ---- 图片放大 ---- */
+/* ---- 图片放大(画廊) ---- */
+.gallery-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
 .preview-img {
   max-width: calc(100vw - 96px);
   max-height: calc(100vh - 96px);
   border-radius: var(--radius-sm);
   cursor: zoom-out;
   display: block;
+}
+
+.gallery-nav {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: rgb(0 0 0 / 45%);
+  color: #fff;
+  cursor: pointer;
+}
+
+.gallery-nav:hover:not(:disabled) {
+  background: rgb(0 0 0 / 65%);
+}
+
+.gallery-nav:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.gallery-prev {
+  left: -48px; /* 按钮放图外两侧,不遮图 */
+}
+
+.gallery-next {
+  right: -48px;
 }
 
 /* ---- 视频播放 ---- */
