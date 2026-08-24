@@ -442,6 +442,43 @@ describe('submit_detection', () => {
     expect(JSON.parse(result.note as string).events[2].detected).toBe(true);
   });
 
+  it('tolerates events passed as a JSON string (qwen3_xml quirk)', async () => {
+    const events = baseEvents();
+    events[0] = {
+      event_id: 1,
+      detected: true,
+      confidence: 0.9,
+      instances: [
+        { description: '大型货车停靠应急车道', location: '画面右侧', start_sec: 0, end_sec: 19 },
+      ],
+      reasoning: '全片可见静止货车',
+      evidence_frames: [2, 7, 12],
+    };
+    // 模型把数组包成字符串(带前导换行),容错反序列化后应正常通过。
+    const result = await execute(tool(), {
+      events: '\n' + JSON.stringify(events),
+      binary_encoding: '1_0_0_0_0_0_0_0_0_0_0',
+      normal: false,
+      report_markdown: '# 检测报告\n检出事件 1。',
+    });
+    expect(result.isError).toBeFalsy();
+    expect(result.stopTurn).toBe(true);
+    const payload = JSON.parse(result.note as string);
+    expect(payload.events[0].detected).toBe(true);
+  });
+
+  it('tolerates the whole input passed as a JSON string', async () => {
+    const input = {
+      events: baseEvents(),
+      binary_encoding: '0_0_0_0_0_0_0_0_0_0_0',
+      normal: true,
+      report_markdown: '# 报告',
+    };
+    const result = await execute(tool(), JSON.stringify(input) as unknown as Record<string, unknown>);
+    expect(result.isError).toBeFalsy();
+    expect(result.stopTurn).toBe(true);
+  });
+
   it('rejects when a set bit contradicts events.detected', async () => {
     const result = await execute(tool(), {
       events: baseEvents(),

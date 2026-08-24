@@ -10,31 +10,44 @@
 
 ## 架构
 
-三层结构，靠明确契约（REST schema、JSONL 进度文件、工作区目录约定）解耦：
+三层结构外加一个 TypeScript **agent 运行时**，靠明确契约（REST schema、JSONL 进度文件、
+工作区目录约定）解耦。检测有两种模式，共用同一输出契约（11 位编码 + Markdown 报告）：
+批量流水线（串行分析任务）与 agent 运行时（多轮工具调用对话）：
 
 ```
 ┌──────────────────────────────────────────────┐
 │ Web 界面 — Vue 3 + TS + Naive UI 单页应用     │  frontend/
-│ 文件树 · 分析详情 · SFT 标注编辑器 · 数据看板  │
+│ agent 对话 · 批量推理 · SFT 标注编辑           │
+│ · 证据画布 · 数据看板                          │
 └───────────────────┬──────────────────────────┘
                     │ REST /api/* · SSE /api/events · Range 视频流
 ┌───────────────────▼──────────────────────────┐
 │ FastAPI web 层                               │  traffic_analyzer/web/
 │ 认证 · 串行任务队列 · 数据看板 · SSE 推送      │
-└───────────────────┬──────────────────────────┘
-                    │ 每个分析任务一个子进程
-┌───────────────────▼──────────────────────────┐
-│ 分析管线(YAML 配置驱动)                       │  orchestrator + core/
-│ 预处理 → 专家并行检测 → 裁决 → 锚定核验        │
-│   → SFT 标签改写 → 生成报告                   │
-└───────────────────┬──────────────────────────┘
-                    │ 写出结构化进度事件(JSONL),由 web 层尾随
-                    ▼
-              工作区目录(视频 + 分析结果)
+│ /api/agent/* → 反向代理（SSE 透传）           │
+└──────┬───────────────────────────┬───────────┘
+       │ 每个分析任务一个子进程      │ 启动时拉起（本地回环 HTTP）
+┌──────▼───────────────────┐  ┌────▼──────────────────────────┐
+│ 分析管线(YAML 配置驱动)    │  │ TS agent 运行时               │  agent/
+│ 预处理 → 专家并行检测 →    │  │ loop · 工具 · 权限 · 沙盒      │
+│ 裁决 → SFT 标签 → 报告     │  │   · kosong（LLM 抽象层）       │
+│ （批量模式）              │  └────┬──────────────────────────┘
+└──────────────────────────┘       │ HTTP 工具调用
+                              ┌────▼──────────────────────────┐
+                              │ Python 视频工具服务             │  toolserver/
+                              │ video_meta / extract_frames / │
+                              │ draw_boxes（CV 留在 Python）   │
+                              └───────────────────────────────┘
 ```
 
 - **前端**只经 REST 和一条 SSE 通道（任务进度、看板变更、在线名册）与后端交互，无轮询。
-- **web 层**以串行子进程跑推理，尾随任务的结构化进度文件驱动界面实时更新。
+- **web 层**以串行子进程跑批量推理，尾随任务的结构化进度文件驱动界面实时更新；启动时
+  自动拉起工具服务与 agent 服务（可用 `AGENT_RUNTIME_ENABLE=0` 关闭），并把 `/api/agent/*`
+  反向代理到 agent 服务。
+- **agent 运行时**（`agent/`）是 TypeScript 多轮 agent：LLM 调用内置工具（`video_meta` /
+  `extract_frames` / `draw_boxes` / `read_file` / `write_file` / `run_script`）观察视频，
+  最终经 `submit_detection` 提交结构化结果——与批量流水线同一输出契约（11 位编码 +
+  Markdown 报告）。工具调用经过权限链（`yolo` / `manual` / `auto` 三模式）与工作区沙盒。
 - **分析核心**全部由 YAML 配置（`traffic_analyzer/config/`）：事件定义、Prompt 模板、
   逻辑链——新增事件无需改代码。
 
@@ -85,6 +98,24 @@ python3 -m traffic_analyzer analyze \
 在终端中运行时显示 **rich 实时进度面板**：每个专家一条泳道（8 个事件专家 + 裁决 + SFT
 标注 + 报告）；非 TTY 输出（Web 子进程、管道）自动退化为 `EXPERT_PROGRESS` 标记行，供
 Web 前端解析。退出码：`0` 成功，`1` 错误，`2` 视频被预过滤器筛除（不写报告文件）。
+
+### 3. Agent 检测模式（Web 界面）
+
+启动 web 服务（`python3 -m traffic_analyzer web`）后，后端会自动拉起 Python 工具服务
+（127.0.0.1:8601）与 TS agent 运行时（127.0.0.1:8602），无需手动启动。点顶部导航栏的
+**「Agent 检测」**进入 `/agent` 对话视图：指定工作区中的视频，检测 Agent 以多轮对话方式
+调用工具（读元信息、抽帧、画框）逐步观察，最终以 `submit_detection` 提交结果——输出与
+批量流水线同一契约：11 位编码 + Markdown 报告。
+
+对话前可选择**权限模式**：`yolo`（工具全部自动放行）、`manual`（每次工具调用需人工确认）、
+`auto`（自动裁决，危险操作仍会询问）；`manual` 下工具调用以审批卡片呈现，可批准或拒绝。
+沙盒约束（文件操作限定工作区内、敏感文件 veto）不受权限模式豁免。
+
+agent 服务也可脱离 web 层单独运行：
+
+```bash
+cd agent && npm install && npm run serve    # npx tsx src/server/main.ts，127.0.0.1:8602
+```
 
 ## Web 界面
 
@@ -205,6 +236,11 @@ python3 scripts/e2e_v2_smoke.py --port 8609 --video-fragment 01-02_Event_129
 | `TRAFFIC_ANALYZER_USERS` | — | 引导式 Web 账号，`zhangsan:pass1,lisi:pass2`（首次启动迁移到 `users.db`） |
 | `TRAFFIC_ANALYZER_SECRET` | 自动生成 | 会话 Cookie 签名密钥 |
 | `TRAFFIC_ANALYZER_WORKSPACE_DIRS` | —（不限制） | 工作区白名单（见「多人协同部署」） |
+| `AGENT_RUNTIME_ENABLE` | `true` | web 层启动时自动拉起工具服务 + agent 服务；`0` 关闭 |
+| `AGENT_PORT` | `8602` | TS agent 服务监听端口（127.0.0.1） |
+| `AGENT_MAX_TOKENS` | 兜底 `16384` | 覆盖 agent LLM 调用的 maxTokens |
+| `TOOLSERVER_PORT` | `8601` | Python 视频工具服务端口（127.0.0.1） |
+| `TOOLSERVER_URL` | `http://127.0.0.1:8601` | TS agent 运行时访问工具服务的地址 |
 
 ### 事件开关 — `config/event_categories.yaml`
 
@@ -235,11 +271,17 @@ CLI 分析把报告写到 `--output`（或 stdout）；`--sft-label` 时另写
 ## 测试
 
 ```bash
-python3 -m pytest traffic_analyzer/tests -q
+python3 -m pytest traffic_analyzer/tests -q   # Python 套件（809 个，VLM 全部 mock）
+cd agent && npx vitest run                    # TS agent 运行时套件（104 个，mock LLM）
 ```
 
-测试套件 mock 全部 VLM 调用，覆盖配置校验、CLI、分析流水线与 Web API。端到端界面检查
-用上面的冒烟脚本（`scripts/e2e_v2_smoke.py`）。
+pytest 套件 mock 全部 VLM 调用，覆盖配置校验、CLI、分析流水线与 Web API；vitest 套件覆盖
+agent loop、权限、沙盒与工具。端到端冒烟脚本：
+
+```bash
+python3 scripts/e2e_agent_smoke.py   # agent 模式，经 web 代理全链路
+python3 scripts/e2e_v2_smoke.py      # 批量流水线 UI（见上文冒烟一节）
+```
 
 ## 事件类别
 

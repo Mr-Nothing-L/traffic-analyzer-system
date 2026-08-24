@@ -64,6 +64,42 @@ const submitDetectionInputSchema = z.strictObject({
 
 type SubmitDetectionInput = z.infer<typeof submitDetectionInputSchema>;
 
+/**
+ * qwen3_xml 序列化的已知怪癖:模型有时把数组/对象参数包成 JSON 字符串
+ * (例如 events: "\n[{...}]"),且收到 "expected array, received string" 后
+ * 也无法自我修正(实测死循环 18 次)。这里做容错反序列化:字符串字段在
+ * trim 后若能 JSON.parse 成目标形态,先还原再交给 zod 严格校验。
+ */
+function tryParseJsonString(value: unknown): unknown {
+  if (typeof value !== 'string') return value;
+  const trimmed = value.trim();
+  if (!trimmed.startsWith('[') && !trimmed.startsWith('{') && !trimmed.startsWith('"')) {
+    return value;
+  }
+  try {
+    return JSON.parse(trimmed) as unknown;
+  } catch {
+    return value;
+  }
+}
+
+export function normalizeSubmitInput(rawInput: unknown): unknown {
+  const top = tryParseJsonString(rawInput);
+  if (typeof top !== 'object' || top === null || Array.isArray(top)) return top;
+  const obj = { ...(top as Record<string, unknown>) };
+  obj['events'] = tryParseJsonString(obj['events']);
+  if (Array.isArray(obj['events'])) {
+    obj['events'] = obj['events'].map((event: unknown) => {
+      if (typeof event !== 'object' || event === null || Array.isArray(event)) return event;
+      const ev = { ...(event as Record<string, unknown>) };
+      ev['instances'] = tryParseJsonString(ev['instances']);
+      ev['evidence_frames'] = tryParseJsonString(ev['evidence_frames']);
+      return ev;
+    });
+  }
+  return obj;
+}
+
 /** Load the model-facing parameter schema (agent/config/submit_detection.schema.json). */
 export function loadSubmitDetectionSchema(): Record<string, unknown> {
   const schemaUrl = new URL('../../../config/submit_detection.schema.json', import.meta.url);
@@ -123,7 +159,7 @@ export function createSubmitDetectionTool(
     description,
     parameters,
     resolveExecution(rawInput: unknown) {
-      const parsed = submitDetectionInputSchema.safeParse(rawInput);
+      const parsed = submitDetectionInputSchema.safeParse(normalizeSubmitInput(rawInput));
       if (!parsed.success) return invalidInputResult('submit_detection', parsed.error);
       const input = parsed.data;
       const violations = crossValidateDetection(input);

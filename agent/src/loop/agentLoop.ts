@@ -69,6 +69,8 @@ export interface AgentLoopOptions {
   readonly messages: Message[];
   /** 单个 turn 内 generate 步数上限,默认 30。 */
   readonly maxStepsPerTurn?: number;
+  /** 同一工具连续失败熔断阈值,默认 5;达到后以 reason 'error' 终止循环。 */
+  readonly maxConsecutiveToolErrors?: number;
   /** 单次工具执行超时(ms),默认 120s;超时合成 isError 结果回灌。 */
   readonly toolTimeoutMs?: number;
   /** 比率触发压缩配置;缺省不压缩。 */
@@ -91,6 +93,7 @@ export interface AgentLoopResult {
 
 export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoopResult> {
   const maxSteps = options.maxStepsPerTurn ?? DEFAULT_MAX_STEPS_PER_TURN;
+  const maxConsecutiveToolErrors = options.maxConsecutiveToolErrors ?? 5;
   const toolTimeoutMs = options.toolTimeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS;
   const tools = options.registry.list();
   const compaction: CompactionConfig | undefined =
@@ -100,6 +103,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
 
   let messages: Message[] = [...options.messages];
   let steps = 0;
+  let errorStreak: { name: string; count: number; output: ExecutableToolResult['output'] | undefined } =
+    { name: '', count: 0, output: undefined };
 
   const emit = async (event: AgentLoopEvent): Promise<void> => {
     await options.onEvent?.(event);
@@ -243,12 +248,33 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         isError: result.isError === true,
       });
       messages.push(createToolMessage(call.id, result.output));
+      if (result.isError === true) {
+        errorStreak =
+          errorStreak.name === call.name
+            ? { name: call.name, count: errorStreak.count + 1, output: result.output }
+            : { name: call.name, count: 1, output: result.output };
+      } else {
+        errorStreak = { name: '', count: 0, output: undefined };
+      }
       if (result.stopTurn === true && stopResult === undefined) {
         stopResult = result;
       }
     }
     await emit({ type: 'step_done', step: steps });
     if (stopResult !== undefined) return finish('stop_turn', { stopResult });
+    // 熔断:同一工具连续失败达到上限,终止循环防止无效重试烧 token
+    // (实测 qwen3 对某类参数错误会无限次原样重试)。
+    if (errorStreak.count >= maxConsecutiveToolErrors) {
+      const lastOutput =
+        typeof errorStreak.output === 'string'
+          ? errorStreak.output.slice(0, 500)
+          : '(非文本输出)';
+      return finish('error', {
+        error:
+          `工具 "${errorStreak.name}" 连续 ${errorStreak.count} 次失败,` +
+          `触发熔断终止。最近一次错误: ${lastOutput}`,
+      });
+    }
   }
 }
 

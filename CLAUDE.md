@@ -55,7 +55,9 @@ event_id 全局采用 v4.5 的 action 编号，不再做 0-based 映射；action
 │   ├── CHANGELOG.md                      更新日志
 │   ├── v4.5_images/                      10 张事件示例 png
 │   └── web_ui_review_and_refactor_plan.md  web 重构诊断与路线图(v6 已执行完毕)
-├── frontend/                            Web 前端(Vue 3 + TS + Naive UI,构建挂 /)
+├── frontend/                            Web 前端(Vue 3 + TS + Naive UI,构建挂 /;含 /agent 对话视图)
+├── agent/                               TS agent 运行时(src/kosong vendored LLM 抽象层、llm、
+│                                        tools、permissions、sandbox、loop、server;npx vitest run)
 ├── traffic_analyzer/
 │   ├── config/
 │   │   ├── event_categories.yaml      事件定义 + 裁决规则
@@ -70,8 +72,10 @@ event_id 全局采用 v4.5 的 action 编号，不再做 0-based 映射；action
 │   │   └── report_generator.py
 │   ├── orchestrator/analysis_orchestrator.py
 │   ├── models/schemas.py              Pydantic 数据模型
+│   ├── toolserver/                    Python 视频工具服务(127.0.0.1:8601,--workspace 必填)
 │   └── web/                           FastAPI 层(jobs/evidence/workspace/dashboard 包 +
-│                                      realtime.py SSE 总线;推理子进程 JSONL 进度契约)
+│                                      realtime.py SSE 总线;推理子进程 JSONL 进度契约;
+│                                      agentproxy/ 反向代理 /api/agent/*,startup 拉起 toolserver+agent)
 ├── design.md                            前端设计系统(Hallmark 锁定,token 唯一源)
 └── README.md                            系统全量说明
 ```
@@ -85,10 +89,17 @@ event_id 全局采用 v4.5 的 action 编号，不再做 0-based 映射；action
 python3 -m traffic_analyzer validate-config \
   --config-dir ./traffic_analyzer/config
 
-# 分析视频
+# 分析视频(批量流水线)
 python3 -m traffic_analyzer analyze \
   --video <path> --format markdown --output report.md
 # 可选: --min-frames N (默认 10)
+
+# Web 服务(批量推理 UI;startup 自动拉起 toolserver + TS agent 服务,
+# AGENT_RUNTIME_ENABLE=0 关闭;顶部「Agent 检测」进入 /agent 对话视图)
+python3 -m traffic_analyzer web
+
+# TS agent 运行时单独运行(一般不需要,web 层会自动拉起)
+cd agent && npm run serve        # npx tsx src/server/main.ts,127.0.0.1:8602
 ```
 
 LLM 配置在 `traffic_analyzer/config/.env`(`LLM_PROVIDER` / `LLM_API_KEY` / `LLM_MODEL` 等)。详细参数见 README §快速开始。
@@ -133,4 +144,4 @@ LLM 配置在 `traffic_analyzer/config/.env`(`LLM_PROVIDER` / `LLM_API_KEY` / `L
 
 ---
 
-*Last reviewed: 2026-08-11 — 遗留检测模式清理后更新。*
+*Last reviewed: 2026-08-24 — TS agent 运行时架构落地后更新。*

@@ -11,34 +11,50 @@ video, editable in the built-in web UI.
 
 ## Architecture
 
-Three layers, decoupled by explicit contracts (REST schemas, a JSONL progress
-file, and the workspace directory layout):
+Three layers plus a TypeScript **agent runtime**, decoupled by explicit
+contracts (REST schemas, a JSONL progress file, and the workspace directory
+layout). Detection runs in two modes sharing one output contract (11-bit code +
+Markdown report): the batch pipeline (serial analysis jobs) and the agent
+runtime (multi-turn tool-calling chat):
 
 ```
 ┌──────────────────────────────────────────────┐
 │ Web UI — Vue 3 + TS + Naive UI SPA           │  frontend/
-│ file tree · detail view · SFT editor · board │
+│ agent chat · batch inference · SFT editor    │
+│ · evidence canvas · data dashboard           │
 └───────────────────┬──────────────────────────┘
                     │ REST /api/* · SSE /api/events · Range video stream
 ┌───────────────────▼──────────────────────────┐
 │ FastAPI web layer                            │  traffic_analyzer/web/
 │ auth · serial job queue · dashboard · SSE    │
-└───────────────────┬──────────────────────────┘
-                    │ one subprocess per analysis job
-┌───────────────────▼──────────────────────────┐
-│ Analysis pipeline (YAML-config-driven)       │  orchestrator + core/
-│ preprocess → expert agents → adjudication    │
-│   → grounding check → SFT label → report     │
-└───────────────────┬──────────────────────────┘
-                    │ writes progress events (JSONL), tailed by the web layer
-                    ▼
-              workspace dir (videos + analysis results)
+│ /api/agent/* → reverse proxy (SSE passthrough)│
+└──────┬───────────────────────────┬───────────┘
+       │ one subprocess per job    │ spawned at startup (loopback HTTP)
+┌──────▼───────────────────┐  ┌────▼──────────────────────────┐
+│ Analysis pipeline        │  │ TS agent runtime              │  agent/
+│ (YAML-config-driven)     │  │ loop · tools · permissions    │
+│ preprocess → experts →   │  │   · sandbox · kosong (LLM)    │
+│  adjudication → SFT →    │  └────┬──────────────────────────┘
+│  report (batch mode)     │       │ HTTP tool calls
+└──────────────────────────┘  ┌────▼──────────────────────────┐
+                              │ Python video tool server      │  toolserver/
+                              │ video_meta / extract_frames / │
+                              │ draw_boxes (CV stays in Python)│
+                              └───────────────────────────────┘
 ```
 
 - **Frontend** talks to the backend only via REST + one SSE channel (job
   progress, dashboard changes, presence) — no polling.
-- The **web layer** runs inference as serial child processes and tails each
-  job's structured progress file to drive the UI in real time.
+- The **web layer** runs batch inference as serial child processes and tails
+  each job's structured progress file to drive the UI in real time. On startup
+  it also spawns the tool server and the agent service (disable with
+  `AGENT_RUNTIME_ENABLE=0`) and proxies `/api/agent/*` to the agent service.
+- The **agent runtime** (`agent/`) is a TypeScript multi-turn agent: the LLM
+  calls builtin tools (`video_meta` / `extract_frames` / `draw_boxes` /
+  `read_file` / `write_file` / `run_script`) to inspect a video and submits the
+  structured result via `submit_detection` — guaranteeing the same 11-bit code
+  + Markdown report contract as the pipeline. Tool calls go through a
+  permission chain (`yolo` / `manual` / `auto` modes) and a workspace sandbox.
 - The **analysis core** is fully configured in YAML (`traffic_analyzer/config/`):
   event definitions, prompt templates, logic chains — new events need no code.
 
@@ -93,6 +109,28 @@ expert (8 event experts + adjudication + SFT labeling + report); in non-TTY outp
 (web subprocess, pipes) it degrades to `EXPERT_PROGRESS` marker lines that the web UI
 parses instead. Exit codes: `0` success, `1` error, `2` video rejected by the
 prefilter (no report file written).
+
+### 3. Agent mode (web UI)
+
+Starting the web server (`python3 -m traffic_analyzer web`) also spawns the Python
+tool server (127.0.0.1:8601) and the TS agent runtime (127.0.0.1:8602) automatically —
+nothing else to launch. Open **「Agent 检测」** in the top bar to enter the `/agent`
+chat view: point the detection agent at a video in the workspace and it inspects it
+over multiple turns (video meta, frame extraction, box drawing), then submits the
+result via the `submit_detection` tool — same output contract as the batch pipeline:
+11-bit code + Markdown report.
+
+Before chatting you pick a **permission mode**: `yolo` (all tool calls auto-approved),
+`manual` (every tool call needs your approval), `auto` (automatic, but dangerous
+operations still ask). Under `manual`, tool calls appear as approval cards you can
+approve or deny. The sandbox (file operations confined to the workspace, sensitive
+files vetoed) cannot be waived by any permission mode.
+
+The agent service can also run standalone:
+
+```bash
+cd agent && npm install && npm run serve    # npx tsx src/server/main.ts, 127.0.0.1:8602
+```
 
 ## Web UI
 
@@ -226,6 +264,11 @@ The script creates a temporary account/workspace and starts the real backend on
 | `TRAFFIC_ANALYZER_USERS` | — | Bootstrap web accounts, `zhangsan:pass1,lisi:pass2` (migrated to `users.db` on first startup) |
 | `TRAFFIC_ANALYZER_SECRET` | auto-generated | Session-cookie signing key |
 | `TRAFFIC_ANALYZER_WORKSPACE_DIRS` | — (unrestricted) | Workspace whitelist (see Multi-User Deployment) |
+| `AGENT_RUNTIME_ENABLE` | `true` | Web layer spawns the tool server + agent service on startup; `0` disables |
+| `AGENT_PORT` | `8602` | TS agent service listen port (127.0.0.1) |
+| `AGENT_MAX_TOKENS` | `16384` fallback | Override maxTokens for agent LLM calls |
+| `TOOLSERVER_PORT` | `8601` | Python video tool server port (127.0.0.1) |
+| `TOOLSERVER_URL` | `http://127.0.0.1:8601` | Tool server URL used by the TS agent runtime |
 
 ### Event switches — `config/event_categories.yaml`
 
@@ -259,12 +302,18 @@ Dashboard review states live in `<workspace>/analysis/review_states.json`.
 ## Testing
 
 ```bash
-python3 -m pytest traffic_analyzer/tests -q
+python3 -m pytest traffic_analyzer/tests -q   # Python suite (809 tests, VLM mocked)
+cd agent && npx vitest run                    # TS agent runtime suite (104 tests, mock LLM)
 ```
 
-The suite mocks all VLM calls and covers config validation, the CLI, the analysis
-pipeline, and the web API. For an end-to-end UI check, use the smoke script above
-(`scripts/e2e_v2_smoke.py`).
+The pytest suite mocks all VLM calls and covers config validation, the CLI, the
+analysis pipeline, and the web API; the vitest suite covers the agent loop,
+permissions, sandbox, and tools. End-to-end smoke scripts:
+
+```bash
+python3 scripts/e2e_agent_smoke.py   # agent mode, full chain through the web proxy
+python3 scripts/e2e_v2_smoke.py      # batch-pipeline UI (see the smoke section above)
+```
 
 ## Event Categories
 

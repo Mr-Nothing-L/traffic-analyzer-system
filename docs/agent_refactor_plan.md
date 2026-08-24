@@ -82,3 +82,13 @@
 ## 输出契约(不变)
 
 11 位二进制编码 `{bit_1_..._bit_11}`(位序=事件编号,位 9 保留恒 0)+ Markdown 报告 + SFT 样本(批量模式)。事件定义仍以 `config/event_categories.yaml` 为准。
+
+## 实施状态(2026-08-24)
+
+- **P0 完成**:基线 commit `b241ae2`、codegraph 索引、kimi-code 调研、依赖安装。
+- **P1 完成**:`agent/` 骨架落地(kosong vendored、llm provider、tool registry/scheduler、loop、permissions、sandbox),`npx vitest run` 104 个测试全绿(mock LLM)。
+- **P2 完成**:`traffic_analyzer/toolserver/` Python 工具服务(127.0.0.1:8601,`--workspace` 必填、越界 403)+ TS 工具层经 HTTP 接通真实视频。
+- **P3 完成**:检测编排(系统 prompt + `submit_detection` 契约)端到端跑通,演示区视频产出 11 位编码 + Markdown 报告。
+- **P4 完成**:web/前端集成落地——`web/agentproxy/` 反向代理 `/api/agent/*` 并在 startup 自动拉起 toolserver + agent 服务(`AGENT_RUNTIME_ENABLE=0` 关闭);前端 `/agent` 路由 AgentChatView(权限模式选择、工具气泡、审批卡片、检测结果卡);批量推理视图保留。
+- **P5 部分完成(瘦身从简)**:pytest 809 个全绿、文档已更新;旧 `web/chat/` 快速对话**未删除**,留作遗留,后续由 agent 对话取代时再清理。
+- **P6 完成**:重要节点 git commit 已做。

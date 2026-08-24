@@ -71,3 +71,29 @@ _Avoid_: training data, annotation, ground truth
 **证据 (Evidence)**:
 逐视频的可视化标注文件(`<stem>_evidence.json`),包含多边形和矩形标注,标注事件实例在关键帧中的空间位置。证据与 SFT 标签紧密关联,为训练样本提供空间锚定。
 _Avoid_: bbox, annotation file
+
+### Agent 运行时
+
+**Agent 运行时 (Agent Runtime)**:
+`agent/` 下的 TypeScript 服务:多轮 loop 驱动 LLM 调用工具完成任务,经 HTTP+SSE 对外服务(默认 127.0.0.1:8602),由 web 层 `/api/agent/*` 代理。内含 kosong(vendored 自 kimi-code 的 LLM 抽象层)、工具注册表与调度器、权限链、沙盒。
+_Avoid_: Node backend, chatbot service
+
+**检测 Agent (Detection Agent)**:
+Agent 运行时中执行视频检测的会话角色:按系统 prompt 编排 video_meta / extract_frames / draw_boxes 等工具逐步观察视频,最终以 `submit_detection` 工具提交结构化结果(11 位编码 + Markdown 报告),输出契约与批量流水线一致。
+_Avoid_: expert agent(事件专家是批量流水线内角色,与检测 Agent 不同)
+
+**工具 (Tool)**:
+Agent 运行时可调用的最小能力单元,声明 `{name, description, parameters}` 与资源访问(accesses);注册表管理,调度器按访问冲突并行执行同批调用。内置 7 个:video_meta / extract_frames / draw_boxes / read_file / write_file / run_script / submit_detection。
+_Avoid_: function call, action
+
+**权限模式 (Permission Mode)**:
+工具执行前的裁决策略,三档:`yolo`(全部放行)、`manual`(逐次人工确认)、`auto`(自动裁决,危险操作仍询问)。policy 责任链首个命中生效;会话级批准记忆免除重复确认。沙盒越界属硬 veto,不进权限链。
+_Avoid_: approval flow, access control
+
+**沙盒 (Sandbox)**:
+文件访问的硬边界:所有路径解析后必须落在 workspace(+ additionalDirs)内,敏感文件(`.env`、私钥、credentials 等)一律 veto。沙盒约束不可被任何权限模式豁免。
+_Avoid_: chroot, container
+
+**工具服务 (Tool Server)**:
+`traffic_analyzer/toolserver/` 下的 Python 本地 HTTP 服务(默认 127.0.0.1:8601),向 Agent 运行时暴露视频元信息、抽帧、画框能力;`--workspace` 必填,视频路径越界返回 403。CV 计算全部留在 Python,TS 侧只做 HTTP client。
+_Avoid_: tool API, video service

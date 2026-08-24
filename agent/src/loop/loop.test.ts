@@ -250,6 +250,56 @@ describe('runAgentLoop', () => {
     expect(DEFAULT_MAX_STEPS_PER_TURN).toBe(30);
   });
 
+  it('同一工具连续失败触发熔断,以 error 终止而非死循环到 max_steps', async () => {
+    const failTool = echoTool(() =>
+      Promise.resolve({ output: 'bad params', isError: true }),
+    );
+    const h = harness(
+      [
+        [toolCall('c1', 'echo', {})],
+        [toolCall('c2', 'echo', {})],
+        [toolCall('c3', 'echo', {})],
+        [toolCall('c4', 'echo', {})],
+        [toolCall('c5', 'echo', {})],
+        [toolCall('c6', 'echo', {})],
+      ],
+      [failTool],
+    );
+
+    const result = await h.run();
+
+    expect(result.reason).toBe('error');
+    expect(result.error).toContain('连续 5 次失败');
+    expect(result.steps).toBe(5);
+    const done = doneEvent(h.events);
+    expect(done.reason).toBe('error');
+    expect(done.error).toContain('bad params');
+  });
+
+  it('工具成功后重置连续失败计数', async () => {
+    let call = 0;
+    const flakyTool = echoTool(() => {
+      call += 1;
+      return Promise.resolve(
+        call % 2 === 0 ? { output: 'ok' } : { output: 'bad', isError: true },
+      );
+    });
+    const h = harness(
+      [
+        [toolCall('c1', 'echo', {})],
+        [toolCall('c2', 'echo', {})],
+        [toolCall('c3', 'echo', {})],
+        [toolCall('c4', 'echo', {})],
+        [text('完成')],
+      ],
+      [flakyTool],
+    );
+
+    const result = await h.run({ maxConsecutiveToolErrors: 2 });
+
+    expect(result.reason).toBe('completed');
+  });
+
   it('权限 deny 时合成 isError 结果回灌,工具不执行', async () => {
     const execute = vi.fn(() => Promise.resolve({ output: 'should-not-run' }));
     const gate = new PermissionGate({
