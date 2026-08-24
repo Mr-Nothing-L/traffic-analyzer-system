@@ -56,12 +56,19 @@ export function createProviderFromEnv(envPath: string = defaultEnvPath()): Provi
         `the TS agent runtime currently supports only: ${[...OPENAI_COMPATIBLE_PROVIDERS].join(', ')}`,
     );
   }
+  // qwen3 这类 thinking 模型的推理 token 也计入 max_tokens;检测 agent 需要
+  // 长思考 + 大型结构化输出(submit_detection 参数),4096 会把 tool call
+  // arguments 截断。AGENT_MAX_TOKENS 显式覆盖;否则在 .env 配置值上兜底 16384。
+  const envOverride = Number.parseInt(process.env.AGENT_MAX_TOKENS ?? '', 10);
+  const maxTokens = Number.isFinite(envOverride)
+    ? envOverride
+    : Math.max(config.maxTokens, 16384);
   const provider = new OpenAILegacyChatProvider({
     // 本地 vLLM 不校验 key,但 openai SDK 要求非空;缺省时用占位值
     apiKey: config.apiKey === '' ? 'EMPTY' : config.apiKey,
     baseUrl: config.baseUrl,
     model: config.model,
-    maxTokens: config.maxTokens,
+    maxTokens,
     generationKwargs: { temperature: config.temperature },
   });
   return { provider, model: config.model, config };

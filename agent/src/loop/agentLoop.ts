@@ -53,6 +53,8 @@ export type AgentLoopEvent =
       readonly type: 'done';
       readonly reason: AgentLoopDoneReason;
       readonly stopResult?: ExecutableToolResult;
+      /** reason === 'error' 时的错误信息。 */
+      readonly error?: string;
     };
 
 export interface AgentLoopOptions {
@@ -108,7 +110,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     reason: AgentLoopDoneReason,
     extra: { stopResult?: ExecutableToolResult; error?: string } = {},
   ): Promise<AgentLoopResult> => {
-    await emit({ type: 'done', reason, stopResult: extra.stopResult });
+    await emit({ type: 'done', reason, stopResult: extra.stopResult, error: extra.error });
     return {
       reason,
       messages,
