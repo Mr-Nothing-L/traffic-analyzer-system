@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /** 快速对话整卡:来源条(会话标题 = 首个问题缩略/清空记忆)+ 消息列表(SSE 流式气泡,
- * 附件随 user 消息进气泡:图片缩略图/视频 chip 在文字上方;assistant 正文 markdown
- * 渲染;思考过程折叠块收起时单行流式指示;带撤回/复制/时间操作栏)
+ * 附件随 user 消息进气泡:图片缩略图/视频封面块(带播放角标,无封面回退 chip)在文字上方;
+ * assistant 正文 markdown 渲染;思考过程折叠块收起时单行流式指示;带撤回/复制/时间操作栏)
  * + 输入区(「+」/ Ctrl+V 粘贴 / 拖拽三种方式暂存附件随消息一同上传、
  * Enter 发送 / Shift+Enter 换行 / 发送中可停止)。
  * 与数据看板同模式:TreeView 子路由,整卡替换主区;状态在 stores/chat.ts,组件只接线。 */
@@ -142,6 +142,11 @@ const fileName = (u: string) => {
  * 幂等:已是 /api/chat/video/ 的 URL 原样返回;仅转换 /api/chat/files/ 前缀。 */
 const videoStreamUrl = (u: string) =>
   u.includes('/api/chat/video/') ? u : u.replace('/api/chat/files/', '/api/chat/video/')
+
+/** 视频封面约定:同路径把扩展名换成 .thumb.jpg(后端上传时生成;历史视频无封面,
+ * onerror 进 thumbBroken 回退文件 chip)。 */
+const videoThumbUrl = (u: string) => u.replace(/\.[^./]+$/, '.thumb.jpg')
+const thumbBroken = reactive(new Set<string>())
 
 /* ---- 视频播放 modal:首次播放 mpeg4/HEVC 需等整片转码,给加载遮罩 ---- */
 const videoLoading = ref(false)
@@ -334,20 +339,34 @@ async function onRecall(m: ChatMessage) {
                   <div v-if="thinkOpen.has(thinkKey(m, i))" class="think-text">{{ m.think }}</div>
                   <div v-else class="think-line">{{ lastThinkLine(m.think) }}</div>
                 </div>
-                <!-- user 附件在文字上方(微信式):视频 chip 点击 modal 播放,图片缩略图点击放大 -->
+                <!-- user 附件在文字上方(微信式):视频封面缩略图(带播放角标,404 回退 chip),
+                     图片缩略图点击放大 -->
                 <template v-if="m.role === 'user'">
                   <div v-if="vidOnly(m.images).length" class="vid-group">
-                    <button
-                      v-for="u in vidOnly(m.images)"
-                      :key="u"
-                      type="button"
-                      class="vid-chip"
-                      :title="fileName(u)"
-                      @click="openVideo(u)"
-                    >
-                      <UiIcon name="video" :size="14" />
-                      <span class="vid-name">{{ fileName(u) }}</span>
-                    </button>
+                    <div v-for="u in vidOnly(m.images)" :key="u" class="vid-item">
+                      <template v-if="!thumbBroken.has(u)">
+                        <button
+                          type="button"
+                          class="vid-thumb"
+                          :title="fileName(u)"
+                          @click="openVideo(u)"
+                        >
+                          <img :src="videoThumbUrl(u)" alt="" @error="thumbBroken.add(u)" />
+                          <span class="vid-play"><UiIcon name="play" :size="16" /></span>
+                        </button>
+                        <div class="vid-caption">{{ fileName(u) }}</div>
+                      </template>
+                      <button
+                        v-else
+                        type="button"
+                        class="vid-chip"
+                        :title="fileName(u)"
+                        @click="openVideo(u)"
+                      >
+                        <UiIcon name="video" :size="14" />
+                        <span class="vid-name">{{ fileName(u) }}</span>
+                      </button>
+                    </div>
                   </div>
                   <div v-if="imgOnly(m.images).length" class="img-group img-group-top">
                     <img
@@ -742,8 +761,8 @@ async function onRecall(m: ChatMessage) {
 }
 
 .img-group img {
-  width: 300px;
-  height: 190px;
+  width: 400px;
+  height: auto; /* 按原始宽高比自适应,不裁切;object-fit 在 height:auto 下为惰性,仅供下方 user 缩略图继承 */
   object-fit: cover;
   border-radius: var(--radius-sm);
   border: 1px solid var(--color-border);
@@ -762,6 +781,58 @@ async function onRecall(m: ChatMessage) {
   flex-wrap: wrap;
   gap: var(--space-sm);
   margin-bottom: var(--space-sm);
+}
+
+/* ---- user 气泡内的视频附件:封面缩略图(微信式)+ 播放角标;无封面回退 chip ---- */
+.vid-item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  max-width: 240px;
+}
+
+.vid-thumb {
+  position: relative;
+  display: block;
+  width: 240px;
+  aspect-ratio: 16 / 9;
+  padding: 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: #000;
+  cursor: pointer;
+}
+
+.vid-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.vid-play {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: rgb(0 0 0 / 55%);
+  color: #fff;
+  pointer-events: none;
+}
+
+.vid-caption {
+  color: var(--color-text2);
+  font-size: var(--text-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .vid-chip {

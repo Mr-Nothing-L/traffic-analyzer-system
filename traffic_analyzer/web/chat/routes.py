@@ -4,7 +4,8 @@
 作用:快速对话路由。GET /api/chat/state 返回当前信源(display_name + 可预览
 文件 URL)与消息列表(含消息 id,images 转 /api/chat/files/<name> URL);POST /api/chat/upload
 接收视频(恰1个)或图片(≥1张,混合 400,扩展名白名单,单文件 ≤500MB 流式写盘,
-超限 413,落盘名 <uuid>_<安全化原名>)写入 output/chat_uploads/incoming/ 并切换信源;POST /api/chat/ask
+超限 413,落盘名 <uuid>_<安全化原名>;视频写盘后 best-effort 生成中间帧封面
+<同名>.thumb.jpg,失败仅 log)写入 output/chat_uploads/incoming/ 并切换信源;POST /api/chat/ask
 SSE 流式问答(text/event-stream,异常兜底 error 事件;body 可带 attachments
 相对名,校验在上传根内且存在后随 user 消息落库,供气泡内展示附件);DELETE /api/chat/history
 清空(204);POST /api/chat/messages/delete 撤回一条消息及其后的 assistant
@@ -32,6 +33,7 @@ from pydantic import BaseModel
 
 from traffic_analyzer.web.auth import _request_ip
 from traffic_analyzer.web.chat import paths, qa, store
+from traffic_analyzer.web.frames import read_frame_jpeg, read_video_meta
 from traffic_analyzer.web.video_stream import _stream_response
 
 logger = logging.getLogger(__name__)
@@ -123,6 +125,27 @@ def _dest_name(original: str, ext: str) -> str:
     return f"{uuid.uuid4().hex}_{safe}{ext}"
 
 
+def _write_video_thumb(dest: Path) -> None:
+    """Best-effort cover thumbnail → ``<dest 去扩展名>.thumb.jpg``(中间帧,失败退第 0 帧)。
+
+    失败仅 log,不影响上传;前端约定同路径换 .thumb.jpg 扩展名取封面,
+    不存在时回退文件 chip。缩略图由现有 /api/chat/files/{name} 直接服务。
+    """
+    try:
+        meta = read_video_meta(dest)
+        if not meta:
+            logger.warning("[chat] video thumb skipped (meta unreadable): %s", dest)
+            return
+        index = int(meta["frame_count"]) // 2
+        jpeg = read_frame_jpeg(dest, index) or read_frame_jpeg(dest, 0)
+        if not jpeg:
+            logger.warning("[chat] video thumb skipped (frame unreadable): %s", dest)
+            return
+        dest.with_suffix(".thumb.jpg").write_bytes(jpeg)
+    except Exception as exc:
+        logger.warning("[chat] video thumb failed %s: %s", dest, exc)
+
+
 @router.post("/api/chat/upload")
 def upload_chat_files(
     request: Request, files: List[UploadFile] = File(...)
@@ -150,6 +173,8 @@ def upload_chat_files(
     for file, ext in zip(files, exts):
         dest = paths.INCOMING_DIR / _dest_name(file.filename or "", ext)
         _write_upload(file, dest)
+        if kind == "upload_video":
+            _write_video_thumb(dest)
         saved.append(str(dest))
         names.append(file.filename or dest.name)
 
