@@ -136,6 +136,15 @@ describe('video_meta', () => {
     expect(result.output).toContain('PATH_OUTSIDE_WORKSPACE');
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it('hard-vetoes an ABSOLUTE path outside the workspace', async () => {
+    const result = await execute(videoTool('video_meta'), {
+      video_path: path.join(os.tmpdir(), 'elsewhere.mp4'),
+    });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain('PATH_OUTSIDE_WORKSPACE');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 });
 
 describe('extract_frames', () => {
@@ -255,6 +264,56 @@ describe('read_file / write_file', () => {
     expect(result.output).toContain('PATH_OUTSIDE_WORKSPACE');
   });
 
+  it('hard-vetoes ABSOLUTE paths outside the workspace (read and write)', async () => {
+    const outsideDir = mkdtempSync(path.join(os.tmpdir(), 'outside-ws-'));
+    try {
+      const outsideFile = path.join(outsideDir, 'abs.txt');
+      writeFileSync(outsideFile, 'secret');
+
+      const read = await execute(fileTool('read_file'), { path: outsideFile });
+      expect(read.isError).toBe(true);
+      expect(read.output).toContain('PATH_OUTSIDE_WORKSPACE');
+
+      const write = await execute(fileTool('write_file'), {
+        path: path.join(outsideDir, 'new.txt'),
+        content: 'x',
+      });
+      expect(write.isError).toBe(true);
+      expect(write.output).toContain('PATH_OUTSIDE_WORKSPACE');
+
+      const script = await execute(fileTool('run_script'), { path: outsideFile });
+      expect(script.isError).toBe(true);
+      expect(script.output).toContain('PATH_OUTSIDE_WORKSPACE');
+    } finally {
+      rmSync(outsideDir, { recursive: true, force: true });
+    }
+  });
+
+  it('allows absolute paths inside additionalDirs', async () => {
+    const extraDir = mkdtempSync(path.join(os.tmpdir(), 'extra-dir-'));
+    try {
+      const extraFile = path.join(extraDir, 'note.txt');
+      const extraWorkspace: WorkspaceConfig = {
+        workspaceDir,
+        additionalDirs: [extraDir],
+      };
+      const tools = createFileTools(extraWorkspace, (n) => `desc:${n}`);
+      const write = tools.find((t) => t.name === 'write_file');
+      const read = tools.find((t) => t.name === 'read_file');
+      if (!write || !read) throw new Error('tools not found');
+
+      const written = await execute(write, { path: extraFile, content: 'in extra dir' });
+      expect(written.isError).toBeFalsy();
+      expect(readFileSync(extraFile, 'utf8')).toBe('in extra dir');
+
+      const readBack = await execute(read, { path: extraFile });
+      expect(readBack.isError).toBeFalsy();
+      expect(JSON.parse(readBack.output as string).content).toBe('in extra dir');
+    } finally {
+      rmSync(extraDir, { recursive: true, force: true });
+    }
+  });
+
   it('hard-vetoes sensitive files', async () => {
     const result = await execute(fileTool('read_file'), { path: '.env' });
     expect(result.isError).toBe(true);
@@ -370,7 +429,7 @@ describe('submit_detection', () => {
         { description: '白色小客车停靠应急车道', location: '画面右侧', start_sec: 2, end_sec: 8 },
       ],
       reasoning: '第 3-8 秒可见静止车辆',
-      evidence_frames: ['frame_3s.jpg'],
+      evidence_frames: [3.0],
     };
     const result = await execute(tool(), {
       events,
@@ -397,7 +456,7 @@ describe('submit_detection', () => {
 
   it('rejects when normal contradicts the encoding', async () => {
     const events = baseEvents();
-    events[0] = { ...events[0], detected: true, evidence_frames: ['f.jpg'] };
+    events[0] = { ...events[0], detected: true, evidence_frames: [1.0] };
     const result = await execute(tool(), {
       events,
       binary_encoding: '1_0_0_0_0_0_0_0_0_0_0',
@@ -419,6 +478,18 @@ describe('submit_detection', () => {
     });
     expect(result.isError).toBe(true);
     expect(result.output).toContain('evidence_frames 为空');
+  });
+
+  it('rejects string evidence frames (timestamps in seconds only)', async () => {
+    const events = baseEvents();
+    events[0] = { ...events[0], detected: true, evidence_frames: ['frame_3s.jpg'] };
+    const result = await execute(tool(), {
+      events,
+      binary_encoding: '1_0_0_0_0_0_0_0_0_0_0',
+      normal: false,
+      report_markdown: '# 报告',
+    });
+    expect(result.isError).toBe(true);
   });
 
   it('rejects an encoding with bit 9 set (schema pattern)', async () => {

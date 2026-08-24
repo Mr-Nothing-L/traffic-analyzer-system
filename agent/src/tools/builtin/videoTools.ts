@@ -18,9 +18,9 @@ import {
   type ExecutableToolResult,
 } from '../contract';
 import type { ToolserverClient } from './httpToolserver';
+import { resolveWorkspacePath } from './fileTools';
 import {
   invalidInputResult,
-  resolveSandboxPath,
   toolserverErrorResult,
 } from './utils';
 
@@ -105,7 +105,7 @@ export function createVideoMetaTool(
     resolveExecution(rawInput: unknown) {
       const parsed = videoMetaInputSchema.safeParse(rawInput);
       if (!parsed.success) return invalidInputResult('video_meta', parsed.error);
-      const resolved = resolveSandboxPath(parsed.data.video_path, workspace, 'read');
+      const resolved = resolveWorkspacePath(parsed.data.video_path, workspace, 'read');
       if (!resolved.ok) return resolved.result;
       const videoPath = resolved.path;
       return {
@@ -159,7 +159,7 @@ export function createExtractFramesTool(
     resolveExecution(rawInput: unknown) {
       const parsed = extractFramesInputSchema.safeParse(rawInput);
       if (!parsed.success) return invalidInputResult('extract_frames', parsed.error);
-      const resolved = resolveSandboxPath(parsed.data.video_path, workspace, 'read');
+      const resolved = resolveWorkspacePath(parsed.data.video_path, workspace, 'read');
       if (!resolved.ok) return resolved.result;
       const videoPath = resolved.path;
       const input = parsed.data;
@@ -232,7 +232,7 @@ export function createDrawBoxesTool(
     resolveExecution(rawInput: unknown) {
       const parsed = drawBoxesInputSchema.safeParse(rawInput);
       if (!parsed.success) return invalidInputResult('draw_boxes', parsed.error);
-      const resolved = resolveSandboxPath(parsed.data.video_path, workspace, 'read');
+      const resolved = resolveWorkspacePath(parsed.data.video_path, workspace, 'read');
       if (!resolved.ok) return resolved.result;
       const videoPath = resolved.path;
       const input = parsed.data;

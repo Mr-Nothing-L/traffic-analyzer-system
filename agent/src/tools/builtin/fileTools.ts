@@ -9,19 +9,28 @@
  */
 import { execFile } from 'node:child_process';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
 import { z } from 'zod';
 
-import type { WorkspaceConfig } from '../../sandbox/path-access';
+import {
+  PathSecurityError,
+  canonicalizePath,
+  isSensitiveFile,
+  isWithinWorkspace,
+  type PathAccessOperation,
+  type WorkspaceConfig,
+} from '../../sandbox/path-access';
 import {
   ToolAccesses,
   type ExecutableTool,
+  type ExecutableToolErrorResult,
   type ExecutableToolResult,
 } from '../contract';
 import type { ToolDescriptionLookup } from './videoTools';
-import { invalidInputResult, resolveSandboxPath, truncateOutput } from './utils';
+import { invalidInputResult, truncateOutput } from './utils';
 
 const execFileAsync = promisify(execFile);
 
@@ -34,6 +43,74 @@ const SCRIPT_INTERPRETERS: Record<string, string> = {
   '.sh': 'bash',
   '.py': 'python3',
 };
+
+export type WorkspacePathResolution =
+  | { readonly ok: true; readonly path: string }
+  | { readonly ok: false; readonly result: ExecutableToolErrorResult };
+
+/**
+ * Strict workspace confinement for builtin tools. Unlike resolvePathAccess's
+ * default `absolute-outside-allowed` guard mode, ANY path resolving outside
+ * the workspace (absolute or relative) is a hard veto → isError
+ * (PATH_OUTSIDE_WORKSPACE); paths inside additionalDirs still pass. Sensitive
+ * files are vetoed as PATH_SENSITIVE. Built from the sandbox module's
+ * canonicalizePath/isWithinWorkspace/isSensitiveFile primitives (the sandbox
+ * module itself is not modified).
+ */
+export function resolveWorkspacePath(
+  rawPath: string,
+  workspace: WorkspaceConfig,
+  operation: PathAccessOperation,
+): WorkspacePathResolution {
+  let canonical: string;
+  try {
+    const expanded =
+      rawPath === '~'
+        ? os.homedir()
+        : rawPath.startsWith('~/')
+          ? path.join(os.homedir(), rawPath.slice(2))
+          : rawPath;
+    canonical = canonicalizePath(expanded, workspace.workspaceDir);
+  } catch (error) {
+    if (error instanceof PathSecurityError) {
+      return {
+        ok: false,
+        result: {
+          output: `路径访问被沙盒硬性拒绝 [${error.code}]: ${error.message}`,
+          isError: true,
+        },
+      };
+    }
+    throw error;
+  }
+
+  if (isSensitiveFile(canonical)) {
+    return {
+      ok: false,
+      result: {
+        output:
+          `路径访问被沙盒硬性拒绝 [PATH_SENSITIVE]: "${rawPath}" 命中敏感文件模式` +
+          `(env / 私钥 / credentials),已阻止访问以保护密钥。`,
+        isError: true,
+      },
+    };
+  }
+
+  if (!isWithinWorkspace(canonical, workspace)) {
+    const verb = operation === 'write' ? '写入' : operation === 'search' ? '搜索' : '读取';
+    return {
+      ok: false,
+      result: {
+        output:
+          `路径访问被沙盒硬性拒绝 [PATH_OUTSIDE_WORKSPACE]: "${rawPath}" 解析为 ` +
+          `"${canonical}",位于工作区之外;${verb}操作仅限工作区(及附加目录)内。`,
+        isError: true,
+      },
+    };
+  }
+
+  return { ok: true, path: canonical };
+}
 
 const readFileInputSchema = z.strictObject({
   path: z.string(),
@@ -68,7 +145,7 @@ export function createReadFileTool(
     resolveExecution(rawInput: unknown) {
       const parsed = readFileInputSchema.safeParse(rawInput);
       if (!parsed.success) return invalidInputResult('read_file', parsed.error);
-      const resolved = resolveSandboxPath(parsed.data.path, workspace, 'read');
+      const resolved = resolveWorkspacePath(parsed.data.path, workspace, 'read');
       if (!resolved.ok) return resolved.result;
       const filePath = resolved.path;
       return {
@@ -111,7 +188,7 @@ export function createWriteFileTool(
     resolveExecution(rawInput: unknown) {
       const parsed = writeFileInputSchema.safeParse(rawInput);
       if (!parsed.success) return invalidInputResult('write_file', parsed.error);
-      const resolved = resolveSandboxPath(parsed.data.path, workspace, 'write');
+      const resolved = resolveWorkspacePath(parsed.data.path, workspace, 'write');
       if (!resolved.ok) return resolved.result;
       const filePath = resolved.path;
       return {
@@ -170,7 +247,7 @@ export function createRunScriptTool(
     resolveExecution(rawInput: unknown) {
       const parsed = runScriptInputSchema.safeParse(rawInput);
       if (!parsed.success) return invalidInputResult('run_script', parsed.error);
-      const resolved = resolveSandboxPath(parsed.data.path, workspace, 'read');
+      const resolved = resolveWorkspacePath(parsed.data.path, workspace, 'read');
       if (!resolved.ok) return resolved.result;
       const scriptPath = resolved.path;
       const interpreter = SCRIPT_INTERPRETERS[path.extname(scriptPath).toLowerCase()];

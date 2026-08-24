@@ -15,64 +15,71 @@
         },
         "required": ["video_path"]
       },
-      "returns": "{frame_count, fps, duration_sec, width, height};视频无法打开时返回 {error}",
+      "returns": "{duration_s, fps, width, height, frame_count};失败时返回 {error: {code, message}}(403 path_outside_workspace / 404 video_not_found / 404 video_meta_unavailable)",
       "limits": [
         "只读操作,不修改视频文件",
-        "duration_sec 可能为 null(fps 不可用时)"
+        "video_path 可为绝对路径或 workspace 相对路径,解析后必须落在 workspace 内,越界返回 403",
+        "duration_s 可能为 null(fps 不可用时)"
       ]
     },
     {
       "name": "extract_frames",
-      "description": "从视频中按时间范围均匀抽帧,保存为 JPEG 文件,返回文件路径和对应时间戳(秒)。start_sec/end_sec 为秒,会自动换算为帧号。",
-      "when_to_use": "需要查看画面时。短视频均匀覆盖全片;长视频先大范围粗采样建立全局理解,再对可疑时段缩小范围精细采样。返回的帧会作为图片输入给你逐张观察。",
+      "description": "从视频中抽帧,返回 JPEG 图像(base64 编码)及对应时间戳(秒)。两种模式:传 timestamps 按指定时刻抽帧;或不传 timestamps,用 count 在全片均匀抽帧。",
+      "when_to_use": "需要查看画面时。短视频用 count 均匀覆盖全片;长视频先用小 count 粗采样建立全局理解,再用 timestamps 指定可疑时刻精细采样。返回的帧(base64 JPEG)会作为图片输入给你逐张观察。",
       "parameters": {
         "type": "object",
         "properties": {
-          "video_path": { "type": "string", "description": "视频文件绝对路径" },
-          "start_sec": { "type": "number", "description": "起始秒", "minimum": 0 },
-          "end_sec": { "type": "number", "description": "结束秒(含),需 >= start_sec", "minimum": 0 },
-          "max_frames": { "type": "integer", "description": "最多抽取帧数,默认 4,上限 8", "default": 4, "minimum": 1, "maximum": 8 }
+          "video_path": { "type": "string", "description": "视频文件路径(绝对路径或 workspace 相对路径)" },
+          "timestamps": {
+            "type": "array",
+            "description": "指定抽帧时刻(秒)列表;提供时优先于 count,负数截断为 0,超出时长的时刻会被夹到有效帧范围",
+            "items": { "type": "number", "minimum": 0 }
+          },
+          "count": { "type": "integer", "description": "全片均匀抽帧数量(仅在未提供 timestamps 时生效),实际数量不超过 max_frames", "minimum": 1 },
+          "max_frames": { "type": "integer", "description": "本次调用返回帧数上限,默认 4,硬上限 8", "default": 4, "minimum": 1, "maximum": 8 }
         },
-        "required": ["video_path", "start_sec", "end_sec"]
+        "required": ["video_path"]
       },
-      "returns": "{paths: string[], timestamps: number[], fps};空区间或视频无法打开时返回 {error}",
+      "returns": "{frames: [{timestamp, jpeg_base64, width, height}]};失败时返回 {error: {code, message}}(403 path_outside_workspace / 404 video_not_found / 404 video_meta_unavailable)",
       "limits": [
-        "单次调用最多 8 帧;需要更密覆盖时分多次调用不同时间区间",
-        "start_sec/end_sec 越界会被截断到实际帧范围",
-        "帧文件写入沙盒帧目录,不要假设其目录位置,以返回的 paths 为准"
+        "单次调用最多返回 8 帧(硬上限);timestamps 超出部分会被截断,需要更密覆盖时分多次调用",
+        "不写盘,帧以 base64 JPEG 内联返回;evidence_frames 引用证据帧时用其 timestamp",
+        "timestamps 与 count 都不传时,按 max_frames 在全片均匀抽帧"
       ]
     },
     {
       "name": "draw_boxes",
-      "description": "在图片上绘制归一化 xyxy 边界框(0~1 浮点)并标注标签,返回标注后图片的输出路径。",
-      "when_to_use": "对疑似目标做锚定核对时:远距离、过小、运动模糊或拿不准的目标(如远处行人/摩托车、车道内小异物),在帧上框出你判断的位置,生成标注图后再看一次,核对类别与位置是否成立。也用于为证据帧生成可视化标注。",
+      "description": "在视频指定时刻的帧上绘制归一化 xyxy 边界框(0~1 浮点)并标注标签,返回标注后帧的 JPEG(base64 编码)。",
+      "when_to_use": "对疑似目标做锚定核对时:远距离、过小、运动模糊或拿不准的目标(如远处行人/摩托车、车道内小异物),用 video_path + timestamp 定位帧,框出你判断的目标位置,查看返回的标注图,核对类别与位置是否成立。也用于为证据帧生成可视化标注。",
       "parameters": {
         "type": "object",
         "properties": {
-          "image_path": { "type": "string", "description": "输入图片路径(通常来自 extract_frames 的 paths)" },
+          "video_path": { "type": "string", "description": "视频文件路径(绝对路径或 workspace 相对路径)" },
+          "timestamp": { "type": "number", "description": "目标帧时刻(秒),自动换算并夹取到有效帧号", "minimum": 0 },
           "boxes": {
             "type": "array",
-            "description": "归一化 xyxy 框列表,如 [[0.1, 0.2, 0.3, 0.4]]",
+            "description": "要绘制的框列表,至少 1 个;坐标为归一化 xyxy(0~1),label 可选(缺省 \"target\",截断至 40 字符)",
+            "minItems": 1,
             "items": {
-              "type": "array",
-              "items": { "type": "number", "minimum": 0, "maximum": 1 },
-              "minItems": 4,
-              "maxItems": 4
+              "type": "object",
+              "properties": {
+                "x1": { "type": "number", "minimum": 0, "maximum": 1 },
+                "y1": { "type": "number", "minimum": 0, "maximum": 1 },
+                "x2": { "type": "number", "minimum": 0, "maximum": 1 },
+                "y2": { "type": "number", "minimum": 0, "maximum": 1 },
+                "label": { "type": "string", "description": "框标签(如 \"疑似行人\");框颜色由标签自动决定" }
+              },
+              "required": ["x1", "y1", "x2", "y2"]
             }
-          },
-          "labels": {
-            "type": "array",
-            "description": "与 boxes 一一对应的标签(如 [\"疑似行人\"])",
-            "items": { "type": "string" }
           }
         },
-        "required": ["image_path", "boxes", "labels"]
+        "required": ["video_path", "timestamp", "boxes"]
       },
-      "returns": "{output_path, n_boxes};box 格式错误时返回 {error}",
+      "returns": "{jpeg_base64, width, height};失败时返回 {error: {code, message}}(403 path_outside_workspace / 404 video_not_found / 404 frame_unavailable)",
       "limits": [
         "坐标必须是 0~1 归一化 xyxy,越界会被截断到图像边缘",
-        "boxes 与 labels 数量应一致;labels 缺失时自动使用 obj0/obj1...",
-        "不修改原图,输出为新文件"
+        "在服务端解码的帧上绘制,不生成/修改任何文件;标注图以 base64 JPEG 内联返回",
+        "boxes 至少 1 个"
       ]
     },
     {

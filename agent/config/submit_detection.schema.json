@@ -66,8 +66,8 @@
           },
           "evidence_frames": {
             "type": "array",
-            "description": "支撑该判定的证据帧文件路径(来自 extract_frames/draw_boxes 的输出)。detected=true 时不得为空——这是锚定核验的硬性要求。",
-            "items": { "type": "string" }
+            "description": "支撑该判定的证据帧时间戳(秒,即 extract_frames/draw_boxes 中看过对应画面的帧时间点;帧不落盘,不使用文件路径)。detected=true 时不得为空——这是锚定核验的硬性要求。",
+            "items": { "type": "number", "minimum": 0 }
           }
         }
       }

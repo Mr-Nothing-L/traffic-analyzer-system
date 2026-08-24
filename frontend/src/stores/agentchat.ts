@@ -1,0 +1,387 @@
+/** Agent 对话检测:会话(权限模式)+ 时间线条目 + SSE 流式轮次。
+ * 后端契约(FastAPI /api/agent/* 代理 → Node agent 服务,workspaceDir 由后端注入):
+ * POST /api/agent/sessions({mode}) → {sessionId};
+ * POST /api/agent/chat({sessionId,input,videoPath?}) → SSE(每事件一行 'data: {json}\n\n',
+ *   事件:text_delta/think_delta/tool_call_start/tool_result/step_done/
+ *   approval_request/detection/done);
+ * POST /api/agent/approval({requestId,decision,scope?}) → {status:'ok'}。
+ * 与 stores/chat.ts 同模式:fetch+ReadableStream 按 \n\n 分块解析 data: 行,
+ * 组件只接线,状态全部在这里。 */
+import { ref } from 'vue'
+import { defineStore } from 'pinia'
+import { ApiError } from '../api/client'
+
+export type AgentMode = 'manual' | 'yolo'
+
+/** idle 待开始 / connecting 连接中(建会话或流发起)/ running 运行中 /
+ * awaiting_approval 等待审批 / done 已完成 / failed 失败(可重试)。 */
+export type AgentStatus =
+  | 'idle'
+  | 'connecting'
+  | 'running'
+  | 'awaiting_approval'
+  | 'done'
+  | 'failed'
+
+/** approval_request 事件里的资源访问声明(与 agent 端 ToolAccesses 对齐)。 */
+export interface AgentAccess {
+  kind: 'file' | 'all'
+  operation?: 'read' | 'write' | 'readwrite' | 'search'
+  path?: string
+  recursive?: boolean
+}
+
+export interface AgentUserEntry {
+  kind: 'user'
+  text: string
+  videoPath?: string
+}
+
+export interface AgentAssistantEntry {
+  kind: 'assistant'
+  text: string
+  think: string
+}
+
+export interface AgentToolEntry {
+  kind: 'tool'
+  /** tool_call_start 的 call.id,tool_result 按它回填。 */
+  id: string
+  name: string
+  /** call.arguments 原文(JSON 字符串)。 */
+  args: string
+  result: string
+  isError: boolean
+  done: boolean
+}
+
+export interface AgentApprovalEntry {
+  kind: 'approval'
+  requestId: string
+  toolName: string
+  approvalRule: string
+  description?: string
+  accesses: AgentAccess[]
+  /** 已回执后记录:'approved' | 'rejected' | 'approved_session'。 */
+  decision?: string
+}
+
+/** detection 事件的 data:submit_detection 的结构化 payload(解析失败时为原始字符串)。 */
+export interface DetectionPayload {
+  binary_encoding?: string
+  normal?: boolean
+  events?: Array<{
+    event_id: number
+    detected: boolean
+    reasoning: string
+    evidence_frames: string[]
+  }>
+  report_markdown?: string
+}
+
+export interface AgentDetectionEntry {
+  kind: 'detection'
+  data: unknown
+}
+
+export type AgentEntry =
+  | AgentUserEntry
+  | AgentAssistantEntry
+  | AgentToolEntry
+  | AgentApprovalEntry
+  | AgentDetectionEntry
+
+/** 非 2xx 统一成 ApiError:agent 服务错误为 {error:{code,message}},
+ * FastAPI 代理/其他后端为 {detail},两种都认。 */
+async function toApiError(res: Response): Promise<ApiError> {
+  if (res.status === 401 && window.location.pathname !== '/login') {
+    window.location.href = '/login'
+  }
+  let detail = res.statusText
+  try {
+    const body = (await res.json()) as {
+      detail?: unknown
+      error?: { message?: unknown }
+    }
+    if (body?.detail != null) detail = String(body.detail)
+    else if (body?.error?.message != null) detail = String(body.error.message)
+  } catch {
+    // 非 JSON 错误响应,保留 statusText
+  }
+  return new ApiError(res.status, detail)
+}
+
+/** JSON POST 封装(错误体两种形态兼容;401 跳登录由 toApiError 处理)。 */
+async function postJson(path: string, body: unknown): Promise<unknown> {
+  let res: Response
+  try {
+    res = await fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+  } catch {
+    throw new ApiError(0, '网络错误,无法连接后端')
+  }
+  if (!res.ok) throw await toApiError(res)
+  return res.json()
+}
+
+/** tool_result 的 output:string 原样;ContentPart[] 取 text 拼接;其他 JSON 化。 */
+function formatToolOutput(output: unknown): string {
+  if (typeof output === 'string') return output
+  if (Array.isArray(output)) {
+    const texts = output
+      .map((p) =>
+        p && typeof p === 'object' && 'text' in p ? String((p as { text: unknown }).text) : '',
+      )
+      .filter(Boolean)
+    if (texts.length) return texts.join('\n')
+  }
+  try {
+    return JSON.stringify(output, null, 2) ?? ''
+  } catch {
+    return String(output ?? '')
+  }
+}
+
+export const useAgentChatStore = defineStore('agentchat', () => {
+  const sessionId = ref<string | null>(null)
+  const mode = ref<AgentMode>('manual')
+  const status = ref<AgentStatus>('idle')
+  const error = ref<string | null>(null)
+  /** 时间线条目(user/assistant/工具/审批/检测结果),渲染顺序 = 到达顺序。 */
+  const entries = ref<AgentEntry[]>([])
+
+  let ctrl: AbortController | null = null
+  let lastInput = ''
+  let lastVideoPath: string | undefined
+
+  function stop() {
+    ctrl?.abort()
+  }
+
+  /** 创建会话:workspaceDir 由后端代理注入,前端只传权限模式。 */
+  async function createSession() {
+    stop()
+    status.value = 'connecting'
+    error.value = null
+    sessionId.value = null
+    try {
+      const r = (await postJson('/api/agent/sessions', { mode: mode.value })) as {
+        sessionId?: string
+      }
+      if (!r.sessionId) throw new ApiError(0, '后端未返回 sessionId')
+      sessionId.value = r.sessionId
+      status.value = 'idle'
+    } catch (e) {
+      status.value = 'failed'
+      error.value = (e as Error).message
+    }
+  }
+
+  /** 切换权限模式:清空时间线并重建会话(模式是会话级属性)。 */
+  async function setMode(m: AgentMode) {
+    if (m === mode.value && sessionId.value) return
+    mode.value = m
+    entries.value = []
+    await createSession()
+  }
+
+  /** 新建会话(同模式):清空时间线重来。 */
+  async function newSession() {
+    entries.value = []
+    await createSession()
+  }
+
+  /** 流式中追加文本/思考:最后一个条目是 assistant 就续写,否则开新气泡
+   * (工具气泡会自然切断前后两段 assistant 文本)。 */
+  function currentAssistant(): AgentAssistantEntry {
+    const last = entries.value[entries.value.length - 1]
+    if (last?.kind === 'assistant') return last
+    const entry: AgentAssistantEntry = { kind: 'assistant', text: '', think: '' }
+    entries.value.push(entry)
+    return entry
+  }
+
+  function handleEvent(ev: Record<string, unknown>) {
+    if (ev.type === 'text_delta') {
+      currentAssistant().text += String(ev.text ?? '')
+    } else if (ev.type === 'think_delta') {
+      currentAssistant().think += String(ev.text ?? '')
+    } else if (ev.type === 'tool_call_start') {
+      const call = ev.call as { id?: unknown; name?: unknown; arguments?: unknown } | undefined
+      entries.value.push({
+        kind: 'tool',
+        id: String(call?.id ?? ''),
+        name: String(call?.name ?? ''),
+        args:
+          typeof call?.arguments === 'string'
+            ? call.arguments
+            : JSON.stringify(call?.arguments ?? ''),
+        result: '',
+        isError: false,
+        done: false,
+      })
+    } else if (ev.type === 'tool_result') {
+      const id = String(ev.toolCallId ?? '')
+      const tool = [...entries.value]
+        .reverse()
+        .find((e): e is AgentToolEntry => e.kind === 'tool' && e.id === id)
+      if (tool) {
+        tool.done = true
+        tool.isError = ev.isError === true
+        tool.result = formatToolOutput((ev.result as { output?: unknown } | undefined)?.output)
+      }
+      // 审批后的 tool_result 到达即说明流已恢复
+      if (status.value === 'awaiting_approval') status.value = 'running'
+    } else if (ev.type === 'approval_request') {
+      entries.value.push({
+        kind: 'approval',
+        requestId: String(ev.requestId ?? ''),
+        toolName: String(ev.toolName ?? ''),
+        approvalRule: String(ev.approvalRule ?? ''),
+        ...(ev.description != null ? { description: String(ev.description) } : {}),
+        accesses: Array.isArray(ev.accesses) ? (ev.accesses as AgentAccess[]) : [],
+      })
+      status.value = 'awaiting_approval'
+    } else if (ev.type === 'detection') {
+      entries.value.push({ kind: 'detection', data: ev.data })
+    } else if (ev.type === 'done') {
+      if (ev.reason === 'error') {
+        status.value = 'failed'
+        error.value = typeof ev.error === 'string' ? ev.error : 'Agent 运行出错'
+      } else {
+        status.value = 'done'
+      }
+    }
+    // step_done:无独立 UI(工具批结束的进度信号,时间线条目已自解释)
+  }
+
+  /** 发起一轮 /chat SSE(不压 user 条目;send/retry 共用)。 */
+  async function runTurn() {
+    status.value = 'running'
+    error.value = null
+    ctrl = new AbortController()
+    try {
+      let res: Response
+      try {
+        res = await fetch('/api/agent/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sessionId: sessionId.value,
+            input: lastInput,
+            ...(lastVideoPath ? { videoPath: lastVideoPath } : {}),
+          }),
+          signal: ctrl.signal,
+        })
+      } catch (e) {
+        if ((e as Error).name === 'AbortError') return
+        throw new ApiError(0, '网络错误,无法连接后端')
+      }
+      if (!res.ok || !res.body) throw await toApiError(res)
+
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buf = ''
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buf += decoder.decode(value, { stream: true })
+        // SSE 事件以空行(\n\n)分隔;每行 data: {json}
+        let sep: number
+        while ((sep = buf.indexOf('\n\n')) >= 0) {
+          const raw = buf.slice(0, sep)
+          buf = buf.slice(sep + 2)
+          for (const line of raw.split('\n')) {
+            if (!line.startsWith('data:')) continue
+            let ev: Record<string, unknown>
+            try {
+              ev = JSON.parse(line.slice(5).trim())
+            } catch {
+              continue // 非 JSON 行(注释/心跳)忽略
+            }
+            handleEvent(ev)
+          }
+        }
+      }
+      // 流结束但没收到 done(代理中断等):停在运行态会卡死 UI,按失败处理
+      if (status.value === 'running' || status.value === 'awaiting_approval') {
+        status.value = 'failed'
+        error.value = 'SSE 流异常中断,未收到完成事件'
+      }
+    } catch (e) {
+      if ((e as Error).name === 'AbortError') {
+        // stop() 主动中断:静默收尾,已收到内容保留在条目里
+        status.value = 'done'
+        return
+      }
+      status.value = 'failed'
+      error.value = (e as Error).message
+    } finally {
+      ctrl = null
+    }
+  }
+
+  /** 发送一轮检测指令(压 user 条目);进行中/审批中忽略。 */
+  async function send(input: string, videoPath?: string) {
+    const busy =
+      status.value === 'connecting' ||
+      status.value === 'running' ||
+      status.value === 'awaiting_approval'
+    if (!sessionId.value || busy) return
+    lastInput = input
+    lastVideoPath = videoPath || undefined
+    entries.value.push({
+      kind: 'user',
+      text: input,
+      ...(lastVideoPath ? { videoPath: lastVideoPath } : {}),
+    })
+    await runTurn()
+  }
+
+  /** 失败重试:会话都没建上则重建;否则用上次输入重跑一轮(不重复压 user 条目)。 */
+  async function retry() {
+    if (!sessionId.value) {
+      await createSession()
+      return
+    }
+    if (!lastInput) return
+    await runTurn()
+  }
+
+  /** 审批回执:approved/rejected,scope:'session' 表示本会话都批准。
+   * 失败抛错(调用方提示),条目保持未决状态可再点。 */
+  async function respondApproval(
+    requestId: string,
+    decision: 'approved' | 'rejected',
+    scope?: 'session',
+  ) {
+    await postJson('/api/agent/approval', {
+      requestId,
+      decision,
+      ...(scope ? { scope } : {}),
+    })
+    const entry = [...entries.value]
+      .reverse()
+      .find((e): e is AgentApprovalEntry => e.kind === 'approval' && e.requestId === requestId)
+    if (entry) entry.decision = scope === 'session' ? 'approved_session' : decision
+    if (status.value === 'awaiting_approval') status.value = 'running'
+  }
+
+  return {
+    sessionId,
+    mode,
+    status,
+    error,
+    entries,
+    createSession,
+    setMode,
+    newSession,
+    send,
+    retry,
+    stop,
+    respondApproval,
+  }
+})

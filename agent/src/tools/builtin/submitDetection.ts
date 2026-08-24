@@ -49,7 +49,8 @@ const eventSchema = z.strictObject({
   confidence: z.number().min(0).max(1),
   instances: z.array(instanceSchema),
   reasoning: z.string(),
-  evidence_frames: z.array(z.string()),
+  // Frame timestamps (seconds); frames are never written to disk.
+  evidence_frames: z.array(z.number()),
 });
 
 const submitDetectionInputSchema = z.strictObject({

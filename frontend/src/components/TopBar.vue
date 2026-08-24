@@ -63,6 +63,7 @@ async function onLogout() {
     </button>
     <span class="tb-spacer" />
     <ModelSwitcher />
+    <n-button size="small" @click="router.push('/agent')">Agent 检测</n-button>
     <n-button size="small" @click="router.push('/chat')">快速对话</n-button>
     <n-button size="small" @click="router.push('/dashboard')">数据看板</n-button>
     <n-button
