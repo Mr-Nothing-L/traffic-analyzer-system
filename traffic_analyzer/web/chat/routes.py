@@ -5,7 +5,8 @@
 文件 URL)与消息列表(含消息 id,images 转 /api/chat/files/<name> URL);POST /api/chat/upload
 接收视频(恰1个)或图片(≥1张,混合 400,扩展名白名单,单文件 ≤500MB 流式写盘,
 超限 413)写入 output/chat_uploads/incoming/ 并切换信源;POST /api/chat/ask
-SSE 流式问答(text/event-stream,异常兜底 error 事件);DELETE /api/chat/history
+SSE 流式问答(text/event-stream,异常兜底 error 事件;body 可带 attachments
+相对名,校验在上传根内且存在后随 user 消息落库,供气泡内展示附件);DELETE /api/chat/history
 清空(204);POST /api/chat/messages/delete 撤回一条消息及其后的 assistant
 回复(非本 IP 消息 404,成功 204);GET /api/chat/files/{name} 提供上传/产出图(限制在 chat_uploads 根内)。
 状态/消息按 IP 隔离(auth._request_ip)。切换信源写 divider 消息「已切换到 …」。
@@ -41,6 +42,8 @@ _MAX_FILE_BYTES = 500 * 1024 * 1024
 
 class AskRequest(BaseModel):
     question: str
+    """chat-files 相对名(如 incoming/<uuid>.png),随 user 消息落库用于气泡展示。"""
+    attachments: List[str] = []
 
 
 class DeleteMessageRequest(BaseModel):
@@ -148,10 +151,17 @@ def ask_chat(body: AskRequest, request: Request) -> StreamingResponse:
     if not question:
         raise HTTPException(status_code=400, detail="question must be non-empty")
     ip = _request_ip(request)
+    # 附件白名单:仅保留解析后仍在上传根内且真实存在的相对名(防穿越,静默丢弃)
+    root = paths.UPLOAD_DIR.resolve()
+    attachments = []
+    for name in body.attachments:
+        target = (root / name).resolve()
+        if target != root and root in target.parents and target.is_file():
+            attachments.append(Path(name).as_posix())
 
     def event_stream():
         try:
-            for event in qa.ask(ip, question):
+            for event in qa.ask(ip, question, tuple(attachments)):
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         except Exception as exc:
             logger.exception("[chat] ask failed: %s", exc)

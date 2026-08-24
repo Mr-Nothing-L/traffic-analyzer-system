@@ -597,8 +597,14 @@ def maybe_compact(ip: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def ask(ip: str, question: str) -> Generator[Dict[str, Any], None, None]:
-    """SSE event dicts for one question: think/delta/images/done or error."""
+def ask(
+    ip: str, question: str, attachments: Tuple[str, ...] = ()
+) -> Generator[Dict[str, Any], None, None]:
+    """SSE event dicts for one question: think/delta/images/done or error.
+
+    ``attachments`` = upload-dir-relative names (already validated by the
+    route); persisted on the user message so bubbles can render them.
+    """
     try:
         maybe_compact(ip)
     except Exception as exc:  # 压缩是优化,绝不阻塞问答
@@ -620,7 +626,7 @@ def ask(ip: str, question: str) -> Generator[Dict[str, Any], None, None]:
         messages.append({"role": m["role"], "content": m["content"]})
     messages.append({"role": "user", "content": question})
 
-    store.add_message(ip, "user", question)
+    store.add_message(ip, "user", question, images=tuple(attachments))
 
     full_text = ""
     think_text = ""

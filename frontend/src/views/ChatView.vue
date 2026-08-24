@@ -1,5 +1,6 @@
 <script setup lang="ts">
-/** 快速对话整卡:来源条(预览/清空记忆)+ 消息列表(SSE 流式气泡,带撤回/复制/时间)
+/** 快速对话整卡:来源条(来源名/清空记忆)+ 消息列表(SSE 流式气泡,附件随 user
+ * 消息进气泡:图片缩略图/视频 chip 在文字上方,带撤回/复制/时间操作栏)
  * + 输入区(「+」/ Ctrl+V 粘贴 / 拖拽三种方式暂存附件随消息一同上传、
  * Enter 发送 / Shift+Enter 换行 / 发送中可停止)。
  * 与数据看板同模式:TreeView 子路由,整卡替换主区;状态在 stores/chat.ts,组件只接线。 */
@@ -121,12 +122,17 @@ function clearPending() {
   pending.value = []
 }
 
-/* ---- 来源预览面板(上传的视频/图片) ---- */
-const previewOpen = ref(false)
+/* ---- 来源预览:附件随消息进气泡,不再有顶部预览条 ---- */
 
-/* ---- 图片:加载失败隐藏(onerror);点击放大(NModal) ---- */
+/* ---- 图片:加载失败隐藏(onerror);点击放大(NModal);视频 chip 点击 modal 播放 ---- */
 const broken = reactive(new Set<string>())
 const previewUrl = ref<string | null>(null)
+const previewVideo = ref<string | null>(null)
+
+const isVideoUrl = (u: string) => VIDEO_EXT.some((e) => u.toLowerCase().endsWith(e))
+const imgOnly = (images: string[]) => images.filter((u) => !isVideoUrl(u))
+const vidOnly = (images: string[]) => images.filter(isVideoUrl)
+const fileName = (u: string) => u.split('/').pop() || u
 
 /* ---- 消息列表:历史 + 流式中气泡;新增/增长时自动滚底 ---- */
 const scrollbar = ref<InstanceType<typeof NScrollbar> | null>(null)
@@ -170,17 +176,17 @@ onUnmounted(() => {
 async function onClear() {
   try {
     await chat.clear()
-    previewOpen.value = false
     message.success('已清空对话记忆')
   } catch (e) {
     message.error(`清空失败:${(e as Error).message}`)
   }
 }
 
-/* ---- 提问:有暂存附件先上传(失败则保留附件、不发问题),成功后再走 SSE ---- */
+/* ---- 提问:有暂存附件先上传(失败则保留附件、不发问题),成功后附件 URL 随问题走 SSE ---- */
 async function onSend() {
   const q = question.value.trim()
   if (!q || chat.sending || uploading.value) return
+  let sentUrls: string[] = []
   if (pending.value.length) {
     uploading.value = true
     try {
@@ -191,12 +197,12 @@ async function onSend() {
     } finally {
       uploading.value = false
     }
+    sentUrls = [...(chat.source?.files || [])] // 本次上传的可预览 URL,随消息进气泡
     clearPending()
-    previewOpen.value = true // 上传成功后直接展示预览
   }
   question.value = ''
   try {
-    await chat.ask(q)
+    await chat.ask(q, sentUrls)
   } catch (e) {
     message.error((e as Error).message)
   }
@@ -248,13 +254,6 @@ async function onRecall(m: ChatMessage) {
         <span class="chat-source-name" :title="chat.source?.display_name || ''">
           {{ chat.source ? chat.source.display_name : '未选择视频/图片' }}
         </span>
-        <n-button
-          size="small"
-          :disabled="!chat.source?.files?.length"
-          @click="previewOpen = !previewOpen"
-        >
-          预览
-        </n-button>
         <span class="chat-spacer" />
         <n-popconfirm @positive-click="onClear">
           <template #trigger>
@@ -262,30 +261,6 @@ async function onRecall(m: ChatMessage) {
           </template>
           清空全部对话记忆?
         </n-popconfirm>
-      </div>
-
-      <!-- 来源预览:视频内嵌播放 / 图片缩略图(点击放大) -->
-      <div v-if="previewOpen && chat.source?.files?.length" class="source-preview">
-        <video
-          v-if="chat.source.kind === 'upload_video'"
-          class="source-video"
-          :src="chat.source.files[0]"
-          controls
-          preload="metadata"
-        />
-        <template v-else>
-          <img
-            v-for="u in chat.source.files"
-            v-show="!broken.has(u)"
-            :key="u"
-            class="source-thumb"
-            :src="u"
-            alt=""
-            loading="lazy"
-            @error="broken.add(u)"
-            @click="previewUrl = u"
-          />
-        </template>
       </div>
 
       <!-- 消息列表:微信式布局(头像 + 气泡);padding 放在 inner 上,不依赖 n-scrollbar 根元素 -->
@@ -306,8 +281,35 @@ async function onRecall(m: ChatMessage) {
                     <div class="think-text">{{ m.think }}</div>
                   </n-collapse-item>
                 </n-collapse>
+                <!-- user 附件在文字上方(微信式):视频 chip 点击 modal 播放,图片缩略图点击放大 -->
+                <template v-if="m.role === 'user'">
+                  <div v-if="vidOnly(m.images).length" class="vid-group">
+                    <button
+                      v-for="u in vidOnly(m.images)"
+                      :key="u"
+                      class="vid-chip"
+                      :title="fileName(u)"
+                      @click="previewVideo = u"
+                    >
+                      <UiIcon name="video" :size="14" />
+                      <span class="vid-name">{{ fileName(u) }}</span>
+                    </button>
+                  </div>
+                  <div v-if="imgOnly(m.images).length" class="img-group img-group-top">
+                    <img
+                      v-for="u in imgOnly(m.images)"
+                      v-show="!broken.has(u)"
+                      :key="u"
+                      :src="u"
+                      alt=""
+                      loading="lazy"
+                      @error="broken.add(u)"
+                      @click="previewUrl = u"
+                    />
+                  </div>
+                </template>
                 <div v-if="m.content" class="bubble-text">{{ m.content }}</div>
-                <div v-if="m.images.length" class="img-group">
+                <div v-if="m.role === 'assistant' && m.images.length" class="img-group">
                   <img
                     v-for="u in m.images"
                     v-show="!broken.has(u)"
@@ -394,6 +396,11 @@ async function onRecall(m: ChatMessage) {
     <n-modal :show="!!previewUrl" @update:show="previewUrl = null">
       <img v-if="previewUrl" class="preview-img" :src="previewUrl" alt="" @click="previewUrl = null" />
     </n-modal>
+
+    <!-- 视频播放预览(user 气泡内的视频 chip) -->
+    <n-modal :show="!!previewVideo" @update:show="previewVideo = null">
+      <video v-if="previewVideo" class="preview-video" :src="previewVideo" controls autoplay />
+    </n-modal>
   </div>
 </template>
 
@@ -457,33 +464,6 @@ async function onRecall(m: ChatMessage) {
 
 .chat-spacer {
   flex: 1;
-}
-
-/* ---- 来源预览 ---- */
-.source-preview {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-sm);
-  padding: var(--space-sm) var(--space-lg);
-  border-bottom: 1px solid var(--color-border);
-  background: var(--color-surface-2);
-}
-
-.source-video {
-  max-width: 360px;
-  max-height: 220px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--color-border);
-  background: #000;
-}
-
-.source-thumb {
-  width: 120px;
-  height: 80px;
-  object-fit: cover;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--color-border);
-  cursor: zoom-in;
 }
 
 /* ---- 消息列表 ---- */
@@ -581,6 +561,12 @@ async function onRecall(m: ChatMessage) {
   margin-top: var(--space-sm);
 }
 
+/* user 附件在文字上方:上边距改为下边距 */
+.img-group-top {
+  margin-top: 0;
+  margin-bottom: var(--space-sm);
+}
+
 .img-group img {
   width: 120px;
   height: 80px;
@@ -588,6 +574,39 @@ async function onRecall(m: ChatMessage) {
   border-radius: var(--radius-sm);
   border: 1px solid var(--color-border);
   cursor: zoom-in;
+}
+
+/* ---- user 气泡内的视频附件 chip ---- */
+.vid-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-sm);
+}
+
+.vid-chip {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  max-width: 220px;
+  padding: var(--space-xs) var(--space-sm);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-2);
+  color: var(--color-text2);
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+
+.vid-chip:hover {
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+.vid-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ---- 气泡操作栏(撤回/复制/时间) ---- */
@@ -699,6 +718,15 @@ async function onRecall(m: ChatMessage) {
   max-height: calc(100vh - 96px);
   border-radius: var(--radius-sm);
   cursor: zoom-out;
+  display: block;
+}
+
+/* ---- 视频播放 ---- */
+.preview-video {
+  max-width: calc(100vw - 96px);
+  max-height: calc(100vh - 96px);
+  border-radius: var(--radius-sm);
+  background: #000;
   display: block;
 }
 </style>

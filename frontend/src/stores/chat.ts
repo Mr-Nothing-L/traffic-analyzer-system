@@ -91,21 +91,30 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   /** 提问:POST /api/chat/ask 的 SSE 流按行解析;think/delta/images 增量进 current。
+   * attachments 为本次随消息上传的附件完整 URL(/api/chat/files/...):
+   * 本地 user 气泡立即展示;发给后端时剥成相对名,随 user 消息落库(刷新不丢)。
    * error 事件:保留已收到文本并抛错(调用方提示);stop() 中断:静默收尾。 */
-  async function ask(question: string) {
+  async function ask(question: string, attachments: string[] = []) {
     if (sending.value) stop()
     const now = Date.now() / 1000
-    messages.value.push({ role: 'user', content: question, think: '', images: [], created_at: now })
+    messages.value.push({
+      role: 'user',
+      content: question,
+      think: '',
+      images: [...attachments],
+      created_at: now,
+    })
     current.value = { role: 'assistant', content: '', think: '', images: [], created_at: now }
     sending.value = true
     ctrl = new AbortController()
+    const names = attachments.map((u) => u.replace(/^\/api\/chat\/files\//, ''))
     try {
       let res: Response
       try {
         res = await fetch('/api/chat/ask', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ question }),
+          body: JSON.stringify({ question, attachments: names }),
           signal: ctrl.signal,
         })
       } catch (e) {
