@@ -248,7 +248,7 @@ async function onSend() {
   display: flex;
   align-items: center;
   gap: var(--space-sm);
-  padding: var(--space-sm) var(--space-md);
+  padding: var(--space-sm) var(--space-lg);
   border-bottom: 1px solid var(--color-border);
   color: var(--color-text2);
 }
@@ -272,7 +272,7 @@ async function onSend() {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-sm);
-  padding: var(--space-sm) var(--space-md);
+  padding: var(--space-sm) var(--space-lg);
   border-bottom: 1px solid var(--color-border);
   background: var(--color-surface-2);
 }
@@ -381,7 +381,7 @@ async function onSend() {
   display: flex;
   align-items: flex-end;
   gap: var(--space-sm);
-  padding: var(--space-sm) var(--space-md);
+  padding: var(--space-sm) var(--space-lg);
   border-top: 1px solid var(--color-border);
 }
 

@@ -411,10 +411,14 @@ def _sample_video_frames(
 
 
 def _gather_context(state: Dict[str, Any], intent: str) -> Tuple[List[bytes], str]:
-    """(images, evidence_summary) for the current source; empty for chitchat."""
-    if intent == "chitchat":
-        return [], ""
+    """(images, evidence_summary) for the current source.
+
+    chitchat only skips images when no source is set; with an active source the
+    user expects the model to see it regardless of intent (local model, cheap).
+    """
     kind = state.get("source_kind")
+    if intent == "chitchat" and not kind:
+        return [], ""
     ref = state.get("source_ref") or {}
     try:
         if kind == "workspace_video":
