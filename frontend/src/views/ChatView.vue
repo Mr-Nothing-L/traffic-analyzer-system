@@ -14,10 +14,15 @@ import {
   useMessage,
 } from 'naive-ui'
 import { useChatStore } from '../stores/chat'
+import { useAppStore } from '../stores/app'
 import UiIcon from '../components/UiIcon.vue'
 
 const chat = useChatStore()
+const app = useAppStore()
 const message = useMessage()
+
+/* ---- 用户头像:登录名首字母大写;未登录显示「我」 ---- */
+const userInitial = computed(() => (app.user ? app.user[0].toUpperCase() : '我'))
 
 const question = ref('')
 const uploading = ref(false)
@@ -161,36 +166,42 @@ async function onSend() {
         </template>
       </div>
 
-      <!-- 消息列表 -->
+      <!-- 消息列表:微信式布局(头像 + 气泡);padding 放在 inner 上,不依赖 n-scrollbar 根元素 -->
       <n-scrollbar ref="scrollbar" class="chat-scroll">
-        <div v-if="!displayMessages.length" class="chat-empty">
-          上传视频/图片,然后开始提问
-        </div>
-        <template v-for="(m, i) in displayMessages" :key="i">
-          <div v-if="m.role === 'divider'" class="chat-divider">{{ m.content }}</div>
-          <div v-else class="chat-row" :class="m.role">
-            <div class="bubble">
-              <n-collapse v-if="m.role === 'assistant' && m.think" class="think">
-                <n-collapse-item title="思考过程" name="think">
-                  <div class="think-text">{{ m.think }}</div>
-                </n-collapse-item>
-              </n-collapse>
-              <div v-if="m.content" class="bubble-text">{{ m.content }}</div>
-              <div v-if="m.images.length" class="img-group">
-                <img
-                  v-for="u in m.images"
-                  v-show="!broken.has(u)"
-                  :key="u"
-                  :src="u"
-                  alt=""
-                  loading="lazy"
-                  @error="broken.add(u)"
-                  @click="previewUrl = u"
-                />
-              </div>
-            </div>
+        <div class="chat-scroll-inner">
+          <div v-if="!displayMessages.length" class="chat-empty">
+            上传视频/图片,然后开始提问
           </div>
-        </template>
+          <template v-for="(m, i) in displayMessages" :key="i">
+            <div v-if="m.role === 'divider'" class="chat-divider">{{ m.content }}</div>
+            <div v-else class="chat-row" :class="m.role">
+              <div v-if="m.role === 'assistant'" class="avatar avatar-assistant">
+                <UiIcon name="chip" :size="18" />
+              </div>
+              <div class="bubble">
+                <n-collapse v-if="m.role === 'assistant' && m.think" class="think">
+                  <n-collapse-item title="思考过程" name="think">
+                    <div class="think-text">{{ m.think }}</div>
+                  </n-collapse-item>
+                </n-collapse>
+                <div v-if="m.content" class="bubble-text">{{ m.content }}</div>
+                <div v-if="m.images.length" class="img-group">
+                  <img
+                    v-for="u in m.images"
+                    v-show="!broken.has(u)"
+                    :key="u"
+                    :src="u"
+                    alt=""
+                    loading="lazy"
+                    @error="broken.add(u)"
+                    @click="previewUrl = u"
+                  />
+                </div>
+              </div>
+              <div v-if="m.role === 'user'" class="avatar avatar-user">{{ userInitial }}</div>
+            </div>
+          </template>
+        </div>
       </n-scrollbar>
 
       <!-- 输入区 -->
@@ -298,6 +309,11 @@ async function onSend() {
 .chat-scroll {
   flex: 1;
   min-height: 0;
+}
+
+/* padding 放 inner:naive-ui 滚动容器结构下根元素 padding 表现不一致,
+ * 内层容器保证头像外侧到卡片边缘恒有 24px 留白 */
+.chat-scroll-inner {
   padding: var(--space-md) var(--space-lg);
 }
 
@@ -317,6 +333,8 @@ async function onSend() {
 
 .chat-row {
   display: flex;
+  align-items: flex-start; /* 头像与气泡顶部对齐,不随气泡拉伸 */
+  gap: var(--space-sm);
   margin: var(--space-sm) 0;
 }
 
@@ -328,8 +346,23 @@ async function onSend() {
   justify-content: flex-start;
 }
 
+.avatar {
+  width: 36px;
+  height: 36px;
+  flex: 0 0 36px;
+  border-radius: 50%;
+  border: 1px solid var(--color-border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-accent-soft);
+  color: var(--color-accent);
+  font-weight: 650;
+  font-size: var(--text-sm);
+}
+
 .bubble {
-  max-width: 72%;
+  max-width: 65%;
   padding: var(--space-sm) var(--space-md);
   border-radius: var(--radius-sm);
   border: 1px solid var(--color-border);
