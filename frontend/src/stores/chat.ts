@@ -1,7 +1,6 @@
-/** 快速对话:来源(上传视频/图片、工作区视频)+ 消息历史 + SSE 流式提问。
+/** 快速对话:来源(上传视频/多图)+ 消息历史 + SSE 流式提问。
  * 后端契约:GET /api/chat/state、POST /api/chat/upload(FormData 字段 files)、
- * POST /api/chat/source({rel})、POST /api/chat/ask({question},SSE 流)、
- * DELETE /api/chat/history(204)。 */
+ * POST /api/chat/ask({question},SSE 流)、DELETE /api/chat/history(204)。 */
 import { ref } from 'vue'
 import { defineStore } from 'pinia'
 import { ApiError, apiFetch } from '../api/client'
@@ -9,6 +8,8 @@ import { ApiError, apiFetch } from '../api/client'
 export interface ChatSource {
   kind: 'upload_video' | 'upload_images' | 'workspace_video'
   display_name: string
+  /** 来源文件的可预览 URL(/api/chat/files/...);工作区视频来源为空数组。 */
+  files: string[]
 }
 
 export interface ChatMessage {
@@ -72,16 +73,6 @@ export const useChatStore = defineStore('chat', () => {
     }
     if (!res.ok) throw await toApiError(res)
     applyState((await res.json()) as ChatState)
-  }
-
-  /** 从工作区选择视频作为来源。 */
-  async function setSource(rel: string) {
-    applyState(
-      await apiFetch<ChatState>('/chat/source', {
-        method: 'POST',
-        body: JSON.stringify({ rel }),
-      }),
-    )
   }
 
   /** 流式中的部分气泡落进消息列表:完成/出错/停止都保留已收到文本。幂等。 */
@@ -170,5 +161,5 @@ export const useChatStore = defineStore('chat', () => {
     current.value = null
   }
 
-  return { source, messages, current, sending, fetchState, upload, setSource, ask, stop, clear }
+  return { source, messages, current, sending, fetchState, upload, ask, stop, clear }
 })

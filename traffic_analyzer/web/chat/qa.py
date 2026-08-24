@@ -236,7 +236,11 @@ def _stream_aliyun(
         if not chunk.choices:
             continue
         delta = chunk.choices[0].delta
-        think = getattr(delta, "reasoning_content", None)
+        # vLLM with --reasoning-parser emits think as `reasoning`; OpenAI-compat
+        # convention is `reasoning_content`. Accept both.
+        think = getattr(delta, "reasoning_content", None) or getattr(
+            delta, "reasoning", None
+        )
         if think:
             yield ("think", think)
         text = getattr(delta, "content", None)

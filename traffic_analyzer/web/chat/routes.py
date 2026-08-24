@@ -1,16 +1,15 @@
-"""Quick-chat HTTP routes (per-IP state, upload, source, ask SSE, files).
+"""Quick-chat HTTP routes (per-IP state, upload, ask SSE, files).
 
 [文件说明]
-作用:快速对话路由。GET /api/chat/state 返回当前信源(display_name)与消息
-列表(images 转 /api/chat/files/<name> URL);POST /api/chat/upload 接收视频
-(恰1个)或图片(≥1张,混合 400,扩展名白名单,单文件 ≤500MB 流式写盘,
-超限 413)写入 output/chat_uploads/incoming/ 并切换信源;POST /api/chat/source
-按 workspace rel 切换信源(resolve_workspace_video 防穿越);POST /api/chat/ask
+作用:快速对话路由。GET /api/chat/state 返回当前信源(display_name + 可预览
+文件 URL)与消息列表(images 转 /api/chat/files/<name> URL);POST /api/chat/upload
+接收视频(恰1个)或图片(≥1张,混合 400,扩展名白名单,单文件 ≤500MB 流式写盘,
+超限 413)写入 output/chat_uploads/incoming/ 并切换信源;POST /api/chat/ask
 SSE 流式问答(text/event-stream,异常兜底 error 事件);DELETE /api/chat/history
-清空(204);GET /api/chat/files/{name} 提供产出图(限制在 chat_uploads 根内)。
+清空(204);GET /api/chat/files/{name} 提供上传/产出图(限制在 chat_uploads 根内)。
 状态/消息按 IP 隔离(auth._request_ip)。切换信源写 divider 消息「已切换到 …」。
 上游:web/app.py(include_router)、前端快速对话面板。
-下游:web/chat/store.py、qa.py、paths.py;web/workspace(analysis_dir 证据探测)。
+下游:web/chat/store.py、qa.py、paths.py。
 """
 
 from __future__ import annotations
@@ -26,7 +25,6 @@ from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFil
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
-from traffic_analyzer.web import workspace as workspace_mod
 from traffic_analyzer.web.auth import _request_ip
 from traffic_analyzer.web.chat import paths, qa, store
 
@@ -40,12 +38,17 @@ _ALLOWED_EXT = _VIDEO_EXT + _IMAGE_EXT
 _MAX_FILE_BYTES = 500 * 1024 * 1024
 
 
-class SourceRequest(BaseModel):
-    rel: str
-
-
 class AskRequest(BaseModel):
     question: str
+
+
+def _file_url(abs_path: str) -> str | None:
+    """Map an absolute path under the uploads root to its /api/chat/files URL."""
+    try:
+        rel = Path(abs_path).resolve().relative_to(paths.UPLOAD_DIR.resolve())
+    except ValueError:
+        return None
+    return f"/api/chat/files/{rel.as_posix()}"
 
 
 def _state_payload(ip: str) -> Dict[str, Any]:
@@ -56,9 +59,11 @@ def _state_payload(ip: str) -> Dict[str, Any]:
         ref = state.get("source_ref") or {}
         if kind == "workspace_video":
             display_name = Path(ref.get("rel") or ref.get("path") or "").name
+            file_urls = []
         else:
             display_name = "、".join(ref.get("names") or [])
-        source = {"kind": kind, "display_name": display_name}
+            file_urls = [u for u in (_file_url(p) for p in ref.get("files") or []) if u]
+        source = {"kind": kind, "display_name": display_name, "files": file_urls}
     messages = [
         {
             "role": m["role"],
@@ -128,29 +133,6 @@ def upload_chat_files(
     store.set_source(ip, kind, {"files": saved, "names": names})
     store.add_message(ip, "divider", f"已切换到 {'、'.join(names)}")
     logger.info("[chat] upload source: ip=%s kind=%s files=%d", ip, kind, len(saved))
-    return _state_payload(ip)
-
-
-@router.post("/api/chat/source")
-def set_chat_source(body: SourceRequest, request: Request) -> Dict[str, Any]:
-    """Switch source to a workspace video (rel path, traversal-safe)."""
-    ip = _request_ip(request)
-    video = workspace_mod.resolve_workspace_video(request, body.rel)
-    workspace = workspace_mod.require_workspace(request)
-    stem = video.stem
-    evidence = workspace_mod.analysis_dir(workspace, stem) / f"{stem}_evidence.json"
-    store.set_source(
-        ip,
-        "workspace_video",
-        {
-            "path": str(video),
-            "rel": body.rel,
-            "stem": stem,
-            "has_evidence": evidence.is_file(),
-        },
-    )
-    store.add_message(ip, "divider", f"已切换到 {video.name}")
-    logger.info("[chat] workspace source: ip=%s rel=%s", ip, body.rel)
     return _state_payload(ip)
 
 
