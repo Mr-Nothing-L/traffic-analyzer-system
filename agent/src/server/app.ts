@@ -1,19 +1,27 @@
 /**
  * agent 运行时的 HTTP + SSE 服务(node:http 手写,无新增依赖):
  *
- *   GET  /health           → {status:'ok'}
- *   POST /sessions         → {sessionId}(workspaceDir 必填且须为已存在目录)
- *   POST /chat             → SSE 流(text/event-stream,每事件一行 'data: {json}\n\n')
- *   POST /approval         → 审批回执(见 approvalBridge.ts)
+ *   GET    /health                 → {status:'ok'}
+ *   POST   /sessions               → {sessionId}(workspaceDir 必填且须为已存在目录)
+ *   GET    /sessions               → {sessions:[{id,workspaceDir,mode,title,createdAt,lastActiveAt}]}
+ *   GET    /sessions/{id}/history  → {entries:[TimelineEntry]}(渲染友好的时间线)
+ *   DELETE /sessions/{id}          → {status:'ok'}(同时取消挂起审批、删盘)
+ *   POST   /chat                   → SSE 流(text/event-stream,每事件一行 'data: {json}\n\n')
+ *   POST   /approval               → 审批回执(见 approvalBridge.ts)
  *
  * 错误统一 {error:{code,message}};未知 session → 404。同 session 的 /chat
  * 用简单互斥串行,不同 session 并行。provider / tools 均可注入以便测试。
+ *
+ * 持久化:SessionManager 委托 node:sqlite(<workspaceDir>/.agent/sessions.db);
+ * /chat 的 SSE 事件流在转发的同时累积 TimelineEntry(user/assistant/tool/
+ * approval/detection),每轮结束批量落盘。POST /chat 支持可选 images(最多
+ * 4 张,base64 或 dataURL),转成 kosong image ContentPart 附在该轮 user message。
  */
 import { readFileSync, statSync } from 'node:fs';
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { fileURLToPath } from 'node:url';
 
-import { createUserMessage } from '#/message';
+import type { ContentPart, Message } from '#/message';
 import type { ChatProvider } from '#/provider';
 
 import { createProviderFromEnv } from '../llm/provider';
@@ -27,6 +35,7 @@ import { ToolRegistry } from '../tools/registry';
 
 import { ApprovalBridge, type ApprovalDecisionInput } from './approvalBridge';
 import { SessionManager, type Session } from './session';
+import type { TimelineEntry } from './storage';
 
 export interface ProviderHandle {
   readonly provider: ChatProvider;
@@ -38,7 +47,7 @@ export interface AgentServerOptions {
   readonly providerFactory?: () => ProviderHandle;
   /** 按 session 构造工具注册表;默认 registerBuiltinTools(workspaceDir)。 */
   readonly toolsFactory?: (session: Session) => ToolRegistry;
-  /** system prompt;默认读 agent/prompts/detect_system.md。 */
+  /** system prompt;默认读 agent/prompts/chat_system.md(缺失回退 detect_system.md)。 */
   readonly systemPrompt?: string;
   /** 审批挂起超时(ms),默认 5 分钟。 */
   readonly approvalTimeoutMs?: number;
@@ -46,6 +55,8 @@ export interface AgentServerOptions {
   readonly sessionIdleMs?: number;
   /** 过期清扫周期(ms),默认 60s。 */
   readonly sweepIntervalMs?: number;
+  /** 启动时从这些 workspace 的 .agent/sessions.db 恢复历史 session。 */
+  readonly restoreWorkspaceDirs?: readonly string[];
 }
 
 export interface AgentServer {
@@ -62,12 +73,18 @@ interface SessionRuntime {
   busy: boolean;
 }
 
-/** 默认 system prompt:agent/prompts/detect_system.md。 */
-export function defaultSystemPrompt(): string {
-  return readFileSync(
-    fileURLToPath(new URL('../../prompts/detect_system.md', import.meta.url)),
-    'utf8',
-  );
+/**
+ * 默认 system prompt:agent/prompts/chat_system.md(统一对话);文件不存在时
+ * 回退 detect_system.md 并打警告(并行任务产出 chat_system.md 后即走主路径)。
+ */
+export function defaultSystemPrompt(promptsDir?: string): string {
+  const dir = promptsDir ?? fileURLToPath(new URL('../../prompts', import.meta.url));
+  try {
+    return readFileSync(`${dir}/chat_system.md`, 'utf8');
+  } catch {
+    console.warn('[agent-server] chat_system.md 不存在,回退 detect_system.md');
+    return readFileSync(`${dir}/detect_system.md`, 'utf8');
+  }
 }
 
 /**
@@ -95,7 +112,9 @@ class ExecutionSnapshotGate extends PermissionGate {
   }
 }
 
-const MAX_BODY_BYTES = 1024 * 1024;
+const MAX_BODY_BYTES = 16 * 1024 * 1024;
+/** POST /chat 单轮图片附件上限。 */
+const MAX_IMAGES_PER_TURN = 4;
 
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
@@ -129,6 +148,18 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
+/** 解析可选 images 字段:接受 dataURL 或裸 base64,统一为 dataURL,最多 4 张。 */
+function parseImages(body: Record<string, unknown>): string[] {
+  if (!Array.isArray(body.images)) return [];
+  const images: string[] = [];
+  for (const item of body.images) {
+    if (typeof item !== 'string' || item === '') continue;
+    if (images.length >= MAX_IMAGES_PER_TURN) break;
+    images.push(item.startsWith('data:') ? item : `data:image/png;base64,${item}`);
+  }
+  return images;
+}
+
 export function createAgentServer(options: AgentServerOptions = {}): AgentServer {
   const systemPrompt = options.systemPrompt ?? defaultSystemPrompt();
 
@@ -145,6 +176,9 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
     ...(options.sessionIdleMs !== undefined ? { idleMs: options.sessionIdleMs } : {}),
     ...(options.sweepIntervalMs !== undefined
       ? { sweepIntervalMs: options.sweepIntervalMs }
+      : {}),
+    ...(options.restoreWorkspaceDirs !== undefined
+      ? { workspaces: options.restoreWorkspaceDirs }
       : {}),
     onExpire: (session) => {
       runtimes.get(session.id)?.bridge.cancelAll();
@@ -181,6 +215,16 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
     return { registry: toolsFactory(session), gate, bridge, busy: false };
   };
 
+  /** 内存中无 runtime 时(恢复的 session)按需创建。 */
+  const runtimeFor = (session: Session): SessionRuntime => {
+    let runtime = runtimes.get(session.id);
+    if (runtime === undefined) {
+      runtime = createRuntime(session);
+      runtimes.set(session.id, runtime);
+    }
+    return runtime;
+  };
+
   const findBridge = (requestId: string): ApprovalBridge | undefined => {
     for (const runtime of runtimes.values()) {
       if (runtime.bridge.has(requestId)) return runtime.bridge;
@@ -207,6 +251,28 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
     const session = sessions.create({ workspaceDir: body.workspaceDir, mode });
     runtimes.set(session.id, createRuntime(session));
     sendJson(res, 200, { sessionId: session.id });
+  };
+
+  const handleListSessions = (res: ServerResponse): void => {
+    sendJson(res, 200, { sessions: sessions.list() });
+  };
+
+  const handleGetHistory = (res: ServerResponse, sessionId: string): void => {
+    const session = sessions.get(sessionId);
+    if (session === undefined) {
+      sendError(res, 404, 'session_not_found', `unknown session: ${sessionId}`);
+      return;
+    }
+    sendJson(res, 200, { entries: session.entries });
+  };
+
+  const handleDeleteSession = (res: ServerResponse, sessionId: string): void => {
+    if (!sessions.delete(sessionId)) {
+      sendError(res, 404, 'session_not_found', `unknown session: ${sessionId}`);
+      return;
+    }
+    // onExpire 已取消挂起审批并清理 runtime。
+    sendJson(res, 200, { status: 'ok' });
   };
 
   const handleApproval = (res: ServerResponse, body: unknown): void => {
@@ -248,12 +314,13 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
     }
     const videoPath =
       typeof body.videoPath === 'string' && body.videoPath !== '' ? body.videoPath : undefined;
+    const images = parseImages(body);
     const session = sessions.get(body.sessionId);
-    const runtime = runtimes.get(body.sessionId);
-    if (session === undefined || runtime === undefined) {
+    if (session === undefined) {
       sendError(res, 404, 'session_not_found', `unknown session: ${body.sessionId}`);
       return;
     }
+    const runtime = runtimeFor(session);
     if (runtime.busy) {
       sendError(res, 409, 'chat_in_progress', `session ${session.id} already has a chat turn in progress`);
       return;
@@ -274,13 +341,60 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
     const emit = (event: unknown): void => {
       writeSseEvent(res, event);
     };
-    runtime.bridge.bindEmitter(emit);
+
+    // ---- 时间线条目累积(与 SSE 转发并行,每轮结束批量落盘) ----
+    const turnEntries: TimelineEntry[] = [];
+    const userEntry: TimelineEntry = {
+      kind: 'user',
+      text: body.input,
+      images,
+      ...(videoPath !== undefined ? { videoPath } : {}),
+      at: Date.now(),
+    };
+    turnEntries.push(userEntry);
+
+    let assistantText = '';
+    let assistantThink = '';
+    const flushAssistant = (): void => {
+      if (assistantText === '' && assistantThink === '') return;
+      turnEntries.push({ kind: 'assistant', text: assistantText, think: assistantThink, at: Date.now() });
+      assistantText = '';
+      assistantThink = '';
+    };
+    /** tool_call_start 暂存,tool_result 到达时配对成一条 tool 条目。 */
+    const pendingCalls = new Map<string, { name: string; arguments: string | null }>();
+
+    runtime.bridge.bindEmitter((event) => {
+      emit(event);
+      turnEntries.push({
+        kind: 'approval',
+        requestId: event.requestId,
+        toolName: event.toolName,
+        approvalRule: event.approvalRule,
+        ...(event.description !== undefined ? { description: event.description } : {}),
+        at: Date.now(),
+      });
+    });
+    runtime.bridge.bindSettleHook((requestId, response) => {
+      for (let i = turnEntries.length - 1; i >= 0; i -= 1) {
+        const entry = turnEntries[i];
+        if (entry !== undefined && entry.kind === 'approval' && entry.requestId === requestId) {
+          entry.decision = response.decision;
+          break;
+        }
+      }
+    });
 
     const userText =
       videoPath === undefined ? body.input : `视频路径:${videoPath}\n\n${body.input}`;
+    const userContent: ContentPart[] = [{ type: 'text', text: userText }];
+    for (const url of images) {
+      userContent.push({ type: 'image_url', imageUrl: { url } });
+    }
+    const userMessage: Message = { role: 'user', content: userContent, toolCalls: [] };
     const baseLength = session.messages.length;
-    const messages = [...session.messages, createUserMessage(userText)];
-    sessions.appendMessages(session.id, [createUserMessage(userText)]);
+    const messages = [...session.messages, userMessage];
+    sessions.appendMessages(session.id, [userMessage]);
 
     const { provider, model } = providerFactory();
 
@@ -294,16 +408,51 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
         messages,
         signal: controller.signal,
         onEvent: (event: AgentLoopEvent) => {
-          if (event.type === 'done') {
-            if (event.reason === 'stop_turn' && event.stopResult?.note !== undefined) {
-              try {
-                emit({ type: 'detection', data: JSON.parse(event.stopResult.note) });
-              } catch {
-                emit({ type: 'detection', data: event.stopResult.note });
-              }
+          switch (event.type) {
+            case 'text_delta':
+              assistantText += event.text;
+              break;
+            case 'think_delta':
+              assistantThink += event.text;
+              break;
+            case 'tool_call_start':
+              flushAssistant();
+              pendingCalls.set(event.call.id, {
+                name: event.call.name,
+                arguments: event.call.arguments,
+              });
+              break;
+            case 'tool_result': {
+              const call = pendingCalls.get(event.toolCallId);
+              pendingCalls.delete(event.toolCallId);
+              turnEntries.push({
+                kind: 'tool',
+                toolCallId: event.toolCallId,
+                name: event.name,
+                arguments: call?.arguments ?? null,
+                output: event.result.output,
+                isError: event.isError,
+                at: Date.now(),
+              });
+              break;
             }
-            emit({ type: 'done', reason: event.reason });
-            return;
+            case 'step_done':
+              flushAssistant();
+              break;
+            case 'done':
+              flushAssistant();
+              if (event.reason === 'stop_turn' && event.stopResult?.note !== undefined) {
+                let data: unknown;
+                try {
+                  data = JSON.parse(event.stopResult.note);
+                } catch {
+                  data = event.stopResult.note;
+                }
+                emit({ type: 'detection', data });
+                turnEntries.push({ kind: 'detection', data, at: Date.now() });
+              }
+              emit({ type: 'done', reason: event.reason });
+              return;
           }
           emit(event);
         },
@@ -317,6 +466,9 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
         error: error instanceof Error ? error.message : String(error),
       });
     } finally {
+      flushAssistant();
+      sessions.appendEntries(session.id, turnEntries);
+      runtime.bridge.unbindSettleHook();
       runtime.bridge.unbindEmitter();
       runtime.busy = false;
       res.end();
@@ -333,6 +485,30 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
         }
         if (req.method === 'POST' && url.pathname === '/sessions') {
           handleCreateSession(res, await readJsonBody(req));
+          return;
+        }
+        if (req.method === 'GET' && url.pathname === '/sessions') {
+          handleListSessions(res);
+          return;
+        }
+        const historyMatch = /^\/sessions\/([^/]+)\/history$/.exec(url.pathname);
+        if (req.method === 'GET' && historyMatch !== null) {
+          const sessionId = historyMatch[1];
+          if (sessionId === undefined) {
+            sendError(res, 400, 'invalid_request', 'session id is required');
+            return;
+          }
+          handleGetHistory(res, sessionId);
+          return;
+        }
+        const sessionMatch = /^\/sessions\/([^/]+)$/.exec(url.pathname);
+        if (req.method === 'DELETE' && sessionMatch !== null) {
+          const sessionId = sessionMatch[1];
+          if (sessionId === undefined) {
+            sendError(res, 400, 'invalid_request', 'session id is required');
+            return;
+          }
+          handleDeleteSession(res, sessionId);
           return;
         }
         if (req.method === 'POST' && url.pathname === '/approval') {

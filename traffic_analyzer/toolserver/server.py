@@ -42,8 +42,8 @@ _HARD_MAX_FRAMES = 8
 _EXTRACT_JPEG_QUALITY = 70
 _ANNOTATED_JPEG_QUALITY = 85
 
-# Same label->color palette convention as web/chat/qa.py (kept local to
-# avoid importing the whole chat module).
+# Label->color palette convention (originally shared with the retired
+# quick-chat QA; kept local, no shared module).
 _PALETTE = (
     (255, 56, 56),
     (255, 157, 46),

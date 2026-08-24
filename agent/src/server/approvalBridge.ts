@@ -44,6 +44,7 @@ export class ApprovalBridge {
   private readonly timeoutMs: number;
   private readonly pending = new Map<string, PendingApproval>();
   private emit: ((event: ApprovalRequestEvent) => void) | undefined;
+  private settleHook: ((requestId: string, response: ApprovalResponse) => void) | undefined;
 
   constructor(options: ApprovalBridgeOptions = {}) {
     this.timeoutMs = options.timeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS;
@@ -56,6 +57,15 @@ export class ApprovalBridge {
 
   unbindEmitter(): void {
     this.emit = undefined;
+  }
+
+  /** 绑定审批落定(回执/超时/取消)钩子,用于时间线条目记录;结束时务必 unbind。 */
+  bindSettleHook(hook: (requestId: string, response: ApprovalResponse) => void): void {
+    this.settleHook = hook;
+  }
+
+  unbindSettleHook(): void {
+    this.settleHook = undefined;
   }
 
   /**
@@ -109,6 +119,7 @@ export class ApprovalBridge {
     if (entry === undefined) return false;
     this.pending.delete(requestId);
     clearTimeout(entry.timer);
+    this.settleHook?.(requestId, response);
     entry.resolve(response);
     return true;
   }

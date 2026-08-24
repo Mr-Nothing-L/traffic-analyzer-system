@@ -4,11 +4,11 @@
  * 覆盖 /sessions → /chat 的 SSE 事件序列、approval 往返、未知 session 404。
  * 不打真实模型 API。
  */
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Message, StreamedMessagePart, ToolCall } from '#/message';
 import type {
@@ -22,8 +22,9 @@ import type { Tool } from '#/tool';
 import type { ExecutableTool, ExecutableToolResult } from '../tools/contract';
 import { ToolRegistry } from '../tools/registry';
 
-import { createAgentServer, type AgentServer } from './app';
+import { createAgentServer, defaultSystemPrompt, type AgentServer } from './app';
 import type { Session } from './session';
+import type { TimelineEntry } from './storage';
 
 // ---------------------------------------------------------------------------
 // 假 provider / 假工具
@@ -171,14 +172,15 @@ async function readUntilDone(next: () => Promise<SseEvent | null>): Promise<SseE
 // ---------------------------------------------------------------------------
 
 let workspace: string;
-let agentServer: AgentServer;
+let agentServer: AgentServer | undefined;
 let baseUrl: string;
 
 async function startServer(
   provider: ScriptedProvider,
   tools: ExecutableTool[],
+  extra?: { restoreWorkspaceDirs?: string[] },
 ): Promise<void> {
-  agentServer = createAgentServer({
+  const created = createAgentServer({
     providerFactory: () => ({ provider, model: provider.modelName }),
     toolsFactory: (_session: Session) => {
       const registry = new ToolRegistry();
@@ -186,11 +188,15 @@ async function startServer(
       return registry;
     },
     systemPrompt: 'sys',
+    ...(extra?.restoreWorkspaceDirs !== undefined
+      ? { restoreWorkspaceDirs: extra.restoreWorkspaceDirs }
+      : {}),
   });
+  agentServer = created;
   await new Promise<void>((resolve) => {
-    agentServer.server.listen(0, '127.0.0.1', resolve);
+    created.server.listen(0, '127.0.0.1', resolve);
   });
-  const address = agentServer.server.address();
+  const address = created.server.address();
   if (address === null || typeof address === 'string') throw new Error('no address');
   baseUrl = `http://127.0.0.1:${address.port}`;
 }
@@ -218,12 +224,30 @@ async function createSession(mode?: string): Promise<string> {
   return sessionId as string;
 }
 
-function startChat(sessionId: string, input: string, videoPath?: string): Promise<Response> {
+function startChat(
+  sessionId: string,
+  input: string,
+  videoPath?: string,
+  images?: string[],
+): Promise<Response> {
   return fetch(`${baseUrl}/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ sessionId, input, ...(videoPath !== undefined ? { videoPath } : {}) }),
+    body: JSON.stringify({
+      sessionId,
+      input,
+      ...(videoPath !== undefined ? { videoPath } : {}),
+      ...(images !== undefined ? { images } : {}),
+    }),
   });
+}
+
+async function getJson(
+  urlPath: string,
+  method: string = 'GET',
+): Promise<{ status: number; json: unknown }> {
+  const res = await fetch(`${baseUrl}${urlPath}`, { method });
+  return { status: res.status, json: await res.json() };
 }
 
 beforeEach(() => {
@@ -232,6 +256,7 @@ beforeEach(() => {
 
 afterEach(async () => {
   await agentServer?.close();
+  agentServer = undefined;
   rmSync(workspace, { recursive: true, force: true });
 });
 
@@ -258,7 +283,7 @@ describe('agent server', () => {
     expect(missing.status).toBe(400);
 
     const sessionId = await createSession();
-    const session = agentServer.sessions.get(sessionId);
+    const session = agentServer?.sessions.get(sessionId);
     expect(session?.mode).toBe('manual');
     expect(session?.workspaceDir).toBe(workspace);
   });
@@ -304,7 +329,7 @@ describe('agent server', () => {
     expect(secondHistory.some((m) => m.role === 'tool' && m.toolCallId === 'c1')).toBe(true);
 
     // 会话历史已累积:user + assistant + tool + assistant
-    expect(agentServer.sessions.get(sessionId)?.messages.map((m) => m.role)).toEqual([
+    expect(agentServer?.sessions.get(sessionId)?.messages.map((m) => m.role)).toEqual([
       'user',
       'assistant',
       'tool',
@@ -420,5 +445,182 @@ describe('agent server', () => {
     });
     const rest = await readUntilDone(next);
     expect(rest.at(-1)).toMatchObject({ reason: 'completed' });
+  });
+
+  it('持久化往返:重建 server 后 history 完整、kosong messages 恢复供续跑', async () => {
+    const provider = new ScriptedProvider([[text('第一轮回答')], [text('第二轮回答')]]);
+    await startServer(provider, [echoTool()]);
+    const sessionId = await createSession('yolo');
+
+    const res = await startChat(sessionId, '第一轮输入');
+    if (res.body === null) throw new Error('no body');
+    await readUntilDone(sseReader(res.body));
+
+    // DB 文件已落在 workspace 的 .agent/ 下
+    expect(existsSync(path.join(workspace, '.agent', 'sessions.db'))).toBe(true);
+
+    // 重建 server(模拟进程重启),从磁盘恢复 session
+    await agentServer?.close();
+    await startServer(provider, [echoTool()], { restoreWorkspaceDirs: [workspace] });
+
+    const list = await getJson('/sessions');
+    expect(list.status).toBe(200);
+    const summaries = (list.json as { sessions: { id: string; title: string }[] }).sessions;
+    expect(summaries.map((s) => s.id)).toEqual([sessionId]);
+    expect(summaries[0]?.title).toBe('第一轮输入');
+
+    const history = await getJson(`/sessions/${sessionId}/history`);
+    expect(history.status).toBe(200);
+    const entries = (history.json as { entries: TimelineEntry[] }).entries;
+    expect(entries.map((e) => e.kind)).toEqual(['user', 'assistant']);
+    expect(entries[0]).toMatchObject({ kind: 'user', text: '第一轮输入', images: [] });
+    expect(entries[1]).toMatchObject({ kind: 'assistant', text: '第一轮回答', think: '' });
+
+    // 续跑:恢复的 kosong messages 应出现在 provider 收到的历史里
+    const res2 = await startChat(sessionId, '第二轮输入');
+    if (res2.body === null) throw new Error('no body');
+    await readUntilDone(sseReader(res2.body));
+    const secondHistory = provider.histories[1] ?? [];
+    expect(secondHistory.map((m) => m.role)).toEqual(['user', 'assistant', 'user']);
+  });
+
+  it('GET /sessions:列表字段齐全,title 取首轮用户输入前 30 字', async () => {
+    const provider = new ScriptedProvider([[text('ok')]]);
+    await startServer(provider, [echoTool()]);
+    const sessionId = await createSession('yolo');
+    const longInput = '一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十';
+
+    const res = await startChat(sessionId, longInput);
+    if (res.body === null) throw new Error('no body');
+    await readUntilDone(sseReader(res.body));
+
+    const { status, json } = await getJson('/sessions');
+    expect(status).toBe(200);
+    const sessions = (json as { sessions: Record<string, unknown>[] }).sessions;
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]).toMatchObject({
+      id: sessionId,
+      workspaceDir: workspace,
+      mode: 'yolo',
+      title: longInput.slice(0, 30),
+    });
+    expect(typeof sessions[0]?.createdAt).toBe('number');
+    expect(typeof sessions[0]?.lastActiveAt).toBe('number');
+  });
+
+  it('DELETE /sessions/{id}:清理内存与磁盘;未知 id → 404', async () => {
+    const provider = new ScriptedProvider([[text('ok')]]);
+    await startServer(provider, [echoTool()]);
+    const sessionId = await createSession('yolo');
+
+    const res = await startChat(sessionId, '待删除的会话');
+    if (res.body === null) throw new Error('no body');
+    await readUntilDone(sseReader(res.body));
+
+    const del = await getJson(`/sessions/${sessionId}`, 'DELETE');
+    expect(del.status).toBe(200);
+    expect(del.json).toEqual({ status: 'ok' });
+
+    expect((await getJson(`/sessions/${sessionId}/history`)).status).toBe(404);
+    expect((await getJson('/sessions', 'DELETE')).status).toBe(404);
+    const ghost = await getJson('/sessions/ghost', 'DELETE');
+    expect(ghost.status).toBe(404);
+    expect(ghost.json).toMatchObject({ error: { code: 'session_not_found' } });
+
+    // 重建后磁盘上也不存在该 session
+    await agentServer?.close();
+    await startServer(provider, [echoTool()], { restoreWorkspaceDirs: [workspace] });
+    const list = await getJson('/sessions');
+    expect((list.json as { sessions: unknown[] }).sessions).toEqual([]);
+  });
+
+  it('images 附件:转成 image ContentPart 进入 user message,上限 4 张', async () => {
+    const provider = new ScriptedProvider([[text('看到了')]]);
+    await startServer(provider, [echoTool()]);
+    const sessionId = await createSession('yolo');
+
+    const images = [
+      'aGVsbG8=', // 裸 base64 → 补 dataURL 前缀
+      'data:image/jpeg;base64,anBlZw==', // dataURL 原样保留
+      'aW1nMw==',
+      'aW1nNA==',
+      'aW1nNQ==', // 超出上限被丢弃
+    ];
+    const res = await startChat(sessionId, '看图分析', undefined, images);
+    if (res.body === null) throw new Error('no body');
+    await readUntilDone(sseReader(res.body));
+
+    const firstHistory = provider.histories[0] ?? [];
+    const userMessage = firstHistory[0];
+    const imageParts = (userMessage?.content ?? []).filter((p) => p.type === 'image_url');
+    expect(imageParts).toEqual([
+      { type: 'image_url', imageUrl: { url: 'data:image/png;base64,aGVsbG8=' } },
+      { type: 'image_url', imageUrl: { url: 'data:image/jpeg;base64,anBlZw==' } },
+      { type: 'image_url', imageUrl: { url: 'data:image/png;base64,aW1nMw==' } },
+      { type: 'image_url', imageUrl: { url: 'data:image/png;base64,aW1nNA==' } },
+    ]);
+
+    // user 条目里保留同样的 4 张图
+    const history = await getJson(`/sessions/${sessionId}/history`);
+    const entries = (history.json as { entries: TimelineEntry[] }).entries;
+    const userEntry = entries[0];
+    expect(userEntry?.kind).toBe('user');
+    expect(userEntry !== undefined && userEntry.kind === 'user' ? userEntry.images : []).toHaveLength(4);
+  });
+
+  it('approval 条目:request 与回执 decision 都进历史', async () => {
+    const provider = new ScriptedProvider([
+      [toolCall('c1', 'write_file', { path: '/tmp/x' })],
+      [text('写完了')],
+    ]);
+    await startServer(provider, [writeTool()]);
+    const sessionId = await createSession('manual');
+
+    const res = await startChat(sessionId, '写个文件');
+    if (res.body === null) throw new Error('no body');
+    const next = sseReader(res.body);
+    let requestId: string | undefined;
+    for (;;) {
+      const event = await next();
+      if (event === null) throw new Error('stream ended before approval_request');
+      if (event.type === 'approval_request') {
+        requestId = (event as unknown as { requestId: string }).requestId;
+        break;
+      }
+    }
+    await postJson('/approval', { requestId, decision: 'approved' });
+    await readUntilDone(next);
+
+    const history = await getJson(`/sessions/${sessionId}/history`);
+    const entries = (history.json as { entries: TimelineEntry[] }).entries;
+    expect(entries.map((e) => e.kind)).toEqual(['user', 'approval', 'tool', 'assistant']);
+    expect(entries[1]).toMatchObject({
+      kind: 'approval',
+      requestId,
+      toolName: 'write_file',
+      decision: 'approved',
+    });
+    expect(entries[2]).toMatchObject({ kind: 'tool', name: 'write_file', isError: false });
+  });
+
+  it('defaultSystemPrompt:chat_system.md 缺失时回退 detect_system.md 并打警告', () => {
+    const promptsDir = mkdtempSync(path.join(tmpdir(), 'agent-prompts-test-'));
+    try {
+      writeFileSync(path.join(promptsDir, 'detect_system.md'), 'DETECT-PROMPT');
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        expect(defaultSystemPrompt(promptsDir)).toBe('DETECT-PROMPT');
+        expect(warnSpy).toHaveBeenCalledOnce();
+
+        warnSpy.mockClear();
+        writeFileSync(path.join(promptsDir, 'chat_system.md'), 'CHAT-PROMPT');
+        expect(defaultSystemPrompt(promptsDir)).toBe('CHAT-PROMPT');
+        expect(warnSpy).not.toHaveBeenCalled();
+      } finally {
+        warnSpy.mockRestore();
+      }
+    } finally {
+      rmSync(promptsDir, { recursive: true, force: true });
+    }
   });
 });
