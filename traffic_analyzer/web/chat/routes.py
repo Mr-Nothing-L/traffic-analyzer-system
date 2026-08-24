@@ -3,7 +3,7 @@
 [文件说明]
 作用:快速对话路由。GET /api/chat/state 返回当前信源(display_name + 可预览
 文件 URL)与消息列表(含消息 id,images 转 /api/chat/files/<name> URL);POST /api/chat/upload
-接收视频(恰1个)或图片(≥1张,混合 400,扩展名白名单,单文件 ≤500MB 流式写盘,
+接收视频(恰1个)或图片(≥1张,混合 400,扩展名白名单,单文件 ≤40MB 流式写盘,
 超限 413,落盘名 <uuid>_<安全化原名>;视频写盘后 best-effort 生成中间帧封面
 <同名>.thumb.jpg,失败仅 log)写入 output/chat_uploads/incoming/ 并切换信源;POST /api/chat/ask
 SSE 流式问答(text/event-stream,异常兜底 error 事件;body 可带 attachments
@@ -43,7 +43,7 @@ router = APIRouter()
 _VIDEO_EXT = (".mp4", ".avi", ".mov", ".mkv", ".ts")
 _IMAGE_EXT = (".jpg", ".jpeg", ".png", ".webp")
 _ALLOWED_EXT = _VIDEO_EXT + _IMAGE_EXT
-_MAX_FILE_BYTES = 500 * 1024 * 1024
+_MAX_FILE_BYTES = 40 * 1024 * 1024
 
 
 class AskRequest(BaseModel):
@@ -112,7 +112,7 @@ def _write_upload(file: UploadFile, dest: Path) -> None:
         raise HTTPException(status_code=500, detail=f"upload write failed: {exc}")
     if dest.stat().st_size > _MAX_FILE_BYTES:
         dest.unlink(missing_ok=True)
-        raise HTTPException(status_code=413, detail="file exceeds 500MB limit")
+        raise HTTPException(status_code=413, detail="文件超过 40MB 限制")
 
 
 def _dest_name(original: str, ext: str) -> str:

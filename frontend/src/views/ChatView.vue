@@ -39,21 +39,31 @@ interface PendingFile {
 }
 const pending = ref<PendingFile[]>([])
 const VIDEO_EXT = ['.mp4', '.avi', '.mov', '.mkv', '.ts']
+const MAX_FILE_BYTES = 40 * 1024 * 1024 // 与后端 _MAX_FILE_BYTES 一致
 const isVideoFile = (f: File) => VIDEO_EXT.some((e) => f.name.toLowerCase().endsWith(e))
 
 /** 公共入口(「+」选择 / Ctrl+V 粘贴 / 拖拽均走这里):
- * 校验(视频恰 1 个且不能与图片混选,与后端一致,合并已暂存一起判)→ 加入 pending。
- * 违规 message.warning 且不予暂存;返回是否暂存成功。 */
+ * 校验(单文件 ≤40MB;视频恰 1 个且不能与图片混选,与后端一致,合并已暂存一起判)
+ * → 加入 pending。违规 message.warning 且不予暂存;返回是否暂存成功。 */
 function stageFiles(files: Iterable<File>): boolean {
   const list = Array.from(files)
   if (!list.length) return false
-  const all = [...pending.value.map((p) => p.file), ...list]
+  const ok: File[] = []
+  for (const f of list) {
+    if (f.size > MAX_FILE_BYTES) {
+      message.warning(`「${f.name}」超过 40MB 限制,未添加`)
+      continue
+    }
+    ok.push(f)
+  }
+  if (!ok.length) return false
+  const all = [...pending.value.map((p) => p.file), ...ok]
   const videos = all.filter(isVideoFile)
   if (videos.length && (videos.length !== 1 || videos.length !== all.length)) {
     message.warning('视频只能选 1 个,且不能与图片混选')
     return false
   }
-  for (const f of list) {
+  for (const f of ok) {
     pending.value.push({ file: f, url: URL.createObjectURL(f), isVideo: isVideoFile(f) })
   }
   return true

@@ -4,19 +4,20 @@
 作用:快速对话问答编排。ask(ip, question) 为 SSE 事件生成器:maybe_compact
 (超 COMPACT_AT 时用主用 provider 非流式压缩旧消息为中文摘要)→ classify
 (主用 provider 非流式判定 event_analysis|content_query|chitchat,失败兜底
-content_query)→ 按信源组装上下文(workspace_video: 智能自适应抽帧,上限
-.env CHAT_MAX_VIDEO_FRAMES(缺省 30;约 1 fps 候选、96x54 灰度相邻差自适应
-阈值,静止段稀疏/动态段密集),证据帧
-优先,analysis/<stem>/<stem>_evidence.json 的 detected 事件摘要注入系统
-prompt;upload_video 同抽帧;upload_images ≤ CHAT_MAX_VIDEO_FRAMES 张;none/chitchat 不带图)→
+content_query)→ 按信源组装上下文(视频信源 workspace_video/upload_video:
+整视频 base64 经 video_url 发给 OpenAI 兼容 provider(vLLM 原生采样);
+anthropic/google 不支持 video_url,回退均匀 10 帧图片;upload_images ≤
+CHAT_MAX_VIDEO_FRAMES 张(缺省 30);工作区视频的 analysis/<stem>/<stem>_evidence.json
+detected 事件摘要注入系统 prompt;none/chitchat 不带图)→
 历史(summary + 近10轮文本)→ 流式调用(provider 按 .env 顺序 failover,
 首块前失败切下一个,流式中失败 yield error 结束)→ event_analysis 时解析
-尾部 ```json boxes 块并用 PIL 画框落盘(output/chat_uploads/<sha1(ip)[:12]>/)→
-落库(user 在流前,assistant 在流后)。SDK 客户端构建参照
+尾部 ```json boxes 块并用 PIL 画框落盘(output/chat_uploads/<sha1(ip)[:12]>/;
+视频整发模式契约为 time_sec(秒)→ fps 换算帧号画框,图片/抽帧模式为
+frame_index)→ 落库(user 在流前,assistant 在流后)。SDK 客户端构建参照
 core/vlm_engine.py:_init_client_for_provider(httpx 绕开系统代理);
 aliyun 流式 chunk 的 delta 可能带 reasoning_content(作为 think 事件)。
 上游:web/chat/routes.py(POST /api/chat/ask)。
-下游:web/chat/store.py、tokens.py、paths.py;web/frames.py(抽帧);
+下游:web/chat/store.py、tokens.py、paths.py;web/frames.py(抽帧/视频 meta);
 utils/bbox_geometry.py、utils/image_drawing.py(画框);
 core/config_manager.py(provider 列表);anthropic/openai/google SDK(惰性导入)。
 """
@@ -52,16 +53,17 @@ logger = logging.getLogger(__name__)
 
 _CONFIG_DIR = Path(__file__).resolve().parents[2] / "config"
 
-_DEFAULT_MAX_VIDEO_FRAMES = 30  # CHAT_MAX_VIDEO_FRAMES 未配置时的缺省(30 帧 × 2600 ≈ 78k tokens,256k 预算吃得下)
+_DEFAULT_MAX_VIDEO_FRAMES = 30  # CHAT_MAX_VIDEO_FRAMES 未配置时的缺省(仅用于上传多图切片)
 _HISTORY_TURNS = 10  # 近 10 轮 user/assistant 文本
 _EVIDENCE_SUMMARY_CHARS = 2000
 
 
 def _max_frames() -> int:
-    """视频抽帧/上传图片上限:.env 的 CHAT_MAX_VIDEO_FRAMES,缺省 30。
+    """上传多图切片上限:.env 的 CHAT_MAX_VIDEO_FRAMES,缺省 30。
 
-    .env 不一定进了 os.environ,优先走 llm_settings._locate_env 读文件,
-    再兜底 os.environ(环境变量注入的部署);解析失败/非正数回退缺省。
+    视频信源已改为整视频 base64 发送(见 ask),不再受此限制;本配置只约束
+    upload_images 一次带多少张图。.env 不一定进了 os.environ,优先走
+    llm_settings._locate_env 读文件,再兜底 os.environ;解析失败回退缺省。
     """
     raw: Optional[str] = None
     try:
@@ -75,13 +77,6 @@ def _max_frames() -> int:
     except ValueError:
         value = 0
     return value if value > 0 else _DEFAULT_MAX_VIDEO_FRAMES
-
-# 智能抽帧参数:候选约 1 fps(长视频放大步长,候选 ≤240);96x54 灰度相邻差
-# 自适应阈值(中位数 × 0.5,下限 6.0);至少保留 3 帧(不足用均匀帧补齐)。
-_SMART_CANDIDATE_MAX = 240
-_SMART_DIFF_FLOOR = 6.0
-_SMART_DIFF_RATIO = 0.5
-_SMART_MIN_KEPT = 3
 
 # 画框颜色调色板,按 label 哈希取色(同 label 恒同色)。
 _PALETTE = (
@@ -103,6 +98,12 @@ _SYSTEM_BASE = (
 _BOX_INSTRUCTION = (
     "回答正文结束后,若涉及事件/目标定位,输出一个 ```json 围栏块,格式:"
     '{"boxes":[{"frame_index": 图中序号(从0), "bbox_norm": [x1,y1,x2,y2], "label": "简短标签"}]}'
+    ";bbox_norm 为 0-1 归一化坐标。无定位需要则不输出该块。"
+)
+
+_BOX_INSTRUCTION_VIDEO = (
+    "回答正文结束后,若涉及事件/目标定位,输出一个 ```json 围栏块,格式:"
+    '{"boxes":[{"time_sec": 目标出现时刻(相对视频开始的秒数, float), "bbox_norm": [x1,y1,x2,y2], "label": "简短标签"}]}'
     ";bbox_norm 为 0-1 归一化坐标。无定位需要则不输出该块。"
 )
 
@@ -233,13 +234,15 @@ def classify(question: str, providers: List[LLMProviderConfig]) -> str:
 
 
 def _openai_messages(
-    messages: List[Dict[str, str]], images: List[bytes]
+    messages: List[Dict[str, str]], images: List[bytes], video_url: Optional[str] = None
 ) -> List[Dict[str, Any]]:
-    """OpenAI-style messages with images attached to the last user message."""
-    if not images:
+    """OpenAI-style messages with images (and optional video) on the last user message."""
+    if not images and not video_url:
         return [dict(m) for m in messages]
     out = [dict(m) for m in messages]
     content: List[Dict[str, Any]] = [{"type": "text", "text": out[-1]["content"]}]
+    if video_url:
+        content.append({"type": "video_url", "video_url": {"url": video_url}})
     for data in images:
         b64 = base64.b64encode(data).decode("ascii")
         content.append(
@@ -254,10 +257,11 @@ def _stream_aliyun(
     cfg: LLMProviderConfig,
     messages: List[Dict[str, str]],
     images: List[bytes],
+    video_url: Optional[str] = None,
 ) -> Iterable[Tuple[str, str]]:
     stream = client.chat.completions.create(
         model=cfg.model,
-        messages=_openai_messages(messages, images),
+        messages=_openai_messages(messages, images, video_url),
         max_tokens=cfg.max_tokens,
         temperature=cfg.temperature,
         stream=True,
@@ -365,10 +369,11 @@ def _stream_for(
     client: Any,
     messages: List[Dict[str, str]],
     images: List[bytes],
+    video_url: Optional[str] = None,
 ) -> Iterable[Tuple[str, str]]:
     provider = cfg.provider.lower().strip()
     if provider == "aliyun":
-        return _stream_aliyun(client, cfg, messages, images)
+        return _stream_aliyun(client, cfg, messages, images, video_url)
     if provider == "anthropic":
         return _stream_anthropic(client, cfg, messages, images)
     if provider == "google":
@@ -390,102 +395,23 @@ def _uniform_indices(frame_count: int, limit: int) -> List[int]:
     return sorted({min(frame_count - 1, int(i * step)) for i in range(limit)})
 
 
-def _smart_frame_indices(
-    video_path: Path, frame_count: int, fps: float, limit: int = 10
-) -> List[int]:
-    """Scene-adaptive frame indices: static spans sampled sparsely, dynamic densely.
+def _uniform_video_frames(video_path: Path, limit: int = 10) -> List[bytes]:
+    """Uniform ≤limit frames as JPEG bytes.
 
-    Candidates at ~1 fps (step enlarged so candidates ≤ 240 on long videos),
-    read sequentially (grab-skip between candidates instead of repeated
-    seeks) and downscaled to 96x54 gray. First frame always kept; a later
-    candidate is kept only when its mean-abs-diff to the last KEPT frame
-    reaches the adaptive threshold (median adjacent diff × 0.5, floored at
-    6.0). Over-``limit`` results are pruned by repeatedly dropping the frame
-    with the smallest neighbor-diff sum (endpoints kept for time coverage);
-    fewer than 3 are padded with uniform frames. Returns ascending indices.
+    回退路径:主链路把整视频 base64 发给支持 video_url 的 provider(OpenAI
+    兼容/vLLM);anthropic/google 不支持 video_url,对视频信源退化为均匀抽帧
+    发图片(prompt 同步用 frame_index 语义,见 ask 的 mode_video 判断)。
     """
-    if frame_count <= 0:
+    meta = read_video_meta(video_path)
+    if meta is None:
+        logger.warning("[chat] video metadata unreadable: %s", video_path)
         return []
-    if frame_count <= limit:
-        return list(range(frame_count))
-    step = max(1, int(fps)) if fps and fps > 1 else 25
-    if -(-frame_count // step) > _SMART_CANDIDATE_MAX:
-        step = -(-frame_count // _SMART_CANDIDATE_MAX)
-    candidates = [min(frame_count - 1, i * step) for i in range(-(-frame_count // step))]
-
-    import cv2
-    import numpy as np
-
-    cand_frames: List[int] = []
-    smalls: List[Any] = []
-    cap = cv2.VideoCapture(str(video_path))
-    try:
-        if not cap.isOpened():
-            logger.warning("[chat] smart sample: cannot open %s; uniform fallback", video_path)
-            return _uniform_indices(frame_count, limit)
-        pos = 0
-        for idx in candidates:
-            while pos < idx:  # grab 只解包不解码,比逐候选 seek 便宜
-                if not cap.grab():
-                    pos = idx
-                    break
-                pos += 1
-            ok, frame = cap.read()
-            if not ok:
-                break
-            pos = idx + 1
-            cand_frames.append(idx)
-            smalls.append(
-                cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), (96, 54))
-            )
-    finally:
-        cap.release()
-
-    if not smalls:
-        logger.warning("[chat] smart sample: no frames read %s; uniform fallback", video_path)
-        return _uniform_indices(frame_count, limit)
-    arrs = [s.astype(np.int16) for s in smalls]
-
-    def diff(a: int, b: int) -> float:
-        return float(np.abs(arrs[a] - arrs[b]).mean())
-
-    adjacent = [diff(i, i - 1) for i in range(1, len(arrs))]
-    threshold = _SMART_DIFF_FLOOR
-    if adjacent:
-        threshold = max(_SMART_DIFF_FLOOR, float(np.median(adjacent)) * _SMART_DIFF_RATIO)
-
-    kept = [0]
-    for i in range(1, len(arrs)):
-        if diff(i, kept[-1]) >= threshold:
-            kept.append(i)
-
-    while len(kept) > limit:  # 端点保留(时间覆盖),删邻居差异和最小的帧
-        costs = [
-            (diff(kept[j], kept[j - 1]) + diff(kept[j], kept[j + 1]), j)
-            for j in range(1, len(kept) - 1)
-        ]
-        if not costs:
-            break
-        del kept[min(costs)[1]]
-
-    target_min = min(_SMART_MIN_KEPT, len(cand_frames))
-    if len(kept) < target_min:
-        for i in _uniform_indices(len(cand_frames), target_min):
-            if i not in kept:
-                kept.append(i)
-            if len(kept) >= target_min:
-                break
-        kept.sort()
-
-    chosen = sorted(cand_frames[i] for i in kept)
-    logger.info(
-        "[chat] smart sample: video=%s candidates=%d chosen=%d limit=%d",
-        video_path,
-        len(cand_frames),
-        len(chosen),
-        limit,
-    )
-    return chosen
+    frames: List[bytes] = []
+    for idx in _uniform_indices(int(meta["frame_count"]), limit):
+        data = read_frame_jpeg(video_path, idx)
+        if data is not None:
+            frames.append(data)
+    return frames
 
 
 def _evidence_summary(evidence_path: Path) -> Tuple[str, List[int]]:
@@ -513,49 +439,24 @@ def _evidence_summary(evidence_path: Path) -> Tuple[str, List[int]]:
     return "\n".join(lines)[:_EVIDENCE_SUMMARY_CHARS], frames
 
 
-def _sample_video_frames(
-    video_path: Path, priority_frames: List[int]
-) -> List[bytes]:
-    """Smart adaptive sampling (≤ CHAT_MAX_VIDEO_FRAMES, default 30); evidence first."""
-    meta = read_video_meta(video_path)
-    if meta is None:
-        logger.warning("[chat] video metadata unreadable: %s", video_path)
-        return []
-    frame_count = int(meta["frame_count"])
-    limit = _max_frames()
-    smart = _smart_frame_indices(
-        video_path, frame_count, float(meta.get("fps") or 0), limit
-    )
-    priority = sorted({i for i in priority_frames if 0 <= i < frame_count})
-    chosen = priority[:limit]
-    for idx in smart:
-        if len(chosen) >= limit:
-            break
-        if idx not in chosen:
-            chosen.append(idx)
-    images: List[bytes] = []
-    for idx in sorted(chosen):
-        data = read_frame_jpeg(video_path, idx)
-        if data is not None:
-            images.append(data)
-    return images
+def _gather_context(
+    state: Dict[str, Any], intent: str
+) -> Tuple[List[bytes], Optional[Path], str]:
+    """(images, video_path, evidence_summary) for the current source.
 
-
-def _gather_context(state: Dict[str, Any], intent: str) -> Tuple[List[bytes], str]:
-    """(images, evidence_summary) for the current source.
-
-    chitchat only skips images when no source is set; with an active source the
-    user expects the model to see it regardless of intent (local model, cheap).
+    视频信源(workspace_video/upload_video)返回 video_path,由 ask 决定整视频
+    base64(支持 video_url 的 provider)或均匀抽帧回退(anthropic/google);
+    upload_images 返回图片字节列表;无信源的 chitchat 全空。
     """
     kind = state.get("source_kind")
     if intent == "chitchat" and not kind:
-        return [], ""
+        return [], None, ""
     ref = state.get("source_ref") or {}
     try:
         if kind == "workspace_video":
             video = Path(ref.get("path") or "")
             stem = ref.get("stem") or video.stem
-            summary, eframes = "", []
+            summary = ""
             # 工作区 = 视频绝对路径去掉 rel 部分;证据在 analysis/<stem>/ 下。
             rel = ref.get("rel") or ""
             workspace = video
@@ -563,13 +464,13 @@ def _gather_context(state: Dict[str, Any], intent: str) -> Tuple[List[bytes], st
                 workspace = workspace.parent
             evidence_path = workspace / "analysis" / stem / f"{stem}_evidence.json"
             if evidence_path.is_file():
-                summary, eframes = _evidence_summary(evidence_path)
-            return _sample_video_frames(video, eframes), summary
+                summary, _eframes = _evidence_summary(evidence_path)
+            return [], video, summary
         if kind == "upload_video":
             files = ref.get("files") or []
             if not files:
-                return [], ""
-            return _sample_video_frames(Path(files[0]), []), ""
+                return [], None, ""
+            return [], Path(files[0]), ""
         if kind == "upload_images":
             images: List[bytes] = []
             for f in (ref.get("files") or [])[: _max_frames()]:
@@ -577,10 +478,10 @@ def _gather_context(state: Dict[str, Any], intent: str) -> Tuple[List[bytes], st
                     images.append(Path(f).read_bytes())
                 except OSError as exc:
                     logger.warning("[chat] uploaded image unreadable %s: %s", f, exc)
-            return images, ""
+            return images, None, ""
     except Exception as exc:
         logger.warning("[chat] gather context failed (%s); continue without", exc)
-    return [], ""
+    return [], None, ""
 
 
 def _build_system(
@@ -588,16 +489,19 @@ def _build_system(
     state: Dict[str, Any],
     evidence_summary: str,
     n_images: int,
+    is_video: bool = False,
 ) -> str:
     parts = [_SYSTEM_BASE]
     if state.get("summary"):
         parts.append(f"此前对话摘要:\n{state['summary']}")
     if evidence_summary:
         parts.append(f"已检测到的事件证据摘要:\n{evidence_summary}")
-    if n_images:
+    if is_video:
+        parts.append("随问题附带一段视频,基于视频画面内容回答。")
+    elif n_images:
         parts.append(f"随问题附带 {n_images} 张图片,按发送顺序编号 0..{n_images - 1}。")
     if intent == "event_analysis":
-        parts.append(_BOX_INSTRUCTION)
+        parts.append(_BOX_INSTRUCTION_VIDEO if is_video else _BOX_INSTRUCTION)
     return "\n\n".join(parts)
 
 
@@ -679,6 +583,44 @@ def _annotate_frames(
     return names
 
 
+def _annotate_video(
+    ip: str, boxes: List[Dict[str, Any]], video_path: Path
+) -> List[str]:
+    """Draw time_sec boxes on video frames; return upload-dir-relative names.
+
+    time_sec(相对视频开始的秒数)→ int(fps * time_sec) 帧号(越界 clamp)→
+    read_frame_jpeg 取帧,再复用 _annotate_frames 的 frame_index 画框逻辑。
+    """
+    meta = read_video_meta(video_path)
+    if meta is None:
+        logger.warning("[chat] annotate video: metadata unreadable %s", video_path)
+        return []
+    fps = float(meta.get("fps") or 0) or 25.0
+    frame_count = int(meta["frame_count"])
+    mapped: List[Dict[str, Any]] = []
+    for box in boxes:
+        t = box.get("time_sec")
+        if not isinstance(t, (int, float)) or isinstance(t, bool):
+            continue
+        idx = max(0, min(frame_count - 1, int(fps * float(t))))
+        mapped.append({**box, "frame_index": idx})
+    if not mapped:
+        return []
+    frames_by_idx: Dict[int, bytes] = {}
+    for idx in sorted({b["frame_index"] for b in mapped}):
+        data = read_frame_jpeg(video_path, idx)
+        if data is not None:
+            frames_by_idx[idx] = data
+    ordered = sorted(frames_by_idx)
+    remap = {orig: i for i, orig in enumerate(ordered)}
+    remapped = [
+        {**b, "frame_index": remap[b["frame_index"]]}
+        for b in mapped
+        if b["frame_index"] in frames_by_idx
+    ]
+    return _annotate_frames(ip, remapped, [frames_by_idx[i] for i in ordered])
+
+
 # ---------------------------------------------------------------------------
 # Compaction
 # ---------------------------------------------------------------------------
@@ -694,7 +636,14 @@ def maybe_compact(ip: str) -> None:
     for m in messages:
         texts.append(m["content"])
         texts.append(m.get("think") or "")
-    est = tokens.estimate_request(texts, _max_frames())
+    kind = state.get("source_kind")
+    if kind in ("upload_video", "workspace_video"):
+        # 视频整发(vLLM 原生采样):按固定估值,不再按帧数折算
+        est = tokens.estimate_request(texts, 0) + tokens.VIDEO_TOKENS_EST
+    else:
+        ref = state.get("source_ref") or {}
+        n_images = min(len(ref.get("files") or []), _max_frames())
+        est = tokens.estimate_request(texts, n_images)
     if est <= tokens.COMPACT_AT:
         return
     keep = _HISTORY_TURNS * 2
@@ -748,8 +697,48 @@ def ask(
 
     intent = classify(question, providers)
     state = store.get_state(ip)
-    images, evidence_summary = _gather_context(state, intent)
-    system = _build_system(intent, state, evidence_summary, len(images))
+    images, video_path, evidence_summary = _gather_context(state, intent)
+
+    # 视频整发:读文件 base64 为 data URL(仅 OpenAI 兼容/vLLM 支持 video_url)。
+    video_data_url: Optional[str] = None
+    if video_path is not None:
+        try:
+            raw = video_path.read_bytes()
+            mime = "video/quicktime" if video_path.suffix.lower() == ".mov" else "video/mp4"
+            video_data_url = f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
+            logger.info(
+                "[chat] send video: path=%s bytes=%d b64_bytes=%d",
+                video_path,
+                len(raw),
+                len(video_data_url),
+            )
+        except OSError as exc:
+            logger.warning("[chat] video unreadable %s: %s", video_path, exc)
+
+    # 模式判定:视频信源且主用 provider 是 OpenAI 兼容(aliyun)→ 整视频 + time_sec
+    # 画框契约;否则(anthropic/google 主用,不支持 video_url)→ 均匀 10 帧图片 +
+    # frame_index 契约。failover 到非 OpenAI 兼容 provider 时同样走抽帧回退。
+    primary_openai = providers[0].provider.lower().strip() == "aliyun"
+    mode_video = video_data_url is not None and primary_openai
+
+    # 抽帧回退(惰性):视频信源且实际要发图片时才抽,整发路径零开销
+    fallback_frames: Optional[List[bytes]] = None
+
+    def get_fallback_frames() -> List[bytes]:
+        nonlocal fallback_frames
+        if fallback_frames is None:
+            fallback_frames = (
+                _uniform_video_frames(video_path) if video_path is not None else []
+            )
+        return fallback_frames
+
+    if mode_video:
+        n_ctx_images, is_video_prompt = 0, True
+    elif video_path is not None:
+        n_ctx_images, is_video_prompt = len(get_fallback_frames()), False
+    else:
+        n_ctx_images, is_video_prompt = len(images), False
+    system = _build_system(intent, state, evidence_summary, n_ctx_images, is_video_prompt)
 
     messages: List[Dict[str, str]] = [{"role": "system", "content": system}]
     history = [m for m in store.list_messages(ip) if m["role"] in ("user", "assistant")]
@@ -765,9 +754,18 @@ def ask(
     served = False
     last_exc: Optional[Exception] = None
     for cfg in providers:
+        # 每个 provider 的视觉输入:OpenAI 兼容 + mode_video → video_url;
+        # 视频信源但当前 provider 不支持 video_url → 均匀抽帧回退;图片信源原样。
+        p = cfg.provider.lower().strip()
+        if mode_video and p == "aliyun":
+            stream_images, stream_video = [], video_data_url
+        elif video_path is not None and not images:
+            stream_images, stream_video = get_fallback_frames(), None
+        else:
+            stream_images, stream_video = images, None
         try:
             client = _client_for(cfg)
-            for kind, text in _stream_for(cfg, client, messages, images):
+            for kind, text in _stream_for(cfg, client, messages, stream_images, stream_video):
                 emitted = True
                 if kind == "think":
                     think_text += text
@@ -797,7 +795,12 @@ def ask(
         display_text, boxes = _extract_boxes(full_text)
         if boxes:
             try:
-                image_names = _annotate_frames(ip, boxes, images)
+                if mode_video and video_path is not None:
+                    image_names = _annotate_video(ip, boxes, video_path)  # time_sec 契约
+                elif video_path is not None and not images:
+                    image_names = _annotate_frames(ip, boxes, get_fallback_frames())
+                else:
+                    image_names = _annotate_frames(ip, boxes, images)
             except Exception as exc:
                 logger.warning("[chat] annotate failed: %s", exc)
             if image_names:

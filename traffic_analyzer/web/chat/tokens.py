@@ -18,6 +18,8 @@ CONTEXT_LIMIT = 256_000
 COMPACT_AT = 200_000
 # 1080p 帧 ≈ (1920/28)×(1080/28) ≈ 68×39 ≈ 2600 patch tokens(vLLM 按 28×28 patch 计数)。
 IMAGE_TOKENS_EST = 2600
+# 视频整发:vLLM 原生采样,20s 1080p 约数万 tokens,按 30k 固定估值(估算用,余量吸收误差)。
+VIDEO_TOKENS_EST = 30_000
 
 _ASCII_RUN = re.compile(r"[\x00-\x7f]+")
 
