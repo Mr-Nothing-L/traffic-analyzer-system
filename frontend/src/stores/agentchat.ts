@@ -81,6 +81,8 @@ export interface AgentToolEntry {
   /** call.arguments 原文(JSON 字符串)。 */
   args: string
   result: string
+  /** 工具输出中的图片(dataURL;extract_frames/draw_boxes 等返回的 image ContentPart)。 */
+  images: string[]
   isError: boolean
   done: boolean
 }
@@ -212,6 +214,25 @@ function formatToolOutput(output: unknown): string {
   }
 }
 
+/** tool_result 的 output 为 ContentPart[] 时,提取 image_url 部分的 url(dataURL)。
+ * 兼容 kosong 的 camelCase(imageUrl)与 snake_case(image_url)两种键名。 */
+function extractToolImages(output: unknown): string[] {
+  if (!Array.isArray(output)) return []
+  const urls: string[] = []
+  for (const p of output) {
+    if (!p || typeof p !== 'object') continue
+    const part = p as {
+      type?: unknown
+      imageUrl?: { url?: unknown }
+      image_url?: { url?: unknown }
+    }
+    if (part.type !== 'image_url') continue
+    const url = part.imageUrl?.url ?? part.image_url?.url
+    if (typeof url === 'string' && url) urls.push(url)
+  }
+  return urls
+}
+
 /** GET history 的条目 → 本地时间线条目;不认识/缺 kind 的条目丢弃。 */
 function mapHistoryEntry(raw: unknown): AgentEntry | null {
   if (!raw || typeof raw !== 'object') return null
@@ -244,6 +265,7 @@ function mapHistoryEntry(raw: unknown): AgentEntry | null {
       args:
         typeof e.arguments === 'string' ? e.arguments : JSON.stringify(e.arguments ?? ''),
       result: formatToolOutput(e.output),
+      images: extractToolImages(e.output),
       isError: e.isError === true,
       done: true,
     }
@@ -460,6 +482,7 @@ export const useAgentChatStore = defineStore('agentchat', () => {
             ? call.arguments
             : JSON.stringify(call?.arguments ?? ''),
         result: '',
+        images: [],
         isError: false,
         done: false,
       })
@@ -471,7 +494,9 @@ export const useAgentChatStore = defineStore('agentchat', () => {
       if (tool) {
         tool.done = true
         tool.isError = ev.isError === true
-        tool.result = formatToolOutput((ev.result as { output?: unknown } | undefined)?.output)
+        const output = (ev.result as { output?: unknown } | undefined)?.output
+        tool.result = formatToolOutput(output)
+        tool.images = extractToolImages(output)
       }
       // 审批后的 tool_result 到达即说明流已恢复
       if (status.value === 'awaiting_approval') status.value = 'running'

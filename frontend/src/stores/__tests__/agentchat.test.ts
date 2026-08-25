@@ -69,3 +69,49 @@ describe('工作区切换重置 agent 会话', () => {
     expect(agent.entries).toHaveLength(1);
   });
 });
+
+// 工具结果图片回归测试:extract_frames/draw_boxes 的 output 是 kosong ContentPart[]
+// (text + image_url),历史落盘 JSON 往返后仍是数组;期望 mapHistoryEntry 提取
+// 图片 dataURL 进 images,文本仍进 result。
+describe('历史工具条目图片提取', () => {
+  it('history 的 tool 条目 output(ContentPart[])拆成文本 result + 图片 images', async () => {
+    const { agent } = await load();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (String(url).endsWith('/history')) {
+          return new Response(
+            JSON.stringify({
+              entries: [
+                {
+                  kind: 'tool',
+                  toolCallId: 'c1',
+                  name: 'extract_frames',
+                  arguments: '{}',
+                  output: [
+                    { type: 'text', text: '帧 t=2.0s' },
+                    { type: 'image_url', imageUrl: { url: 'data:image/jpeg;base64,AAA' } },
+                    { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,BBB' } },
+                  ],
+                  isError: false,
+                  at: 1,
+                },
+              ],
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        return new Response('{}', { status: 200 });
+      }),
+    );
+    await agent.selectSession('s1');
+    const tool = agent.entries[0];
+    expect(tool.kind).toBe('tool');
+    if (tool.kind === 'tool') {
+      expect(tool.result).toBe('帧 t=2.0s');
+      expect(tool.images).toEqual(['data:image/jpeg;base64,AAA', 'data:image/jpeg;base64,BBB']);
+      expect(tool.done).toBe(true);
+    }
+    vi.unstubAllGlobals();
+  });
+});

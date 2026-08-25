@@ -3,7 +3,8 @@
  * 左侧历史会话栏(列表 title + 相对时间 / 点击切换重建时间线 / 删除(optimistic + 确认)/ 新建)
  * + 右侧对话卡:顶条(状态 chip)/ 时间线(user 气泡(图片附件 + 视频预览或路径 chip)/
  * assistant 流式气泡(思考折叠 + markdown)/ 消息底部行(HH:MM + hover 显现的复制;user 另有撤回,
- * 调 recall API 从时间线移除该条及其后全部,进行中禁用)/ 工具气泡(参数摘要 + 结果折叠,失败标红)/
+ * 调 recall API 从时间线移除该条及其后全部,进行中禁用)/ 工具气泡(参数摘要 + 结果折叠
+ * (文本 + 图片缩略图,点击进画廊),失败标红)/
  * 审批卡(批准/本会话都批准/拒绝;历史未决显示「已失效」)/ 检测结果卡(11 位编码等宽高亮 +
  * markdown 报告))/ 失败条(错误 + 重试)/ composer 圆角盒(三行:附件预览行(图片缩略图 +
  * 视频块,视频同一时刻最多一个,可移除)/ 无边框 textarea(自动增高)/ 底部功能行(左:「+」
@@ -340,13 +341,14 @@ function fileToDataUrl(file: File): Promise<string> {
   })
 }
 
-/* ---- 图片画廊:全对话 user 气泡图按时间序进画廊;点击放大,左右切换(按钮/键盘) ---- */
+/* ---- 图片画廊:user 气泡附件图与工具结果图按时间序进画廊;点击放大,左右切换(按钮/键盘) ---- */
 const previewIndex = ref<number | null>(null)
 
 const galleryImages = computed(() => {
   const urls: string[] = []
   for (const e of agent.entries) {
     if (e.kind === 'user' && e.images?.length) urls.push(...e.images)
+    else if (e.kind === 'tool' && e.images.length) urls.push(...e.images)
   }
   return urls
 })
@@ -663,7 +665,20 @@ onUnmounted(() => {
                 <span v-else-if="e.isError" class="tool-state err">失败</span>
                 <span v-else class="tool-state ok">完成</span>
               </button>
-              <div v-if="toolOpen.has(i) && e.done" class="tool-result">{{ e.result || '(无输出)' }}</div>
+              <div v-if="toolOpen.has(i) && e.done" class="tool-result">
+                <div v-if="e.result" class="tool-result-text">{{ e.result }}</div>
+                <div v-else-if="!e.images.length" class="tool-result-text">(无输出)</div>
+                <div v-if="e.images.length" class="tool-imgs">
+                  <img
+                    v-for="u in e.images"
+                    :key="u"
+                    :src="u"
+                    alt=""
+                    loading="lazy"
+                    @click="openPreview(u)"
+                  />
+                </div>
+              </div>
             </div>
 
             <!-- 审批卡片:工具名 + 规则 + 资源访问 + 三键回执;历史未决显示「已失效」 -->
@@ -1338,6 +1353,26 @@ onUnmounted(() => {
   color: var(--color-text2);
   max-height: 240px;
   overflow-y: auto;
+}
+
+/* 工具结果图片行(extract_frames/draw_boxes 抽帧/标注图,点击进画廊) */
+.tool-imgs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs);
+}
+
+.tool-result-text + .tool-imgs {
+  margin-top: var(--space-xs);
+}
+
+.tool-imgs img {
+  width: 160px;
+  height: 120px;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  cursor: zoom-in;
 }
 
 /* ---- 审批卡片 ---- */
