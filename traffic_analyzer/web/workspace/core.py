@@ -301,4 +301,9 @@ def set_workspace(body: WorkspaceSetRequest, request: Request) -> Dict[str, Any]
     add_root = getattr(runtime, "add_workspace_root", None)
     if add_root is not None:
         add_root(path)
+    # 同时让 agent server 恢复该工作区的磁盘历史会话(重启后内存索引为空);
+    # 同为旁路调用,失败仅 warning。顺序:先注册根再恢复会话。
+    restore = getattr(runtime, "restore_workspace", None)
+    if restore is not None:
+        restore(path)
     return {"path": str(path)}

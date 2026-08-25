@@ -64,6 +64,29 @@ const sortedSessions = computed(() =>
   [...agent.sessions].sort((a, b) => (b.lastActiveAt ?? 0) - (a.lastActiveAt ?? 0)),
 )
 
+/* 会话按工作区分组:主区只列 workspaceDir === 当前工作区的会话;
+ * 缺失(旧数据)或绑其他工作区的收在底部「其他工作区」分组,点击仍可正常打开。 */
+const ownSessions = computed(() =>
+  sortedSessions.value.filter((s) => !!ws.path && s.workspaceDir === ws.path),
+)
+const otherSessions = computed(() =>
+  sortedSessions.value.filter((s) => !ws.path || s.workspaceDir !== ws.path),
+)
+
+/** 「其他工作区」项的来源标签:workspaceDir 的 basename;旧数据无字段时标「旧数据」。 */
+function wsTag(s: AgentSessionInfo): string {
+  if (!s.workspaceDir) return '旧数据'
+  return s.workspaceDir.split(/[\\/]/).filter(Boolean).pop() || s.workspaceDir
+}
+
+/** 会话栏分组:当前工作区(无标题)在前,其他工作区(带标题与来源标签)沉底。 */
+const sessionGroups = computed(() =>
+  [
+    { key: 'own', label: '', items: ownSessions.value },
+    { key: 'other', label: '其他工作区', items: otherSessions.value },
+  ].filter((g) => g.items.length),
+)
+
 function relTime(ts?: number): string {
   if (!ts) return ''
   const m = Math.floor((Date.now() - ts) / 60000)
@@ -452,11 +475,9 @@ onMounted(async () => {
   window.addEventListener('keydown', onGalleryKey)
   try {
     await agent.fetchSessions()
-    // 续上当前工作区的最近会话(会话绑 workspaceDir;无该字段的旧会话视为通用);
+    // 续上当前工作区的最近会话(ownSessions 已按 lastActiveAt 倒序);
     // 当前工作区没有历史会话时新建,避免把旧工作区会话绑到新工作区
-    const latest = sortedSessions.value.find(
-      (s) => !s.workspaceDir || !ws.path || s.workspaceDir === ws.path,
-    )
+    const latest = ownSessions.value[0]
     if (latest) await agent.selectSession(latest.id)
     else await agent.createSession()
     await nextTick()
@@ -477,7 +498,8 @@ onUnmounted(() => {
 
 <template>
   <div class="chat-page">
-    <!-- 历史会话栏:title + 相对时间,点击切换,悬停出删除(确认后 optimistic 移除) -->
+    <!-- 历史会话栏:当前工作区会话在前,旧数据/其他工作区会话收底部分组(带来源标签);
+         title + 相对时间,点击切换,悬停出删除(确认后 optimistic 移除) -->
     <aside class="session-col">
       <div class="session-head">
         <UiIcon name="chat" :size="14" />
@@ -487,28 +509,38 @@ onUnmounted(() => {
       </div>
       <n-scrollbar class="session-scroll">
         <div v-if="!sortedSessions.length" class="session-empty">暂无历史会话</div>
-        <div
-          v-for="s in sortedSessions"
-          :key="s.id"
-          class="session-item"
-          :class="{ active: s.id === agent.sessionId }"
-          tabindex="0"
-          @click="onSelect(s.id)"
-          @keydown.enter="onSelect(s.id)"
-        >
-          <div class="session-item-title" :title="sessionTitle(s)">{{ sessionTitle(s) }}</div>
-          <div class="session-item-meta">
-            <span class="session-item-time">{{ relTime(s.lastActiveAt) }}</span>
-            <n-popconfirm @positive-click="onDelete(s.id)">
-              <template #trigger>
-                <button class="session-del" title="删除会话" @click.stop>
-                  <UiIcon name="close" :size="10" />
-                </button>
-              </template>
-              删除该会话及其全部记录?
-            </n-popconfirm>
+        <div v-else-if="!ownSessions.length" class="session-empty">当前工作区暂无会话</div>
+        <!-- 主区:当前工作区会话;底部「其他工作区」分组:旧数据/其他工作区会话(带来源标签) -->
+        <template v-for="g in sessionGroups" :key="g.key">
+          <div v-if="g.label" class="session-group-title">{{ g.label }}</div>
+          <div
+            v-for="s in g.items"
+            :key="s.id"
+            class="session-item"
+            :class="{ active: s.id === agent.sessionId }"
+            tabindex="0"
+            @click="onSelect(s.id)"
+            @keydown.enter="onSelect(s.id)"
+          >
+            <div class="session-item-title" :title="sessionTitle(s)">{{ sessionTitle(s) }}</div>
+            <div class="session-item-meta">
+              <span class="session-item-meta-left">
+                <span class="session-item-time">{{ relTime(s.lastActiveAt) }}</span>
+                <span v-if="g.key === 'other'" class="session-tag" :title="s.workspaceDir || ''">
+                  {{ wsTag(s) }}
+                </span>
+              </span>
+              <n-popconfirm @positive-click="onDelete(s.id)">
+                <template #trigger>
+                  <button class="session-del" title="删除会话" @click.stop>
+                    <UiIcon name="close" :size="10" />
+                  </button>
+                </template>
+                删除该会话及其全部记录?
+              </n-popconfirm>
+            </div>
           </div>
-        </div>
+        </template>
       </n-scrollbar>
     </aside>
 
@@ -908,6 +940,15 @@ onUnmounted(() => {
   font-size: var(--text-sm);
 }
 
+/* 「其他工作区」分组标题:沉底分隔,弱化处理 */
+.session-group-title {
+  padding: var(--space-sm) var(--space-md) var(--space-xs);
+  font-size: var(--text-xs);
+  color: var(--color-text2);
+  background: var(--color-surface-2);
+  border-bottom: 1px solid var(--color-border);
+}
+
 .session-item {
   padding: var(--space-sm) var(--space-md);
   border-bottom: 1px solid var(--color-border);
@@ -943,9 +984,29 @@ onUnmounted(() => {
   gap: var(--space-xs);
 }
 
+.session-item-meta-left {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  min-width: 0;
+}
+
 .session-item-time {
   font-size: var(--text-xs);
   color: var(--color-text2);
+}
+
+/* 「其他工作区」项的来源标签(workspaceDir basename) */
+.session-tag {
+  font-size: var(--text-xs);
+  color: var(--color-text2);
+  background: var(--color-surface-3);
+  border-radius: var(--radius-sm);
+  padding: 0 var(--space-xs);
+  max-width: 96px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* 删除按钮:默认淡隐,悬停/聚焦条目或自身时出现 */

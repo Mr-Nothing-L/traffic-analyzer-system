@@ -857,3 +857,85 @@ describe('agent server', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// POST /workspaces/restore:运行后恢复磁盘历史会话(web 启动/切换工作区时
+// 由代理层调用;覆盖 server 重启后内存索引为空、磁盘数据还在的场景)
+// ---------------------------------------------------------------------------
+
+describe('POST /workspaces/restore', () => {
+  it('chat 后重启 → GET /sessions 为空 → restore 后历史可见(含 history)', async () => {
+    const provider = new ScriptedProvider([[text('检测完成')]]);
+    await startServer(provider, [echoTool()]);
+    const sessionId = await createSession();
+
+    const res = await startChat(sessionId, '检测这个视频');
+    if (res.body === null) throw new Error('no body');
+    await readUntilDone(sseReader(res.body));
+
+    // 重启:新 server 不传 restoreWorkspaceDirs,内存索引为空。
+    await agentServer?.close();
+    await startServer(new ScriptedProvider([]), [echoTool()]);
+
+    const before = await getJson('/sessions');
+    expect((before.json as { sessions: unknown[] }).sessions).toEqual([]);
+
+    const restored = await postJson('/workspaces/restore', { workspaceDir: workspace });
+    expect(restored.status).toBe(200);
+    expect(restored.json).toEqual({ status: 'ok', restored: 1 });
+
+    const after = await getJson('/sessions');
+    const sessions = (after.json as { sessions: Record<string, unknown>[] }).sessions;
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]).toMatchObject({
+      id: sessionId,
+      workspaceDir: workspace,
+      title: '检测这个视频',
+    });
+
+    const history = await getJson(`/sessions/${sessionId}/history`);
+    const entries = (history.json as { entries: { kind: string }[] }).entries;
+    expect(entries.map((e) => e.kind)).toEqual(['user', 'assistant']);
+  });
+
+  it('幂等:重复调用不报错不重复,第二次 restored:0', async () => {
+    await startServer(new ScriptedProvider([]), [echoTool()]);
+    const sessionId = await createSession();
+    // 模拟「代理层重复调用」:同一会话已在内存,restore 不得覆盖/重复。
+    const first = await postJson('/workspaces/restore', { workspaceDir: workspace });
+    expect(first.json).toEqual({ status: 'ok', restored: 0 });
+    const second = await postJson('/workspaces/restore', { workspaceDir: workspace });
+    expect(second.json).toEqual({ status: 'ok', restored: 0 });
+
+    const list = await getJson('/sessions');
+    const sessions = (list.json as { sessions: { id: string }[] }).sessions;
+    expect(sessions.map((s) => s.id)).toEqual([sessionId]);
+  });
+
+  it('workspaceDir 不是已存在目录 → 400 invalid_workspace;缺字段 → 400', async () => {
+    await startServer(new ScriptedProvider([]), [echoTool()]);
+
+    const bad = await postJson('/workspaces/restore', {
+      workspaceDir: path.join(workspace, 'nope'),
+    });
+    expect(bad.status).toBe(400);
+    expect(bad.json).toMatchObject({ error: { code: 'invalid_workspace' } });
+
+    const missing = await postJson('/workspaces/restore', {});
+    expect(missing.status).toBe(400);
+    expect(missing.json).toMatchObject({ error: { code: 'invalid_request' } });
+  });
+
+  it('sessions.db 不存在 → restored:0,且不在磁盘上创建 .agent 目录', async () => {
+    await startServer(new ScriptedProvider([]), [echoTool()]);
+    const empty = mkdtempSync(path.join(tmpdir(), 'agent-restore-empty-'));
+    try {
+      const res = await postJson('/workspaces/restore', { workspaceDir: empty });
+      expect(res.status).toBe(200);
+      expect(res.json).toEqual({ status: 'ok', restored: 0 });
+      expect(existsSync(path.join(empty, '.agent'))).toBe(false);
+    } finally {
+      rmSync(empty, { recursive: true, force: true });
+    }
+  });
+});

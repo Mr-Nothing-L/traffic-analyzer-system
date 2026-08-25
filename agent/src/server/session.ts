@@ -9,6 +9,8 @@
  * setInterval,不阻塞进程退出。
  */
 import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
 
 import type { Message } from '#/message';
 
@@ -128,6 +130,25 @@ export class SessionManager {
       byId.set(session.id, summaryOf(session));
     }
     return [...byId.values()].sort((a, b) => a.createdAt - b.createdAt);
+  }
+
+  /**
+   * 运行时恢复一个 workspace 的历史会话(POST /workspaces/restore 用):
+   * 打开 <workspaceDir>/.agent/sessions.db(文件不存在返回 0,不创建文件),
+   * 把磁盘 session 加载进内存索引。幂等:已在内存的 session 跳过(内存是
+   * lastKnownUsage 等内存态的唯一权威,不能用磁盘行覆盖),重复调用返回 0。
+   */
+  restoreWorkspace(workspaceDir: string): number {
+    const dbPath = path.join(workspaceDir, '.agent', 'sessions.db');
+    if (!existsSync(dbPath)) return 0;
+    const storage = this.storageFor(workspaceDir);
+    let restored = 0;
+    for (const row of storage.listSessions()) {
+      if (this.sessions.has(row.id)) continue;
+      this.sessions.set(row.id, this.materialize(storage, row));
+      restored += 1;
+    }
+    return restored;
   }
 
   /** 追加消息并刷新活跃时间(同步落盘)。未知 session 返回 false。 */

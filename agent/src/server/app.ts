@@ -14,6 +14,10 @@
  *   POST   /sessions/{id}/mode     {mode} → {status:'ok', mode}(切换权限模式
  *                                      manual|auto|yolo,内存+磁盘同步,进行中的
  *                                      轮次下一轮生效;非法 mode → 400)
+ *   POST   /workspaces/restore     {workspaceDir} → {status:'ok',restored:n}
+ *                                      (把该 workspace 磁盘上的历史会话加载进内存
+ *                                       索引,幂等;workspaceDir 非已存在目录 → 400,
+ *                                       sessions.db 不存在 → restored:0)
  *   DELETE /sessions/{id}          → {status:'ok'}(同时取消挂起审批、删盘)
  *   POST   /chat                   → SSE 流(text/event-stream,每事件一行 'data: {json}\n\n')
  *   POST   /approval               → 审批回执(见 approvalBridge.ts)
@@ -286,6 +290,25 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
 
   const handleListSessions = (res: ServerResponse): void => {
     sendJson(res, 200, { sessions: sessions.list() });
+  };
+
+  /** 运行时恢复某 workspace 的磁盘历史会话(web 启动/切换工作区时代理层调用)。 */
+  const handleRestoreWorkspace = (res: ServerResponse, body: unknown): void => {
+    if (!isRecord(body) || typeof body.workspaceDir !== 'string' || body.workspaceDir === '') {
+      sendError(res, 400, 'invalid_request', 'workspaceDir is required and must be a string');
+      return;
+    }
+    let isDir = false;
+    try {
+      isDir = statSync(body.workspaceDir).isDirectory();
+    } catch {
+      isDir = false;
+    }
+    if (!isDir) {
+      sendError(res, 400, 'invalid_workspace', `workspaceDir is not an existing directory: ${body.workspaceDir}`);
+      return;
+    }
+    sendJson(res, 200, { status: 'ok', restored: sessions.restoreWorkspace(body.workspaceDir) });
   };
 
   const handleGetHistory = (res: ServerResponse, sessionId: string): void => {
@@ -620,6 +643,10 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
         }
         if (req.method === 'GET' && url.pathname === '/sessions') {
           handleListSessions(res);
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/workspaces/restore') {
+          handleRestoreWorkspace(res, await readJsonBody(req));
           return;
         }
         const historyMatch = /^\/sessions\/([^/]+)\/history$/.exec(url.pathname);

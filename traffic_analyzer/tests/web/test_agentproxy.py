@@ -31,6 +31,7 @@ from traffic_analyzer.web.agentproxy.runtime import AgentRuntimeManager
 # autouse 的 root_posts fixture 会替换 _post_workspace_root;需要验证其
 # 真实实现(URL/body)的用例先把它还原回来。
 _REAL_POST_WORKSPACE_ROOT = runtime_mod._post_workspace_root
+_REAL_POST_WORKSPACE_RESTORE = runtime_mod._post_workspace_restore
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +91,22 @@ def root_posts(monkeypatch: pytest.MonkeyPatch) -> List[Any]:
     monkeypatch.setattr(
         runtime_mod,
         "_post_workspace_root",
+        lambda url, path: posts.append((url, str(path))),
+    )
+    return posts
+
+
+@pytest.fixture(autouse=True)
+def restore_posts(monkeypatch: pytest.MonkeyPatch) -> List[Any]:
+    """拦截 runtime → agent server 的 /workspaces/restore 恢复(不打真实 8602)。
+
+    autouse:既给恢复语义用例提供断言载体,也防止既有 start() 用例
+    (fake spawn)误触本机正在运行的 8602 实例。
+    """
+    posts: List[Any] = []
+    monkeypatch.setattr(
+        runtime_mod,
+        "_post_workspace_restore",
         lambda url, path: posts.append((url, str(path))),
     )
     return posts
@@ -1169,3 +1186,111 @@ class TestWorkspaceSwitchRegistersRoot:
         assert resp.status_code == 200, resp.text
         assert resp.json() == {"path": str(new_ws.resolve())}
         assert root_posts == []  # 无 runtime:不注册,也不报错
+
+    def test_set_workspace_triggers_agent_restore(
+        self,
+        root_posts: List[Any],
+        restore_posts: List[Any],
+        workspace: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """切换工作区同时触发两个副作用:toolserver 注册允许根 + agent 恢复会话。"""
+        monkeypatch.delenv(app_mod.WORKSPACE_ENV_VAR, raising=False)
+        app = app_mod.create_app(workspace=str(workspace))
+        app.state.agent_runtime = AgentRuntimeManager(enabled=True)
+        new_ws = tmp_path / "ws2"
+        new_ws.mkdir()
+        client = TestClient(app)
+        resp = client.post("/api/workspace", json={"path": str(new_ws)})
+        assert resp.status_code == 200, resp.text
+        resolved = str(new_ws.resolve())
+        assert root_posts == [("http://127.0.0.1:8601", resolved)]
+        assert restore_posts == [("http://127.0.0.1:8602", resolved)]
+
+    def test_set_workspace_without_runtime_skips_restore(
+        self,
+        restore_posts: List[Any],
+        workspace: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        monkeypatch.delenv(app_mod.WORKSPACE_ENV_VAR, raising=False)
+        app = app_mod.create_app(workspace=str(workspace))
+        new_ws = tmp_path / "ws2"
+        new_ws.mkdir()
+        client = TestClient(app)
+        resp = client.post("/api/workspace", json={"path": str(new_ws)})
+        assert resp.status_code == 200, resp.text
+        assert restore_posts == []  # 无 runtime:不恢复,也不报错
+
+
+# ---------------------------------------------------------------------------
+# restore_workspace:让 agent server 恢复工作区磁盘历史会话(免重启)
+# ---------------------------------------------------------------------------
+
+
+class TestRestoreWorkspace:
+    def test_post_workspace_restore_url_and_body(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """_post_workspace_restore 本身:URL /workspaces/restore,body {"workspaceDir": ...}。"""
+        calls: List[Any] = []
+        monkeypatch.setattr(
+            runtime_mod,
+            "httpx",
+            SimpleNamespace(post=lambda *a, **k: calls.append((a, k))),
+        )
+        monkeypatch.setattr(
+            runtime_mod, "_post_workspace_restore", _REAL_POST_WORKSPACE_RESTORE
+        )
+        runtime_mod._post_workspace_restore("http://127.0.0.1:8602", tmp_path)
+        assert calls == [
+            (
+                ("http://127.0.0.1:8602/workspaces/restore",),
+                {"json": {"workspaceDir": str(tmp_path)},
+                 "timeout": runtime_mod._REGISTER_ROOT_TIMEOUT},
+            )
+        ]
+
+    def test_posts_workspaces_restore(
+        self, restore_posts: List[Any], tmp_path: Path
+    ) -> None:
+        mgr = AgentRuntimeManager(enabled=True)
+        mgr.restore_workspace(tmp_path)
+        assert restore_posts == [
+            ("http://127.0.0.1:8602", str(tmp_path))
+        ]
+
+    def test_failure_only_warns(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: Any, tmp_path: Path
+    ) -> None:
+        def boom(url: str, path: Path) -> None:
+            raise httpx.ConnectError("connection refused")
+
+        monkeypatch.setattr(runtime_mod, "_post_workspace_restore", boom)
+        mgr = AgentRuntimeManager(enabled=True)
+        with caplog.at_level(logging.WARNING, logger="traffic_analyzer.web.agentproxy.runtime"):
+            mgr.restore_workspace(tmp_path)  # 不抛异常
+        assert "failed to restore workspace" in caplog.text
+
+    def test_disabled_runtime_skips(
+        self, restore_posts: List[Any], tmp_path: Path
+    ) -> None:
+        mgr = AgentRuntimeManager(enabled=False)
+        mgr.restore_workspace(tmp_path)
+        assert restore_posts == []
+
+    def test_start_restores_current_workspace(
+        self, restore_posts: List[Any], tmp_path: Path
+    ) -> None:
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        mgr = AgentRuntimeManager(
+            workspace=ws,
+            enabled=True,
+            spawn=lambda argv, **k: _FakeProc(argv),
+            port_probe=lambda port: False,
+        )
+        mgr.start()
+        assert restore_posts == [("http://127.0.0.1:8602", str(ws))]
