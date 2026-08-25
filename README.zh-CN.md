@@ -6,7 +6,7 @@
 **11 位二进制事件编码**和一份结构化分析报告（Markdown / JSON）；开启 SFT label 模式时
 每个视频再产出一条 **SFT 训练样本**，可在自带的 Web 界面中编辑。
 
-> 当前版本：v6.0.0。
+> 当前版本：v7.0.0。
 
 ## 架构
 
@@ -37,13 +37,15 @@
                               │ Python 视频工具服务             │  toolserver/
                               │ video_meta / extract_frames / │
                               │ draw_boxes（CV 留在 Python）   │
+                              │ 多根允许集合（切换时热注册）   │
                               └───────────────────────────────┘
 ```
 
 - **前端**只经 REST 和一条 SSE 通道（任务进度、看板变更、在线名册）与后端交互，无轮询。
 - **web 层**以串行子进程跑批量推理，尾随任务的结构化进度文件驱动界面实时更新；启动时
   自动拉起工具服务与 agent 服务（可用 `AGENT_RUNTIME_ENABLE=0` 关闭），并把 `/api/agent/*`
-  反向代理到 agent 服务。
+  反向代理到 agent 服务。工具服务持有多根允许集合：切换工作区时经 `POST /config/roots`
+  热注册新根，免重启。
 - **agent 运行时**（`agent/`）是 TypeScript 多轮 agent：LLM 调用内置工具（`video_meta` /
   `extract_frames` / `draw_boxes` / `read_file` / `write_file` / `run_script`）观察视频，
   最终经 `submit_detection` 提交结构化结果——与批量流水线同一输出契约（11 位编码 +
@@ -99,17 +101,27 @@ python3 -m traffic_analyzer analyze \
 标注 + 报告）；非 TTY 输出（Web 子进程、管道）自动退化为 `EXPERT_PROGRESS` 标记行，供
 Web 前端解析。退出码：`0` 成功，`1` 错误，`2` 视频被预过滤器筛除（不写报告文件）。
 
-### 3. Agent 检测模式（Web 界面）
+### 3. Agent 模式（Web 界面）
 
 启动 web 服务（`python3 -m traffic_analyzer web`）后，后端会自动拉起 Python 工具服务
 （127.0.0.1:8601）与 TS agent 运行时（127.0.0.1:8602），无需手动启动。点顶部导航栏的
-**「Agent 检测」**进入 `/agent` 对话视图：指定工作区中的视频，检测 Agent 以多轮对话方式
-调用工具（读元信息、抽帧、画框）逐步观察，最终以 `submit_detection` 提交结果——输出与
-批量流水线同一契约：11 位编码 + Markdown 报告。
+**「Agent模式」**进入 `/chat` 统一对话视图（问答 + 检测一体）：指定工作区中的视频，
+agent 以多轮对话方式调用工具（读元信息、抽帧、画框）逐步观察，最终以 `submit_detection`
+提交结果——输出与批量流水线同一契约：11 位编码 + Markdown 报告。
 
-对话前可选择**权限模式**：`yolo`（工具全部自动放行）、`manual`（每次工具调用需人工确认）、
-`auto`（自动裁决，危险操作仍会询问）；`manual` 下工具调用以审批卡片呈现，可批准或拒绝。
-沙盒约束（文件操作限定工作区内、敏感文件 veto）不受权限模式豁免。
+- **会话历史** — 左侧栏按工作区分组列出会话；绑定其他工作区的会话收在底部「其他工作区」
+  分组，每条带来源标签（工作区目录名）。
+- **权限模式** — 三档，在输入框底栏切换（按会话生效，下一轮起效）：`manual` 逐条确认
+  （每个工具操作都需人工确认）、`auto` 自动通过（自动批准，关键操作仍会询问）、`yolo`
+  完全自主（完全自主运行，不再询问）。`manual` 下工具调用以审批卡片呈现，可批准或拒绝。
+  沙盒约束（文件操作限定工作区内、敏感文件 veto）不受权限模式豁免。
+- **附件** — 粘贴/拖拽/选择图片（每轮 ≤4 张，以 dataURL 内联发送）与视频（自动上传到
+  `<workspace>/.agent/uploads/`，大小上限 `AGENT_UPLOAD_MAX_MB`，默认 500MB）。工作区
+  文件树行尾的「送入对话」按钮可直接把视频带进对话。
+- **消息操作** — 悬停消息可复制；用户消息可撤回（撤回会删除该条消息及其后全部内容）。
+- **上下文圆环** — 右下角圆环，悬停显示具体 token 用量；超过 60% 出现压缩按钮（85%
+  以上为警示色），用量 ≥85% 时服务端在下一轮前自动做 LLM 摘要压缩。窗口大小由
+  `AGENT_CONTEXT_TOKENS` 控制（默认 262144）。
 
 agent 服务也可脱离 web 层单独运行：
 
@@ -236,11 +248,15 @@ python3 scripts/e2e_v2_smoke.py --port 8609 --video-fragment 01-02_Event_129
 | `TRAFFIC_ANALYZER_USERS` | — | 引导式 Web 账号，`zhangsan:pass1,lisi:pass2`（首次启动迁移到 `users.db`） |
 | `TRAFFIC_ANALYZER_SECRET` | 自动生成 | 会话 Cookie 签名密钥 |
 | `TRAFFIC_ANALYZER_WORKSPACE_DIRS` | —（不限制） | 工作区白名单（见「多人协同部署」） |
-| `AGENT_RUNTIME_ENABLE` | `true` | web 层启动时自动拉起工具服务 + agent 服务；`0` 关闭 |
-| `AGENT_PORT` | `8602` | TS agent 服务监听端口（127.0.0.1） |
-| `AGENT_MAX_TOKENS` | 兜底 `16384` | 覆盖 agent LLM 调用的 maxTokens |
-| `TOOLSERVER_PORT` | `8601` | Python 视频工具服务端口（127.0.0.1） |
-| `TOOLSERVER_URL` | `http://127.0.0.1:8601` | TS agent 运行时访问工具服务的地址 |
+| `AGENT_RUNTIME_ENABLE` | `true` | web 层启动时自动拉起工具服务 + agent 服务；`0`/`false`/`no`/`off` 关闭 |
+| `AGENT_RUNTIME_AGENT_PORT` / `AGENT_RUNTIME_TOOLSERVER_PORT` | `8602` / `8601` | web 层拉起 agent 服务 / 工具服务所用的端口（覆盖默认值，避免撞上外部残留实例） |
+| `AGENT_PORT` / `AGENT_HOST` | `8602` / `127.0.0.1` | TS agent 服务监听地址（web 层拉起时会自行设置 `AGENT_PORT`） |
+| `AGENT_MAX_TOKENS` | 兜底 `16384` | 覆盖 agent LLM 调用的 maxTokens（未设置时取 `.env` 配置值，且不低于 16384） |
+| `AGENT_CONTEXT_TOKENS` | `262144` | agent 上下文窗口；用量 ≥85% 时自动做 LLM 摘要压缩 |
+| `AGENT_RESTORE_WORKSPACES` | — | 逗号分隔的工作区目录，agent 服务启动时从这些目录恢复历史会话 |
+| `AGENT_UPLOAD_MAX_MB` | `500` | `/api/agent/uploads` 对话附件大小上限（MB，仅视频/图片） |
+| `TOOLSERVER_PORT` | `8601` | `python3 -m traffic_analyzer.toolserver` 的默认端口（127.0.0.1 回环） |
+| `TOOLSERVER_URL` | `http://127.0.0.1:8601` | TS agent 运行时访问工具服务的地址（web 层拉起时会自行设置） |
 
 ### 事件开关 — `config/event_categories.yaml`
 
@@ -271,16 +287,18 @@ CLI 分析把报告写到 `--output`（或 stdout）；`--sft-label` 时另写
 ## 测试
 
 ```bash
-python3 -m pytest traffic_analyzer/tests -q   # Python 套件（809 个，VLM 全部 mock）
-cd agent && npx vitest run                    # TS agent 运行时套件（104 个，mock LLM）
+python3 -m pytest traffic_analyzer/tests -q   # Python 套件（约 860 个，VLM 全部 mock）
+cd agent && npx vitest run                    # TS agent 运行时套件（约 140 个，mock LLM）
+cd frontend && npx vitest run                 # 前端套件（约 95 个）
 ```
 
-pytest 套件 mock 全部 VLM 调用，覆盖配置校验、CLI、分析流水线与 Web API；vitest 套件覆盖
-agent loop、权限、沙盒与工具。端到端冒烟脚本：
+pytest 套件 mock 全部 VLM 调用，覆盖配置校验、CLI、分析流水线与 Web API（含 `/api/agent`
+代理与上传）；agent vitest 套件覆盖 agent loop、权限、沙盒、工具与 HTTP/SSE 服务；前端
+vitest 套件覆盖 store 与工具函数。端到端冒烟脚本：
 
 ```bash
-python3 scripts/e2e_agent_smoke.py   # agent 模式，经 web 代理全链路
-python3 scripts/e2e_v2_smoke.py      # 批量流水线 UI（见上文冒烟一节）
+python3 scripts/e2e_agent_smoke.py   # 8 步，agent 链路经 web 代理全链路（需真实模型端点）
+python3 scripts/e2e_v2_smoke.py      # 8 步，批量流水线 UI 冒烟（见上文冒烟一节）
 ```
 
 ## 事件类别

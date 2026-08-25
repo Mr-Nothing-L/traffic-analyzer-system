@@ -7,7 +7,7 @@ video: one video clip in, an **11-bit binary event code** plus a structured repo
 (Markdown / JSON) out — and, with SFT label mode, one **SFT training sample** per
 video, editable in the built-in web UI.
 
-**Current version: 6.0.0.**
+**Current version: 7.0.0.**
 
 ## Architecture
 
@@ -40,6 +40,7 @@ runtime (multi-turn tool-calling chat):
                               │ Python video tool server      │  toolserver/
                               │ video_meta / extract_frames / │
                               │ draw_boxes (CV stays in Python)│
+                              │ workspace roots hot-registered │
                               └───────────────────────────────┘
 ```
 
@@ -49,6 +50,8 @@ runtime (multi-turn tool-calling chat):
   each job's structured progress file to drive the UI in real time. On startup
   it also spawns the tool server and the agent service (disable with
   `AGENT_RUNTIME_ENABLE=0`) and proxies `/api/agent/*` to the agent service.
+  The tool server holds a multi-root allow set: switching workspaces
+  hot-registers the new root via `POST /config/roots`, no restart needed.
 - The **agent runtime** (`agent/`) is a TypeScript multi-turn agent: the LLM
   calls builtin tools (`video_meta` / `extract_frames` / `draw_boxes` /
   `read_file` / `write_file` / `run_script`) to inspect a video and submits the
@@ -114,17 +117,32 @@ prefilter (no report file written).
 
 Starting the web server (`python3 -m traffic_analyzer web`) also spawns the Python
 tool server (127.0.0.1:8601) and the TS agent runtime (127.0.0.1:8602) automatically —
-nothing else to launch. Open **「Agent 检测」** in the top bar to enter the `/agent`
-chat view: point the detection agent at a video in the workspace and it inspects it
-over multiple turns (video meta, frame extraction, box drawing), then submits the
-result via the `submit_detection` tool — same output contract as the batch pipeline:
-11-bit code + Markdown report.
+nothing else to launch. Click **「Agent模式」** in the top bar to enter the `/chat`
+view — one unified conversation for Q&A and detection: point the agent at a video in
+the workspace and it inspects it over multiple turns (video meta, frame extraction,
+box drawing), then submits the result via the `submit_detection` tool — same output
+contract as the batch pipeline: 11-bit code + Markdown report.
 
-Before chatting you pick a **permission mode**: `yolo` (all tool calls auto-approved),
-`manual` (every tool call needs your approval), `auto` (automatic, but dangerous
-operations still ask). Under `manual`, tool calls appear as approval cards you can
-approve or deny. The sandbox (file operations confined to the workspace, sensitive
-files vetoed) cannot be waived by any permission mode.
+- **Session history** — the sidebar lists sessions grouped by workspace; sessions
+  bound to other workspaces sit in a bottom "其他工作区" group, each with a source
+  label (the workspace directory name).
+- **Permission modes** — three tiers, switched in the composer bottom bar (per
+  session, applies from the next turn): `manual` 逐条确认 (every tool call needs
+  your approval), `auto` 自动通过 (auto-approved, but key operations still ask),
+  `yolo` 完全自主 (fully autonomous, never asks). Under `manual`, tool calls appear
+  as approval cards you can approve or deny. The sandbox (file operations confined
+  to the workspace, sensitive files vetoed) cannot be waived by any permission mode.
+- **Attachments** — paste/drag/pick images (≤4 per turn, sent inline as dataURL)
+  and videos (auto-uploaded to `<workspace>/.agent/uploads/`, capped by
+  `AGENT_UPLOAD_MAX_MB`, default 500 MB). The workspace file tree has a row-end
+  **「送入对话」** (send to chat) button that brings a video straight into the
+  conversation.
+- **Messages** — hover a message to copy it; a user message can be recalled, which
+  drops that message and everything after it.
+- **Context ring** — the bottom-right ring shows the exact token usage on hover;
+  past 60% a compact button appears (warning styling past 85%), and at ≥85% of the
+  window the server automatically compacts the history with an LLM summary before
+  the next turn. Window size comes from `AGENT_CONTEXT_TOKENS` (default 262144).
 
 The agent service can also run standalone:
 
@@ -264,11 +282,15 @@ The script creates a temporary account/workspace and starts the real backend on
 | `TRAFFIC_ANALYZER_USERS` | — | Bootstrap web accounts, `zhangsan:pass1,lisi:pass2` (migrated to `users.db` on first startup) |
 | `TRAFFIC_ANALYZER_SECRET` | auto-generated | Session-cookie signing key |
 | `TRAFFIC_ANALYZER_WORKSPACE_DIRS` | — (unrestricted) | Workspace whitelist (see Multi-User Deployment) |
-| `AGENT_RUNTIME_ENABLE` | `true` | Web layer spawns the tool server + agent service on startup; `0` disables |
-| `AGENT_PORT` | `8602` | TS agent service listen port (127.0.0.1) |
-| `AGENT_MAX_TOKENS` | `16384` fallback | Override maxTokens for agent LLM calls |
-| `TOOLSERVER_PORT` | `8601` | Python video tool server port (127.0.0.1) |
-| `TOOLSERVER_URL` | `http://127.0.0.1:8601` | Tool server URL used by the TS agent runtime |
+| `AGENT_RUNTIME_ENABLE` | `true` | Web layer spawns the tool server + agent service on startup; `0`/`false`/`no`/`off` disables |
+| `AGENT_RUNTIME_AGENT_PORT` / `AGENT_RUNTIME_TOOLSERVER_PORT` | `8602` / `8601` | Ports the web layer spawns the agent service / tool server on (override to avoid clashing with a stale external instance) |
+| `AGENT_PORT` / `AGENT_HOST` | `8602` / `127.0.0.1` | TS agent service listen address (the web layer sets `AGENT_PORT` itself when spawning the service) |
+| `AGENT_MAX_TOKENS` | `16384` fallback | Override maxTokens for agent LLM calls (fallback: the `.env` value, floored at 16384) |
+| `AGENT_CONTEXT_TOKENS` | `262144` | Agent context window; ≥85% usage triggers automatic LLM-summary compaction |
+| `AGENT_RESTORE_WORKSPACES` | — | Comma-separated workspace dirs whose session history the agent service restores at startup |
+| `AGENT_UPLOAD_MAX_MB` | `500` | Size cap (MB) for `/api/agent/uploads` chat attachments (video/image only) |
+| `TOOLSERVER_PORT` | `8601` | Default port of `python3 -m traffic_analyzer.toolserver` (127.0.0.1 loopback) |
+| `TOOLSERVER_URL` | `http://127.0.0.1:8601` | Tool server URL used by the TS agent runtime (the web layer sets it when spawning the service) |
 
 ### Event switches — `config/event_categories.yaml`
 
@@ -302,17 +324,20 @@ Dashboard review states live in `<workspace>/analysis/review_states.json`.
 ## Testing
 
 ```bash
-python3 -m pytest traffic_analyzer/tests -q   # Python suite (809 tests, VLM mocked)
-cd agent && npx vitest run                    # TS agent runtime suite (104 tests, mock LLM)
+python3 -m pytest traffic_analyzer/tests -q   # Python suite (~860 tests, VLM mocked)
+cd agent && npx vitest run                    # TS agent runtime suite (~140 tests, mock LLM)
+cd frontend && npx vitest run                 # frontend suite (~95 tests)
 ```
 
 The pytest suite mocks all VLM calls and covers config validation, the CLI, the
-analysis pipeline, and the web API; the vitest suite covers the agent loop,
-permissions, sandbox, and tools. End-to-end smoke scripts:
+analysis pipeline, and the web API (including the `/api/agent` proxy and uploads);
+the agent vitest suite covers the agent loop, permissions, sandbox, tools, and the
+HTTP/SSE server; the frontend vitest suite covers stores and utilities. End-to-end
+smoke scripts:
 
 ```bash
-python3 scripts/e2e_agent_smoke.py   # agent mode, full chain through the web proxy
-python3 scripts/e2e_v2_smoke.py      # batch-pipeline UI (see the smoke section above)
+python3 scripts/e2e_agent_smoke.py   # 8-step agent chain through the web proxy (needs a real model endpoint)
+python3 scripts/e2e_v2_smoke.py      # 8-step batch-pipeline UI smoke (see the smoke section above)
 ```
 
 ## Event Categories

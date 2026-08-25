@@ -1,5 +1,34 @@
 # 更新日志
 
+## [v7.0.0] 2026-08-25 — TS agent 运行时 + Python 工具服务 + 统一对话架构
+
+### 核心变更
+
+#### 新增
+
+- **TypeScript agent 运行时(`agent/`)**:kosong 引擎 vendor 自 MoonshotAI/kimi-code;工具契约/注册表(`tools/contract.ts`、`tools/registry.ts`)与冲突并行调度(`tools/scheduler.ts`);权限责任链 manual/auto/yolo 三档(`permissions/`);沙盒工作区硬边界(`sandbox/path-access.ts`);多轮 agent loop;LLM 摘要式上下文压缩(带 placeholder 兜底,压缩后历史持久化);HTTP + SSE 服务(node:http 手写,`POST /chat` SSE 流)
+- **Python 视频工具服务(`traffic_analyzer/toolserver/`)**:多根路径安全集合,运行期经 `POST /config/roots` 热注册工作区
+- **统一对话**:单入口 `/chat`,问答 + 检测双能力,模型自主决定工具,`submit_detection` 结构化提交;会话持久化用 node:sqlite 按工作区分库(`<workspace>/.agent/sessions.db`),支持历史恢复、复制/撤回、图片/视频附件、上下文用量圆环
+- **web 层 agent 代理(`traffic_analyzer/web/agentproxy/`)**:`/api/agent/*` 反向代理至 TS agent server,并管理 agent 运行时/toolserver 生命周期(进程组清理、失败降级、工作区切换时自动恢复会话)
+
+#### 变更
+
+- **前端 composer 重构**:kimi-code 风格圆角盒(附件预览行 / 文本输入行 / 底部功能行),权限模式三档选择器、上下文圆环等功能收进输入框底栏
+- **工作区文件树「送入对话」**:TreeNode 行内按钮常驻,点击后视频块进 composer 预览
+
+#### 移除
+
+- **旧快速对话后端**:`traffic_analyzer/web/chat/` 整目录删除,`/api/chat/*` 全部端点移除,由统一对话(`/api/agent/*` 代理)取代
+
+#### 修复
+
+- thinking 模型 maxTokens 截断:`AGENT_MAX_TOKENS` 显式覆盖,否则在 .env 配置值上兜底 16384(`agent/src/llm/provider.ts`)
+- `submit_detection` 参数字符串化容错:trim 后可 JSON.parse 的先还原再 zod 校验
+- 工具连败熔断:同一工具连续失败达阈值(默认 5)以 reason `error` 终止 loop,防止无效重试烧 token
+- 工作区切换后视频 404:toolserver 多根热注册,切换工作区即注册新根
+
+---
+
 ## [v6.0.0] 2026-08-05 — Web 前端全面重构(Vue 3 SPA 替换原生 JS)
 
 ### 核心变更

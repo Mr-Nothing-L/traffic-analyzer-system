@@ -83,7 +83,7 @@
 
 11 位二进制编码 `{bit_1_..._bit_11}`(位序=事件编号,位 9 保留恒 0)+ Markdown 报告 + SFT 样本(批量模式)。事件定义仍以 `config/event_categories.yaml` 为准。
 
-## 实施状态(2026-08-24)
+## 实施状态(截至 2026-08-25,最终态)
 
 - **P0 完成**:基线 commit `b241ae2`、codegraph 索引、kimi-code 调研、依赖安装。
 - **P1 完成**:`agent/` 骨架落地(kosong vendored、llm provider、tool registry/scheduler、loop、permissions、sandbox),`npx vitest run` 104 个测试全绿(mock LLM)。
@@ -93,3 +93,15 @@
 - **P5 部分完成(瘦身从简)**:pytest 809 个全绿、文档已更新;旧 `web/chat/` 快速对话~~未删除~~**已删除**(对话统一,见下)。
 - **P6 完成**:重要节点 git commit 已做。
 - **对话统一(2026-08-24 晚些)**:旧「快速对话」与「Agent 检测」合并为统一对话——agent 运行时(TS)为唯一对话后端,旧 Python `web/chat/` 已删除;agent server 补齐持久化(`<workspace>/.agent/sessions.db`)、`GET /sessions` 列表、`GET /sessions/{id}/history`(entries 时间线)、`DELETE /sessions/{id}` 与 `/chat` 图片附件(dataURL ≤4);系统 prompt 统一为 `agent/prompts/chat_system.md`(问答 + 检测双能力,模型自主判断意图,正式检测必须 `submit_detection` 收尾);web 代理同步透传三个新路由。
+- **对话统一后续(2026-08-25)**:
+  - 三档权限模式 `manual` / `auto` / `yolo`:agent server 新增 `POST /sessions/{id}/mode`(内存 gate 与磁盘 sessions 表同步,进行中的轮次下一轮生效),前端对话页可切换。
+  - 上下文圆环与 LLM 摘要压缩:`/chat` 每步按真实 usage 透传 `context_usage`,前端 `ContextRing.vue` 渲染上下文用量圆环;用量 ≥ 窗口(默认 262144)× 0.85 时下一步前自动压缩(优先 LLM 摘要替换,失败回退占位替换),另有手动 `POST /sessions/{id}/compact`。
+  - 新端点:`POST /sessions/{id}/recall`(撤回,截断 entries 与 kosong messages)、`POST /sessions/{id}/mode`、`POST /workspaces/restore`(按需恢复工作区磁盘历史会话)、web 代理侧 `POST /api/agent/uploads` 附件上传(视频/图片落盘返回路径,`AGENT_UPLOAD_MAX_MB` 控制上限,默认 500MB);`/chat` 另支持随消息携带 ≤4 张图片 dataURL。
+  - 工作区绑定:session 必须绑定已存在的 `workspaceDir`(web 代理在 body 缺失时注入当前工作区);web 启动与工作区切换时旁路调用 restore,重启后历史会话立即可见。
+  - 「送入对话」:工作区树每行常驻「→ 送入对话」按钮,把该视频(工作区相对路径)设为对话页待发送附件,不在对话页则跳转。
+
+## 遗留问题(2026-08-25 终态)
+
+- ~~旧 `web/chat/` 快速对话删除~~(已完成,见上「对话统一」)。
+- TS agent 的 LLM 接入仅支持 OpenAI 兼容协议(aliyun/vllm 等);anthropic/google 原生协议未接入,`.env` 配了非兼容 provider 会抛错(见 `agent/src/llm/provider.ts`)。
+- Python 瘦身从简:expert_agent 等旧「单次大 prompt」流水线代码保留(批量模式仍依赖),未进一步删除。

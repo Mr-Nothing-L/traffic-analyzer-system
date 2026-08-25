@@ -82,12 +82,16 @@ _Avoid_: Node backend, chatbot service
 Agent 运行时中执行视频检测的会话角色:按系统 prompt 编排 video_meta / extract_frames / draw_boxes 等工具逐步观察视频,最终以 `submit_detection` 工具提交结构化结果(11 位编码 + Markdown 报告),输出契约与批量流水线一致。
 _Avoid_: expert agent(事件专家是批量流水线内角色,与检测 Agent 不同)
 
+**统一对话 (Unified Chat)**:
+Agent 运行时的唯一对话形态(系统 prompt 为 `agent/prompts/chat_system.md`):自由问答与正式事件检测双能力共用同一套工具,走哪条路由模型按用户意图判断;正式检测必须以 `submit_detection` 提交结构化结果收尾,问答一律直接文本回答。旧 Python「快速对话」(`web/chat/`)已删除。
+_Avoid_: 快速对话, chatbot
+
 **工具 (Tool)**:
 Agent 运行时可调用的最小能力单元,声明 `{name, description, parameters}` 与资源访问(accesses);注册表管理,调度器按访问冲突并行执行同批调用。内置 7 个:video_meta / extract_frames / draw_boxes / read_file / write_file / run_script / submit_detection。
 _Avoid_: function call, action
 
 **权限模式 (Permission Mode)**:
-工具执行前的裁决策略,三档:`yolo`(全部放行)、`manual`(逐次人工确认)、`auto`(自动裁决,危险操作仍询问)。policy 责任链首个命中生效;会话级批准记忆免除重复确认。沙盒越界属硬 veto,不进权限链。
+工具执行前的裁决策略,三档:`manual`(逐条人工确认)、`auto`(自动通过;敏感文件访问仍询问)、`yolo`(完全自主,全部放行)。policy 责任链首个命中生效(yolo-mode-approve 排链首;敏感文件询问策略先于 auto-mode-approve);会话级批准记忆免除重复确认。沙盒越界属硬 veto,不进权限链。
 _Avoid_: approval flow, access control
 
 **沙盒 (Sandbox)**:
@@ -97,3 +101,11 @@ _Avoid_: chroot, container
 **工具服务 (Tool Server)**:
 `traffic_analyzer/toolserver/` 下的 Python 本地 HTTP 服务(默认 127.0.0.1:8601),向 Agent 运行时暴露视频元信息、抽帧、画框能力;`--workspace` 必填,视频路径越界返回 403。CV 计算全部留在 Python,TS 侧只做 HTTP client。
 _Avoid_: tool API, video service
+
+**上下文压缩 (Context Compaction)**:
+LLM 摘要式的会话历史压缩:上下文用量达窗口 85%(`triggerRatio 0.85`,或逼近预留输出空间)时触发,把安全切点之前的历史交由同一 LLM 摘要为一条消息,保留最近若干轮;摘要失败回退为工具结果占位替换。也可经 `POST /sessions/{id}/compact` 手动触发。
+_Avoid_: truncation, sliding window
+
+**工作区绑定 (Workspace Binding)**:
+会话创建时绑定 `workspaceDir`(缺省时由 web 代理注入当前工作区),按工作区分库存储(`<workspaceDir>/.agent/sessions.db`,node:sqlite),前端会话列表按工作区过滤分组,旧会话仍绑原工作区。
+_Avoid_: global session store, per-user session
