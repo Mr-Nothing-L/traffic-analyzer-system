@@ -111,6 +111,14 @@ export interface AgentLoopOptions {
   readonly signal?: AbortSignal;
   readonly onEvent?: (event: AgentLoopEvent) => void | Promise<void>;
   /**
+   * steer 注入回调(可选):每个 step 的 generate 之前调用一次,返回本轮
+   * 进行中被排队(POST /sessions/{id}/steer)的 user 消息;非空则按序追加
+   * 进 messages 并立即经 onStepPersist 落盘,再继续 generate——模型在下一次
+   * 调用时看到新指示。返回 null/空数组表示无排队输入。注入后即视为消费,
+   * 回调方负责清空队列(参考 deepseek-harness 的 inbox next-step 语义)。
+   */
+  readonly shouldSteer?: () => readonly Message[] | null;
+  /**
    * 按步持久化回调(可选):每个 step 结束(step_done 事件发出)前调用,
    * 参数为上一步以来回灌进 messages 的增量(assistant / tool 消息),
    * 供 server 同步落盘——崩溃时半截轮次不丢。压缩发生时历史被整体折叠,
@@ -304,6 +312,15 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       }
     }
     steps += 1;
+
+    // steer:每个 step 的 generate 之前检查排队注入;有则按序追加进
+    // messages 并立即落盘(flushStepMessages → onStepPersist),模型本次
+    // 调用即可看到新指示。
+    const steered = options.shouldSteer?.();
+    if (steered != null && steered.length > 0) {
+      messages = [...messages, ...steered];
+      await flushStepMessages();
+    }
 
     let assistant: Message;
     let stepTruncated = false;

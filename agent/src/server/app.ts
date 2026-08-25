@@ -19,6 +19,16 @@
  *   POST   /sessions/{id}/mode     {mode} → {status:'ok', mode}(切换权限模式
  *                                      manual|auto|yolo,内存+磁盘同步,进行中的
  *                                      轮次下一轮生效;非法 mode → 400)
+ *   POST   /sessions/{id}/cancel   → {status:'ok'}(显式终止该 session 进行中
+ *                                      的轮次:触发其 AbortController,已完成部分
+ *                                      照常增量落盘,loop 以 cancelled 收尾;无
+ *                                      进行中轮次 → 409 no_active_turn)
+ *   POST   /sessions/{id}/steer    {input,videoPath?,images?}
+ *                                    → {status:'ok',queued:true}(轮次进行中注入
+ *                                      一条 user 消息,下一个 step 边界生效:注入时
+ *                                      增量落盘(条目+消息)并经该 session 活跃流发
+ *                                      SSE steer 事件(客户端已断则只落盘);无进行
+ *                                      中轮次 → 409 no_active_turn,前端应改发 /chat)
  *   POST   /workspaces/restore     {workspaceDir} → {status:'ok',restored:n}
  *                                      (打开该 workspace 的 sessions.db 存储:列表
  *                                       以磁盘为准,会话内容按需懒恢复;幂等,
@@ -104,12 +114,25 @@ export interface AgentServer {
   close(): Promise<void>;
 }
 
+/** steer 排队项:handleSteer 入队(消息按 /chat 同一规则构建),
+ * 进行中轮次的下一个 step 边界由 handleChat 的 shouldSteer 回调消费。 */
+interface QueuedSteer {
+  readonly text: string;
+  readonly videoPath?: string;
+  readonly images: string[];
+  readonly message: Message;
+}
+
 interface SessionRuntime {
   readonly registry: ToolRegistry;
   readonly gate: ExecutionSnapshotGate;
   readonly bridge: ApprovalBridge;
   /** 同 session 的 /chat 串行锁:true 时有进行中的轮次。 */
   busy: boolean;
+  /** 进行中轮次的 AbortController(/cancel 触发;轮次结束清空)。 */
+  controller: AbortController | null;
+  /** steer 排队的 user 消息(注入后清空;轮次结束时未消费的留给下一轮)。 */
+  readonly steerQueue: QueuedSteer[];
 }
 
 /**
@@ -296,7 +319,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
         }),
       );
     }
-    return { registry, gate, bridge, busy: false };
+    return { registry, gate, bridge, busy: false, controller: null, steerQueue: [] };
   };
 
   /** 内存中无 runtime 时(恢复的 session)按需创建。 */
@@ -482,6 +505,60 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
     sendJson(res, 200, { status: 'ok', mode: body.mode });
   };
 
+  /** 显式终止进行中的轮次:abort 其 controller,loop 以 cancelled 收尾,
+   * 已完成部分由 P1 的增量落盘保留;无进行中轮次 → 409 no_active_turn。 */
+  const handleCancel = (res: ServerResponse, sessionId: string): void => {
+    const session = sessions.get(sessionId);
+    if (session === undefined) {
+      sendError(res, 404, 'session_not_found', `unknown session: ${sessionId}`);
+      return;
+    }
+    const runtime = runtimeFor(session);
+    if (!runtime.busy || runtime.controller === null) {
+      sendError(res, 409, 'no_active_turn', `session ${session.id} has no chat turn in progress`);
+      return;
+    }
+    runtime.controller.abort();
+    sendJson(res, 200, { status: 'ok' });
+  };
+
+  /** steer:轮次进行中排队一条 user 消息,下一个 step 边界注入(见
+   * handleChat 的 shouldSteer 回调);无进行中轮次 → 409 no_active_turn
+   * (前端应改为直接发 /chat)。 */
+  const handleSteer = (res: ServerResponse, sessionId: string, body: unknown): void => {
+    if (!isRecord(body) || typeof body.input !== 'string' || body.input === '') {
+      sendError(res, 400, 'invalid_request', 'input is required and must be a non-empty string');
+      return;
+    }
+    const session = sessions.get(sessionId);
+    if (session === undefined) {
+      sendError(res, 404, 'session_not_found', `unknown session: ${sessionId}`);
+      return;
+    }
+    const runtime = runtimeFor(session);
+    if (!runtime.busy || runtime.controller === null) {
+      sendError(res, 409, 'no_active_turn', `session ${session.id} has no chat turn in progress; send /chat instead`);
+      return;
+    }
+    const videoPath =
+      typeof body.videoPath === 'string' && body.videoPath !== '' ? body.videoPath : undefined;
+    const images = parseImages(body);
+    const userText =
+      videoPath === undefined ? body.input : `视频路径:${videoPath}\n\n${body.input}`;
+    const content: ContentPart[] = [{ type: 'text', text: userText }];
+    for (const url of images) {
+      content.push({ type: 'image_url', imageUrl: { url } });
+    }
+    const queued: QueuedSteer = {
+      text: body.input,
+      ...(videoPath !== undefined ? { videoPath } : {}),
+      images,
+      message: { role: 'user', content, toolCalls: [] },
+    };
+    runtime.steerQueue.push(queued);
+    sendJson(res, 200, { status: 'ok', queued: true });
+  };
+
   const handleApproval = (res: ServerResponse, body: unknown): void => {
     if (!isRecord(body) || typeof body.requestId !== 'string') {
       sendError(res, 400, 'invalid_request', 'requestId is required');
@@ -533,6 +610,10 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       return;
     }
     runtime.busy = true;
+    // 轮次级 AbortController:/cancel 显式终止用(P1 起断连不再 abort,
+    // 停止语义由 POST /sessions/{id}/cancel 承担)。
+    const controller = new AbortController();
+    runtime.controller = controller;
 
     res.writeHead(200, {
       'Content-Type': 'text/event-stream; charset=utf-8',
@@ -640,6 +721,39 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
         registry: runtime.registry,
         gate: runtime.gate,
         messages,
+        signal: controller.signal,
+        // steer:每个 step 的 generate 之前由 loop 回调;取走全部排队项,
+        // 逐条构建 user 条目并立即落盘(复用本轮增量落盘路径),经活跃流发
+        // SSE steer 事件(客户端已断则 emit 为空操作,只落盘),消息体交给
+        // loop 追加进 messages 并由其 flushStepMessages 落盘。
+        shouldSteer: () => {
+          if (runtime.steerQueue.length === 0) return null;
+          const queued = runtime.steerQueue.splice(0, runtime.steerQueue.length);
+          const injected: Message[] = [];
+          for (const item of queued) {
+            const entry: TimelineEntry = {
+              kind: 'user',
+              text: item.text,
+              images: item.images,
+              ...(item.videoPath !== undefined ? { videoPath: item.videoPath } : {}),
+              // 与 /chat 的 user 条目同一映射:注入点即该消息在 messages 中的下标。
+              messageIndex: session.messages.length + injected.length,
+              at: Date.now(),
+            };
+            turnEntries.push(entry);
+            injected.push(item.message);
+          }
+          flushEntries(); // steer 条目立即落盘(seq 水位先于 SSE 事件推进)。
+          for (const item of queued) {
+            emit({
+              type: 'steer',
+              text: item.text,
+              images: item.images,
+              ...(item.videoPath !== undefined ? { videoPath: item.videoPath } : {}),
+            });
+          }
+          return injected;
+        },
         compaction: { maxContextTokens: contextTokens },
         onStepPersist: (appended) => {
           // loop 按步回灌的 assistant / tool 消息同步落盘(sqlite 同步写,
@@ -736,6 +850,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       flushEntries(); // 失败/中断的轮次也把剩余条目落盘,保证不丢。
       runtime.bridge.unbindSettleHook();
       runtime.bridge.unbindEmitter();
+      runtime.controller = null;
       runtime.busy = false;
       try {
         res.end();
@@ -813,6 +928,26 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
             return;
           }
           handleSetMode(res, sessionId, await readJsonBody(req));
+          return;
+        }
+        const cancelMatch = /^\/sessions\/([^/]+)\/cancel$/.exec(url.pathname);
+        if (req.method === 'POST' && cancelMatch !== null) {
+          const sessionId = cancelMatch[1];
+          if (sessionId === undefined) {
+            sendError(res, 400, 'invalid_request', 'session id is required');
+            return;
+          }
+          handleCancel(res, sessionId);
+          return;
+        }
+        const steerMatch = /^\/sessions\/([^/]+)\/steer$/.exec(url.pathname);
+        if (req.method === 'POST' && steerMatch !== null) {
+          const sessionId = steerMatch[1];
+          if (sessionId === undefined) {
+            sendError(res, 400, 'invalid_request', 'session id is required');
+            return;
+          }
+          handleSteer(res, sessionId, await readJsonBody(req));
           return;
         }
         const sessionMatch = /^\/sessions\/([^/]+)$/.exec(url.pathname);
