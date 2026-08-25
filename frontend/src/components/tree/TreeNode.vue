@@ -218,9 +218,6 @@ async function onRetry(rel: string) {
         <div class="video-name file-name" :title="row.e.rel">{{ row.e.name }}</div>
         <div class="video-sub">{{ fmtBytes(row.e.size) }}</div>
       </div>
-      <button class="send-chat-btn" title="送入对话" @click.stop="onSendToChat(row.e)">
-        <UiIcon name="right" :size="11" />
-      </button>
       <span
         v-for="b in presence.badgesFor(row.e.rel, app.user)"
         :key="b.kind + b.name"
@@ -258,6 +255,10 @@ async function onRetry(rel: string) {
           <UiIcon name="retry" :size="11" />
         </button>
       </template>
+      <!-- 常驻在行尾(最后渲染,不受文件名/徽标宽度影响,各行右缘对齐) -->
+      <button class="send-chat-btn" title="送入对话" @click.stop="onSendToChat(row.e)">
+        <UiIcon name="right" :size="11" />
+      </button>
     </div>
 
     <!-- 非视频文件:仅展示 -->

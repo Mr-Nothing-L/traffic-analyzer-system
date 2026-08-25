@@ -235,7 +235,7 @@
   outline-offset: 1px;
 }
 
-/* ---------- 行内「送入对话」键(hover 显现,同会话栏删除键的纪律) ---------- */
+/* ---------- 行尾「送入对话」键(常驻;渲染为行内最后元素,各行右缘对齐) ---------- */
 .send-chat-btn {
   flex: 0 0 auto;
   display: inline-flex;
@@ -249,16 +249,9 @@
   background: none;
   color: var(--color-text2);
   cursor: pointer;
-  opacity: 0;
   transition:
-    opacity var(--dur-fast) var(--ease-out),
     color var(--dur-fast) var(--ease-out),
     background var(--dur-fast) var(--ease-out);
-}
-
-.video-item:hover .send-chat-btn,
-.video-item:focus-within .send-chat-btn {
-  opacity: 1;
 }
 
 .send-chat-btn:hover {
@@ -271,7 +264,6 @@
 }
 
 .send-chat-btn:focus-visible {
-  opacity: 1;
   outline: 2px solid var(--color-accent);
   outline-offset: 1px;
 }
