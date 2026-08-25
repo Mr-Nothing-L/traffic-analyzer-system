@@ -85,6 +85,66 @@ def test_extract_frames_max_frames_hard_cap() -> None:
 
 
 @requires_video
+def test_extract_frames_fps_mode_full_coverage() -> None:
+    """fps=1 全片采样:~每秒 1 帧,时间戳间隔约 1s,不触发截断。"""
+    meta = read_video_meta(VIDEO_ABS)
+    assert meta is not None
+    duration = float(meta["duration_sec"])
+    resp = client.post(
+        "/tools/extract_frames", json={"video_path": VIDEO_REL, "fps": 1}
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    frames = body["frames"]
+    assert body["truncated"] is False
+    assert len(frames) == pytest.approx(duration, abs=2)
+    assert len(frames) >= 10
+    stamps = [f["timestamp"] for f in frames]
+    gaps = [b - a for a, b in zip(stamps, stamps[1:])]
+    for gap in gaps:
+        assert gap == pytest.approx(1.0, abs=1e-6)
+
+
+@requires_video
+def test_extract_frames_timestamps_take_priority_over_fps() -> None:
+    resp = client.post(
+        "/tools/extract_frames",
+        json={"video_path": VIDEO_REL, "timestamps": [1.0, 2.5], "fps": 1},
+    )
+    assert resp.status_code == 200, resp.text
+    frames = resp.json()["frames"]
+    assert [f["timestamp"] for f in frames] == [1.0, 2.5]
+
+
+@requires_video
+def test_extract_frames_fps_mode_truncation() -> None:
+    """fps 模式超过上限时截断并在响应中标记 truncated。"""
+    resp = client.post(
+        "/tools/extract_frames",
+        json={"video_path": VIDEO_REL, "fps": 1, "max_frames": 5},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert len(body["frames"]) == 5
+    assert body["truncated"] is True
+    resp = client.post(
+        "/tools/extract_frames",
+        json={"video_path": VIDEO_REL, "fps": 5, "max_frames": 999},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert len(body["frames"]) <= 120
+
+
+@requires_video
+def test_extract_frames_fps_must_be_positive() -> None:
+    resp = client.post(
+        "/tools/extract_frames", json={"video_path": VIDEO_REL, "fps": 0}
+    )
+    assert resp.status_code == 422
+
+
+@requires_video
 def test_draw_boxes() -> None:
     resp = client.post(
         "/tools/draw_boxes",

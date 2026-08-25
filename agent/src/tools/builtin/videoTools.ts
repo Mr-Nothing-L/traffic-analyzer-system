@@ -26,6 +26,8 @@ import {
 
 const HARD_MAX_FRAMES = 8;
 const DEFAULT_MAX_FRAMES = 4;
+/** fps 模式(全片均匀采样)的帧数上限,与 toolserver 侧 _FPS_MODE_MAX_FRAMES 对齐。 */
+const FPS_MODE_MAX_FRAMES = 120;
 
 export type ToolDescriptionLookup = (toolName: string) => string;
 
@@ -46,6 +48,8 @@ interface ExtractedFrame {
 
 interface ExtractFramesResponse {
   frames: ExtractedFrame[];
+  /** true 时说明请求模式下的帧数超过上限,响应被截断。 */
+  truncated?: boolean;
 }
 
 interface DrawBoxesResponse {
@@ -61,6 +65,7 @@ const videoMetaInputSchema = z.strictObject({
 const extractFramesInputSchema = z.strictObject({
   video_path: z.string(),
   timestamps: z.array(z.number().min(0)).optional(),
+  fps: z.number().min(0.2).max(5).optional(),
   count: z.number().int().min(1).optional(),
   max_frames: z.number().int().min(1).optional(),
 });
@@ -138,19 +143,25 @@ export function createExtractFramesTool(
         timestamps: {
           type: 'array',
           items: { type: 'number', minimum: 0 },
-          description: '指定抽帧时间点(秒);与 count 二选一,优先级更高',
+          description: '指定抽帧时间点(秒);优先级最高,提供时忽略 fps/count',
+        },
+        fps: {
+          type: 'number',
+          minimum: 0.2,
+          maximum: 5,
+          description:
+            '全片均匀采样密度(帧/秒),正式检测默认 fps=1;优先级低于 timestamps、高于 count',
         },
         count: {
           type: 'integer',
           minimum: 1,
-          description: '未给 timestamps 时,在整段视频上均匀抽取的帧数',
+          description: '未给 timestamps/fps 时,在整段视频上均匀抽取的帧数',
         },
         max_frames: {
           type: 'integer',
           minimum: 1,
-          maximum: HARD_MAX_FRAMES,
-          default: DEFAULT_MAX_FRAMES,
-          description: `单次最多返回帧数,默认 ${DEFAULT_MAX_FRAMES},上限 ${HARD_MAX_FRAMES}`,
+          maximum: FPS_MODE_MAX_FRAMES,
+          description: `单次最多返回帧数;timestamps/count 模式默认 ${DEFAULT_MAX_FRAMES}、上限 ${HARD_MAX_FRAMES},fps 模式上限 ${FPS_MODE_MAX_FRAMES}`,
         },
       },
       required: ['video_path'],
@@ -163,9 +174,11 @@ export function createExtractFramesTool(
       if (!resolved.ok) return resolved.result;
       const videoPath = resolved.path;
       const input = parsed.data;
+      const fpsMode = input.timestamps === undefined && input.fps !== undefined;
+      const cap = fpsMode ? FPS_MODE_MAX_FRAMES : HARD_MAX_FRAMES;
       const maxFrames = Math.min(
-        HARD_MAX_FRAMES,
-        Math.max(1, input.max_frames ?? DEFAULT_MAX_FRAMES),
+        cap,
+        Math.max(1, input.max_frames ?? (fpsMode ? FPS_MODE_MAX_FRAMES : DEFAULT_MAX_FRAMES)),
       );
       return {
         accesses: ToolAccesses.readFile(videoPath),
@@ -173,6 +186,7 @@ export function createExtractFramesTool(
         execute: async (): Promise<ExecutableToolResult> => {
           const body: Record<string, unknown> = { video_path: videoPath, max_frames: maxFrames };
           if (input.timestamps !== undefined) body['timestamps'] = input.timestamps;
+          if (input.fps !== undefined) body['fps'] = input.fps;
           if (input.count !== undefined) body['count'] = input.count;
           const result = await client.post<ExtractFramesResponse>('/tools/extract_frames', body);
           if (!result.ok) return toolserverErrorResult(result.error);
@@ -181,6 +195,12 @@ export function createExtractFramesTool(
             return { output: '未能从视频中抽取到任何帧(时间戳可能均不可用)。', isError: true };
           }
           const parts: ContentPart[] = [];
+          if (result.data.truncated) {
+            parts.push({
+              type: 'text',
+              text: `注意:请求帧数超过本次调用上限 ${maxFrames},已按上限截断(只覆盖视频前段);剩余时段请用 timestamps 对未覆盖时刻补抽。`,
+            });
+          }
           for (const frame of frames) {
             parts.push({
               type: 'text',

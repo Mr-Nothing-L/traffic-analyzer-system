@@ -1,8 +1,9 @@
 /**
- * registerBuiltinTools: one-shot registration of the detection agent's seven
- * builtin tools (video_meta / draw_boxes / load_video / read_file /
- * write_file / run_script / submit_detection). extract_frames 已于
- * 2026-08-25 下线(不再注册),实现保留在 videoTools.ts 以便需要时恢复。
+ * registerBuiltinTools: one-shot registration of the detection agent's eight
+ * builtin tools (video_meta / extract_frames / draw_boxes / load_video /
+ * read_file / write_file / run_script / submit_detection).
+ * 历史:extract_frames 曾于 2026-08-25 短暂下线(d6cba0d),同日恢复并
+ * 升级为 fps 采样(见 videoTools.ts 与 toolset.json)。
  *
  * Model-facing descriptions come from agent/config/toolset.json; the
  * submit_detection parameters are toolset.json's `$ref` to
@@ -86,11 +87,9 @@ export function registerBuiltinTools(
   const client = new ToolserverClient({ baseUrl: options.toolserverUrl });
 
   const tools: ExecutableTool[] = [
-    // extract_frames 已下线(2026-08-25):视觉输入统一走 load_video 整段直传,
-    // 局部放大核对用 draw_boxes。createVideoTools 仍会构造它,这里过滤掉不注册。
-    ...createVideoTools(client, workspace, describe).filter(
-      (tool) => tool.name !== 'extract_frames',
-    ),
+    // extract_frames 与 load_video 并存:extract_frames(fps=1 全片采样)是
+    // 看画面的主方式,load_video 用于需要完整时序连贯理解的场景。
+    ...createVideoTools(client, workspace, describe),
     createLoadVideoTool(client, workspace, describe('load_video')),
     ...createFileTools(workspace, describe),
     createSubmitDetectionTool(

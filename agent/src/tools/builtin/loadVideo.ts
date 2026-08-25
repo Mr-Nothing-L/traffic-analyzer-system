@@ -7,8 +7,8 @@
  * default 40) → read the prepared file back and inline it as a base64 data
  * URL. If the prepared file still exceeds 50MB the base64 payload would be
  * too large for the chat request, so the call fails with an isError result
- * telling the model to inspect key moments with draw_boxes instead
- * (extract_frames 已下线,不再作为回退建议)。
+ * telling the model to inspect key moments with draw_boxes / extract_frames
+ * instead.
  */
 import { readFile } from 'node:fs/promises';
 
@@ -91,7 +91,7 @@ export function createLoadVideoTool(
             return {
               output:
                 `视频经降帧/转码后仍有 ${sizeMb}MB,超过 ${HARD_MAX_BYTES / (1024 * 1024)}MB 上限,` +
-                '无法整段加载。请改用 draw_boxes 对关键时刻逐帧核对分析。',
+                '无法整段加载。请改用 extract_frames(fps=1 全片采样,或对关键时刻用 timestamps)分析,必要时用 draw_boxes 逐帧核对。',
               isError: true,
             };
           }

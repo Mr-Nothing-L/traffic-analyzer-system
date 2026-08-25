@@ -43,9 +43,14 @@ from traffic_analyzer.web.frames import read_frame_jpeg, read_video_meta
 # Frame extraction limits.
 _DEFAULT_MAX_FRAMES = 4
 _HARD_MAX_FRAMES = 8
+# fps mode (uniform sampling at >= `fps` frames per second) is meant for
+# full-coverage detection, so its frame cap is much looser and the JPEG
+# quality lower to keep the response size manageable.
+_FPS_MODE_MAX_FRAMES = 120
 # JPEG quality: extracted frames are fed to the VLM, keep them compact;
 # annotated frames go back to the user, keep them readable.
 _EXTRACT_JPEG_QUALITY = 70
+_FPS_MODE_JPEG_QUALITY = 60
 _ANNOTATED_JPEG_QUALITY = 85
 
 # prepare_video size gate: default cap and hard anti-misuse ceiling (MB).
@@ -80,8 +85,10 @@ class AddRootRequest(BaseModel):
 class ExtractFramesRequest(BaseModel):
     video_path: str
     timestamps: Optional[List[float]] = None
+    fps: Optional[float] = Field(default=None, gt=0)
     count: Optional[int] = None
-    max_frames: int = _DEFAULT_MAX_FRAMES
+    # None = mode default (4 for timestamps/count, 120 for fps mode).
+    max_frames: Optional[int] = None
 
 
 class Box(BaseModel):
@@ -259,19 +266,44 @@ def create_app(workspace: Path | str) -> FastAPI:
     ) -> Dict[str, Any]:
         video = _resolve(request, body.video_path)
         meta = _meta_or_error(video)
-        max_frames = max(1, min(_HARD_MAX_FRAMES, body.max_frames))
+        truncated = False
         if body.timestamps:
-            timestamps = [max(0.0, float(ts)) for ts in body.timestamps][:max_frames]
+            # timestamps mode: explicit moments, tight cap.
+            max_frames = max(
+                1, min(_HARD_MAX_FRAMES, body.max_frames or _DEFAULT_MAX_FRAMES)
+            )
+            timestamps = [max(0.0, float(ts)) for ts in body.timestamps]
+            truncated = len(timestamps) > max_frames
+            timestamps = timestamps[:max_frames]
+            quality = _EXTRACT_JPEG_QUALITY
+        elif body.fps is not None:
+            # fps mode: uniform sampling across the whole video at ~`fps`
+            # frames per second; loose cap, lower JPEG quality.
+            max_frames = max(
+                1,
+                min(_FPS_MODE_MAX_FRAMES, body.max_frames or _FPS_MODE_MAX_FRAMES),
+            )
+            duration = float(meta["duration_sec"] or 0)
+            step = 1.0 / body.fps
+            n = int(duration * body.fps)
+            truncated = n > max_frames
+            timestamps = [step * i for i in range(min(n, max_frames))]
+            quality = _FPS_MODE_JPEG_QUALITY
         else:
+            # count mode: even spread over the whole video, tight cap.
+            max_frames = max(
+                1, min(_HARD_MAX_FRAMES, body.max_frames or _DEFAULT_MAX_FRAMES)
+            )
             n = body.count if body.count and body.count > 0 else max_frames
             n = min(n, max_frames)
             timestamps = _even_timestamps(float(meta["duration_sec"] or 0), n)
+            quality = _EXTRACT_JPEG_QUALITY
         frames: List[Dict[str, Any]] = []
         for ts in timestamps:
             data = read_frame_jpeg(video, _frame_index(meta, ts))
             if data is None:
                 continue
-            compact = _reencode_jpeg(data, _EXTRACT_JPEG_QUALITY)
+            compact = _reencode_jpeg(data, quality)
             if compact is None:
                 continue
             frames.append(
@@ -282,7 +314,7 @@ def create_app(workspace: Path | str) -> FastAPI:
                     "height": meta["height"],
                 }
             )
-        return {"frames": frames}
+        return {"frames": frames, "truncated": truncated}
 
     @app.post("/tools/draw_boxes")
     def draw_boxes(body: DrawBoxesRequest, request: Request) -> Dict[str, Any]:

@@ -187,6 +187,72 @@ describe('extract_frames', () => {
     });
     expect(result.isError).toBe(true);
   });
+
+  it('passes fps through and applies the fps-mode frame cap', async () => {
+    mockToolserver({
+      frames: [
+        { timestamp: 0, jpeg_base64: FAKE_JPEG_BASE64, width: 640, height: 360 },
+      ],
+    });
+    const videoPath = path.join(workspaceDir, 'demo.mp4');
+    const result = await execute(videoTool('extract_frames'), {
+      video_path: videoPath,
+      fps: 1,
+      max_frames: 999, // clamped to 120 in fps mode
+    });
+    expect(result.isError).toBeFalsy();
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual({
+      video_path: videoPath,
+      fps: 1,
+      max_frames: 120,
+    });
+  });
+
+  it('timestamps take priority over fps for the frame cap', async () => {
+    mockToolserver({ frames: [] });
+    await execute(videoTool('extract_frames'), {
+      video_path: path.join(workspaceDir, 'demo.mp4'),
+      timestamps: [1, 2],
+      fps: 1,
+    });
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    // timestamps 模式仍按 8 帧上限(默认 4)
+    expect(JSON.parse(init.body as string)).toMatchObject({
+      timestamps: [1, 2],
+      fps: 1,
+      max_frames: 4,
+    });
+  });
+
+  it('rejects an out-of-range fps', async () => {
+    const result = await execute(videoTool('extract_frames'), {
+      video_path: path.join(workspaceDir, 'demo.mp4'),
+      fps: 10,
+    });
+    expect(result.isError).toBe(true);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('prepends a truncation note when the toolserver truncates', async () => {
+    mockToolserver({
+      frames: [
+        { timestamp: 0, jpeg_base64: FAKE_JPEG_BASE64, width: 640, height: 360 },
+      ],
+      truncated: true,
+    });
+    const result = await execute(videoTool('extract_frames'), {
+      video_path: path.join(workspaceDir, 'demo.mp4'),
+      fps: 1,
+    });
+    expect(result.isError).toBeFalsy();
+    const parts = result.output as ContentPart[];
+    const first = parts[0];
+    expect(first?.type).toBe('text');
+    if (first?.type !== 'text') throw new Error('unreachable');
+    expect(first.text).toContain('截断');
+  });
 });
 
 describe('draw_boxes', () => {
@@ -699,13 +765,14 @@ describe('submit_detection', () => {
 });
 
 describe('registerBuiltinTools', () => {
-  it('registers all seven builtin tools (extract_frames 已下线)', () => {
+  it('registers all eight builtin tools', () => {
     const registry = new ToolRegistry();
     const tools = registerBuiltinTools(registry, { workspaceDir });
-    expect(tools).toHaveLength(7);
+    expect(tools).toHaveLength(8);
     expect(registry.list().map((tool) => tool.name).sort()).toEqual(
       [
         'draw_boxes',
+        'extract_frames',
         'load_video',
         'read_file',
         'run_script',
