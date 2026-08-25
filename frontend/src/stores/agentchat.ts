@@ -57,7 +57,8 @@ export interface AgentUserEntry {
   kind: 'user'
   text: string
   videoPath?: string
-  /** 上传视频的预览地址(/api/agent/uploads/{name});仅本次会话内有效,历史重载回退路径 chip。 */
+  /** 上传视频的预览地址(/api/agent/uploads/{name});仅本次会话内有效,
+   * 历史重载由 videoPath 确定性推 /api/workspace/stream(见 utils/chatDisplay)。 */
   videoSrc?: string
   /** dataURL 图片附件(发送时随消息上传,历史原样返回)。 */
   images?: string[]
@@ -134,7 +135,8 @@ export type AgentEntry =
 
 /** 待发送的视频附件(同一时刻最多一个):
  * 上传得来:path=uploads 返回路径,src=/api/agent/uploads/{name} 供预览;
- * 工作区树「送入对话」:path=工作区相对路径,无 src(composer 显示图标块,气泡走路径 chip)。 */
+ * 工作区树「送入对话」:path=工作区相对路径,无 src(composer 显示图标块,
+ * 气泡由 path 确定性推 /api/workspace/stream 小播放器预览)。 */
 export interface PendingVideo {
   path: string
   name: string

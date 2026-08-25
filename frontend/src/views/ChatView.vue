@@ -10,7 +10,10 @@
  * 视频块,视频同一时刻最多一个,可移除)/ 无边框 textarea(自动增高)/ 底部功能行(左:「+」
  * 上传图片或视频 + 权限模式选择器(逐条确认/自动通过/完全自主);右:压缩按钮 + 上下文圆环
  * + 发送/停止);图片粘贴/选择/拖拽 ≤4 张走 dataURL,
- * 视频粘贴/选择/拖拽走 /api/agent/uploads 落盘拿 path;Enter 发送 / Shift+Enter 换行)。
+ * 视频粘贴/选择/拖拽走 /api/agent/uploads 落盘拿 path;Enter 发送 / Shift+Enter 换行,
+ * 输入法合成态(isComposing)中的 Enter 是选词上屏,不发送)。
+ * 工作区视频(无 src)气泡内按 path 确定性推 /api/workspace/stream 小播放器预览;
+ * 工具条目为思考过程同款弱化样式(无卡片,工具名走中文映射),点击展开结果。
  * 图片画廊:点击气泡图放大,左右切换(按钮/键盘 ←→)。
  * 状态在 stores/agentchat.ts,组件只接线。 */
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
@@ -24,10 +27,11 @@ import {
   useMessage,
 } from 'naive-ui'
 import { useAgentChatStore } from '../stores/agentchat'
-import type { AgentAccess, AgentMode, AgentSessionInfo, DetectionPayload } from '../stores/agentchat'
+import type { AgentAccess, AgentMode, AgentSessionInfo, AgentUserEntry, DetectionPayload } from '../stores/agentchat'
 import { useWorkspaceStore } from '../stores/workspace'
 import { ApiError } from '../api/client'
 import { mdToHtml } from '../utils/markdown'
+import { shouldSendOnEnter, toolLabel, workspaceVideoSrc } from '../utils/chatDisplay'
 import UiIcon from '../components/UiIcon.vue'
 import ContextRing from '../components/chat/ContextRing.vue'
 
@@ -388,6 +392,19 @@ function scrollToBottom() {
   scrollbar.value?.scrollTo({ top: Number.MAX_SAFE_INTEGER })
 }
 
+/* ---- composer 键盘:Enter 发送 / Shift+Enter 换行;输入法合成态(isComposing/
+ * keyCode 229)中的 Enter 是选词上屏,不发送(判定抽 utils/chatDisplay 便于直测) ---- */
+function onComposerEnter(ev: KeyboardEvent) {
+  if (!shouldSendOnEnter(ev)) return
+  ev.preventDefault()
+  onSend()
+}
+
+/** user 气泡视频地址:当次上传附件用 src;工作区视频由 path 确定性推流地址
+ * (历史重载同路径同源);推不出(工作区外绝对路径)回退路径 chip。 */
+const bubbleVideoSrc = (e: AgentUserEntry) =>
+  workspaceVideoSrc(e.videoPath, e.videoSrc, ws.path)
+
 async function onSend() {
   const q = question.value.trim()
   if (!q || !canSend.value) return
@@ -587,9 +604,9 @@ onUnmounted(() => {
                     />
                   </div>
                   <video
-                    v-if="e.videoSrc"
+                    v-if="bubbleVideoSrc(e)"
                     class="bubble-video"
-                    :src="e.videoSrc"
+                    :src="bubbleVideoSrc(e)!"
                     controls
                     preload="metadata"
                   />
@@ -649,8 +666,9 @@ onUnmounted(() => {
               </div>
             </div>
 
-            <!-- 工具气泡:头(图标 + 名 + 参数摘要 + 状态)整行点击折叠结果;失败标红 -->
-            <div v-else-if="e.kind === 'tool'" class="tool" :class="{ err: e.isError }">
+            <!-- 工具条目:思考过程同款弱化样式(无卡片边框/底色,小字 muted,工具名走
+                 中文映射);整行点击展开结果(文本 + 图片缩略图,进画廊),失败状态标红 -->
+            <div v-else-if="e.kind === 'tool'" class="tool">
               <button class="tool-head" @click="toggle(toolOpen, i)">
                 <UiIcon
                   name="up"
@@ -658,8 +676,7 @@ onUnmounted(() => {
                   class="think-caret"
                   :class="{ open: toolOpen.has(i) }"
                 />
-                <UiIcon name="chip" :size="12" />
-                <span class="tool-name">{{ e.name }}</span>
+                <span class="tool-title">工具调用:{{ toolLabel(e.name) }}</span>
                 <span class="tool-args">{{ argsSummary(e.args) }}</span>
                 <span v-if="!e.done" class="tool-state">执行中…</span>
                 <span v-else-if="e.isError" class="tool-state err">失败</span>
@@ -806,7 +823,7 @@ onUnmounted(() => {
             :bordered="false"
             placeholder="输入问题或检测指令,Enter 发送,Shift+Enter 换行"
             :disabled="busy"
-            @keydown.enter.exact.prevent="onSend"
+            @keydown.enter="onComposerEnter"
           />
           <!-- 底部功能行 -->
           <div class="composer-bar">
@@ -1282,17 +1299,9 @@ onUnmounted(() => {
   text-overflow: ellipsis;
 }
 
-/* ---- 工具气泡 ---- */
+/* ---- 工具条目(弱化:无卡片边框/底色,小字 muted,与思考过程同款) ---- */
 .tool {
-  margin: var(--space-sm) 0;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  background: var(--color-surface-2);
-}
-
-.tool.err {
-  border-color: var(--color-red);
-  background: var(--color-red-soft);
+  margin: var(--space-xs) 0;
 }
 
 .tool-head {
@@ -1300,7 +1309,7 @@ onUnmounted(() => {
   align-items: center;
   gap: var(--space-xs);
   width: 100%;
-  padding: var(--space-xs) var(--space-sm);
+  padding: 0;
   border: none;
   background: none;
   color: var(--color-text2);
@@ -1313,6 +1322,12 @@ onUnmounted(() => {
   color: var(--color-accent);
 }
 
+/* 工具名:正文 sans 小字,不突出;中文映射由 toolLabel 给出 */
+.tool-title {
+  flex: 0 0 auto;
+}
+
+/* 审批卡里的工具名仍用等宽强调(与审批规则同风格) */
 .tool-name {
   font-family: var(--font-mono);
   font-weight: 600;
@@ -1322,7 +1337,6 @@ onUnmounted(() => {
 .tool-args {
   flex: 1;
   min-width: 0;
-  font-family: var(--font-mono);
   font-size: var(--text-xs);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1344,7 +1358,7 @@ onUnmounted(() => {
 }
 
 .tool-result {
-  padding: 0 var(--space-sm) var(--space-sm) calc(var(--space-sm) + 22px);
+  padding: 2px 0 var(--space-xs) calc(10px + var(--space-xs));
   white-space: pre-wrap;
   word-break: break-word;
   font-family: var(--font-mono);
