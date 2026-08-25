@@ -1,13 +1,14 @@
 <script setup lang="ts">
 /** 统一对话整卡(问答 + 检测,后端统一走 /api/agent/*):
  * 左侧历史会话栏(列表 title + 相对时间 / 点击切换重建时间线 / 删除(optimistic + 确认)/ 新建)
- * + 右侧对话卡:顶条(状态 chip + 权限模式)/ 时间线(user 气泡(图片附件 + 视频预览或路径 chip)/
+ * + 右侧对话卡:顶条(状态 chip)/ 时间线(user 气泡(图片附件 + 视频预览或路径 chip)/
  * assistant 流式气泡(思考折叠 + markdown)/ 消息底部行(HH:MM + hover 显现的复制;user 另有撤回,
  * 调 recall API 从时间线移除该条及其后全部,进行中禁用)/ 工具气泡(参数摘要 + 结果折叠,失败标红)/
  * 审批卡(批准/本会话都批准/拒绝;历史未决显示「已失效」)/ 检测结果卡(11 位编码等宽高亮 +
  * markdown 报告))/ 失败条(错误 + 重试)/ composer 圆角盒(三行:附件预览行(图片缩略图 +
  * 视频块,视频同一时刻最多一个,可移除)/ 无边框 textarea(自动增高)/ 底部功能行(左:「+」
- * 上传图片或视频;右:压缩按钮 + 上下文圆环 + 发送/停止);图片粘贴/选择/拖拽 ≤4 张走 dataURL,
+ * 上传图片或视频 + 权限模式选择器(逐条确认/自动通过/完全自主);右:压缩按钮 + 上下文圆环
+ * + 发送/停止);图片粘贴/选择/拖拽 ≤4 张走 dataURL,
  * 视频粘贴/选择/拖拽走 /api/agent/uploads 落盘拿 path;Enter 发送 / Shift+Enter 换行)。
  * 图片画廊:点击气泡图放大,左右切换(按钮/键盘 ←→)。
  * 状态在 stores/agentchat.ts,组件只接线。 */
@@ -17,8 +18,7 @@ import {
   NInput,
   NModal,
   NPopconfirm,
-  NRadioButton,
-  NRadioGroup,
+  NPopover,
   NScrollbar,
   useMessage,
 } from 'naive-ui'
@@ -413,9 +413,25 @@ async function onCompact() {
   }
 }
 
-async function onModeChange(m: string | number) {
-  resetFolds()
-  await agent.setMode(m as AgentMode)
+/* ---- 权限模式:composer 底栏下拉选择器(三档);切换走 POST /sessions/{id}/mode 就地生效 ---- */
+const MODE_OPTIONS: Array<{ value: AgentMode; label: string; desc: string }> = [
+  { value: 'manual', label: '逐条确认', desc: '每个工具操作都需要你手动确认' },
+  { value: 'auto', label: '自动通过', desc: '自动批准工具操作,但遇到关键问题仍会询问' },
+  { value: 'yolo', label: '完全自主', desc: '完全自主运行,智能体自己做决定,不再询问' },
+]
+const modeMenuOpen = ref(false)
+const modeLabel = computed(
+  () => MODE_OPTIONS.find((o) => o.value === agent.mode)?.label ?? agent.mode,
+)
+
+async function onModeSelect(m: AgentMode) {
+  modeMenuOpen.value = false
+  if (m === agent.mode) return
+  try {
+    await agent.setMode(m)
+  } catch (e) {
+    message.error(`切换权限模式失败:${(e as Error).message}`)
+  }
 }
 
 async function onNewSession() {
@@ -499,21 +515,12 @@ onUnmounted(() => {
       <!-- 拖拽提示覆盖层(pointer-events: none,不干扰 dragleave 计数) -->
       <div v-show="dragOver" class="drop-overlay">松开鼠标,将图片或视频添加为附件</div>
 
-      <!-- 顶条:标题 + 状态 chip + 权限模式 -->
+      <!-- 顶条:标题 + 状态 chip -->
       <div class="chat-bar">
         <UiIcon name="chat" :size="14" />
         <span class="chat-title">对话</span>
         <span class="status-chip" :class="`st-${agent.status}`">{{ statusLabel }}</span>
         <span class="chat-spacer" />
-        <n-radio-group
-          size="small"
-          :value="agent.mode"
-          :disabled="busy"
-          @update:value="onModeChange"
-        >
-          <n-radio-button value="manual">权限审核</n-radio-button>
-          <n-radio-button value="yolo">YOLO</n-radio-button>
-        </n-radio-group>
       </div>
 
       <!-- 时间线 -->
@@ -709,7 +716,7 @@ onUnmounted(() => {
       </div>
 
       <!-- composer 圆角盒(三行):附件预览行 / 文本输入行(自动增高)/ 底部功能行
-           (左:「+」上传;右:压缩按钮 + 上下文圆环 + 发送/停止)。粘贴冒泡到此处统一处理 -->
+           (左:「+」上传 + 权限模式选择器;右:压缩按钮 + 上下文圆环 + 发送/停止)。粘贴冒泡到此处统一处理 -->
       <div class="chat-composer" @paste="onPaste">
         <div class="composer-box">
           <!-- 附件预览行:图片缩略图 + 视频块(小预览或图标块 + 文件名),均可移除 -->
@@ -757,6 +764,31 @@ onUnmounted(() => {
             >
               <UiIcon name="plus" :size="14" />
             </button>
+            <!-- 权限模式选择器:当前模式名 + 盾牌图标,点击弹菜单(当前项打勾) -->
+            <n-popover v-model:show="modeMenuOpen" trigger="click" placement="top-start">
+              <template #trigger>
+                <button class="mode-btn" title="权限模式" :disabled="busy">
+                  <UiIcon name="shield" :size="12" />
+                  <span class="mode-btn-label">{{ modeLabel }}</span>
+                </button>
+              </template>
+              <div class="mode-menu">
+                <button
+                  v-for="opt in MODE_OPTIONS"
+                  :key="opt.value"
+                  class="mode-item"
+                  @click="onModeSelect(opt.value)"
+                >
+                  <span class="mode-item-check">
+                    <UiIcon v-if="opt.value === agent.mode" name="check" :size="12" />
+                  </span>
+                  <span class="mode-item-text">
+                    <span class="mode-item-title">{{ opt.label }}</span>
+                    <span class="mode-item-desc">{{ opt.desc }}</span>
+                  </span>
+                </button>
+              </div>
+            </n-popover>
             <span v-if="videoUploading" class="bar-hint">视频上传中…</span>
             <span class="bar-spacer" />
             <button
@@ -1522,7 +1554,7 @@ onUnmounted(() => {
   font-size: var(--text-md);
 }
 
-/* ---- 底部功能行:左「+」,右 压缩按钮 + 圆环 + 发送/停止 ---- */
+/* ---- 底部功能行:左「+」+ 权限模式选择器,右 压缩按钮 + 圆环 + 发送/停止 ---- */
 .composer-bar {
   display: flex;
   align-items: center;
@@ -1595,6 +1627,103 @@ onUnmounted(() => {
 .send-btn:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+/* ---- 权限模式选择器(触发钮 + 弹层菜单) ---- */
+.mode-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  height: 30px;
+  padding: 0 var(--space-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-card);
+  color: var(--color-text2);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  transition:
+    background var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out);
+}
+
+.mode-btn:hover:not(:disabled) {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+  background: var(--color-hover-bg);
+}
+
+.mode-btn:active:not(:disabled) {
+  background: var(--color-accent-soft);
+}
+
+.mode-btn:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+.mode-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.mode-btn-label {
+  font-weight: 600;
+}
+
+.mode-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 260px;
+}
+
+.mode-item {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-sm);
+  padding: var(--space-xs) var(--space-sm);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  cursor: pointer;
+  text-align: left;
+}
+
+.mode-item:hover {
+  background: var(--color-hover-bg);
+}
+
+.mode-item:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -2px;
+}
+
+/* 勾位固定宽,未选中项与选中项标题对齐 */
+.mode-item-check {
+  flex: 0 0 14px;
+  display: inline-flex;
+  justify-content: center;
+  padding-top: 1px;
+  color: var(--color-accent);
+}
+
+.mode-item-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.mode-item-title {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.mode-item-desc {
+  font-size: var(--text-xs);
+  color: var(--color-text2);
 }
 
 .compact-btn {

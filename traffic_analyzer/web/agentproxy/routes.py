@@ -12,6 +12,7 @@
 - GET  /sessions/{id}/history     透传(entries 时间线)。
 - POST /sessions/{id}/compact     透传(手动压缩上下文;进行中 → 409)。
 - POST /sessions/{id}/recall      透传(撤回某条用户消息及其后内容)。
+- POST /sessions/{id}/mode        透传(切换会话权限模式 manual|auto|yolo)。
 - DELETE /sessions/{id}           透传(删除 session)。
 - POST /uploads                   对话文件上传(落盘 <workspace>/.agent/uploads/,
                                   见 uploads.py;不透传,web 层本地处理)。
@@ -218,6 +219,26 @@ async def recall_session(session_id: str, request: Request) -> JSONResponse:
             )
     except httpx.HTTPError as exc:
         logger.warning("agent /sessions/%s/recall unreachable: %s", session_id, exc)
+        return _unavailable(f"agent server unreachable: {exc}")
+    return _passthrough_error(resp.status_code, resp.content)
+
+
+@router.post("/sessions/{session_id}/mode")
+async def set_session_mode(session_id: str, request: Request) -> JSONResponse:
+    """透传 POST /sessions/{id}/mode(切换会话权限模式)。"""
+    runtime = _runtime(request)
+    if runtime is None or not runtime.enabled:
+        return _unavailable()
+    body = await request.body()
+    try:
+        async with AsyncClient(base_url=runtime.agent_url, timeout=_JSON_TIMEOUT) as client:
+            resp = await client.post(
+                f"/sessions/{session_id}/mode",
+                content=body,
+                headers={"Content-Type": "application/json"},
+            )
+    except httpx.HTTPError as exc:
+        logger.warning("agent /sessions/%s/mode unreachable: %s", session_id, exc)
         return _unavailable(f"agent server unreachable: {exc}")
     return _passthrough_error(resp.status_code, resp.content)
 

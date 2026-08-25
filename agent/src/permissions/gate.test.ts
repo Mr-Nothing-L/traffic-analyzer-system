@@ -57,6 +57,48 @@ describe('PermissionGate', () => {
     expect(handler).not.toHaveBeenCalled();
   });
 
+  it('auto mode approves ordinary tool operations without asking', async () => {
+    const handler = vi.fn(autoApprove);
+    const { gate } = gateWith('auto', handler);
+
+    const decision = await gate.authorize(context(execution(accesses.writeFile('/out/f.txt'))));
+
+    expect(decision).toEqual({ kind: 'approve', policyName: 'auto-mode-approve' });
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('auto mode still asks on sensitive file access', async () => {
+    const handler = vi.fn(autoApprove);
+    const { gate } = gateWith('auto', handler);
+
+    const decision = await gate.authorize(
+      context(execution(accesses.writeFile('/home/u/.env'), 'write_file(/home/u/.env)')),
+    );
+
+    expect(decision).toEqual({ kind: 'approve', policyName: 'sensitive-file-access-ask' });
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it('setMode changes subsequent adjudications', async () => {
+    const handler = vi.fn(autoApprove);
+    const { gate } = gateWith('manual', handler);
+    const exec = execution(accesses.writeFile('/out/f.txt'));
+
+    const before = await gate.authorize(context(exec));
+    expect(before).toMatchObject({ kind: 'approve', policyName: 'fallback-ask' });
+    expect(handler).toHaveBeenCalledTimes(1);
+
+    gate.setMode('auto');
+    const after = await gate.authorize(context(exec));
+    expect(after).toEqual({ kind: 'approve', policyName: 'auto-mode-approve' });
+    expect(handler).toHaveBeenCalledTimes(1);
+
+    gate.setMode('manual');
+    const backToManual = await gate.authorize(context(exec));
+    expect(backToManual).toMatchObject({ kind: 'approve', policyName: 'fallback-ask' });
+    expect(handler).toHaveBeenCalledTimes(2);
+  });
+
   it('manual mode asks for writes and approves on approval', async () => {
     const handler = vi.fn(autoApprove);
     const { gate } = gateWith('manual', handler);

@@ -548,6 +548,59 @@ class TestRecallSession:
 
 
 # ---------------------------------------------------------------------------
+# POST /api/agent/sessions/{id}/mode
+# ---------------------------------------------------------------------------
+
+
+class TestSessionMode:
+    def test_passthrough(
+        self, proxy_app: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured: List[Dict[str, Any]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.method == "POST"
+            assert request.url.path == "/sessions/s-1/mode"
+            captured.append(json.loads(request.content))
+            return httpx.Response(200, json={"status": "ok", "mode": "auto"})
+
+        _patch_downstream(monkeypatch, handler)
+        client = TestClient(proxy_app)
+        resp = client.post("/api/agent/sessions/s-1/mode", json={"mode": "auto"})
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "ok", "mode": "auto"}
+        assert captured == [{"mode": "auto"}]
+
+    def test_downstream_error_passthrough(
+        self, proxy_app: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                400,
+                json={"error": {"code": "invalid_request",
+                                "message": "mode must be 'manual' | 'auto' | 'yolo'"}},
+            )
+
+        _patch_downstream(monkeypatch, handler)
+        client = TestClient(proxy_app)
+        resp = client.post("/api/agent/sessions/s-1/mode", json={"mode": "paranoid"})
+        assert resp.status_code == 400
+        assert resp.json()["error"]["code"] == "invalid_request"
+
+    def test_downstream_unreachable(
+        self, proxy_app: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("connection refused", request=request)
+
+        _patch_downstream(monkeypatch, handler)
+        client = TestClient(proxy_app)
+        resp = client.post("/api/agent/sessions/s-1/mode", json={"mode": "yolo"})
+        assert resp.status_code == 503
+        assert resp.json()["error"]["code"] == "agent_unavailable"
+
+
+# ---------------------------------------------------------------------------
 # POST /api/agent/approval
 # ---------------------------------------------------------------------------
 

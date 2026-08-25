@@ -762,6 +762,80 @@ describe('agent server', () => {
     expect(rest.at(-1)).toMatchObject({ reason: 'completed' });
   });
 
+  it('POST /sessions/{id}/mode:切换模式并持久化;非法 mode → 400;未知 session → 404', async () => {
+    await startServer(new ScriptedProvider([]), [echoTool()]);
+    const sessionId = await createSession();
+
+    const ok = await postJson(`/sessions/${sessionId}/mode`, { mode: 'auto' });
+    expect(ok.status).toBe(200);
+    expect(ok.json).toEqual({ status: 'ok', mode: 'auto' });
+    expect(agentServer?.sessions.get(sessionId)?.mode).toBe('auto');
+
+    const bad = await postJson(`/sessions/${sessionId}/mode`, { mode: 'paranoid' });
+    expect(bad.status).toBe(400);
+    expect(bad.json).toMatchObject({ error: { code: 'invalid_request' } });
+    expect(agentServer?.sessions.get(sessionId)?.mode).toBe('auto');
+
+    const ghost = await postJson('/sessions/ghost/mode', { mode: 'yolo' });
+    expect(ghost.status).toBe(404);
+    expect(ghost.json).toMatchObject({ error: { code: 'session_not_found' } });
+  });
+
+  it('POST /sessions/{id}/mode:切换后下一轮裁决生效(manual → yolo 后写工具直接放行)', async () => {
+    const provider = new ScriptedProvider([
+      [toolCall('c1', 'write_file', {})],
+      [text('第一轮完')],
+      [toolCall('c2', 'write_file', {})],
+      [text('第二轮完')],
+    ]);
+    await startServer(provider, [writeTool()]);
+    const sessionId = await createSession('manual');
+
+    // 第一轮:manual 模式,写工具挂起等审批
+    const res1 = await startChat(sessionId, '第一轮');
+    if (res1.body === null) throw new Error('no body');
+    const next1 = sseReader(res1.body);
+    let approval: SseEvent | null = null;
+    while (approval === null) {
+      const event = await next1();
+      if (event === null) throw new Error('stream ended before approval_request');
+      if (event.type === 'approval_request') approval = event;
+    }
+    await postJson('/approval', {
+      requestId: (approval as unknown as { requestId: string }).requestId,
+      decision: 'approved',
+    });
+    await readUntilDone(next1);
+
+    // 切换 yolo 后第二轮:写工具不再发起审批,直接执行
+    const switched = await postJson(`/sessions/${sessionId}/mode`, { mode: 'yolo' });
+    expect(switched.status).toBe(200);
+
+    const res2 = await startChat(sessionId, '第二轮');
+    if (res2.body === null) throw new Error('no body');
+    const events = await readUntilDone(sseReader(res2.body));
+    const types = events.map((e) => e.type);
+    expect(types).not.toContain('approval_request');
+    expect(types).toEqual(['tool_call_start', 'tool_result', 'step_done', 'text_delta', 'step_done', 'done']);
+    expect(events[1]).toMatchObject({ toolCallId: 'c2', name: 'write_file', isError: false });
+  });
+
+  it('POST /sessions/{id}/mode:重启恢复后 mode 保持', async () => {
+    const provider = new ScriptedProvider([]);
+    await startServer(provider, [echoTool()]);
+    const sessionId = await createSession();
+
+    const ok = await postJson(`/sessions/${sessionId}/mode`, { mode: 'auto' });
+    expect(ok.status).toBe(200);
+
+    await agentServer?.close();
+    await startServer(provider, [echoTool()], { restoreWorkspaceDirs: [workspace] });
+
+    const list = await getJson('/sessions');
+    const sessions = (list.json as { sessions: Record<string, unknown>[] }).sessions;
+    expect(sessions[0]).toMatchObject({ id: sessionId, mode: 'auto' });
+  });
+
   it('defaultSystemPrompt:chat_system.md 缺失时回退 detect_system.md 并打警告', () => {
     const promptsDir = mkdtempSync(path.join(tmpdir(), 'agent-prompts-test-'));
     try {

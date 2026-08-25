@@ -11,6 +11,9 @@
  *   POST   /sessions/{id}/recall   {entryIndex} → {status:'ok'}(撤回:删除
  *                                      entries[entryIndex..] 并同步截断 kosong
  *                                      messages;进行中 → 409;越界/非 user → 400)
+ *   POST   /sessions/{id}/mode     {mode} → {status:'ok', mode}(切换权限模式
+ *                                      manual|auto|yolo,内存+磁盘同步,进行中的
+ *                                      轮次下一轮生效;非法 mode → 400)
  *   DELETE /sessions/{id}          → {status:'ok'}(同时取消挂起审批、删盘)
  *   POST   /chat                   → SSE 流(text/event-stream,每事件一行 'data: {json}\n\n')
  *   POST   /approval               → 审批回执(见 approvalBridge.ts)
@@ -264,7 +267,8 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       sendError(res, 400, 'invalid_request', 'workspaceDir is required and must be a string');
       return;
     }
-    const mode: PermissionMode = body.mode === 'yolo' ? 'yolo' : 'manual';
+    const mode: PermissionMode =
+      body.mode === 'yolo' || body.mode === 'auto' ? body.mode : 'manual';
     let isDir = false;
     try {
       isDir = statSync(body.workspaceDir).isDirectory();
@@ -366,6 +370,25 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       return;
     }
     sendJson(res, 200, { status: 'ok' });
+  };
+
+  /** 切换权限模式:更新 gate(下一轮生效)并持久化到 sessions 表。 */
+  const handleSetMode = (res: ServerResponse, sessionId: string, body: unknown): void => {
+    if (
+      !isRecord(body) ||
+      (body.mode !== 'manual' && body.mode !== 'auto' && body.mode !== 'yolo')
+    ) {
+      sendError(res, 400, 'invalid_request', "mode must be 'manual' | 'auto' | 'yolo'");
+      return;
+    }
+    const session = sessions.get(sessionId);
+    if (session === undefined) {
+      sendError(res, 404, 'session_not_found', `unknown session: ${sessionId}`);
+      return;
+    }
+    sessions.setMode(sessionId, body.mode);
+    runtimeFor(session).gate.setMode(body.mode);
+    sendJson(res, 200, { status: 'ok', mode: body.mode });
   };
 
   const handleApproval = (res: ServerResponse, body: unknown): void => {
@@ -627,6 +650,16 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
             return;
           }
           handleRecall(res, sessionId, await readJsonBody(req));
+          return;
+        }
+        const modeMatch = /^\/sessions\/([^/]+)\/mode$/.exec(url.pathname);
+        if (req.method === 'POST' && modeMatch !== null) {
+          const sessionId = modeMatch[1];
+          if (sessionId === undefined) {
+            sendError(res, 400, 'invalid_request', 'session id is required');
+            return;
+          }
+          handleSetMode(res, sessionId, await readJsonBody(req));
           return;
         }
         const sessionMatch = /^\/sessions\/([^/]+)$/.exec(url.pathname);

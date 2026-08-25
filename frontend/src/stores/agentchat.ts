@@ -2,6 +2,7 @@
  * 后端契约(FastAPI /api/agent/* 代理 → Node agent 服务,workspaceDir 由后端注入):
  * POST   /api/agent/sessions({mode}) → {sessionId};
  * GET    /api/agent/sessions → {sessions:[{id,workspaceDir,mode,title,createdAt,lastActiveAt,usedTokens?}]};
+ * POST   /api/agent/sessions/{id}/mode({mode:'manual'|'auto'|'yolo'}) → {status:'ok'}(就地切换权限模式);
  * GET    /api/agent/sessions/{id}/history → {entries:[...]}(五类条目,见 mapHistoryEntry);
  * POST   /api/agent/sessions/{id}/compact → {status,compacted,beforeTokens?,afterTokens?}(进行中 409);
  * DELETE /api/agent/sessions/{id} → {status:'ok'};
@@ -18,7 +19,8 @@ import { ref } from 'vue'
 import { defineStore } from 'pinia'
 import { ApiError } from '../api/client'
 
-export type AgentMode = 'manual' | 'yolo'
+/** 权限模式三档:逐条确认 manual / 自动通过 auto / 完全自主 yolo。 */
+export type AgentMode = 'manual' | 'auto' | 'yolo'
 
 /** idle 待开始 / connecting 连接中(建会话、切会话或流发起)/ running 运行中 /
  * awaiting_approval 等待审批 / done 已完成 / failed 失败(可重试)。 */
@@ -356,7 +358,9 @@ export const useAgentChatStore = defineStore('agentchat', () => {
         .filter((e): e is AgentEntry => e !== null)
       sessionId.value = id
       const info = sessions.value.find((s) => s.id === id)
-      if (info?.mode === 'manual' || info?.mode === 'yolo') mode.value = info.mode
+      if (info?.mode === 'manual' || info?.mode === 'auto' || info?.mode === 'yolo') {
+        mode.value = info.mode
+      }
       // 会话切换:沿用列表里的最近已知用量(没有则清空等下一次 context_usage)
       usedTokens.value = typeof info?.usedTokens === 'number' ? info.usedTokens : null
       status.value = 'idle'
@@ -389,12 +393,18 @@ export const useAgentChatStore = defineStore('agentchat', () => {
     }
   }
 
-  /** 切换权限模式:清空时间线并重建会话(模式是会话级属性)。 */
+  /** 切换权限模式:有会话走 POST /sessions/{id}/mode 就地切换,成功后更新本地 mode
+   * 与列表项;无会话先记在 mode,建会话时带上。失败抛错(调用方提示),本地 mode 不变。 */
   async function setMode(m: AgentMode) {
-    if (m === mode.value && sessionId.value) return
+    if (m === mode.value) return
+    if (!sessionId.value) {
+      mode.value = m
+      return
+    }
+    await postJson(`/api/agent/sessions/${sessionId.value}/mode`, { mode: m })
     mode.value = m
-    entries.value = []
-    await createSession()
+    const info = sessions.value.find((s) => s.id === sessionId.value)
+    if (info) info.mode = m
   }
 
   /** 新建会话(同模式):清空时间线重来。 */

@@ -34,7 +34,7 @@ const MAX_ASK_ITERATIONS = 8;
  * ApprovalService, and scope:'session' approvals are remembered.
  */
 export class PermissionGate {
-  private readonly mode: PermissionMode;
+  private mode: PermissionMode;
   private readonly approvalService: ApprovalService;
   private readonly sessionApprovals: SessionApprovalStore;
   private readonly policies: readonly PermissionPolicy[];
@@ -44,6 +44,11 @@ export class PermissionGate {
     this.approvalService = options.approvalService;
     this.sessionApprovals = options.sessionApprovals ?? new SessionApprovalStore();
     this.policies = options.policies ?? createDefaultPolicies(this.sessionApprovals);
+  }
+
+  /** 切换权限模式;之后的裁决立即生效(进行中的 ask 不受影响)。 */
+  setMode(mode: PermissionMode): void {
+    this.mode = mode;
   }
 
   async authorize(

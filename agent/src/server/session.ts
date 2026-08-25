@@ -19,7 +19,8 @@ import { SessionStorage, type StoredSession, type TimelineEntry } from './storag
 export interface Session {
   readonly id: string;
   readonly workspaceDir: string;
-  readonly mode: PermissionMode;
+  /** 权限模式;运行中可经 setMode 切换。 */
+  mode: PermissionMode;
   /** 会话标题(首轮用户输入前 30 字,未产生用户输入时为 '')。 */
   title: string;
   readonly messages: Message[];
@@ -163,6 +164,15 @@ export class SessionManager {
     if (session !== undefined) {
       this.bumpLastActive(session, this.storages.get(session.workspaceDir));
     }
+  }
+
+  /** 切换权限模式:内存 + 磁盘同步更新。未知 session 返回 false。 */
+  setMode(id: string, mode: PermissionMode): boolean {
+    const session = this.sessions.get(id);
+    if (session === undefined) return false;
+    session.mode = mode;
+    this.storages.get(session.workspaceDir)?.updateMode(id, mode);
+    return true;
   }
 
   /** 记录 session 最近一次真实上下文占用(内存态,随 /chat 的 context_usage 更新)。 */

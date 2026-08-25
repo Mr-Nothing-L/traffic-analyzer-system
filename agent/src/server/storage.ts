@@ -142,6 +142,10 @@ export class SessionStorage {
     this.db.prepare('UPDATE sessions SET title = ? WHERE id = ?').run(title, id);
   }
 
+  updateMode(id: string, mode: PermissionMode): void {
+    this.db.prepare('UPDATE sessions SET mode = ? WHERE id = ?').run(mode, id);
+  }
+
   updateLastActive(id: string, lastActiveAt: number): void {
     this.db.prepare('UPDATE sessions SET last_active_at = ? WHERE id = ?').run(lastActiveAt, id);
   }
@@ -219,7 +223,7 @@ function rowToSession(row: Record<string, unknown>): StoredSession {
   return {
     id: String(row.id),
     workspaceDir: String(row.workspace_dir),
-    mode: row.mode === 'yolo' ? 'yolo' : 'manual',
+    mode: row.mode === 'yolo' || row.mode === 'auto' ? row.mode : 'manual',
     title: String(row.title),
     createdAt: Number(row.created_at),
     lastActiveAt: Number(row.last_active_at),

@@ -1,7 +1,7 @@
 /**
  * Built-in permission policies, in chain order (first hit wins):
  * yolo-mode-approve → sensitive-file-access-ask → session-approval-history →
- * default-readonly-approve → fallback-ask.
+ * auto-mode-approve → default-readonly-approve → fallback-ask.
  *
  * Ported from MoonshotAI/kimi-code (MIT)
  * packages/agent-core-v2/src/agent/permissionPolicy/policies/, minus DI.
@@ -45,6 +45,18 @@ export class SensitiveFileAccessAskPolicy implements PermissionPolicy {
   }
 }
 
+/**
+ * auto 模式:自动批准一切工具操作。链上排在 sensitive-file-access-ask 之后,
+ * 故敏感文件访问仍会在更前面 ask(关键问题仍询问)。
+ */
+export class AutoModeApprovePolicy implements PermissionPolicy {
+  readonly name = 'auto-mode-approve';
+
+  evaluate(context: PermissionPolicyContext): PermissionPolicyResult | undefined {
+    return context.mode === 'auto' ? { kind: 'approve' } : undefined;
+  }
+}
+
 export class SessionApprovalHistoryPolicy implements PermissionPolicy {
   readonly name = 'session-approval-history';
 
@@ -85,6 +97,7 @@ export function createDefaultPolicies(store: SessionApprovalStore): PermissionPo
     new YoloModeApprovePolicy(),
     new SensitiveFileAccessAskPolicy(),
     new SessionApprovalHistoryPolicy(store),
+    new AutoModeApprovePolicy(),
     new DefaultReadonlyApprovePolicy(),
     new FallbackAskPolicy(),
   ];
