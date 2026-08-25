@@ -354,6 +354,10 @@ export const useAgentChatStore = defineStore('agentchat', () => {
       error.value = null
       status.value = 'idle'
       resetLastTurn()
+      // 切换端点已同步触发 agent server 恢复该工作区的磁盘历史(set_workspace
+      // 返回时 restore 已完成),此处重拉列表让恢复的会话立即可见;
+      // 失败不阻塞切换,仅留在控制台。
+      void fetchSessions().catch((e) => console.warn('[agentchat] 工作区切换后刷新会话列表失败', e))
     },
   )
 

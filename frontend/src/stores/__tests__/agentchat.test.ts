@@ -55,6 +55,29 @@ describe('工作区切换重置 agent 会话', () => {
     expect(agent.sessions).toEqual([{ id: 's1', workspaceDir: '/ws/a' }]); // 后端历史不删
   });
 
+  it('工作区切换后重拉会话列表,恢复的会话立即可见', async () => {
+    const { ws, agent } = await load();
+    ws.path = '/ws/a';
+    await nextTick();
+    agent.sessions = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({ sessions: [{ id: 's9', workspaceDir: '/ws/b', title: '恢复的会话' }] }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+      ),
+    );
+    ws.path = '/ws/b'; // 切换工作区 → watch 应触发 fetchSessions
+    await nextTick();
+    // fetchSessions 是异步的,等它落地
+    await vi.waitFor(() => {
+      expect(agent.sessions).toEqual([{ id: 's9', workspaceDir: '/ws/b', title: '恢复的会话' }]);
+    });
+    vi.unstubAllGlobals();
+  });
+
   it('selectSession 不动工作区路径,不触发重置', async () => {
     const { ws, agent } = await load();
     ws.path = '/ws/a';
