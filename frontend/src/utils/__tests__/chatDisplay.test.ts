@@ -3,12 +3,16 @@
 // - toolLabel:工具名中文映射,未知工具回退原名;
 // - workspaceVideoSrc:气泡视频地址由 path 确定性推导(历史重载同源);
 // - copyText:clipboard API 缺失(非安全上下文)时回退 textarea + execCommand;
-// - detectionEventNote:检测事件标注降级小字(无定位框 / 标注图生成失败)。
+// - detectionEventNote:检测事件标注降级小字(无定位框 / 标注图生成失败);
+// - thinkSummaryLine:思考折叠行摘要(运行中取末行,结束后取首行);
+// - toolErrorSummary:工具失败折叠摘要取错误首行(截断 80 字)。
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   copyText,
   detectionEventNote,
   shouldSendOnEnter,
+  thinkSummaryLine,
+  toolErrorSummary,
   toolLabel,
   workspaceVideoSrc,
 } from '../chatDisplay';
@@ -132,6 +136,38 @@ describe('copyText(消息复制)', () => {
     vi.stubGlobal('document', doc);
     await expect(copyText('x')).rejects.toThrow();
     expect(ta.remove).toHaveBeenCalled();
+  });
+});
+
+describe('thinkSummaryLine(思考折叠行摘要)', () => {
+  it('运行中显示最后一个非空行(跟随最新进展)', () => {
+    expect(thinkSummaryLine('先理解需求\n\n再写代码\n', true)).toBe('再写代码');
+  });
+
+  it('结束后显示第一个非空行', () => {
+    expect(thinkSummaryLine('先理解需求\n再写代码', false)).toBe('先理解需求');
+  });
+
+  it('空思考返回空串', () => {
+    expect(thinkSummaryLine('', true)).toBe('');
+    expect(thinkSummaryLine('\n  \n', false)).toBe('');
+  });
+});
+
+describe('toolErrorSummary(工具失败摘要)', () => {
+  it('取结果首个非空行', () => {
+    expect(toolErrorSummary('\n读取失败:文件不存在\n堆栈第二行')).toBe('读取失败:文件不存在');
+  });
+
+  it('超长截断到 80 字并加省略号', () => {
+    const long = 'x'.repeat(100);
+    const out = toolErrorSummary(long);
+    expect(out).toBe(`${'x'.repeat(80)}…`);
+  });
+
+  it('无内容回退「未知错误」', () => {
+    expect(toolErrorSummary('')).toBe('未知错误');
+    expect(toolErrorSummary('\n \n')).toBe('未知错误');
   });
 });
 

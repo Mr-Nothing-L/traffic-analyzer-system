@@ -70,6 +70,21 @@ export function shouldSendOnEnter(ev: {
   return true
 }
 
+/** 思考折叠行的单行摘要:运行中显示最后一个非空行(跟随最新进展),
+ * 结束后显示第一个非空行(概括思考起点);无内容返回空串。 */
+export function thinkSummaryLine(think: string, running: boolean): string {
+  const lines = think.split('\n').filter((l) => l.trim())
+  if (!lines.length) return ''
+  return (running ? lines[lines.length - 1] : lines[0]).trim()
+}
+
+/** 工具失败摘要:结果文本首个非空行(截断 80 字),无内容回退「未知错误」。 */
+export function toolErrorSummary(result: string): string {
+  const line = (result.split('\n').find((l) => l.trim()) ?? '').trim()
+  if (!line) return '未知错误'
+  return line.length > 80 ? `${line.slice(0, 80)}…` : line
+}
+
 /** user 气泡视频预览地址:当次上传附件有 src 直接用;
  * 否则由 videoPath 确定性推 /api/workspace/stream —— 工作区相对路径直接用,
  * 工作区内绝对路径(如 .agent/uploads 落盘文件)剥掉工作区前缀转相对;

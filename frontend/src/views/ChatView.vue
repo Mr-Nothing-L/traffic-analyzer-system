@@ -2,21 +2,26 @@
 /** 统一对话整卡(问答 + 检测,后端统一走 /api/agent/*):
  * 左侧历史会话栏(列表 title + 相对时间 / 点击切换重建时间线 / 删除(optimistic + 确认)/ 新建)
  * + 右侧对话卡:顶条(状态 chip)/ 时间线(user 气泡(图片附件 + 视频预览或路径 chip)/
- * assistant 流式气泡(思考折叠 + markdown)/ 消息底部行(HH:MM + hover 显现的复制;user 另有撤回,
+ * assistant 流式气泡(思考折叠(运行中末行横向跟随/结束后首行)+ 增量 markdown
+ * (流式期间冻结已完成块,结束后一次性完整渲染,见 components/chat/MdStream))/ 
+ * 消息底部行(HH:MM + hover/focus-within 显现的复制(成功变 ✓ 一秒);user 另有撤回,
  * 调 recall API 从时间线移除该条及其后全部,进行中禁用)/ 工具气泡(参数摘要 + 结果折叠
- * (文本 + 图片缩略图,点击进画廊),失败标红)/
- * 审批卡(批准/本会话都批准/拒绝;历史未决显示「已失效」)/ 检测结果卡(11 位编码等宽高亮 +
+ * (文本 + 图片缩略图,点击进画廊),失败时折叠态直接显示错误首行,标红)/
+ * 审批(approval_request 到达时 composer 输入区整体替换为审批面板
+ * (拒绝/批准一次/本会话都批准),时间线里的审批卡只读留档;历史未决显示「已失效」)/
+ * 检测结果卡(11 位编码等宽高亮 +
  * 检出事件(逐事件标注图进画廊,无框/画框失败显示降级小字)+ markdown 报告))/ 失败条(错误 + 重试)/
  * 恢复条(刷新/断网后服务端轮次仍在跑:常驻「分析仍在进行中」+ 刷新进度,5s 轮询补齐)/
  * composer 圆角盒(三行:附件预览行(图片缩略图 +
  * 视频块,视频同一时刻最多一个,可移除)/ 无边框 textarea(自动增高)/ 底部功能行(左:「+」
  * 上传图片或视频 + 权限模式选择器(逐条确认/自动通过/完全自主);右:压缩按钮 + 上下文圆环
- * + 发送/停止);图片粘贴/选择/拖拽 ≤4 张走 dataURL,
+ * (点击弹层:百分比 + 总量 + 压缩按钮)+ 发送/停止);图片粘贴/选择/拖拽 ≤4 张走 dataURL,
  * 视频粘贴/选择/拖拽走 /api/agent/uploads 落盘拿 path;Enter 发送 / Shift+Enter 换行,
  * 输入法合成态(isComposing)中的 Enter 是选词上屏,不发送)。
  * 进行中输入框不禁用:发送即 /steer 插话(气泡带「已插话」标记),停止走 /cancel 显式终止。
  * 工作区视频(无 src)气泡内按 path 确定性推 /api/workspace/stream 小播放器预览;
  * 工具条目为思考过程同款弱化样式(无卡片,工具名走中文映射),点击展开结果。
+ * 对话进行中时间线底部常驻一行「分析中…」,超过 15s 追加秒表。
  * 图片画廊:点击气泡图放大,左右切换(按钮/键盘 ←→)。
  * 状态在 stores/agentchat.ts,组件只接线。 */
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
@@ -30,13 +35,15 @@ import {
   useMessage,
 } from 'naive-ui'
 import { useAgentChatStore } from '../stores/agentchat'
-import type { AgentAccess, AgentMode, AgentSessionInfo, AgentUserEntry, DetectionPayload } from '../stores/agentchat'
+import type { AgentAccess, AgentApprovalEntry, AgentMode, AgentSessionInfo, AgentUserEntry, DetectionPayload } from '../stores/agentchat'
 import { useWorkspaceStore } from '../stores/workspace'
 import { ApiError } from '../api/client'
 import { mdToHtml } from '../utils/markdown'
-import { copyText, detectionEventNote, shouldSendOnEnter, toolLabel, workspaceVideoSrc } from '../utils/chatDisplay'
+import { copyText, detectionEventNote, shouldSendOnEnter, toolErrorSummary, toolLabel, workspaceVideoSrc } from '../utils/chatDisplay'
 import UiIcon from '../components/UiIcon.vue'
 import ContextRing from '../components/chat/ContextRing.vue'
+import MdStream from '../components/chat/MdStream.vue'
+import ThinkLine from '../components/chat/ThinkLine.vue'
 
 const agent = useAgentChatStore()
 const ws = useWorkspaceStore()
@@ -124,21 +131,32 @@ async function onDelete(id: string) {
   }
 }
 
-/* ---- 消息底部行:HH:MM 时间 + hover 显现的操作(复制;user 另有撤回) ---- */
+/* ---- 消息底部行:HH:MM 时间 + hover/focus-within 显现的操作(复制;user 另有撤回) ---- */
 function fmtTime(ts?: number): string {
   if (!ts) return ''
   const d = new Date(ts)
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 
-/** 复制消息文本(静默成功,失败才提示)。非安全上下文(局域网 IP 直连)
+/** 复制成功标记:按消息 key(u-{i}/a-{i})记住刚复制的那条,图标变 ✓,1s 后换回。 */
+const copiedKey = ref<string | null>(null)
+let copiedTimer: ReturnType<typeof setTimeout> | null = null
+
+/** 复制消息文本(成功图标变 ✓ 一秒,失败才提示)。非安全上下文(局域网 IP 直连)
  * 无 navigator.clipboard,copyText 内部回退 execCommand。 */
-async function onCopy(text: string) {
+async function onCopy(key: string, text: string) {
   try {
     await copyText(text)
   } catch {
     message.error('复制失败')
+    return
   }
+  copiedKey.value = key
+  if (copiedTimer !== null) clearTimeout(copiedTimer)
+  copiedTimer = setTimeout(() => {
+    copiedKey.value = null
+    copiedTimer = null
+  }, 1000)
 }
 
 /** 撤回:后端删库后本地移除该条及其后全部;409(进行中)按钮已禁用,兜底提示。 */
@@ -166,11 +184,19 @@ function resetFolds() {
   subThinkOpen.clear()
 }
 
-const lastThinkLine = (think: string) =>
-  think
-    .split('\n')
-    .filter((l) => l.trim())
-    .pop() || ''
+/* ---- 流式渲染态:最后一个 assistant 条目在对话进行中走增量渲染;
+ * 思考折叠行仅在「思考仍在流入」(该条目还没有正文)时取末行并横向跟随 ---- */
+const streamingEntryIndex = computed(() => {
+  if (!busy.value) return -1
+  const last = agent.entries.length - 1
+  return agent.entries[last]?.kind === 'assistant' ? last : -1
+})
+const isStreamingEntry = (i: number) => i === streamingEntryIndex.value
+const isThinkLive = (i: number) => {
+  if (!isStreamingEntry(i)) return false
+  const e = agent.entries[i]
+  return e.kind === 'assistant' && !e.text
+}
 
 /* ---- 工具参数摘要:JSON 解析成 k=v 串,超长截断;非 JSON 原文截断 ---- */
 function argsSummary(args: string): string {
@@ -213,6 +239,17 @@ async function onApprove(requestId: string, decision: 'approved' | 'rejected', s
     message.error(`审批回执失败:${(e as Error).message}`)
   }
 }
+
+/** 待处理的审批请求:仅在等待审批状态下取时间线里最后一个未决审批,
+ * composer 据此整体替换为审批面板;回执后状态翻回 running,composer 自动恢复。 */
+const pendingApproval = computed<AgentApprovalEntry | null>(() => {
+  if (agent.status !== 'awaiting_approval') return null
+  for (let i = agent.entries.length - 1; i >= 0; i--) {
+    const e = agent.entries[i]
+    if (e.kind === 'approval') return !e.decision && !e.stale ? e : null
+  }
+  return null
+})
 
 /* ---- 检测结果卡:data 正常是结构化 payload;后端解析失败时为原始字符串 ---- */
 function asPayload(data: unknown): DetectionPayload | null {
@@ -407,6 +444,39 @@ function scrollToBottom() {
   scrollbar.value?.scrollTo({ top: Number.MAX_SAFE_INTEGER })
 }
 
+/* ---- Turn 级 loading:对话进行中(connecting/running,等审批不算——composer 已被
+ * 审批面板接管)时间线底部常驻一行「分析中…」,超过 15s 追加秒表。
+ * 只由 status 驱动,step 之间状态不变,行不闪烁。 ---- */
+const turnActive = computed(
+  () => agent.status === 'connecting' || agent.status === 'running',
+)
+const busySince = ref<number | null>(null)
+const nowTick = ref(0)
+let tickTimer: ReturnType<typeof setInterval> | null = null
+watch(turnActive, (active) => {
+  if (active) {
+    busySince.value = Date.now()
+    nowTick.value = Date.now()
+    if (tickTimer === null) {
+      tickTimer = setInterval(() => {
+        nowTick.value = Date.now()
+      }, 1000)
+    }
+  } else {
+    busySince.value = null
+    if (tickTimer !== null) {
+      clearInterval(tickTimer)
+      tickTimer = null
+    }
+  }
+})
+/** 已进行秒数(超过 15s 才在时间线 loading 行展示)。 */
+const turnElapsedSec = computed(() =>
+  busySince.value === null
+    ? 0
+    : Math.max(0, Math.floor((nowTick.value - busySince.value) / 1000)),
+)
+
 /* ---- composer 键盘:Enter 发送 / Shift+Enter 换行;输入法合成态(isComposing/
  * keyCode 229)中的 Enter 是选词上屏,不发送(判定抽 utils/chatDisplay 便于直测) ---- */
 function onComposerEnter(ev: KeyboardEvent) {
@@ -550,6 +620,8 @@ onUnmounted(() => {
   window.removeEventListener('dragover', preventWindowDrop)
   window.removeEventListener('drop', preventWindowDrop)
   window.removeEventListener('keydown', onGalleryKey)
+  if (tickTimer !== null) clearInterval(tickTimer)
+  if (copiedTimer !== null) clearTimeout(copiedTimer)
   agent.stop() // 离开页面中断在途流
   clearPending() // 释放全部 objectURL
 })
@@ -660,8 +732,8 @@ onUnmounted(() => {
                   <span class="msg-time">{{ fmtTime(e.at) }}</span>
                   <span v-if="e.steered" class="steer-tag">已插话</span>
                   <span class="msg-actions">
-                    <button class="msg-act" title="复制" @click="onCopy(e.text)">
-                      <UiIcon name="copy" :size="12" />
+                    <button class="msg-act" title="复制" @click="onCopy(`u-${i}`, e.text)">
+                      <UiIcon :name="copiedKey === `u-${i}` ? 'check' : 'copy'" :size="12" />
                     </button>
                     <button
                       class="msg-act"
@@ -692,15 +764,17 @@ onUnmounted(() => {
                       <span>思考过程</span>
                     </button>
                     <div v-if="thinkOpen.has(i)" class="think-text">{{ e.think }}</div>
-                    <div v-else class="think-line">{{ lastThinkLine(e.think) }}</div>
+                    <!-- 折叠态摘要:运行中(思考仍在流入)显示末行并横向跟随滚动,结束后显示首行 -->
+                    <ThinkLine v-else :think="e.think" :live="isThinkLive(i)" />
                   </div>
-                  <div v-if="e.text" class="bubble-text bubble-md" v-html="mdToHtml(e.text)" />
+                  <!-- 正文:流式期间增量渲染(冻结已完成块),定格后一次性完整渲染 -->
+                  <MdStream v-if="e.text" :text="e.text" :streaming="isStreamingEntry(i)" />
                 </div>
                 <div class="msg-meta">
                   <span class="msg-time">{{ fmtTime(e.at) }}</span>
                   <span class="msg-actions">
-                    <button class="msg-act" title="复制" @click="onCopy(e.text)">
-                      <UiIcon name="copy" :size="12" />
+                    <button class="msg-act" title="复制" @click="onCopy(`a-${i}`, e.text)">
+                      <UiIcon :name="copiedKey === `a-${i}` ? 'check' : 'copy'" :size="12" />
                     </button>
                   </span>
                 </div>
@@ -708,7 +782,8 @@ onUnmounted(() => {
             </div>
 
             <!-- 工具条目:思考过程同款弱化样式(无卡片边框/底色,小字 muted,工具名走
-                 中文映射);整行点击展开结果(文本 + 图片缩略图,进画廊),失败状态标红 -->
+                 中文映射);整行点击展开结果(文本 + 图片缩略图,进画廊);
+                 失败时折叠态单行直接显示错误内容首行(红色) -->
             <div v-else-if="e.kind === 'tool'" class="tool">
               <button class="tool-head" @click="toggle(toolOpen, i)">
                 <UiIcon
@@ -720,7 +795,11 @@ onUnmounted(() => {
                 <span class="tool-title">工具调用:{{ toolLabel(e.name) }}</span>
                 <span class="tool-args">{{ argsSummary(e.args) }}</span>
                 <span v-if="!e.done" class="tool-state">执行中…</span>
-                <span v-else-if="e.isError" class="tool-state err">失败</span>
+                <span
+                  v-else-if="e.isError"
+                  class="tool-state err tool-err-text"
+                  :title="e.result"
+                >{{ toolErrorSummary(e.result) }}</span>
                 <span v-else class="tool-state ok">完成</span>
               </button>
               <div v-if="toolOpen.has(i) && (e.done || e.children.length)" class="tool-result">
@@ -765,7 +844,8 @@ onUnmounted(() => {
               </div>
             </div>
 
-            <!-- 审批卡片:工具名 + 规则 + 资源访问 + 三键回执;历史未决显示「已失效」 -->
+            <!-- 审批卡片(只读留档):工具名 + 规则 + 资源访问 + 结果;
+                 未决时操作在 composer 审批面板进行,这里只显示状态;历史未决显示「已失效」 -->
             <div v-else-if="e.kind === 'approval'" class="approval">
               <div class="approval-head">
                 <span class="approval-title">审批请求</span>
@@ -778,16 +858,8 @@ onUnmounted(() => {
                   {{ accessLabel(a) }}
                 </div>
               </div>
-              <div v-if="!e.decision && !e.stale" class="approval-actions">
-                <n-button size="small" type="primary" @click="onApprove(e.requestId, 'approved')">
-                  批准
-                </n-button>
-                <n-button size="small" @click="onApprove(e.requestId, 'approved', 'session')">
-                  本会话都批准
-                </n-button>
-                <n-button size="small" type="error" @click="onApprove(e.requestId, 'rejected')">
-                  拒绝
-                </n-button>
+              <div v-if="!e.decision && !e.stale" class="approval-decided">
+                等待审批(请在下方输入区处理)
               </div>
               <div v-else-if="e.decision" class="approval-decided">
                 {{ DECISION_LABEL[e.decision] ?? e.decision }}
@@ -863,6 +935,14 @@ onUnmounted(() => {
               <pre v-else class="detection-raw">{{ String(e.data ?? '') }}</pre>
             </div>
           </template>
+          <!-- Turn 级 loading:对话进行中常驻一行,超过 15s 追加秒表(仅 status 驱动,step 间不闪烁) -->
+          <div v-if="turnActive" class="turn-loading">
+            <span class="turn-loading-dot" />
+            <span>分析中…</span>
+            <span v-if="turnElapsedSec >= 15" class="turn-loading-time">
+              {{ turnElapsedSec }} 秒
+            </span>
+          </div>
         </div>
       </n-scrollbar>
 
@@ -887,6 +967,56 @@ onUnmounted(() => {
            (左:「+」上传 + 权限模式选择器;右:压缩按钮 + 上下文圆环 + 发送/停止)。粘贴冒泡到此处统一处理 -->
       <div class="chat-composer" @paste="onPaste">
         <div class="composer-box">
+          <!-- 审批接管:等待审批时输入区整体替换为审批面板(警示色顶条 + 工具/理由/
+               参数摘要 + 三键回执),回执后 status 翻回,composer 自动恢复;
+               时间线里的审批卡片只读留档 -->
+          <div v-if="pendingApproval" class="approval-panel">
+            <div class="approval-panel-bar">
+              <UiIcon name="shield" :size="12" />
+              <span>等待审批</span>
+            </div>
+            <div class="approval-panel-body">
+              <div class="approval-panel-tool">
+                工具:{{ toolLabel(pendingApproval.toolName) }}
+              </div>
+              <div class="approval-panel-rule">{{ pendingApproval.approvalRule }}</div>
+              <div v-if="pendingApproval.description" class="approval-panel-desc">
+                {{ pendingApproval.description }}
+              </div>
+              <div v-if="pendingApproval.accesses.length" class="approval-accesses">
+                <div
+                  v-for="(a, j) in pendingApproval.accesses"
+                  :key="j"
+                  class="approval-access"
+                >
+                  {{ accessLabel(a) }}
+                </div>
+              </div>
+              <div class="approval-panel-actions">
+                <n-button
+                  size="small"
+                  type="error"
+                  @click="onApprove(pendingApproval.requestId, 'rejected')"
+                >
+                  拒绝
+                </n-button>
+                <n-button
+                  size="small"
+                  type="primary"
+                  @click="onApprove(pendingApproval.requestId, 'approved')"
+                >
+                  批准一次
+                </n-button>
+                <n-button
+                  size="small"
+                  @click="onApprove(pendingApproval.requestId, 'approved', 'session')"
+                >
+                  本会话都批准
+                </n-button>
+              </div>
+            </div>
+          </div>
+          <template v-else>
           <!-- 附件预览行:图片缩略图 + 视频块(小预览或图标块 + 文件名),均可移除 -->
           <div v-if="pending.length || agent.pendingVideo" class="attach-list">
             <div v-for="(a, i) in pending" :key="a.url" class="attach-item">
@@ -969,7 +1099,13 @@ onUnmounted(() => {
             >
               {{ compacting ? '压缩中…' : compactLabel }}
             </button>
-            <ContextRing :used="agent.usedTokens" :max="agent.maxTokens" />
+            <ContextRing
+              :used="agent.usedTokens"
+              :max="agent.maxTokens"
+              :can-compact="showCompactBtn"
+              :compacting="compacting || busy"
+              @compact="onCompact"
+            />
             <!-- 停止(显式 cancel 服务端轮次)与发送并存:进行中发送即 steer 插话 -->
             <button v-if="busy" class="bar-btn" title="停止" @click="onStop">
               <UiIcon name="stop" :size="12" />
@@ -983,6 +1119,7 @@ onUnmounted(() => {
               <UiIcon name="send" :size="13" />
             </button>
           </div>
+          </template>
         </div>
         <input
           ref="fileInput"
@@ -1393,16 +1530,6 @@ onUnmounted(() => {
   line-height: 1.6;
 }
 
-.think-line {
-  width: min(320px, 60vw);
-  color: var(--color-text2);
-  font-size: var(--text-sm);
-  line-height: 1.6;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
 /* ---- 工具条目(弱化:无卡片边框/底色,小字 muted,与思考过程同款) ---- */
 .tool {
   margin: var(--space-xs) 0;
@@ -1459,6 +1586,16 @@ onUnmounted(() => {
 
 .tool-state.err {
   color: var(--color-red);
+}
+
+/* 失败摘要:直接显示错误内容首行(红色),占满剩余宽度并省略截断 */
+.tool-err-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
 }
 
 .tool-result {
@@ -1572,17 +1709,94 @@ onUnmounted(() => {
   word-break: break-all;
 }
 
-.approval-actions {
-  margin-top: var(--space-sm);
-  display: flex;
-  gap: var(--space-sm);
-}
-
 .approval-decided {
   margin-top: var(--space-sm);
   font-size: var(--text-sm);
   font-weight: 600;
   color: var(--color-text2);
+}
+
+/* ---- composer 审批面板(等待审批时接管输入区;警示色顶条) ---- */
+.approval-panel {
+  display: flex;
+  flex-direction: column;
+}
+
+.approval-panel-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  margin: calc(-1 * var(--space-sm)) calc(-1 * var(--space-sm)) 0;
+  padding: var(--space-xs) var(--space-sm);
+  border-radius: var(--radius) var(--radius) 0 0;
+  background: color-mix(in srgb, var(--color-gold) 18%, var(--color-card));
+  color: var(--color-gold);
+  font-size: var(--text-xs);
+  font-weight: 700;
+}
+
+.approval-panel-body {
+  padding-top: var(--space-xs);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.approval-panel-tool {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.approval-panel-rule {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--color-text);
+  word-break: break-all;
+}
+
+.approval-panel-desc {
+  font-size: var(--text-xs);
+  color: var(--color-text2);
+}
+
+.approval-panel-actions {
+  display: flex;
+  gap: var(--space-sm);
+  margin-top: var(--space-xs);
+}
+
+/* ---- Turn 级 loading(时间线底部常驻行) ---- */
+.turn-loading {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: var(--space-xs) 0;
+  color: var(--color-text2);
+  font-size: var(--text-sm);
+}
+
+.turn-loading-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-blue);
+  animation: turn-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes turn-pulse {
+  0%,
+  100% {
+    opacity: 0.3;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.turn-loading-time {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
 }
 
 /* ---- 检测结果卡 ---- */
