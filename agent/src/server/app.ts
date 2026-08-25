@@ -5,9 +5,16 @@
  *   POST   /sessions               → {sessionId}(workspaceDir 必填且须为已存在目录)
  *   GET    /sessions               → {sessions:[{id,workspaceDir,mode,title,createdAt,lastActiveAt}]}
  *   GET    /sessions/{id}/history  → {entries:[TimelineEntry]}(渲染友好的时间线)
+ *   POST   /sessions/{id}/compact  → {status:'ok',compacted,beforeTokens,afterTokens}
+ *                                      (立即压缩该 session 历史;进行中 → 409)
  *   DELETE /sessions/{id}          → {status:'ok'}(同时取消挂起审批、删盘)
  *   POST   /chat                   → SSE 流(text/event-stream,每事件一行 'data: {json}\n\n')
  *   POST   /approval               → 审批回执(见 approvalBridge.ts)
+ *
+ * 上下文窗口:AGENT_CONTEXT_TOKENS(默认 262144 = 256k)。/chat 每步 generate
+ * 后按真实 usage 透传 context_usage 事件并记录 session.lastKnownUsage(GET
+ * /sessions 摘要带 usedTokens);上一步用量 ≥ 窗口 × 0.85 时,下一步 generate
+ * 前自动压缩(替换老工具结果为占位)并透传 compaction 事件。
  *
  * 错误统一 {error:{code,message}};未知 session → 404。同 session 的 /chat
  * 用简单互斥串行,不同 session 并行。provider / tools 均可注入以便测试。
@@ -26,6 +33,11 @@ import type { ChatProvider } from '#/provider';
 
 import { createProviderFromEnv } from '../llm/provider';
 import { runAgentLoop, type AgentLoopEvent } from '../loop/agentLoop';
+import {
+  compactMessages,
+  createCompactionConfig,
+  estimateMessagesTokens,
+} from '../loop/compaction';
 import { CallbackApprovalService } from '../permissions/approval';
 import { PermissionGate } from '../permissions/gate';
 import type { PermissionMode, PermissionPolicyContext } from '../permissions/types';
@@ -51,6 +63,8 @@ export interface AgentServerOptions {
   readonly systemPrompt?: string;
   /** 审批挂起超时(ms),默认 5 分钟。 */
   readonly approvalTimeoutMs?: number;
+  /** 上下文窗口(token);默认读 AGENT_CONTEXT_TOKENS,缺省 262144(256k)。 */
+  readonly contextTokens?: number;
   /** session idle 过期(ms),默认 2h。 */
   readonly sessionIdleMs?: number;
   /** 过期清扫周期(ms),默认 60s。 */
@@ -115,6 +129,16 @@ class ExecutionSnapshotGate extends PermissionGate {
 const MAX_BODY_BYTES = 16 * 1024 * 1024;
 /** POST /chat 单轮图片附件上限。 */
 const MAX_IMAGES_PER_TURN = 4;
+/** 默认上下文窗口:256k(本地 qwen3.8-27b-fp8 的 max_model_len)。 */
+const DEFAULT_CONTEXT_TOKENS = 262_144;
+
+/** 上下文窗口解析:显式 option > AGENT_CONTEXT_TOKENS > 默认 256k;非法值回退默认。 */
+function resolveContextTokens(option: number | undefined): number {
+  if (option !== undefined && option > 0) return option;
+  const raw = process.env.AGENT_CONTEXT_TOKENS;
+  const parsed = raw === undefined ? NaN : Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_CONTEXT_TOKENS;
+}
 
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
@@ -162,6 +186,7 @@ function parseImages(body: Record<string, unknown>): string[] {
 
 export function createAgentServer(options: AgentServerOptions = {}): AgentServer {
   const systemPrompt = options.systemPrompt ?? defaultSystemPrompt();
+  const contextTokens = resolveContextTokens(options.contextTokens);
 
   let cachedProvider: ProviderHandle | undefined;
   const providerFactory =
@@ -273,6 +298,34 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
     }
     // onExpire 已取消挂起审批并清理 runtime。
     sendJson(res, 200, { status: 'ok' });
+  };
+
+  /** 手动压缩:立即对该 session 的 messages 执行 compactMessages(强制触发,
+   * 不走过阈判断;无可压缩内容时 noop)。进行中的轮次返回 409。 */
+  const handleCompact = (res: ServerResponse, sessionId: string): void => {
+    const session = sessions.get(sessionId);
+    if (session === undefined) {
+      sendError(res, 404, 'session_not_found', `unknown session: ${sessionId}`);
+      return;
+    }
+    const runtime = runtimeFor(session);
+    if (runtime.busy) {
+      sendError(res, 409, 'chat_in_progress', `session ${session.id} already has a chat turn in progress`);
+      return;
+    }
+    const beforeTokens = estimateMessagesTokens(session.messages);
+    const outcome = compactMessages(
+      session.messages,
+      createCompactionConfig(contextTokens),
+      true,
+    );
+    if (outcome.compacted) sessions.replaceMessages(session.id, outcome.messages);
+    sendJson(res, 200, {
+      status: 'ok',
+      compacted: outcome.compacted,
+      beforeTokens,
+      afterTokens: estimateMessagesTokens(session.messages),
+    });
   };
 
   const handleApproval = (res: ServerResponse, body: unknown): void => {
@@ -406,6 +459,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
         registry: runtime.registry,
         gate: runtime.gate,
         messages,
+        compaction: { maxContextTokens: contextTokens },
         signal: controller.signal,
         onEvent: (event: AgentLoopEvent) => {
           switch (event.type) {
@@ -414,6 +468,9 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
               break;
             case 'think_delta':
               assistantThink += event.text;
+              break;
+            case 'context_usage':
+              sessions.setLastKnownUsage(session.id, event.usedTokens);
               break;
             case 'tool_call_start':
               flushAssistant();
@@ -499,6 +556,16 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
             return;
           }
           handleGetHistory(res, sessionId);
+          return;
+        }
+        const compactMatch = /^\/sessions\/([^/]+)\/compact$/.exec(url.pathname);
+        if (req.method === 'POST' && compactMatch !== null) {
+          const sessionId = compactMatch[1];
+          if (sessionId === undefined) {
+            sendError(res, 400, 'invalid_request', 'session id is required');
+            return;
+          }
+          handleCompact(res, sessionId);
           return;
         }
         const sessionMatch = /^\/sessions\/([^/]+)$/.exec(url.pathname);

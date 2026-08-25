@@ -26,6 +26,8 @@ export interface Session {
   readonly entries: TimelineEntry[];
   readonly createdAt: number;
   lastActiveAt: number;
+  /** 最近一次 /chat 轮次上报的真实上下文占用(token);尚无 usage 时为 undefined。 */
+  lastKnownUsage?: number;
 }
 
 /** GET /sessions 的列表项(不含 messages/entries)。 */
@@ -36,6 +38,8 @@ export interface SessionSummary {
   readonly title: string;
   readonly createdAt: number;
   readonly lastActiveAt: number;
+  /** 最近一次已知上下文占用(有真实 usage 才返回)。 */
+  readonly usedTokens?: number;
 }
 
 export interface SessionManagerOptions {
@@ -158,6 +162,22 @@ export class SessionManager {
     }
   }
 
+  /** 记录 session 最近一次真实上下文占用(内存态,随 /chat 的 context_usage 更新)。 */
+  setLastKnownUsage(id: string, usedTokens: number): void {
+    const session = this.sessions.get(id);
+    if (session !== undefined) session.lastKnownUsage = usedTokens;
+  }
+
+  /** 整体替换 session 的消息历史(手动/自动压缩后);未知 session 返回 false。
+   * 只改内存态:磁盘上的原始消息保留,重启恢复后由 loop 压缩兜底。 */
+  replaceMessages(id: string, messages: readonly Message[]): boolean {
+    const session = this.sessions.get(id);
+    if (session === undefined) return false;
+    session.messages.length = 0;
+    session.messages.push(...messages);
+    return true;
+  }
+
   /** 删除会话:内存 + 磁盘三张表一起清。未知 session 返回 false。 */
   delete(id: string): boolean {
     const session = this.sessions.get(id);
@@ -235,5 +255,6 @@ function summaryOf(session: Session): SessionSummary {
     title: session.title,
     createdAt: session.createdAt,
     lastActiveAt: session.lastActiveAt,
+    ...(session.lastKnownUsage !== undefined ? { usedTokens: session.lastKnownUsage } : {}),
   };
 }

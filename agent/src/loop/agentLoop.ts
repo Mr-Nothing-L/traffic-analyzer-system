@@ -50,6 +50,17 @@ export type AgentLoopEvent =
     }
   | { readonly type: 'step_done'; readonly step: number }
   | {
+      /** 每步 generate 拿到真实 usage 后发出:该次请求的上下文占用与窗口上限。 */
+      readonly type: 'context_usage';
+      readonly usedTokens: number;
+      readonly maxTokens: number;
+    }
+  | {
+      /** 自动压缩实际发生时发出(替换老工具结果为占位)。 */
+      readonly type: 'compaction';
+      readonly compactedToolResults: number;
+    }
+  | {
       readonly type: 'done';
       readonly reason: AgentLoopDoneReason;
       readonly stopResult?: ExecutableToolResult;
@@ -103,6 +114,9 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
 
   let messages: Message[] = [...options.messages];
   let steps = 0;
+  /** 上一步 generate 的真实上下文占用(inputOther + inputCacheRead + output);
+   * usage 不可用时保持 undefined,压缩触发回退 heuristic。 */
+  let lastUsedTokens: number | undefined;
   let errorStreak: { name: string; count: number; output: ExecutableToolResult['output'] | undefined } =
     { name: '', count: 0, output: undefined };
 
@@ -188,8 +202,16 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     if (isAborted()) return finish('cancelled');
     if (steps >= maxSteps) return finish('max_steps');
     if (compaction !== undefined) {
-      const outcome = compactMessages(messages, compaction);
-      if (outcome.compacted) messages = outcome.messages;
+      // 触发判断优先真实 usage(≥ maxTokens × triggerRatio 即视为要爆了),
+      // 不可用(force=false)时回退 compactMessages 内部的 token 估算 heuristic。
+      const overByUsage =
+        lastUsedTokens !== undefined &&
+        lastUsedTokens >= compaction.maxContextTokens * compaction.triggerRatio;
+      const outcome = compactMessages(messages, compaction, overByUsage);
+      if (outcome.compacted) {
+        messages = outcome.messages;
+        await emit({ type: 'compaction', compactedToolResults: outcome.compactedToolResults });
+      }
     }
     steps += 1;
 
@@ -212,6 +234,17 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         { signal: options.signal },
       );
       assistant = generated.message;
+      if (generated.usage !== null && compaction !== undefined) {
+        lastUsedTokens =
+          generated.usage.inputOther +
+          generated.usage.inputCacheRead +
+          generated.usage.output;
+        await emit({
+          type: 'context_usage',
+          usedTokens: lastUsedTokens,
+          maxTokens: compaction.maxContextTokens,
+        });
+      }
     } catch (error) {
       if (isAbortError(error) || isAborted()) {
         return finish('cancelled');

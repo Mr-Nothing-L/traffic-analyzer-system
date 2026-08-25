@@ -23,6 +23,7 @@ import { useAgentChatStore } from '../stores/agentchat'
 import type { AgentAccess, AgentMode, AgentSessionInfo, DetectionPayload } from '../stores/agentchat'
 import { mdToHtml } from '../utils/markdown'
 import UiIcon from '../components/UiIcon.vue'
+import ContextRing from '../components/chat/ContextRing.vue'
 
 const agent = useAgentChatStore()
 const message = useMessage()
@@ -322,6 +323,30 @@ async function onRetry() {
   await agent.retry()
 }
 
+/* ---- 上下文用量:圆环 + 压缩按钮(>60% 出现,>85% 警示文案) ---- */
+const contextRatio = computed(() =>
+  agent.maxTokens > 0 ? (agent.usedTokens ?? 0) / agent.maxTokens : 0,
+)
+const compacting = ref(false)
+const showCompactBtn = computed(() => contextRatio.value > 0.6)
+const compactLabel = computed(() =>
+  contextRatio.value > 0.85 ? '上下文即将溢出,建议压缩' : '压缩上下文',
+)
+
+async function onCompact() {
+  if (compacting.value || busy.value) return
+  compacting.value = true
+  try {
+    const r = await agent.compactContext()
+    if (r.compacted) message.success('上下文已压缩')
+    else message.info('暂无可压缩的上下文')
+  } catch (e) {
+    message.error(`压缩失败:${(e as Error).message}`)
+  } finally {
+    compacting.value = false
+  }
+}
+
 async function onModeChange(m: string | number) {
   resetFolds()
   await agent.setMode(m as AgentMode)
@@ -523,8 +548,11 @@ onUnmounted(() => {
               <div v-else class="approval-decided">已失效</div>
             </div>
 
+            <!-- 系统提示(自动压缩等,仅流式期间插入,不进历史) -->
+            <div v-else-if="e.kind === 'system'" class="system-note">{{ e.text }}</div>
+
             <!-- 检测结果卡:11 位编码等宽高亮 + 检出事件 + markdown 报告 -->
-            <div v-else class="detection">
+            <div v-else-if="e.kind === 'detection'" class="detection">
               <template v-if="asPayload(e.data)">
                 <div class="detection-head">
                   <span class="detection-title">检测结果</span>
@@ -581,6 +609,19 @@ onUnmounted(() => {
       <!-- 输入区:视频路径(可选)+ 暂存附件区 + 「+」/输入框/停止或发送;
            粘贴事件冒泡到此处统一处理 -->
       <div class="chat-composer" @paste="onPaste">
+        <!-- 上下文用量:右下角固定圆环(+用量超 60% 出现压缩按钮) -->
+        <div class="context-widget">
+          <button
+            v-if="showCompactBtn"
+            class="compact-btn"
+            :class="{ danger: contextRatio > 0.85 }"
+            :disabled="busy || compacting"
+            @click="onCompact"
+          >
+            {{ compacting ? '压缩中…' : compactLabel }}
+          </button>
+          <ContextRing :used="agent.usedTokens" :max="agent.maxTokens" />
+        </div>
         <n-input
           v-model:value="videoPath"
           size="small"
@@ -1336,11 +1377,61 @@ onUnmounted(() => {
 
 /* ---- 输入区 ---- */
 .chat-composer {
+  position: relative; /* 上下文圆环浮层定位基准 */
   border-top: 1px solid var(--color-border);
   padding: var(--space-sm) var(--space-lg);
   display: flex;
   flex-direction: column;
   gap: var(--space-sm);
+}
+
+/* ---- 上下文用量浮层:对话右下角(输入区上方) ---- */
+.context-widget {
+  position: absolute;
+  top: -44px;
+  right: var(--space-lg);
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: 2px var(--space-xs);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-card);
+  box-shadow: var(--shadow);
+}
+
+.compact-btn {
+  padding: 2px var(--space-sm);
+  border: 1px solid var(--color-gold);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-gold) 10%, var(--color-card));
+  color: var(--color-gold);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.compact-btn.danger {
+  border-color: var(--color-red);
+  background: var(--color-red-soft);
+  color: var(--color-red);
+}
+
+.compact-btn:hover:not(:disabled) {
+  filter: brightness(0.97);
+}
+
+.compact-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* ---- 系统提示条目(自动压缩等) ---- */
+.system-note {
+  margin: var(--space-sm) 0;
+  text-align: center;
+  font-size: var(--text-xs);
+  color: var(--color-text2);
 }
 
 .chat-input-row {

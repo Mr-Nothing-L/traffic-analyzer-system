@@ -18,6 +18,7 @@ import type {
   ThinkingEffort,
 } from '#/provider';
 import type { Tool } from '#/tool';
+import type { TokenUsage } from '#/usage';
 
 import type { ExecutableTool, ExecutableToolResult } from '../tools/contract';
 import { ToolRegistry } from '../tools/registry';
@@ -36,9 +37,12 @@ class ScriptedProvider implements ChatProvider {
   readonly thinkingEffort = null;
   readonly histories: Message[][] = [];
   private readonly script: StreamedMessagePart[][];
+  /** 与 script 逐步对应的 usage(缺省 null = provider 不上报)。 */
+  private readonly usages: (TokenUsage | null)[];
 
-  constructor(script: StreamedMessagePart[][]) {
+  constructor(script: StreamedMessagePart[][], usages: (TokenUsage | null)[] = []) {
     this.script = [...script];
+    this.usages = [...usages];
   }
 
   generate(
@@ -50,7 +54,7 @@ class ScriptedProvider implements ChatProvider {
     this.histories.push(history.map((m) => m));
     const parts = this.script.shift();
     if (parts === undefined) return Promise.reject(new Error('script exhausted'));
-    return Promise.resolve(streamOf(parts));
+    return Promise.resolve(streamOf(parts, this.usages.shift() ?? null));
   }
 
   withThinking(_effort: ThinkingEffort): ChatProvider {
@@ -58,13 +62,13 @@ class ScriptedProvider implements ChatProvider {
   }
 }
 
-function streamOf(parts: StreamedMessagePart[]): StreamedMessage {
+function streamOf(parts: StreamedMessagePart[], usage: TokenUsage | null = null): StreamedMessage {
   return {
     async *[Symbol.asyncIterator]() {
       for (const part of parts) yield part;
     },
     id: null,
-    usage: null,
+    usage,
     finishReason: 'completed',
     rawFinishReason: 'stop',
   };
@@ -178,7 +182,7 @@ let baseUrl: string;
 async function startServer(
   provider: ScriptedProvider,
   tools: ExecutableTool[],
-  extra?: { restoreWorkspaceDirs?: string[] },
+  extra?: { restoreWorkspaceDirs?: string[]; contextTokens?: number },
 ): Promise<void> {
   const created = createAgentServer({
     providerFactory: () => ({ provider, model: provider.modelName }),
@@ -191,6 +195,7 @@ async function startServer(
     ...(extra?.restoreWorkspaceDirs !== undefined
       ? { restoreWorkspaceDirs: extra.restoreWorkspaceDirs }
       : {}),
+    ...(extra?.contextTokens !== undefined ? { contextTokens: extra.contextTokens } : {}),
   });
   agentServer = created;
   await new Promise<void>((resolve) => {
@@ -601,6 +606,124 @@ describe('agent server', () => {
       decision: 'approved',
     });
     expect(entries[2]).toMatchObject({ kind: 'tool', name: 'write_file', isError: false });
+  });
+
+  it('context_usage:SSE 透传真实用量,GET /sessions 摘要带 usedTokens', async () => {
+    const provider = new ScriptedProvider(
+      [[text('回答')]],
+      [{ inputOther: 500, inputCacheRead: 60, inputCacheCreation: 7, output: 40 }],
+    );
+    await startServer(provider, [echoTool()], { contextTokens: 8000 });
+    const sessionId = await createSession('yolo');
+
+    const res = await startChat(sessionId, 'hi');
+    if (res.body === null) throw new Error('no body');
+    const events = await readUntilDone(sseReader(res.body));
+
+    // inputCacheCreation 不计入上下文占用:500 + 60 + 40 = 600
+    const usage = events.find((e) => e.type === 'context_usage');
+    expect(usage).toMatchObject({ usedTokens: 600, maxTokens: 8000 });
+
+    const list = await getJson('/sessions');
+    const sessions = (list.json as { sessions: Record<string, unknown>[] }).sessions;
+    expect(sessions[0]).toMatchObject({ id: sessionId, usedTokens: 600 });
+  });
+
+  it('POST /sessions/{id}/compact:压缩老工具结果,返回前后 token 估算', async () => {
+    // 大输出工具:压缩后 before/after token 估算差异明显
+    const bigEcho: ExecutableTool = {
+      name: 'echo',
+      description: 'fake echo tool',
+      parameters: { type: 'object' },
+      resolveExecution: () => ({
+        accesses: [],
+        approvalRule: 'echo()',
+        execute: () => Promise.resolve({ output: 'x'.repeat(2000) }),
+      }),
+    };
+    const provider = new ScriptedProvider([
+      [toolCall('c1', 'echo', {})],
+      [text('第一轮完')],
+      [toolCall('c2', 'echo', {})],
+      [text('第二轮完')],
+    ]);
+    await startServer(provider, [bigEcho]);
+    const sessionId = await createSession('yolo');
+
+    for (const input of ['第一轮', '第二轮']) {
+      const res = await startChat(sessionId, input);
+      if (res.body === null) throw new Error('no body');
+      await readUntilDone(sseReader(res.body));
+    }
+
+    const compact = await postJson(`/sessions/${sessionId}/compact`, {});
+    expect(compact.status).toBe(200);
+    const body = compact.json as {
+      status: string;
+      compacted: boolean;
+      beforeTokens: number;
+      afterTokens: number;
+    };
+    expect(body.status).toBe('ok');
+    expect(body.compacted).toBe(true);
+    expect(body.afterTokens).toBeLessThan(body.beforeTokens);
+
+    // 第一轮的工具结果已被占位替换;第二轮(保留区)不受影响
+    const messages = agentServer?.sessions.get(sessionId)?.messages ?? [];
+    const old = messages.find((m) => m.toolCallId === 'c1');
+    const recent = messages.find((m) => m.toolCallId === 'c2');
+    expect(JSON.stringify(old?.content)).toContain('[已压缩]');
+    expect(JSON.stringify(recent?.content)).toContain('x'.repeat(2000));
+  });
+
+  it('POST /sessions/{id}/compact:单轮会话无可压缩内容 → noop(compacted=false)', async () => {
+    const provider = new ScriptedProvider([[text('ok')]]);
+    await startServer(provider, [echoTool()]);
+    const sessionId = await createSession('yolo');
+
+    const res = await startChat(sessionId, 'hi');
+    if (res.body === null) throw new Error('no body');
+    await readUntilDone(sseReader(res.body));
+
+    const compact = await postJson(`/sessions/${sessionId}/compact`, {});
+    expect(compact.status).toBe(200);
+    expect(compact.json).toMatchObject({ status: 'ok', compacted: false });
+  });
+
+  it('POST /sessions/{id}/compact:未知 session → 404;进行中 → 409', async () => {
+    const provider = new ScriptedProvider([
+      [toolCall('c1', 'write_file', {})],
+      [text('ok')],
+    ]);
+    await startServer(provider, [writeTool()]);
+    const sessionId = await createSession('manual');
+
+    const ghost = await postJson('/sessions/ghost/compact', {});
+    expect(ghost.status).toBe(404);
+    expect(ghost.json).toMatchObject({ error: { code: 'session_not_found' } });
+
+    // 挂起审批使轮次保持进行中
+    const res = await startChat(sessionId, '写个文件');
+    if (res.body === null) throw new Error('no body');
+    const next = sseReader(res.body);
+    let approval: SseEvent | null = null;
+    while (approval === null) {
+      const event = await next();
+      if (event === null) throw new Error('stream ended before approval_request');
+      if (event.type === 'approval_request') approval = event;
+    }
+
+    const busy = await postJson(`/sessions/${sessionId}/compact`, {});
+    expect(busy.status).toBe(409);
+    expect(busy.json).toMatchObject({ error: { code: 'chat_in_progress' } });
+
+    // 收尾:审批通过,流正常结束
+    await postJson('/approval', {
+      requestId: (approval as unknown as { requestId: string }).requestId,
+      decision: 'approved',
+    });
+    const rest = await readUntilDone(next);
+    expect(rest.at(-1)).toMatchObject({ reason: 'completed' });
   });
 
   it('defaultSystemPrompt:chat_system.md 缺失时回退 detect_system.md 并打警告', () => {

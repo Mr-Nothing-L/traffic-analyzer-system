@@ -1,12 +1,13 @@
 /** 统一对话(问答 + 检测):会话列表/切换/删除 + 时间线条目 + SSE 流式轮次。
  * 后端契约(FastAPI /api/agent/* 代理 → Node agent 服务,workspaceDir 由后端注入):
  * POST   /api/agent/sessions({mode}) → {sessionId};
- * GET    /api/agent/sessions → {sessions:[{id,workspaceDir,mode,title,createdAt,lastActiveAt}]};
+ * GET    /api/agent/sessions → {sessions:[{id,workspaceDir,mode,title,createdAt,lastActiveAt,usedTokens?}]};
  * GET    /api/agent/sessions/{id}/history → {entries:[...]}(五类条目,见 mapHistoryEntry);
+ * POST   /api/agent/sessions/{id}/compact → {status,compacted,beforeTokens?,afterTokens?}(进行中 409);
  * DELETE /api/agent/sessions/{id} → {status:'ok'};
  * POST   /api/agent/chat({sessionId,input,videoPath?,images?(dataURL,≤4)}) → SSE
  *   (每事件一行 'data: {json}\n\n',事件:text_delta/think_delta/tool_call_start/
- *   tool_result/step_done/approval_request/detection/done);
+ *   tool_result/step_done/approval_request/detection/context_usage/compaction/done);
  * POST   /api/agent/approval({requestId,decision,scope?}) → {status:'ok'}。
  * fetch+ReadableStream 按 \n\n 分块解析 data: 行,组件只接线,状态全部在这里。 */
 import { ref } from 'vue'
@@ -41,6 +42,8 @@ export interface AgentSessionInfo {
   title?: string
   createdAt?: number
   lastActiveAt?: number
+  /** 最近一次已知上下文占用(token,有真实 usage 才返回)。 */
+  usedTokens?: number
 }
 
 export interface AgentUserEntry {
@@ -100,12 +103,19 @@ export interface AgentDetectionEntry {
   data: unknown
 }
 
+/** 系统提示条目(如自动压缩提示),不进历史,仅流式期间插入时间线。 */
+export interface AgentSystemEntry {
+  kind: 'system'
+  text: string
+}
+
 export type AgentEntry =
   | AgentUserEntry
   | AgentAssistantEntry
   | AgentToolEntry
   | AgentApprovalEntry
   | AgentDetectionEntry
+  | AgentSystemEntry
 
 /** 非 2xx 统一成 ApiError:agent 服务错误为 {error:{code,message}},
  * FastAPI 代理/其他后端为 {detail},两种都认。 */
@@ -228,6 +238,10 @@ export const useAgentChatStore = defineStore('agentchat', () => {
   const entries = ref<AgentEntry[]>([])
   /** 历史会话列表(GET /sessions),进入页面/新建/发送/删除后刷新。 */
   const sessions = ref<AgentSessionInfo[]>([])
+  /** 上下文已用 token(context_usage 事件;无真实用量时为 null)。 */
+  const usedTokens = ref<number | null>(null)
+  /** 上下文窗口上限(默认 256k,以 context_usage 事件为准)。 */
+  const maxTokens = ref(262144)
 
   let ctrl: AbortController | null = null
   /** 轮次代际:切换/新建会话会中断在途流并递增,旧 runTurn 的收尾不再写状态。 */
@@ -267,6 +281,7 @@ export const useAgentChatStore = defineStore('agentchat', () => {
     status.value = 'connecting'
     error.value = null
     sessionId.value = null
+    usedTokens.value = null
     resetLastTurn()
     try {
       const r = (await postJson('/api/agent/sessions', { mode: mode.value })) as {
@@ -299,6 +314,8 @@ export const useAgentChatStore = defineStore('agentchat', () => {
       sessionId.value = id
       const info = sessions.value.find((s) => s.id === id)
       if (info?.mode === 'manual' || info?.mode === 'yolo') mode.value = info.mode
+      // 会话切换:沿用列表里的最近已知用量(没有则清空等下一次 context_usage)
+      usedTokens.value = typeof info?.usedTokens === 'number' ? info.usedTokens : null
       status.value = 'idle'
     } catch (e) {
       status.value = 'failed'
@@ -396,6 +413,13 @@ export const useAgentChatStore = defineStore('agentchat', () => {
       status.value = 'awaiting_approval'
     } else if (ev.type === 'detection') {
       entries.value.push({ kind: 'detection', data: ev.data })
+    } else if (ev.type === 'context_usage') {
+      const used = Number(ev.usedTokens)
+      const max = Number(ev.maxTokens)
+      if (Number.isFinite(used) && used >= 0) usedTokens.value = used
+      if (Number.isFinite(max) && max > 0) maxTokens.value = max
+    } else if (ev.type === 'compaction') {
+      entries.value.push({ kind: 'system', text: '上下文已自动压缩' })
     } else if (ev.type === 'done') {
       if (ev.reason === 'error') {
         status.value = 'failed'
@@ -526,6 +550,18 @@ export const useAgentChatStore = defineStore('agentchat', () => {
     if (status.value === 'awaiting_approval') status.value = 'running'
   }
 
+  /** 手动压缩上下文:POST compact;成功且有 afterTokens 时刷新圆环用量。
+   * 失败抛错(调用方提示);进行中后端返回 409。 */
+  async function compactContext() {
+    if (!sessionId.value) throw new ApiError(0, '无活动会话')
+    const r = (await postJson(`/api/agent/sessions/${sessionId.value}/compact`, {})) as {
+      compacted?: boolean
+      afterTokens?: number
+    }
+    if (r.compacted && typeof r.afterTokens === 'number') usedTokens.value = r.afterTokens
+    return r
+  }
+
   return {
     sessionId,
     mode,
@@ -533,6 +569,8 @@ export const useAgentChatStore = defineStore('agentchat', () => {
     error,
     entries,
     sessions,
+    usedTokens,
+    maxTokens,
     fetchSessions,
     createSession,
     selectSession,
@@ -543,5 +581,6 @@ export const useAgentChatStore = defineStore('agentchat', () => {
     retry,
     stop,
     respondApproval,
+    compactContext,
   }
 })

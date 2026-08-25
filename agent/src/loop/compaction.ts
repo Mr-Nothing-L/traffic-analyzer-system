@@ -141,17 +141,21 @@ export interface CompactionOutcome {
  * 保留区 = 最近的 user 轮次:从末尾取 maxRecentMessages 条,再向前扩展到
  * 最近的 user 消息(安全边界);压缩区 = 头部 system 消息之后、保留区之前。
  * 找不到 user 边界时放弃压缩(宁愿不压也不切坏进行中的交互)。
+ *
+ * force = true 时跳过 shouldCompact 的 heuristic 阈值判断(调用方已用真实
+ * usage 判定超阈,或是用户手动触发);安全边界与幂等规则不受影响。
  */
 export function compactMessages(
   messages: Message[],
   config: CompactionConfig,
+  force = false,
 ): CompactionOutcome {
   const unchanged: CompactionOutcome = {
     messages,
     compacted: false,
     compactedToolResults: 0,
   };
-  if (!shouldCompact(messages, config)) return unchanged;
+  if (!force && !shouldCompact(messages, config)) return unchanged;
 
   let firstNonSystem = 0;
   while (firstNonSystem < messages.length && messages[firstNonSystem]?.role === 'system') {

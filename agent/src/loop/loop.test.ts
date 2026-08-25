@@ -20,6 +20,7 @@ import type {
   ThinkingEffort,
 } from '#/provider';
 import type { Tool } from '#/tool';
+import type { TokenUsage } from '#/usage';
 
 import { CallbackApprovalService } from '../permissions/approval';
 import { PermissionGate } from '../permissions/gate';
@@ -50,9 +51,12 @@ class ScriptedProvider implements ChatProvider {
   /** 每次 generate 调用收到的历史快照。 */
   readonly histories: Message[][] = [];
   private readonly script: StreamedMessagePart[][];
+  /** 与 script 逐步对应的 usage(缺省 null = provider 不上报)。 */
+  private readonly usages: (TokenUsage | null)[];
 
-  constructor(script: StreamedMessagePart[][]) {
+  constructor(script: StreamedMessagePart[][], usages: (TokenUsage | null)[] = []) {
     this.script = [...script];
+    this.usages = [...usages];
   }
 
   generate(
@@ -66,7 +70,7 @@ class ScriptedProvider implements ChatProvider {
     if (parts === undefined) {
       return Promise.reject(new Error('script exhausted'));
     }
-    return Promise.resolve(streamOf(parts));
+    return Promise.resolve(streamOf(parts, this.usages.shift() ?? null));
   }
 
   withThinking(_effort: ThinkingEffort): ChatProvider {
@@ -74,13 +78,13 @@ class ScriptedProvider implements ChatProvider {
   }
 }
 
-function streamOf(parts: StreamedMessagePart[]): StreamedMessage {
+function streamOf(parts: StreamedMessagePart[], usage: TokenUsage | null = null): StreamedMessage {
   return {
     async *[Symbol.asyncIterator]() {
       for (const part of parts) yield part;
     },
     id: null,
-    usage: null,
+    usage,
     finishReason: 'completed',
     rawFinishReason: 'stop',
   };
@@ -133,10 +137,11 @@ function harness(
   script: StreamedMessagePart[][],
   tools: ExecutableTool[],
   gate: PermissionGate = yoloGate(),
+  usages: (TokenUsage | null)[] = [],
 ): Harness {
   const registry = new ToolRegistry();
   for (const tool of tools) registry.register(tool);
-  const provider = new ScriptedProvider(script);
+  const provider = new ScriptedProvider(script, usages);
   const events: AgentLoopEvent[] = [];
   return {
     provider,
@@ -427,6 +432,67 @@ describe('runAgentLoop', () => {
     const recent = secondHistory.find((m) => m.toolCallId === 'c1');
     expect(extractText(recent ?? createUserMessage(''))).toBe('small-ok');
   });
+
+  it('generate 返回 usage 时 emit context_usage:usedTokens = inputOther + inputCacheRead + output', async () => {
+    const h = harness(
+      [[text('回答')]],
+      [echoTool()],
+      yoloGate(),
+      [{ inputOther: 100, inputCacheRead: 40, inputCacheCreation: 999, output: 10 }],
+    );
+
+    const result = await h.run({ compaction: { maxContextTokens: 1000 } });
+
+    expect(result.reason).toBe('completed');
+    const usage = h.events.find((e) => e.type === 'context_usage');
+    // inputCacheCreation 不计入上下文占用
+    expect(usage).toEqual({ type: 'context_usage', usedTokens: 150, maxTokens: 1000 });
+  });
+
+  it('usage 不可用时(usage=null)不发 context_usage,压缩回退 heuristic', async () => {
+    const h = harness([[text('回答')]], [echoTool()]);
+
+    await h.run({ compaction: { maxContextTokens: 1000 } });
+
+    expect(h.events.some((e) => e.type === 'context_usage')).toBe(false);
+    expect(h.events.some((e) => e.type === 'compaction')).toBe(false);
+  });
+
+  it('真实 usage 超阈(≥ maxTokens × 0.85)时下一步前自动压缩并 emit compaction', async () => {
+    const initialMessages: Message[] = [
+      createUserMessage('第一轮'),
+      createAssistantMessage([{ type: 'text', text: '先看元数据' }], [
+        toolCall('old-1', 'echo', {}),
+      ]),
+      createToolMessage('old-1', '老工具结果'),
+      createAssistantMessage([{ type: 'text', text: '看完了' }]),
+      createUserMessage('继续'),
+    ];
+    // maxContextTokens=10000,触发线 8500;heuristic 估算远低于阈值
+    // (reservedContextSize=0 关闭预留触发),仅靠真实 usage 驱动压缩。
+    const h = harness(
+      [[toolCall('c1', 'echo', {})], [text('结束')]],
+      [echoTool(() => Promise.resolve({ output: 'small-ok' }))],
+      yoloGate(),
+      [
+        { inputOther: 8600, inputCacheRead: 0, inputCacheCreation: 0, output: 100 },
+        null,
+      ],
+    );
+
+    const result = await h.run({
+      messages: initialMessages,
+      compaction: { maxContextTokens: 10_000, reservedContextSize: 0, maxRecentMessages: 2 },
+    });
+
+    expect(result.reason).toBe('completed');
+    const compaction = h.events.find((e) => e.type === 'compaction');
+    expect(compaction).toEqual({ type: 'compaction', compactedToolResults: 1 });
+    // 第二步历史中,老工具结果已被占位替换
+    const secondHistory = h.provider.histories[1] ?? [];
+    const old = secondHistory.find((m) => m.toolCallId === 'old-1');
+    expect(extractText(old ?? createUserMessage(''))).toBe('[已压缩]');
+  });
 });
 
 describe('compaction', () => {
@@ -486,5 +552,23 @@ describe('compaction', () => {
     const outcome = compactMessages(messages, config);
     expect(outcome.compacted).toBe(false);
     expect(outcome.messages).toBe(messages);
+  });
+
+  it('force=true 时跳过阈值判断:未超阈也执行压缩(手动/真实 usage 触发)', () => {
+    const messages: Message[] = [
+      createUserMessage('u1'),
+      ...bigToolExchange('t1', 100),
+      createAssistantMessage([{ type: 'text', text: 'a1' }]),
+      createUserMessage('u2'),
+      createAssistantMessage([{ type: 'text', text: 'a2' }]),
+    ];
+    const config = createCompactionConfig(1_000_000, { maxRecentMessages: 2 });
+
+    expect(shouldCompact(messages, config)).toBe(false);
+    const outcome = compactMessages(messages, config, true);
+    expect(outcome.compacted).toBe(true);
+    expect(outcome.compactedToolResults).toBe(1);
+    const t1 = outcome.messages.find((m) => m.toolCallId === 't1');
+    expect(extractText(t1 ?? createUserMessage(''))).toBe('[已压缩]');
   });
 });
