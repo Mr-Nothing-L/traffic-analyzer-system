@@ -11,10 +11,12 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import logging
 import signal
 import subprocess
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional
 
 import httpx
@@ -25,6 +27,10 @@ from traffic_analyzer.web import app as app_mod
 from traffic_analyzer.web.agentproxy import routes as routes_mod
 from traffic_analyzer.web.agentproxy import runtime as runtime_mod
 from traffic_analyzer.web.agentproxy.runtime import AgentRuntimeManager
+
+# autouse 的 root_posts fixture 会替换 _post_workspace_root;需要验证其
+# 真实实现(URL/body)的用例先把它还原回来。
+_REAL_POST_WORKSPACE_ROOT = runtime_mod._post_workspace_root
 
 
 # ---------------------------------------------------------------------------
@@ -71,6 +77,22 @@ def proxy_app(
     app = app_mod.create_app(workspace=str(workspace))
     app.state.agent_runtime = AgentRuntimeManager(enabled=True)
     return app
+
+
+@pytest.fixture(autouse=True)
+def root_posts(monkeypatch: pytest.MonkeyPatch) -> List[Any]:
+    """拦截 runtime → toolserver 的 /config/roots 注册(不打真实 8601)。
+
+    autouse:既给注册语义用例提供断言载体,也防止既有 start() 用例
+    (fake spawn)误触本机正在运行的 8601 实例。
+    """
+    posts: List[Any] = []
+    monkeypatch.setattr(
+        runtime_mod,
+        "_post_workspace_root",
+        lambda url, path: posts.append((url, str(path))),
+    )
+    return posts
 
 
 # ---------------------------------------------------------------------------
@@ -1032,3 +1054,118 @@ class TestRuntimeManager:
         )
         mgr.start()
         mgr.stop()  # 不抛异常
+
+
+# ---------------------------------------------------------------------------
+# add_workspace_root:工作区热注册进 toolserver 允许根(免重启)
+# ---------------------------------------------------------------------------
+
+
+class TestAddWorkspaceRoot:
+    def test_post_workspace_root_url_and_body(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """_post_workspace_root 本身:URL 路径 /config/roots,body {"path": ...}。"""
+        calls: List[Any] = []
+        monkeypatch.setattr(
+            runtime_mod,
+            "httpx",
+            SimpleNamespace(post=lambda *a, **k: calls.append((a, k))),
+        )
+        monkeypatch.setattr(
+            runtime_mod, "_post_workspace_root", _REAL_POST_WORKSPACE_ROOT
+        )
+        runtime_mod._post_workspace_root("http://127.0.0.1:8601", tmp_path)
+        assert calls == [
+            (
+                ("http://127.0.0.1:8601/config/roots",),
+                {"json": {"path": str(tmp_path)},
+                 "timeout": runtime_mod._REGISTER_ROOT_TIMEOUT},
+            )
+        ]
+
+    def test_posts_config_roots(
+        self, root_posts: List[Any], tmp_path: Path
+    ) -> None:
+        mgr = AgentRuntimeManager(enabled=True)
+        mgr.add_workspace_root(tmp_path)
+        assert root_posts == [
+            ("http://127.0.0.1:8601", str(tmp_path))
+        ]
+
+    def test_failure_only_warns(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: Any, tmp_path: Path
+    ) -> None:
+        def boom(url: str, path: Path) -> None:
+            raise httpx.ConnectError("connection refused")
+
+        monkeypatch.setattr(runtime_mod, "_post_workspace_root", boom)
+        mgr = AgentRuntimeManager(enabled=True)
+        with caplog.at_level(logging.WARNING, logger="traffic_analyzer.web.agentproxy.runtime"):
+            mgr.add_workspace_root(tmp_path)  # 不抛异常
+        assert "failed to register workspace root" in caplog.text
+
+    def test_disabled_runtime_skips(
+        self, root_posts: List[Any], tmp_path: Path
+    ) -> None:
+        mgr = AgentRuntimeManager(enabled=False)
+        mgr.add_workspace_root(tmp_path)
+        assert root_posts == []
+
+    def test_start_registers_current_workspace(
+        self, root_posts: List[Any], tmp_path: Path
+    ) -> None:
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        mgr = AgentRuntimeManager(
+            workspace=ws,
+            enabled=True,
+            spawn=lambda argv, **k: _FakeProc(argv),
+            port_probe=lambda port: False,
+        )
+        mgr.start()
+        assert root_posts == [("http://127.0.0.1:8601", str(ws))]
+
+
+# ---------------------------------------------------------------------------
+# POST /api/workspace:切换工作区后热注册进 toolserver
+# ---------------------------------------------------------------------------
+
+
+class TestWorkspaceSwitchRegistersRoot:
+    def test_set_workspace_registers_root(
+        self,
+        root_posts: List[Any],
+        workspace: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        monkeypatch.delenv(app_mod.WORKSPACE_ENV_VAR, raising=False)
+        app = app_mod.create_app(workspace=str(workspace))
+        app.state.agent_runtime = AgentRuntimeManager(enabled=True)
+        new_ws = tmp_path / "ws2"
+        new_ws.mkdir()
+        client = TestClient(app)
+        resp = client.post("/api/workspace", json={"path": str(new_ws)})
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"path": str(new_ws.resolve())}
+        assert root_posts == [
+            ("http://127.0.0.1:8601", str(new_ws.resolve()))
+        ]
+
+    def test_set_workspace_without_runtime_keeps_semantics(
+        self,
+        root_posts: List[Any],
+        workspace: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        monkeypatch.delenv(app_mod.WORKSPACE_ENV_VAR, raising=False)
+        app = app_mod.create_app(workspace=str(workspace))
+        new_ws = tmp_path / "ws2"
+        new_ws.mkdir()
+        client = TestClient(app)
+        resp = client.post("/api/workspace", json={"path": str(new_ws)})
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"path": str(new_ws.resolve())}
+        assert root_posts == []  # 无 runtime:不注册,也不报错

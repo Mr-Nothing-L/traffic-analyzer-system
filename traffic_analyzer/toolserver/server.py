@@ -2,8 +2,10 @@
 
 [文件说明]
 作用:三个 POST JSON 端点:/tools/video_meta、/tools/extract_frames、
-    /tools/draw_boxes。所有 video_path 解析后必须落在 workspace 内,
-    越界返回 403;错误统一为 {"error": {"code", "message"}}。
+    /tools/draw_boxes。所有 video_path 解析后必须落在允许根(allowed_roots)
+    之内,越界返回 403;错误统一为 {"error": {"code", "message"}}。
+    允许根:启动 --workspace 为初始根,运行期可经 POST /config/roots
+    热注册新工作区(web 层切换工作区时调用,免重启)。
 上游:toolserver/__init__.py(create_app 导出);__main__.py(uvicorn 启动)。
 下游:web/frames.read_video_meta/read_frame_jpeg(CV 复用);
     utils/image_drawing(load_image/_draw_text_with_background/_load_scaled_font);
@@ -60,6 +62,10 @@ class VideoMetaRequest(BaseModel):
     video_path: str
 
 
+class AddRootRequest(BaseModel):
+    path: str
+
+
 class ExtractFramesRequest(BaseModel):
     video_path: str
     timestamps: Optional[List[float]] = None
@@ -88,21 +94,33 @@ def _error(status_code: int, code: str, message: str) -> HTTPException:
     )
 
 
-def _resolve_video(workspace: Path, video_path: str) -> Path:
-    """Resolve ``video_path`` (absolute or workspace-relative) inside workspace."""
+def _resolve_video(allowed_roots: List[Path], video_path: str) -> Path:
+    """Resolve ``video_path``; the result must lie inside one allowed root.
+
+    相对路径按允许根顺序逐个尝试(取首个存在的);越界候选跳过,全部
+    越界才 403;落在根内但文件不存在则 404。
+    """
     candidate = Path(video_path)
-    if not candidate.is_absolute():
-        candidate = workspace / candidate
-    resolved = candidate.resolve()
-    if not resolved.is_relative_to(workspace):
-        raise _error(
-            403,
-            "path_outside_workspace",
-            f"video_path resolves outside workspace: {video_path}",
-        )
-    if not resolved.is_file():
+    search = (
+        [candidate]
+        if candidate.is_absolute()
+        else [root / candidate for root in allowed_roots]
+    )
+    inside_missing = False
+    for item in search:
+        resolved = item.resolve()
+        if not any(resolved.is_relative_to(root) for root in allowed_roots):
+            continue
+        if resolved.is_file():
+            return resolved
+        inside_missing = True
+    if inside_missing:
         raise _error(404, "video_not_found", f"Video not found: {video_path}")
-    return resolved
+    raise _error(
+        403,
+        "path_outside_workspace",
+        f"video_path resolves outside allowed roots: {video_path}",
+    )
 
 
 def _meta_or_error(video: Path) -> Dict[str, Any]:
@@ -138,13 +156,15 @@ def _even_timestamps(duration_s: float, n: int) -> List[float]:
 
 
 def create_app(workspace: Path | str) -> FastAPI:
-    """Build the tool server app bound to ``workspace`` (path safety root)."""
+    """Build the tool server app with ``workspace`` as the initial allowed root."""
     root = Path(workspace).resolve()
     if not root.is_dir():
         raise ValueError(f"Workspace is not a directory: {workspace}")
 
     app = FastAPI(title="traffic-analyzer toolserver")
     app.state.workspace = root
+    # 路径安全根集合:初始根 + 运行期经 /config/roots 热注册的工作区。
+    app.state.allowed_roots = [root]
 
     @app.exception_handler(StarletteHTTPException)
     async def _http_error_handler(
@@ -167,11 +187,26 @@ def create_app(workspace: Path | str) -> FastAPI:
         )
 
     def _resolve(request: Request, video_path: str) -> Path:
-        return _resolve_video(request.app.state.workspace, video_path)
+        return _resolve_video(request.app.state.allowed_roots, video_path)
 
     @app.get("/health")
-    def health() -> Dict[str, Any]:
-        return {"status": "ok", "workspace": str(root)}
+    def health(request: Request) -> Dict[str, Any]:
+        return {
+            "status": "ok",
+            "workspace": str(root),
+            "roots": [str(r) for r in request.app.state.allowed_roots],
+        }
+
+    @app.post("/config/roots")
+    def add_root(body: AddRootRequest, request: Request) -> Dict[str, Any]:
+        """热注册一个允许根(须为已存在目录);幂等,返回当前根列表。"""
+        new_root = Path(body.path).expanduser().resolve()
+        if not new_root.is_dir():
+            raise _error(400, "invalid_root", f"Not a directory: {body.path}")
+        roots: List[Path] = request.app.state.allowed_roots
+        if new_root not in roots:
+            roots.append(new_root)
+        return {"roots": [str(r) for r in roots]}
 
     @app.post("/tools/video_meta")
     def video_meta(body: VideoMetaRequest, request: Request) -> Dict[str, Any]:

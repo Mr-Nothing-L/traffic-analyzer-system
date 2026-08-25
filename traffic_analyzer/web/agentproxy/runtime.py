@@ -5,7 +5,9 @@
 两个子进程:① Python 视频工具服务 ``python3 -m traffic_analyzer.toolserver
 --workspace <当前workspace或项目根> --port 8601``;② TS agent 服务
 ``npx tsx src/server/main.ts``(cwd=agent/,env 注入 AGENT_PORT=8602 与
-TOOLSERVER_URL)。端口被占用 / Popen 失败仅记日志降级(state 记为
+TOOLSERVER_URL)。toolserver 持有「允许根」集合,--workspace 只是初始根;
+add_workspace_root() 经 POST /config/roots 把新工作区热注册进去(web 层
+切换工作区时调用),免重启;注册失败仅记 warning,不抛异常。端口被占用 / Popen 失败仅记日志降级(state 记为
 port_occupied/failed),不影响 web 其他功能;/api/agent/health 据此与下游
 探测报告 unavailable。stop() 对整个进程组 SIGTERM→SIGKILL(子进程经
 start_new_session 独立成组;agent 是 npx/tsx 包装器,只杀直接子进程会把
@@ -33,6 +35,8 @@ import threading
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+import httpx
+
 from traffic_analyzer.web.jobs.job import REPO_ROOT
 
 logger = logging.getLogger(__name__)
@@ -42,6 +46,9 @@ AGENT_PORT_ENV_VAR = "AGENT_RUNTIME_AGENT_PORT"
 TOOLSERVER_PORT_ENV_VAR = "AGENT_RUNTIME_TOOLSERVER_PORT"
 DEFAULT_TOOLSERVER_PORT = 8601
 DEFAULT_AGENT_PORT = 8602
+
+# 注册允许根是旁路请求:toolserver 未就绪/旧版本无此端点都不能拖慢调用方。
+_REGISTER_ROOT_TIMEOUT = 2.0
 
 _FALSE_VALUES = {"0", "false", "no", "off"}
 
@@ -74,6 +81,15 @@ def _port_in_use(port: int, host: str = "127.0.0.1", timeout: float = 0.5) -> bo
             return True
     except OSError:
         return False
+
+
+def _post_workspace_root(toolserver_url: str, path: Path) -> None:
+    """POST /config/roots 的实际 HTTP 调用(独立出来便于测试替换)。"""
+    httpx.post(
+        f"{toolserver_url}/config/roots",
+        json={"path": str(path)},
+        timeout=_REGISTER_ROOT_TIMEOUT,
+    )
 
 
 def _drain_stdout(proc: subprocess.Popen, name: str) -> None:
@@ -220,6 +236,22 @@ class AgentRuntimeManager:
         ).start()
         logger.info("agent runtime: spawned %s (pid %s, port %s)", name, proc.pid, port)
 
+    def add_workspace_root(self, path: Path) -> None:
+        """把一个工作区目录热注册进 toolserver 的允许根集合。
+
+        失败(toolserver 未就绪、旧版本无 /config/roots、超时等)仅记
+        warning:注册是旁路优化,不影响工作区切换本身。
+        """
+        if not self._enabled:
+            return
+        try:
+            _post_workspace_root(self.toolserver_url, Path(path))
+        except Exception as exc:  # noqa: BLE001 - 注册失败降级为告警
+            logger.warning(
+                "agent runtime: failed to register workspace root %s: %s",
+                path, exc,
+            )
+
     def start(self) -> None:
         """拉起 toolserver 与 agent 服务;任一失败仅降级,不抛异常。"""
         if not self._enabled:
@@ -249,6 +281,9 @@ class AgentRuntimeManager:
             env=agent_env,
             port=self._agent_port,
         )
+        # toolserver 的 --workspace 只是初始根;把当前工作区热注册进去,
+        # 之后切换工作区由 web 层调 add_workspace_root 追加,免重启。
+        self.add_workspace_root(workspace)
 
     def stop(self) -> None:
         """对两个子进程的进程组 SIGTERM→SIGKILL;可重复调用。

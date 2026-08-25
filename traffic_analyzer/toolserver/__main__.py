@@ -24,8 +24,9 @@ def main() -> None:
     parser.add_argument(
         "--workspace",
         default=os.environ.get("TRAFFIC_ANALYZER_WORKSPACE"),
-        help="Path-safety root; every video_path must resolve inside it "
-        "(env: TRAFFIC_ANALYZER_WORKSPACE).",
+        help="Initial path-safety root; every video_path must resolve inside "
+        "an allowed root, and more roots can be registered at runtime via "
+        "POST /config/roots (env: TRAFFIC_ANALYZER_WORKSPACE).",
     )
     parser.add_argument(
         "--port",

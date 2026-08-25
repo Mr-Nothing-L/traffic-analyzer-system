@@ -24,12 +24,14 @@ import {
 } from 'naive-ui'
 import { useAgentChatStore } from '../stores/agentchat'
 import type { AgentAccess, AgentMode, AgentSessionInfo, DetectionPayload } from '../stores/agentchat'
+import { useWorkspaceStore } from '../stores/workspace'
 import { ApiError } from '../api/client'
 import { mdToHtml } from '../utils/markdown'
 import UiIcon from '../components/UiIcon.vue'
 import ContextRing from '../components/chat/ContextRing.vue'
 
 const agent = useAgentChatStore()
+const ws = useWorkspaceStore()
 const message = useMessage()
 
 const question = ref('')
@@ -52,8 +54,9 @@ const busy = computed(
     agent.status === 'running' ||
     agent.status === 'awaiting_approval',
 )
+/* 无会话也可点发送:send 内按当前工作区惰性建会话(工作区切换后 sessionId 已清空) */
 const canSend = computed(
-  () => !!agent.sessionId && !!question.value.trim() && !busy.value && !videoUploading.value,
+  () => !!question.value.trim() && !busy.value && !videoUploading.value,
 )
 
 /* ---- 历史会话栏:按最近活跃倒序;相对时间(后端为 epoch ms) ---- */
@@ -449,8 +452,12 @@ onMounted(async () => {
   window.addEventListener('keydown', onGalleryKey)
   try {
     await agent.fetchSessions()
-    const latest = sortedSessions.value[0]
-    if (latest) await agent.selectSession(latest.id) // 有历史:续上最近会话
+    // 续上当前工作区的最近会话(会话绑 workspaceDir;无该字段的旧会话视为通用);
+    // 当前工作区没有历史会话时新建,避免把旧工作区会话绑到新工作区
+    const latest = sortedSessions.value.find(
+      (s) => !s.workspaceDir || !ws.path || s.workspaceDir === ws.path,
+    )
+    if (latest) await agent.selectSession(latest.id)
     else await agent.createSession()
     await nextTick()
     scrollToBottom() // 进入页面初始滚到底(仅这一次主动滚动)

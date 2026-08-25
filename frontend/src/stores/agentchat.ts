@@ -15,9 +15,10 @@
  * POST   /api/agent/sessions/{id}/recall({entryIndex}) → {status:'ok'}(409=对话进行中;
  *   entryIndex 为后端持久化条目下标,不含本地 system 条目)。
  * fetch+ReadableStream 按 \n\n 分块解析 data: 行,组件只接线,状态全部在这里。 */
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
 import { defineStore } from 'pinia'
 import { ApiError } from '../api/client'
+import { useWorkspaceStore } from './workspace'
 
 /** 权限模式三档:逐条确认 manual / 自动通过 auto / 完全自主 yolo。 */
 export type AgentMode = 'manual' | 'auto' | 'yolo'
@@ -312,6 +313,26 @@ export const useAgentChatStore = defineStore('agentchat', () => {
     lastImages = undefined
   }
 
+  /* ---- 工作区切换:后端在建会话时注入当前工作区作 workspaceDir,旧会话仍绑旧工作区,
+   * 新工作区相对路径送入旧会话会解析失败。监听工作区路径变化:清当前会话态与 pendingVideo
+   * (不删后端历史会话),下次发送/进入对话时按新工作区惰性建新会话。
+   * 首次加载(prev 为 null)不算切换;selectSession 不动工作区路径,不会误触发。 */
+  const wsStore = useWorkspaceStore()
+  watch(
+    () => wsStore.path,
+    (next, prev) => {
+      if (prev == null || next === prev) return
+      supersedeTurn()
+      sessionId.value = null
+      entries.value = []
+      usedTokens.value = null
+      pendingVideo.value = null
+      error.value = null
+      status.value = 'idle'
+      resetLastTurn()
+    },
+  )
+
   /** 拉历史会话列表(失败抛错,调用方提示)。 */
   async function fetchSessions() {
     const r = (await reqJson('/api/agent/sessions', 'GET')) as {
@@ -553,13 +574,18 @@ export const useAgentChatStore = defineStore('agentchat', () => {
     }
   }
 
-  /** 发送一轮(压 user 条目);opts.images 为 dataURL 数组(≤4)。进行中/审批中忽略。 */
+  /** 发送一轮(压 user 条目);opts.images 为 dataURL 数组(≤4)。进行中/审批中忽略。
+   * 无会话(工作区切换后已清空)时先按当前工作区惰性建会话,建不上则交给失败条/重试。 */
   async function send(input: string, opts: SendOptions = {}) {
     const busy =
       status.value === 'connecting' ||
       status.value === 'running' ||
       status.value === 'awaiting_approval'
-    if (!sessionId.value || busy) return
+    if (busy) return
+    if (!sessionId.value) {
+      await createSession()
+      if (!sessionId.value) return // 建会话失败:状态已置 failed,由失败条重试兜底
+    }
     lastInput = input
     lastVideoPath = opts.videoPath || undefined
     lastImages = opts.images?.length ? [...opts.images] : undefined

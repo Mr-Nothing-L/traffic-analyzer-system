@@ -295,4 +295,10 @@ def set_workspace(body: WorkspaceSetRequest, request: Request) -> Dict[str, Any]
         raise HTTPException(status_code=403, detail="workspace not in allowed list")
     request.app.state.workspace.set(path)
     invalidate_caches()  # 工作区变更:旧 key 的缓存一并清掉(防内存堆积/串数据)
+    # 把新工作区热注册进 toolserver 允许根(免重启);运行时不存在或注册
+    # 失败都不影响切换本身。鸭子类型取用,避免 workspace → agentproxy 依赖。
+    runtime = getattr(request.app.state, "agent_runtime", None)
+    add_root = getattr(runtime, "add_workspace_root", None)
+    if add_root is not None:
+        add_root(path)
     return {"path": str(path)}
