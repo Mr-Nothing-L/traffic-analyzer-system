@@ -253,6 +253,10 @@ class SftSample(BaseModel):
     attr_mentions: Optional[Dict[str, Dict[str, Any]]] = None
     # 乐观锁:GET /api/results 的 file_sig 回传,写前不一致 → 409;落盘时排除。
     base_sig: Optional[str] = None
+    # 追溯字段:PUT 落盘时由服务端覆写;声明为可选仅为兼容「GET 带回磁盘
+    # 字段、前端原样回传」的二次保存(extra=forbid 下缺失声明会 422)。
+    last_edited_by: Optional[str] = None
+    last_edited_at: Optional[str] = None
 
     @field_validator("action")
     @classmethod
