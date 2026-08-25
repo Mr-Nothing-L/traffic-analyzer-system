@@ -7,6 +7,7 @@
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -991,5 +992,51 @@ describe('POST /workspaces/restore', () => {
     } finally {
       rmSync(empty, { recursive: true, force: true });
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 切换会话慢的根因回归:restore/history 不得物化整会话。messages 里可能有
+// 几十 MB 的视频 dataURL(load_video),restore 与 GET /history 只需要
+// entries;若它们解析 messages,启动/首次点击会被全量 JSON.parse 阻塞。
+// 用损坏的 message_json 作探针:任何对 messages 的解析都会立刻炸掉。
+// ---------------------------------------------------------------------------
+
+describe('history/restore 只读 entries(不解析 messages)', () => {
+  it('messages 行损坏时:启动恢复、列表、history 仍正常', async () => {
+    const provider = new ScriptedProvider([[text('检测完成')]]);
+    await startServer(provider, [echoTool()]);
+    const sessionId = await createSession();
+
+    const res = await startChat(sessionId, '检测这个视频');
+    if (res.body === null) throw new Error('no body');
+    await readUntilDone(sseReader(res.body));
+    await agentServer?.close();
+
+    // 直接把 messages 表改成非法 JSON(模拟超大/异常消息行)。
+    const db = new DatabaseSync(path.join(workspace, '.agent', 'sessions.db'));
+    db.prepare('UPDATE messages SET message_json = ?').run('{broken');
+    db.close();
+
+    // 重启并经启动路径恢复(构造器 workspaces):只开库,不物化。
+    await startServer(new ScriptedProvider([]), [echoTool()], {
+      restoreWorkspaceDirs: [workspace],
+    });
+
+    // 列表以磁盘行为准:不碰 messages。
+    const list = await getJson('/sessions');
+    expect(list.status).toBe(200);
+    const sessions = (list.json as { sessions: { id: string }[] }).sessions;
+    expect(sessions.map((s) => s.id)).toEqual([sessionId]);
+
+    // history 只读 entries:不物化整会话,损坏的 messages 不影响。
+    const history = await getJson(`/sessions/${sessionId}/history`);
+    expect(history.status).toBe(200);
+    const entries = (history.json as { entries: { kind: string }[] }).entries;
+    expect(entries.map((e) => e.kind)).toEqual(['user', 'assistant']);
+
+    // POST /workspaces/restore 运行时路径:storage 已开 → 幂等 0,不炸。
+    const restored = await postJson('/workspaces/restore', { workspaceDir: workspace });
+    expect(restored.json).toEqual({ status: 'ok', restored: 0 });
   });
 });

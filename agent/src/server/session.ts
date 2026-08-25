@@ -4,8 +4,11 @@
  * createdAt, lastActiveAt};create/get/list/appendMessages/appendEntries +
  * idle 过期清扫(默认 2h,只清内存不删盘;delete 才删盘)。
  *
- * 构造时可传 workspaces 把磁盘上的历史 session 全量加载进内存;get() 对
- * 已打开 storage 做懒恢复(过期清扫后重新命中)。过期清扫用 unref 的
+ * 构造时可传 workspaces、运行时可调 restoreWorkspace 打开磁盘上的
+ * sessions.db:都只「打开 storage」不加载内容(list() 直接以磁盘行为准);
+ * get() 对已打开 storage 做整会话懒恢复(含 messages,续跑/压缩需要),
+ * getEntries() 只读 entries(history 接口用,messages 里可能有几十 MB 的
+ * 视频 dataURL,全量解析会阻塞事件循环)。过期清扫用 unref 的
  * setInterval,不阻塞进程退出。
  */
 import { randomUUID } from 'node:crypto';
@@ -75,10 +78,8 @@ export class SessionManager {
     this.idleMs = options.idleMs ?? DEFAULT_SESSION_IDLE_MS;
     this.onExpire = options.onExpire;
     for (const workspaceDir of options.workspaces ?? []) {
-      const storage = this.storageFor(workspaceDir);
-      for (const row of storage.listSessions()) {
-        this.sessions.set(row.id, this.materialize(storage, row));
-      }
+      // 只打开 storage:磁盘行由 list()/get() 按需读取,启动不做全量加载。
+      this.storageFor(workspaceDir);
     }
     this.sweeper = setInterval(() => {
       this.sweep();
@@ -118,6 +119,21 @@ export class SessionManager {
     return undefined;
   }
 
+  /**
+   * history 专用:只取时间线条目,不物化整会话。内存命中直接返回;否则在
+   * 已打开的 storage 里找该 session 并只解析 entries —— messages 里可能有
+   * 几十 MB 的视频 dataURL(load_video),history 不需要,全量解析会阻塞
+   * 事件循环。未知 session 返回 undefined。
+   */
+  getEntries(id: string): TimelineEntry[] | undefined {
+    const cached = this.sessions.get(id);
+    if (cached !== undefined) return cached.entries;
+    for (const storage of this.storages.values()) {
+      if (storage.getSession(id) !== undefined) return storage.loadEntries(id);
+    }
+    return undefined;
+  }
+
   /** 所有已知 session 的摘要:磁盘为准,内存中的活跃时间/标题更新。 */
   list(): SessionSummary[] {
     const byId = new Map<string, SessionSummary>();
@@ -134,21 +150,18 @@ export class SessionManager {
 
   /**
    * 运行时恢复一个 workspace 的历史会话(POST /workspaces/restore 用):
-   * 打开 <workspaceDir>/.agent/sessions.db(文件不存在返回 0,不创建文件),
-   * 把磁盘 session 加载进内存索引。幂等:已在内存的 session 跳过(内存是
-   * lastKnownUsage 等内存态的唯一权威,不能用磁盘行覆盖),重复调用返回 0。
+   * 打开 <workspaceDir>/.agent/sessions.db(文件不存在返回 0,不创建文件)。
+   * 只打开 storage、不把 session 物化进内存:list() 直接以磁盘行为准,
+   * 会话内容由 get()/getEntries() 按需懒恢复,避免启动时全量解析
+   * messages(可能几十 MB)阻塞事件循环。幂等:storage 已打开时返回 0,
+   * 否则返回磁盘会话数。
    */
   restoreWorkspace(workspaceDir: string): number {
     const dbPath = path.join(workspaceDir, '.agent', 'sessions.db');
     if (!existsSync(dbPath)) return 0;
+    if (this.storages.has(workspaceDir)) return 0;
     const storage = this.storageFor(workspaceDir);
-    let restored = 0;
-    for (const row of storage.listSessions()) {
-      if (this.sessions.has(row.id)) continue;
-      this.sessions.set(row.id, this.materialize(storage, row));
-      restored += 1;
-    }
-    return restored;
+    return storage.listSessions().length;
   }
 
   /** 追加消息并刷新活跃时间(同步落盘)。未知 session 返回 false。 */

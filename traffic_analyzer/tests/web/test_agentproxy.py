@@ -946,6 +946,9 @@ class TestRuntimeManager:
         assert agent.kwargs["cwd"].endswith("agent")
         assert agent.kwargs["env"]["AGENT_PORT"] == "8602"
         assert agent.kwargs["env"]["TOOLSERVER_URL"] == "http://127.0.0.1:8601"
+        # 自己 spawn 的 agent 由 env 在启动时自行恢复磁盘历史会话
+        # (避免「spawn 后立即 HTTP restore 撞上子进程尚未 listen」的竞态)
+        assert agent.kwargs["env"]["AGENT_RESTORE_WORKSPACES"] == str(ws)
 
         snap = mgr.snapshot()
         assert snap["toolserver"]["state"] == "running"
@@ -1281,9 +1284,11 @@ class TestRestoreWorkspace:
         mgr.restore_workspace(tmp_path)
         assert restore_posts == []
 
-    def test_start_restores_current_workspace(
+    def test_start_spawns_agent_with_restore_env(
         self, restore_posts: List[Any], tmp_path: Path
     ) -> None:
+        """自己 spawn 的 agent 走 AGENT_RESTORE_WORKSPACES 启动自恢复,
+        不再发 HTTP restore(spawn 后立即调用会撞上子进程尚未 listen 的竞态)。"""
         ws = tmp_path / "ws"
         ws.mkdir()
         mgr = AgentRuntimeManager(
@@ -1291,6 +1296,22 @@ class TestRestoreWorkspace:
             enabled=True,
             spawn=lambda argv, **k: _FakeProc(argv),
             port_probe=lambda port: False,
+        )
+        mgr.start()
+        assert restore_posts == []
+
+    def test_start_restores_external_agent_over_http(
+        self, restore_posts: List[Any], tmp_path: Path
+    ) -> None:
+        """端口被外部已运行 agent 占用时(未 spawn,env 不覆盖),经 HTTP
+        补一次 restore(实例在听,无启动竞态)。"""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        mgr = AgentRuntimeManager(
+            workspace=ws,
+            enabled=True,
+            spawn=lambda argv, **k: _FakeProc(argv),
+            port_probe=lambda port: True,
         )
         mgr.start()
         assert restore_posts == [("http://127.0.0.1:8602", str(ws))]

@@ -16,7 +16,7 @@
  * POST   /api/agent/sessions/{id}/recall({entryIndex}) → {status:'ok'}(409=对话进行中;
  *   entryIndex 为后端持久化条目下标,不含本地 system 条目)。
  * fetch+ReadableStream 按 \n\n 分块解析 data: 行,组件只接线,状态全部在这里。 */
-import { ref, watch } from 'vue'
+import { markRaw, ref, watch } from 'vue'
 import { defineStore } from 'pinia'
 import { ApiError } from '../api/client'
 import { useWorkspaceStore } from './workspace'
@@ -349,6 +349,10 @@ export const useAgentChatStore = defineStore('agentchat', () => {
   let ctrl: AbortController | null = null
   /** 轮次代际:切换/新建会话会中断在途流并递增,旧 runTurn 的收尾不再写状态。 */
   let turnSeq = 0
+  /** 选择代际:selectSession 的 history 请求在途期间,若发生更新的选择/
+   * 新建会话/工作区切换,晚到的响应必须丢弃(stale write 会把已清空的旧
+   * 工作区会话写回时间线)。 */
+  let selectSeq = 0
   let lastInput = ''
   let lastVideoPath: string | undefined
   let lastImages: string[] | undefined
@@ -380,6 +384,7 @@ export const useAgentChatStore = defineStore('agentchat', () => {
     (next, prev) => {
       if (prev == null || next === prev) return
       supersedeTurn()
+      selectSeq += 1 // 使在途的 selectSession 失效:旧工作区会话不得写回
       sessionId.value = null
       entries.value = []
       usedTokens.value = null
@@ -405,6 +410,7 @@ export const useAgentChatStore = defineStore('agentchat', () => {
   /** 创建会话:workspaceDir 由后端代理注入,前端只传权限模式。 */
   async function createSession() {
     supersedeTurn()
+    selectSeq += 1 // 新建取代任何在途的 selectSession
     status.value = 'connecting'
     error.value = null
     sessionId.value = null
@@ -428,6 +434,7 @@ export const useAgentChatStore = defineStore('agentchat', () => {
   async function selectSession(id: string) {
     if (id === sessionId.value && entries.value.length) return
     supersedeTurn()
+    const gen = ++selectSeq
     status.value = 'connecting'
     error.value = null
     resetLastTurn()
@@ -435,8 +442,16 @@ export const useAgentChatStore = defineStore('agentchat', () => {
       const r = (await reqJson(`/api/agent/sessions/${id}/history`, 'GET')) as {
         entries?: unknown[]
       }
+      // 在途期间发生了更新的选择/新建/工作区切换:丢弃晚到的历史
+      if (gen !== selectSeq) return
       entries.value = (Array.isArray(r.entries) ? r.entries : [])
-        .map(mapHistoryEntry)
+        .map((raw) => {
+          const e = mapHistoryEntry(raw)
+          // 历史条目落盘后不再变更:markRaw 跳过深响应式代理(工具结果/
+          // 附件里的大 base64 字符串逐层 proxy 化开销可观);流式轮次新
+          // 压入的条目不受影响,仍走正常响应式更新。
+          return e === null ? null : markRaw(e)
+        })
         .filter((e): e is AgentEntry => e !== null)
       sessionId.value = id
       const info = sessions.value.find((s) => s.id === id)

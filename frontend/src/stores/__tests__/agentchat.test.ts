@@ -3,7 +3,7 @@
 // 新工作区相对路径送入旧会话会解析失败。期望:工作区路径变化清空当前会话态
 // (sessionId/entries/pendingVideo,不删后端历史会话列表),首次加载不触发。
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { nextTick } from 'vue';
+import { isReactive, nextTick } from 'vue';
 import { createPinia, setActivePinia } from 'pinia';
 
 // workspace store 初始化即读 localStorage,node 环境下先垫一层内存实现
@@ -90,6 +90,124 @@ describe('工作区切换重置 agent 会话', () => {
     await nextTick();
     expect(agent.sessionId).toBe('s2');
     expect(agent.entries).toHaveLength(1);
+  });
+});
+
+// selectSession 竞态回归:history 请求在途期间,工作区切换/新建/后一次选择
+// 都会清空或取代本地状态;晚到的 history 响应必须丢弃,否则会把已清空的
+// 旧会话写回时间线(用户看到「历史会话内容又冒出来/串台」)。同时验证历史
+// 条目 markRaw(大 base64 图片字符串不做深响应式 proxy 化)。
+function historyResponse(entries: unknown[]): Response {
+  return new Response(JSON.stringify({ entries }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+describe('selectSession 代际守卫', () => {
+  it('history 在途期间工作区切换:晚到的响应不得写回旧会话', async () => {
+    const { ws, agent } = await load();
+    ws.path = '/ws/a';
+    await nextTick();
+
+    let release: (r: Response) => void = () => {};
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: unknown) => {
+        const url = String(input);
+        if (url.endsWith('/history')) {
+          return new Promise<Response>((resolve) => {
+            release = resolve;
+          });
+        }
+        // 工作区 watch 触发的 fetchSessions 等
+        return Promise.resolve(
+          new Response(JSON.stringify({ sessions: [] }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+        );
+      }),
+    );
+
+    const pending = agent.selectSession('s-old');
+    await nextTick();
+    expect(agent.status).toBe('connecting');
+
+    ws.path = '/ws/b'; // 工作区切换:清空会话态,使在途 select 失效
+    await nextTick();
+
+    release(historyResponse([{ kind: 'user', text: '旧会话内容', images: [], at: 1 }]));
+    await pending;
+
+    expect(agent.entries).toEqual([]); // 晚到的旧会话历史不得写回
+    expect(agent.sessionId).toBeNull();
+    expect(agent.status).toBe('idle');
+    vi.unstubAllGlobals();
+  });
+
+  it('后一次选择取代前一次:前一次晚到的 history 被丢弃', async () => {
+    const { agent } = await load();
+    const releases = new Map<string, (r: Response) => void>();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: unknown) => {
+        const url = String(input);
+        if (url.endsWith('/history')) {
+          return new Promise<Response>((resolve) => releases.set(url, resolve));
+        }
+        return Promise.resolve(
+          new Response(JSON.stringify({ sessions: [] }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+        );
+      }),
+    );
+
+    const p1 = agent.selectSession('s1');
+    const p2 = agent.selectSession('s2');
+    // s2 先落地:生效
+    releases.get('/api/agent/sessions/s2/history')!(
+      historyResponse([{ kind: 'user', text: 'B', images: [], at: 2 }]),
+    );
+    await p2;
+    expect(agent.sessionId).toBe('s2');
+    // s1 晚到:被丢弃,不得覆盖 s2
+    releases.get('/api/agent/sessions/s1/history')!(
+      historyResponse([{ kind: 'user', text: 'A', images: [], at: 1 }]),
+    );
+    await p1;
+    expect(agent.sessionId).toBe('s2');
+    expect(agent.entries).toHaveLength(1);
+    expect(agent.entries[0]).toMatchObject({ kind: 'user', text: 'B' });
+    vi.unstubAllGlobals();
+  });
+
+  it('历史条目 markRaw:不进深响应式(大 base64 免 proxy 化),字段仍可读', async () => {
+    const { agent } = await load();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: unknown) => {
+        const url = String(input);
+        if (url.endsWith('/history')) {
+          return historyResponse([
+            { kind: 'user', text: 'hi', images: ['data:image/png;base64,AAA'], at: 1 },
+          ]);
+        }
+        return new Response(JSON.stringify({ sessions: [] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }),
+    );
+    await agent.selectSession('s1');
+    vi.unstubAllGlobals();
+
+    expect(agent.entries).toHaveLength(1);
+    const entry = agent.entries[0];
+    expect(isReactive(entry)).toBe(false); // 历史条目不做深响应式代理
+    expect(entry).toMatchObject({ kind: 'user', text: 'hi' });
   });
 });
 

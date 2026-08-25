@@ -15,8 +15,9 @@
  *                                      manual|auto|yolo,内存+磁盘同步,进行中的
  *                                      轮次下一轮生效;非法 mode → 400)
  *   POST   /workspaces/restore     {workspaceDir} → {status:'ok',restored:n}
- *                                      (把该 workspace 磁盘上的历史会话加载进内存
- *                                       索引,幂等;workspaceDir 非已存在目录 → 400,
+ *                                      (打开该 workspace 的 sessions.db 存储:列表
+ *                                       以磁盘为准,会话内容按需懒恢复;幂等,
+ *                                       workspaceDir 非已存在目录 → 400,
  *                                       sessions.db 不存在 → restored:0)
  *   DELETE /sessions/{id}          → {status:'ok'}(同时取消挂起审批、删盘)
  *   POST   /chat                   → SSE 流(text/event-stream,每事件一行 'data: {json}\n\n')
@@ -351,12 +352,13 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
   };
 
   const handleGetHistory = (res: ServerResponse, sessionId: string): void => {
-    const session = sessions.get(sessionId);
-    if (session === undefined) {
+    // 只读 entries:不物化整会话(messages 可能有几十 MB 视频 dataURL)。
+    const entries = sessions.getEntries(sessionId);
+    if (entries === undefined) {
       sendError(res, 404, 'session_not_found', `unknown session: ${sessionId}`);
       return;
     }
-    sendJson(res, 200, { entries: session.entries });
+    sendJson(res, 200, { entries });
   };
 
   const handleDeleteSession = (res: ServerResponse, sessionId: string): void => {

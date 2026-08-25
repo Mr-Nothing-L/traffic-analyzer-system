@@ -10,9 +10,12 @@ add_workspace_root() 经 POST /config/roots 把新工作区热注册进去(web �
 切换工作区时调用),免重启;注册失败仅记 warning,不抛异常。
 restore_workspace() 经 POST agent /workspaces/restore 让 agent server 把
 该工作区 <workspace>/.agent/sessions.db 里的历史会话加载进内存索引(agent
-重启后内存为空、磁盘数据还在,web 启动与工作区切换时各调一次);同为旁路
-调用,失败仅 warning。端口被占用 / Popen 失败仅记日志降级(state 记为
-port_occupied/failed),不影响 web 其他功能;/api/agent/health 据此与下游
+重启后内存为空、磁盘数据还在);web 启动时若 agent 是外部已运行实例
+(端口占用未 spawn)由 start() 调用一次,自己 spawn 的 agent 改由
+AGENT_RESTORE_WORKSPACES 环境变量在进程启动时自行恢复(避免「spawn 后
+立即 HTTP 调用撞上子进程尚未 listen」的竞态);工作区切换时由 web 层再
+调一次。同为旁路调用,失败仅 warning。端口被占用 / Popen 失败仅记日志
+降级(state 记为 port_occupied/failed),不影响 web 其他功能;/api/agent/health 据此与下游
 探测报告 unavailable。stop() 对整个进程组 SIGTERM→SIGKILL(子进程经
 start_new_session 独立成组;agent 是 npx/tsx 包装器,只杀直接子进程会把
 node 孙进程孤儿化)。
@@ -268,9 +271,9 @@ class AgentRuntimeManager:
     def restore_workspace(self, path: Path) -> None:
         """让 agent server 把该工作区的磁盘历史会话加载进内存索引。
 
-        agent server 重启后内存索引为空(只恢复 AGENT_RESTORE_WORKSPACES
-        声明的工作区),经 POST /workspaces/restore 按需恢复。与
-        add_workspace_root 同为旁路调用:失败(agent 未就绪、旧版本无此
+        自己 spawn 的 agent 由 AGENT_RESTORE_WORKSPACES 在启动时自行恢复
+        (见 start());本方法用于外部已运行实例(端口占用)与工作区切换。
+        与 add_workspace_root 同为旁路调用:失败(agent 未就绪、旧版本无此
         端点、超时等)仅记 warning,不影响调用方。
         """
         if not self._enabled:
@@ -305,6 +308,10 @@ class AgentRuntimeManager:
         agent_env = dict(os.environ)
         agent_env["AGENT_PORT"] = str(self._agent_port)
         agent_env["TOOLSERVER_URL"] = self.toolserver_url
+        # 让 agent 进程自己于启动时恢复当前工作区的磁盘历史会话:spawn 后
+        # 立即 HTTP restore 会撞上「子进程尚未 listen」的竞态(连接被拒绝,
+        # 仅 warning 不重试),导致重启后历史会话列表为空、history 404。
+        agent_env["AGENT_RESTORE_WORKSPACES"] = str(workspace)
         self._spawn_one(
             "agent",
             ["npx", "tsx", "src/server/main.ts"],
@@ -315,9 +322,11 @@ class AgentRuntimeManager:
         # toolserver 的 --workspace 只是初始根;把当前工作区热注册进去,
         # 之后切换工作区由 web 层调 add_workspace_root 追加,免重启。
         self.add_workspace_root(workspace)
-        # agent server 是新拉起的(内存索引为空):恢复当前工作区的磁盘历史
-        # 会话,使 web 重启后历史列表立即可见。同为旁路调用,失败仅 warning。
-        self.restore_workspace(workspace)
+        # 端口被外部已运行的 agent 实例占用时,该实例没有我们的
+        # AGENT_RESTORE_WORKSPACES,经 HTTP 补一次 restore(实例在听,
+        # 无启动竞态)。自己 spawn 的已由上面的 env 覆盖,不重复调。
+        if self._states["agent"] == "port_occupied":
+            self.restore_workspace(workspace)
 
     def stop(self) -> None:
         """对两个子进程的进程组 SIGTERM→SIGKILL;可重复调用。
