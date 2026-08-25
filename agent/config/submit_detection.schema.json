@@ -2,11 +2,15 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "submit_detection.schema.json",
   "title": "submit_detection 工具参数",
-  "description": "交通事件检测 agent 的最终提交契约:逐事件结构化判定 + 11 位二进制编码 + 中文 Markdown 报告。位序 = 事件编号 1..11,位 9 恒为 0,全零编码表示正常(已分析、无事件)。一致性要求(schema 之外的运行时校验):normal=true 当且仅当 binary_encoding 为全零;binary_encoding 第 N 位为 1 当且仅当 events 中 event_id=N 的 detected=true。",
+  "description": "交通事件检测 agent 的最终提交契约:逐事件结构化判定 + 11 位二进制编码 + 中文 Markdown 报告。位序 = 事件编号 1..11,位 9 恒为 0,全零编码表示正常(已分析、无事件)。一致性要求(schema 之外的运行时校验):normal=true 当且仅当 binary_encoding 为全零;binary_encoding 第 N 位为 1 当且仅当 events 中 event_id=N 的 detected=true。提交时工具会为每个带 boxes+box_frame 的检出事件调用 draw_boxes 生成标注图,随结果一并返回给用户展示。",
   "type": "object",
   "additionalProperties": false,
-  "required": ["events", "binary_encoding", "normal", "report_markdown"],
+  "required": ["video_path", "events", "binary_encoding", "normal", "report_markdown"],
   "properties": {
+    "video_path": {
+      "type": "string",
+      "description": "被检测视频文件路径(绝对路径或 workspace 相对路径,解析后必须落在沙盒工作区内)。用于为检出事件生成带定位框的标注图。"
+    },
     "events": {
       "type": "array",
       "description": "逐事件判定。应覆盖全部 10 个活跃事件编号(1-8、10、11),未检出的事件也要给出 detected=false 与简短 reasoning。",
@@ -68,6 +72,28 @@
             "type": "array",
             "description": "支撑该判定的证据帧时间戳(秒,即 extract_frames/draw_boxes 中看过对应画面的帧时间点;帧不落盘,不使用文件路径)。detected=true 时不得为空——这是锚定核验的硬性要求。",
             "items": { "type": "number", "minimum": 0 }
+          },
+          "boxes": {
+            "type": "array",
+            "description": "该事件关键目标的定位框列表(归一化 xyxy,0~1 浮点)。detected=true 时应尽量提供(配合 box_frame),提交时用于生成给用户展示的标注图;缺少时不拒绝,但用户将看不到该事件的定位图。",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["x1", "y1", "x2", "y2"],
+              "properties": {
+                "x1": { "type": "number", "minimum": 0, "maximum": 1 },
+                "y1": { "type": "number", "minimum": 0, "maximum": 1 },
+                "x2": { "type": "number", "minimum": 0, "maximum": 1 },
+                "y2": { "type": "number", "minimum": 0, "maximum": 1 },
+                "label": { "type": "string", "description": "框标签(如「白色小客车」);缺省由绘制端处理。" }
+              }
+            }
+          },
+          "box_frame": {
+            "type": "number",
+            "minimum": 0,
+            "description": "boxes 对应的帧时刻(秒),应取自 evidence_frames 中目标最清晰的一帧。提供 boxes 时必须同时提供。"
           }
         }
       }

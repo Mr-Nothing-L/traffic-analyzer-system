@@ -53,6 +53,8 @@ export type TimelineEntry =
       arguments: string | null;
       output: ExecutableToolOutput;
       isError: boolean;
+      /** 工具附带的结构化备注(如 spawn_subagent 的 {reason,steps} 调试 JSON)。 */
+      note?: string;
       at: number;
     }
   | {

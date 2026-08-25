@@ -12,21 +12,35 @@
 from __future__ import annotations
 
 import base64
+import shutil
+import subprocess
 from pathlib import Path
+from typing import List, Tuple
 
+import cv2
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
 from traffic_analyzer.toolserver import create_app
+from traffic_analyzer.web.frames import read_video_meta
 
 WORKSPACE = Path(__file__).resolve().parents[2]
 VIDEO_REL = "演示区/01-02_Event_129_1755579215119_1.mp4"
 VIDEO_ABS = WORKSPACE / VIDEO_REL
+SMALL_VIDEO_REL = "演示区/01-02-04_Event_2048_1750664210002_1.mp4"
+SMALL_VIDEO_ABS = WORKSPACE / SMALL_VIDEO_REL
 
 client = TestClient(create_app(WORKSPACE))
 
 requires_video = pytest.mark.skipif(
     not VIDEO_ABS.is_file(), reason=f"demo video missing: {VIDEO_ABS}"
+)
+requires_small_video = pytest.mark.skipif(
+    not SMALL_VIDEO_ABS.is_file(), reason=f"demo video missing: {SMALL_VIDEO_ABS}"
+)
+requires_ffmpeg = pytest.mark.skipif(
+    shutil.which("ffmpeg") is None, reason="ffmpeg not in PATH"
 )
 
 
@@ -194,3 +208,180 @@ def test_registered_root_serves_real_video(tmp_client: TestClient) -> None:
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["frame_count"] > 0
+
+
+# ---------------------------------------------------------------------------
+# /tools/prepare_video:大小守门,超过 max_mb 用 ffmpeg 阶梯降帧转码
+# ---------------------------------------------------------------------------
+
+_TINY_FPS = 25.0
+_TINY_FRAMES = 30
+_TINY_MAX_MB = 0.0005  # ~524B, tiny test clip is ~2KB -> always over the cap
+
+
+@pytest.fixture()
+def video_client(tmp_path: Path) -> Tuple[TestClient, Path]:
+    """独立 app + tmp 根内一段 cv2 现场合成的 1.2s 小视频(转码产物落 tmp)。"""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    video = workspace / "clip.mp4"
+    writer = cv2.VideoWriter(
+        str(video), cv2.VideoWriter_fourcc(*"mp4v"), _TINY_FPS, (64, 48)
+    )
+    assert writer.isOpened(), "cv2.VideoWriter failed to open"
+    for i in range(_TINY_FRAMES):
+        writer.write(np.full((48, 64, 3), i % 255, dtype=np.uint8))
+    writer.release()
+    return TestClient(create_app(workspace)), video
+
+
+@requires_video
+def test_prepare_video_passthrough() -> None:
+    resp = client.post("/tools/prepare_video", json={"video_path": VIDEO_REL})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["transcoded"] is False
+    assert body["path"] == str(VIDEO_ABS.resolve())
+    assert body["size_bytes"] == VIDEO_ABS.stat().st_size
+    assert body["fps"] > 0
+    assert body["duration_s"] > 0
+
+
+def test_prepare_video_outside_roots_403() -> None:
+    resp = client.post(
+        "/tools/prepare_video", json={"video_path": "/etc/hostname"}
+    )
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["error"]["code"] == "path_outside_workspace"
+
+
+def test_prepare_video_max_mb_capped_at_100() -> None:
+    resp = client.post(
+        "/tools/prepare_video",
+        json={"video_path": "x.mp4", "max_mb": 101},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "invalid_request"
+
+
+def test_prepare_video_ladder_success(
+    video_client: Tuple[TestClient, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tc, _video = video_client
+    calls: List[List[str]] = []
+
+    def fake_run(cmd: List[str], **kwargs: object) -> subprocess.CompletedProcess:
+        calls.append(cmd)
+        if len(calls) == 1:
+            return subprocess.CompletedProcess(cmd, 1)  # 原 fps 重编码失败
+        Path(cmd[-1]).write_bytes(b"x" * 100)  # 后续候选产出 < max_bytes
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(
+        "traffic_analyzer.toolserver.server.subprocess.run", fake_run
+    )
+    resp = tc.post(
+        "/tools/prepare_video",
+        json={"video_path": "clip.mp4", "max_mb": _TINY_MAX_MB},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["transcoded"] is True
+    assert body["fps"] == 12.0  # 阶梯:25 失败后命中 12
+    assert body["size_bytes"] == 100
+    assert body["duration_s"] == pytest.approx(_TINY_FRAMES / _TINY_FPS)
+    assert body["path"].endswith(".agent/transcoded/clip_fps12.mp4")
+    assert len(calls) == 2
+    assert f"fps={_TINY_FPS:g}" in calls[0]
+    assert "fps=12" in calls[1]
+
+
+def test_prepare_video_ladder_all_fail_422(
+    video_client: Tuple[TestClient, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tc, _video = video_client
+
+    def fake_run(cmd: List[str], **kwargs: object) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(cmd, 1)
+
+    monkeypatch.setattr(
+        "traffic_analyzer.toolserver.server.subprocess.run", fake_run
+    )
+    resp = tc.post(
+        "/tools/prepare_video",
+        json={"video_path": "clip.mp4", "max_mb": _TINY_MAX_MB},
+    )
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["error"]["code"] == "transcode_failed"
+
+
+def test_prepare_video_reuses_cached_output(
+    video_client: Tuple[TestClient, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tc, video = video_client
+    cached = (
+        video.parent / ".agent" / "transcoded" / f"clip_fps{_TINY_FPS:g}.mp4"
+    )
+    cached.parent.mkdir(parents=True)
+    cached.write_bytes(b"x" * 100)  # 已存在且 < max_bytes:直接复用
+
+    def fake_run(cmd: List[str], **kwargs: object) -> subprocess.CompletedProcess:
+        raise AssertionError("ffmpeg must not run when cached output fits")
+
+    monkeypatch.setattr(
+        "traffic_analyzer.toolserver.server.subprocess.run", fake_run
+    )
+    resp = tc.post(
+        "/tools/prepare_video",
+        json={"video_path": "clip.mp4", "max_mb": _TINY_MAX_MB},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["transcoded"] is True
+    assert body["path"] == str(cached)
+    assert body["fps"] == _TINY_FPS
+
+
+def test_prepare_video_ffmpeg_missing_500(
+    video_client: Tuple[TestClient, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tc, _video = video_client
+    monkeypatch.setattr(
+        "traffic_analyzer.toolserver.server.shutil.which", lambda _cmd: None
+    )
+    resp = tc.post(
+        "/tools/prepare_video",
+        json={"video_path": "clip.mp4", "max_mb": _TINY_MAX_MB},
+    )
+    assert resp.status_code == 500, resp.text
+    assert resp.json()["error"]["code"] == "tool_unavailable"
+
+
+@requires_small_video
+@requires_ffmpeg
+def test_prepare_video_real_ffmpeg_transcode(tmp_path: Path) -> None:
+    """真实 ffmpeg 端到端:8.8MB 演示视频 + max_mb=2 强制走转码(1080p 下
+    0.5MB 不可达,全阶梯最低档 fps=2 也有 ~1.8MB)。"""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    src = workspace / "demo.mp4"
+    shutil.copyfile(SMALL_VIDEO_ABS, src)
+    tc = TestClient(create_app(workspace))
+    meta = read_video_meta(src)
+    assert meta is not None
+
+    resp = tc.post(
+        "/tools/prepare_video", json={"video_path": "demo.mp4", "max_mb": 2}
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["transcoded"] is True
+    assert body["size_bytes"] < 2 * 1024 * 1024
+    assert body["size_bytes"] == Path(body["path"]).stat().st_size
+    # 产物可解码,且时长与源一致(只降帧率)
+    out_meta = read_video_meta(Path(body["path"]))
+    assert out_meta is not None
+    assert out_meta["duration_sec"] == pytest.approx(
+        meta["duration_sec"], rel=0.05
+    )
+    assert out_meta["fps"] == pytest.approx(body["fps"])

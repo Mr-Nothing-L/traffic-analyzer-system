@@ -83,8 +83,28 @@
       ]
     },
     {
+      "name": "load_video",
+      "description": "将整段视频一次性加载进上下文(以视频形式直接输入模型,而非抽帧)。超过 max_mb(默认 40MB)时由服务端自动降帧/转码。",
+      "when_to_use": "需要完整时序理解、对长视频做全局判断(如事件的起止与演变、全程计数)时,一次加载整段视频;只需查看个别画面时仍用 extract_frames 更省上下文。注意:整段视频占用大量上下文(约 20s 视频 ≈ 33k tokens),短片段优先;降帧后仍超过 50MB 会被拒绝并提示改用抽帧。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "video_path": { "type": "string", "description": "视频文件路径(绝对路径或 workspace 相对路径)" },
+          "max_mb": { "type": "number", "description": "超过该大小(MB)时由服务端降帧/转码,默认 40", "exclusiveMinimum": 0, "default": 40 }
+        },
+        "required": ["video_path"]
+      },
+      "returns": "视频内容(整段 mp4)直接作为模型输入,附文本说明(时长/fps/大小/是否降帧);失败时返回 {error: {code, message}}(403 path_outside_workspace / 404 video_not_found 等)",
+      "limits": [
+        "只读操作,不修改原视频;降帧/转码产物由 toolserver 管理",
+        "video_path 解析后必须落在 workspace 内,越界返回 403",
+        "降帧后仍 >50MB 时调用失败,需改用 extract_frames 抽帧",
+        "整段视频占用大量上下文(约 20s 视频 ≈ 33k tokens),超长视频慎用"
+      ]
+    },
+    {
       "name": "submit_detection",
-      "description": "提交本次检测的最终结构化结果:逐事件判定(events)、11 位二进制编码(binary_encoding)、正常标志(normal)与中文 Markdown 报告(report_markdown)。",
+      "description": "提交本次检测的最终结构化结果:视频路径(video_path)、逐事件判定(events)、11 位二进制编码(binary_encoding)、正常标志(normal)与中文 Markdown 报告(report_markdown)。正式检测时,每个 detected=true 的事件应尽量提供 boxes(归一化定位框)与 box_frame(取自 evidence_frames 的帧时刻),提交时会据此生成带定位框的标注图,用于给用户展示目标定位。",
       "when_to_use": "分析全部完成后调用,且每次分析恰好调用一次。这是唯一有效输出——禁止只在文本回复里给结论。",
       "parameters": { "$ref": "./submit_detection.schema.json" },
       "returns": "{accepted: true} 或 {accepted: false, errors: [...]}(schema 校验失败,需修正后重新调用)",
@@ -92,6 +112,7 @@
         "参数必须符合 submit_detection.schema.json;位 9 恒为 0 由正则强制",
         "binary_encoding、normal 与 events 的 detected 必须互相一致(运行时校验,不一致会被拒绝)",
         "detected=true 的事件 evidence_frames 不得为空",
+        "detected=true 但缺 boxes/box_frame 不会被拒绝,会在结果 meta.annotation_not_provided 中记录,前端降级为无标注图展示;draw_boxes 标注失败同理记入 meta.annotation_missing,不阻塞提交",
         "提交后本轮分析即结束,不再进行其他工具调用"
       ]
     },

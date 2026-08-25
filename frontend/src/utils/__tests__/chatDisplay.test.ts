@@ -1,9 +1,17 @@
 // 对话视图展示纯函数测试:
 // - shouldSendOnEnter:输入法合成态(isComposing/keyCode 229)与 Shift+Enter 不发送;
 // - toolLabel:工具名中文映射,未知工具回退原名;
-// - workspaceVideoSrc:气泡视频地址由 path 确定性推导(历史重载同源)。
-import { describe, it, expect } from 'vitest';
-import { shouldSendOnEnter, toolLabel, workspaceVideoSrc } from '../chatDisplay';
+// - workspaceVideoSrc:气泡视频地址由 path 确定性推导(历史重载同源);
+// - copyText:clipboard API 缺失(非安全上下文)时回退 textarea + execCommand;
+// - detectionEventNote:检测事件标注降级小字(无定位框 / 标注图生成失败)。
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import {
+  copyText,
+  detectionEventNote,
+  shouldSendOnEnter,
+  toolLabel,
+  workspaceVideoSrc,
+} from '../chatDisplay';
 
 describe('shouldSendOnEnter(composer Enter 发送判定)', () => {
   it('普通 Enter 发送', () => {
@@ -37,6 +45,11 @@ describe('toolLabel(工具名中文映射)', () => {
   it('未知工具回退原名', () => {
     expect(toolLabel('some_new_tool')).toBe('some_new_tool');
   });
+
+  it('load_video / spawn_subagent 中文名', () => {
+    expect(toolLabel('load_video')).toBe('加载视频(load_video)');
+    expect(toolLabel('spawn_subagent')).toBe('派生子代理(spawn_subagent)');
+  });
 });
 
 describe('workspaceVideoSrc(气泡视频预览地址推导)', () => {
@@ -64,5 +77,81 @@ describe('workspaceVideoSrc(气泡视频预览地址推导)', () => {
 
   it('无 path 返回 null', () => {
     expect(workspaceVideoSrc(undefined, undefined, '/ws')).toBeNull();
+  });
+});
+
+// node 环境无 DOM,这里垫最小假 document/navigator 验证回退分支
+function fakeTextareaDoc(execResult: boolean) {
+  const ta = {
+    value: '',
+    style: {} as Record<string, string>,
+    setAttribute: vi.fn(),
+    focus: vi.fn(),
+    select: vi.fn(),
+    remove: vi.fn(),
+  };
+  const doc = {
+    createElement: vi.fn(() => ta),
+    body: { appendChild: vi.fn() },
+    execCommand: vi.fn(() => execResult),
+  };
+  return { ta, doc };
+}
+
+describe('copyText(消息复制)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('clipboard API 可用时走 navigator.clipboard.writeText', async () => {
+    const writeText = vi.fn(async () => {});
+    vi.stubGlobal('navigator', { clipboard: { writeText } });
+    const { doc } = fakeTextareaDoc(true);
+    vi.stubGlobal('document', doc);
+    await copyText('你好');
+    expect(writeText).toHaveBeenCalledWith('你好');
+    expect(doc.execCommand).not.toHaveBeenCalled();
+  });
+
+  it('clipboard 缺失(非安全上下文,如局域网 IP)回退 textarea + execCommand', async () => {
+    vi.stubGlobal('navigator', {}); // clipboard 为 undefined
+    const { ta, doc } = fakeTextareaDoc(true);
+    vi.stubGlobal('document', doc);
+    await copyText('降级路径');
+    expect(doc.createElement).toHaveBeenCalledWith('textarea');
+    expect(ta.value).toBe('降级路径');
+    expect(doc.body.appendChild).toHaveBeenCalledWith(ta);
+    expect(ta.select).toHaveBeenCalled();
+    expect(doc.execCommand).toHaveBeenCalledWith('copy');
+    expect(ta.remove).toHaveBeenCalled(); // 隐藏节点用后清理
+  });
+
+  it('回退路径 execCommand 返回 false 时抛错(调用方提示「复制失败」),且仍清理节点', async () => {
+    vi.stubGlobal('navigator', {});
+    const { ta, doc } = fakeTextareaDoc(false);
+    vi.stubGlobal('document', doc);
+    await expect(copyText('x')).rejects.toThrow();
+    expect(ta.remove).toHaveBeenCalled();
+  });
+});
+
+describe('detectionEventNote(检测事件标注降级小字)', () => {
+  it('annotation_missing(画框失败)→ 标注图生成失败', () => {
+    expect(detectionEventNote({ annotation_missing: [3] }, 3)).toBe('标注图生成失败');
+  });
+
+  it('annotation_not_provided(未给框)→ 无定位框', () => {
+    expect(detectionEventNote({ annotation_not_provided: [5] }, 5)).toBe('无定位框');
+  });
+
+  it('两者同时含同一事件时,画框失败优先', () => {
+    expect(
+      detectionEventNote({ annotation_missing: [3], annotation_not_provided: [3] }, 3),
+    ).toBe('标注图生成失败');
+  });
+
+  it('事件不在 meta 名单 / meta 缺省时返回 null', () => {
+    expect(detectionEventNote({ annotation_missing: [3] }, 4)).toBeNull();
+    expect(detectionEventNote(undefined, 3)).toBeNull();
   });
 });

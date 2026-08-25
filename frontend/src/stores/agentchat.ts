@@ -74,6 +74,14 @@ export interface AgentAssistantEntry {
   at?: number
 }
 
+/** spawn_subagent 工具条目下挂的子代理迷你时间线条目(subagent_event 流式期间聚合,
+ * 不落盘不恢复):think=think_delta 聚合的思考;text=text_delta 聚合的子结论文本;
+ * tool=子代理工具调用(tool_call_start 压入,tool_result 按 id 置 done)。 */
+export type AgentSubItem =
+  | { kind: 'think'; text: string }
+  | { kind: 'text'; text: string }
+  | { kind: 'tool'; id: string; name: string; args: string; done: boolean }
+
 export interface AgentToolEntry {
   kind: 'tool'
   /** tool_call_start 的 call.id,tool_result 按它回填。 */
@@ -84,6 +92,10 @@ export interface AgentToolEntry {
   result: string
   /** 工具输出中的图片(dataURL;extract_frames/draw_boxes 等返回的 image ContentPart)。 */
   images: string[]
+  /** 工具输出含 video part(load_video 整段视频直传);只显示静态提示,不做播放器。 */
+  hasVideo: boolean
+  /** 子代理迷你时间线(subagent_event 按 toolCallId 挂到本条目)。 */
+  children: AgentSubItem[]
   isError: boolean
   done: boolean
 }
@@ -110,7 +122,14 @@ export interface DetectionPayload {
     detected: boolean
     reasoning: string
     evidence_frames: string[]
+    /** 逐事件标注图(jpeg dataURL,submit_detection 服务端生成;无框/画框失败时缺省)。 */
+    annotated_image?: string
   }>
+  /** 标注降级元信息:annotation_not_provided=检出但未给定位框;annotation_missing=画框失败。 */
+  meta?: {
+    annotation_not_provided?: number[]
+    annotation_missing?: number[]
+  }
   report_markdown?: string
 }
 
@@ -235,6 +254,15 @@ function extractToolImages(output: unknown): string[] {
   return urls
 }
 
+/** tool_result 的 output 是否含 video part(load_video 整段视频直传)。
+ * 只作标记供 UI 显示静态提示;视频 dataURL 体积巨大,绝不当图渲染。 */
+function hasToolVideo(output: unknown): boolean {
+  if (!Array.isArray(output)) return false
+  return output.some(
+    (p) => p !== null && typeof p === 'object' && (p as { type?: unknown }).type === 'video_url',
+  )
+}
+
 /** GET history 的条目 → 本地时间线条目;不认识/缺 kind 的条目丢弃。 */
 function mapHistoryEntry(raw: unknown): AgentEntry | null {
   if (!raw || typeof raw !== 'object') return null
@@ -268,6 +296,8 @@ function mapHistoryEntry(raw: unknown): AgentEntry | null {
         typeof e.arguments === 'string' ? e.arguments : JSON.stringify(e.arguments ?? ''),
       result: formatToolOutput(e.output),
       images: extractToolImages(e.output),
+      hasVideo: hasToolVideo(e.output),
+      children: [],
       isError: e.isError === true,
       done: true,
     }
@@ -489,6 +519,8 @@ export const useAgentChatStore = defineStore('agentchat', () => {
             : JSON.stringify(call?.arguments ?? ''),
         result: '',
         images: [],
+        hasVideo: false,
+        children: [],
         isError: false,
         done: false,
       })
@@ -503,9 +535,51 @@ export const useAgentChatStore = defineStore('agentchat', () => {
         const output = (ev.result as { output?: unknown } | undefined)?.output
         tool.result = formatToolOutput(output)
         tool.images = extractToolImages(output)
+        tool.hasVideo = hasToolVideo(output)
       }
       // 审批后的 tool_result 到达即说明流已恢复
       if (status.value === 'awaiting_approval') status.value = 'running'
+    } else if (ev.type === 'subagent_event') {
+      // 子代理嵌套事件:按 toolCallId 挂到对应 spawn_subagent 工具条目的 children,
+      // 不建独立顶层条目;不落盘(历史只留工具条目的结论 output)。
+      const id = String(ev.toolCallId ?? '')
+      const tool = [...entries.value]
+        .reverse()
+        .find((e): e is AgentToolEntry => e.kind === 'tool' && e.id === id)
+      const child = ev.event as Record<string, unknown> | undefined
+      if (tool && child) {
+        if (child.type === 'think_delta' || child.type === 'text_delta') {
+          const kind = child.type === 'think_delta' ? ('think' as const) : ('text' as const)
+          const last = tool.children[tool.children.length - 1]
+          // 连续同类 delta 聚合进同一尾巴条目;中间插过工具调用则开新块
+          if (last?.kind === kind) last.text += String(child.text ?? '')
+          else tool.children.push({ kind, text: String(child.text ?? '') })
+        } else if (child.type === 'tool_call_start') {
+          const call = child.call as
+            | { id?: unknown; name?: unknown; arguments?: unknown }
+            | undefined
+          tool.children.push({
+            kind: 'tool',
+            id: String(call?.id ?? ''),
+            name: String(call?.name ?? ''),
+            args:
+              typeof call?.arguments === 'string'
+                ? call.arguments
+                : JSON.stringify(call?.arguments ?? ''),
+            done: false,
+          })
+        } else if (child.type === 'tool_result') {
+          const cid = String(child.toolCallId ?? '')
+          const ct = [...tool.children]
+            .reverse()
+            .find(
+              (c): c is Extract<AgentSubItem, { kind: 'tool' }> =>
+                c.kind === 'tool' && c.id === cid,
+            )
+          if (ct) ct.done = true
+        }
+        // 其余子事件(step_done/done 等)无独立 UI
+      }
     } else if (ev.type === 'approval_request') {
       entries.value.push({
         kind: 'approval',

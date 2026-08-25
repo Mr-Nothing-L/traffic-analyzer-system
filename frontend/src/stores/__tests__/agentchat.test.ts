@@ -137,4 +137,187 @@ describe('历史工具条目图片提取', () => {
     }
     vi.unstubAllGlobals();
   });
+
+  it('history 的 load_video 条目:video part 只置 hasVideo,不进 images(result 仍为文本)', async () => {
+    const { agent } = await load();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (String(url).endsWith('/history')) {
+          return new Response(
+            JSON.stringify({
+              entries: [
+                {
+                  kind: 'tool',
+                  toolCallId: 'c9',
+                  name: 'load_video',
+                  arguments: '{"video_path":"a.mp4"}',
+                  output: [
+                    { type: 'text', text: '已加载完整视频:时长 10s,fps 2,大小 30.0MB,已降帧/转码' },
+                    { type: 'video_url', videoUrl: { url: 'data:video/mp4;base64,QUJD' } },
+                  ],
+                  isError: false,
+                  at: 1,
+                },
+              ],
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        return new Response('{}', { status: 200 });
+      }),
+    );
+    await agent.selectSession('s1');
+    const tool = agent.entries[0];
+    expect(tool.kind).toBe('tool');
+    if (tool.kind === 'tool') {
+      expect(tool.result).toContain('已加载完整视频');
+      expect(tool.images).toEqual([]); // 40MB 视频 dataURL 绝不当图渲染
+      expect(tool.hasVideo).toBe(true);
+      expect(tool.children).toEqual([]);
+    }
+    vi.unstubAllGlobals();
+  });
+});
+
+// SSE 流式事件测试:fetch 垫一个按 \n\n 分块的 data: 行流,驱动 send 全流程。
+function sseResponse(events: unknown[]): Response {
+  const body = events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join('');
+  return new Response(body, {
+    status: 200,
+    headers: { 'Content-Type': 'text/event-stream' },
+  });
+}
+
+function stubChatStream(events: unknown[]) {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: unknown) => {
+      const url = String(input);
+      if (url.endsWith('/api/agent/chat')) return sseResponse(events);
+      // fetchSessions 等其余请求
+      return new Response(JSON.stringify({ sessions: [] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }),
+  );
+}
+
+describe('SSE 流式事件', () => {
+  it('subagent_event 聚合到对应 spawn_subagent 工具条目的 children,不建顶层条目', async () => {
+    const { agent } = await load();
+    agent.sessionId = 's1';
+    stubChatStream([
+      {
+        type: 'tool_call_start',
+        call: { id: 'c1', name: 'spawn_subagent', arguments: '{"task":"研判整段视频"}' },
+      },
+      { type: 'subagent_event', toolCallId: 'c1', event: { type: 'think_delta', text: '先想' } },
+      { type: 'subagent_event', toolCallId: 'c1', event: { type: 'think_delta', text: '再想' } },
+      {
+        type: 'subagent_event',
+        toolCallId: 'c1',
+        event: {
+          type: 'tool_call_start',
+          call: { id: 't1', name: 'extract_frames', arguments: '{"timestamps":[2]}' },
+        },
+      },
+      {
+        type: 'subagent_event',
+        toolCallId: 'c1',
+        event: { type: 'tool_result', toolCallId: 't1', result: { output: 'ok' }, isError: false },
+      },
+      { type: 'subagent_event', toolCallId: 'c1', event: { type: 'text_delta', text: '子结论' } },
+      {
+        type: 'tool_result',
+        toolCallId: 'c1',
+        name: 'spawn_subagent',
+        result: { output: '子代理结论:无事件', note: '{"reason":"completed","steps":3}' },
+        isError: false,
+      },
+      { type: 'done', reason: 'stop_turn' },
+    ]);
+    await agent.send('研判一下');
+    vi.unstubAllGlobals();
+
+    // 顶层只有 user + 一个工具条目,子事件不建独立条目
+    expect(agent.entries.map((e) => e.kind)).toEqual(['user', 'tool']);
+    const tool = agent.entries[1];
+    if (tool.kind !== 'tool') throw new Error('expected tool entry');
+    expect(tool.result).toBe('子代理结论:无事件');
+    expect(tool.done).toBe(true);
+    expect(tool.children).toEqual([
+      { kind: 'think', text: '先想再想' }, // 连续 think_delta 聚合
+      {
+        kind: 'tool',
+        id: 't1',
+        name: 'extract_frames',
+        args: '{"timestamps":[2]}',
+        done: true, // tool_result 回填
+      },
+      { kind: 'text', text: '子结论' },
+    ]);
+    expect(agent.status).toBe('done');
+  });
+
+  it('load_video 工具结果:video part 只置 hasVideo,images 为空,result 取文本部分', async () => {
+    const { agent } = await load();
+    agent.sessionId = 's1';
+    stubChatStream([
+      {
+        type: 'tool_call_start',
+        call: { id: 'c2', name: 'load_video', arguments: '{"video_path":"a.mp4"}' },
+      },
+      {
+        type: 'tool_result',
+        toolCallId: 'c2',
+        name: 'load_video',
+        result: {
+          output: [
+            { type: 'text', text: '已加载完整视频:时长 10s。视频内容如下:' },
+            { type: 'video_url', videoUrl: { url: 'data:video/mp4;base64,QUJD' } },
+          ],
+        },
+        isError: false,
+      },
+      { type: 'done', reason: 'stop_turn' },
+    ]);
+    await agent.send('看看视频');
+    vi.unstubAllGlobals();
+
+    const tool = agent.entries[1];
+    if (tool.kind !== 'tool') throw new Error('expected tool entry');
+    expect(tool.result).toBe('已加载完整视频:时长 10s。视频内容如下:');
+    expect(tool.images).toEqual([]);
+    expect(tool.hasVideo).toBe(true);
+  });
+
+  it('detection 事件 data 原样入条目(含逐事件 annotated_image 与 meta 降级字段)', async () => {
+    const { agent } = await load();
+    agent.sessionId = 's1';
+    const payload = {
+      binary_encoding: '0_0_1_0_0_0_0_0_0_0_0',
+      normal: false,
+      events: [
+        {
+          event_id: 3,
+          detected: true,
+          reasoning: '追尾',
+          evidence_frames: ['f1'],
+          annotated_image: 'data:image/jpeg;base64,WFg=',
+        },
+        { event_id: 5, detected: true, reasoning: '逆行', evidence_frames: ['f2'] },
+      ],
+      meta: { annotation_not_provided: [5] },
+      report_markdown: '## 报告',
+    };
+    stubChatStream([{ type: 'detection', data: payload }, { type: 'done', reason: 'stop_turn' }]);
+    await agent.send('检测');
+    vi.unstubAllGlobals();
+
+    const det = agent.entries[1];
+    expect(det.kind).toBe('detection');
+    if (det.kind === 'detection') expect(det.data).toEqual(payload);
+  });
 });

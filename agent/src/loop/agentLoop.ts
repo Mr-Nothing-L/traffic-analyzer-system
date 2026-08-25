@@ -67,6 +67,16 @@ export type AgentLoopEvent =
       readonly afterTokens: number;
     }
   | {
+      /**
+       * 子代理嵌套事件:工具(如 spawn_subagent)在执行期间经
+       * ctx.onSubagentEvent 上报子 loop 事件,loop 包装成本事件进入父
+       * 事件流;server 原样透传 SSE(前端按 toolCallId 归属到对应工具)。
+       */
+      readonly type: 'subagent_event';
+      readonly toolCallId: string;
+      readonly event: AgentLoopEvent;
+    }
+  | {
       readonly type: 'done';
       readonly reason: AgentLoopDoneReason;
       readonly stopResult?: ExecutableToolResult;
@@ -94,6 +104,14 @@ export interface AgentLoopOptions {
   readonly compaction?: { readonly maxContextTokens: number } & CompactionOverrides;
   readonly signal?: AbortSignal;
   readonly onEvent?: (event: AgentLoopEvent) => void | Promise<void>;
+  /**
+   * 子代理事件回调:设置后接管子代理事件的投递(不再自动包装成
+   * 'subagent_event' 进入 onEvent 流);缺省时 loop 自动包装转发。
+   */
+  readonly onSubagentEvent?: (
+    parentToolCallId: string,
+    event: AgentLoopEvent,
+  ) => void | Promise<void>;
 }
 
 export interface AgentLoopResult {
@@ -128,6 +146,16 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
 
   const emit = async (event: AgentLoopEvent): Promise<void> => {
     await options.onEvent?.(event);
+  };
+  /** 工具上报的子代理事件:options.onSubagentEvent 设置时交给它接管,
+   * 否则包装成 'subagent_event' 进入本 loop 的事件流(server 透传 SSE)。 */
+  const forwardSubagentEvent = async (toolCallId: string, event: unknown): Promise<void> => {
+    const childEvent = event as AgentLoopEvent;
+    if (options.onSubagentEvent !== undefined) {
+      await options.onSubagentEvent(toolCallId, childEvent);
+      return;
+    }
+    await emit({ type: 'subagent_event', toolCallId, event: childEvent });
   };
   // 经函数读取以避免 TS 对可选链的窄化在 await 后残留(abort 随时可能发生)。
   const isAborted = (): boolean => options.signal?.aborted === true;
@@ -199,7 +227,9 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       accesses: execution.accesses ?? [],
       start: () =>
         Promise.resolve({
-          result: executeWithTimeout(execution, call, options.signal, toolTimeoutMs),
+          result: executeWithTimeout(execution, call, options.signal, toolTimeoutMs, (event) =>
+            forwardSubagentEvent(call.id, event),
+          ),
         }),
     };
   };
@@ -336,20 +366,27 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   }
 }
 
-/** 超时与异常统一合成 isError 结果;超时会 abort 工具 ctx.signal(工具是否响应取决于自身)。 */
+/** 超时与异常统一合成 isError 结果;超时会 abort 工具 ctx.signal(工具是否响应取决于自身)。
+ * 超时优先级:execution.timeoutMs(工具自声明,如子代理 600s)> loop 级 toolTimeoutMs。 */
 async function executeWithTimeout(
   execution: RunnableToolExecution,
   call: ToolCall,
   signal: AbortSignal | undefined,
   timeoutMs: number,
+  onSubagentEvent: (event: unknown) => void | Promise<void>,
 ): Promise<ExecutableToolResult> {
+  const effectiveTimeoutMs = execution.timeoutMs ?? timeoutMs;
   const controller = new AbortController();
   const onAbort = (): void => controller.abort();
   signal?.addEventListener('abort', onAbort, { once: true });
 
   const run = (async (): Promise<ExecutableToolResult> => {
     try {
-      return await execution.execute({ toolCallId: call.id, signal: controller.signal });
+      return await execution.execute({
+        toolCallId: call.id,
+        signal: controller.signal,
+        onSubagentEvent,
+      });
     } catch (error) {
       return {
         output: `Tool "${call.name}" execution failed: ${errorMessage(error)}`,
@@ -360,17 +397,17 @@ async function executeWithTimeout(
 
   let timer: ReturnType<typeof setTimeout> | undefined;
   const raced =
-    timeoutMs > 0
+    effectiveTimeoutMs > 0
       ? Promise.race([
           run,
           new Promise<ExecutableToolResult>((resolve) => {
             timer = setTimeout(() => {
               controller.abort();
               resolve({
-                output: `Tool "${call.name}" execution timed out after ${timeoutMs}ms.`,
+                output: `Tool "${call.name}" execution timed out after ${effectiveTimeoutMs}ms.`,
                 isError: true,
               });
-            }, timeoutMs);
+            }, effectiveTimeoutMs);
           }),
         ])
       : run;

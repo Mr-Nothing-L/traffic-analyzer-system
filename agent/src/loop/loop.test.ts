@@ -649,3 +649,86 @@ describe('compaction', () => {
     expect(extractText(t1 ?? createUserMessage(''))).toBe('[已压缩]');
   });
 });
+
+describe('子代理事件转发(subagent_event)', () => {
+  /** 执行时经 ctx.onSubagentEvent 上报嵌套事件的假工具。 */
+  function subEmitTool(childEvents: AgentLoopEvent[]): ExecutableTool {
+    return {
+      name: 'sub_emit',
+      description: 'fake tool emitting nested loop events',
+      parameters: { type: 'object' },
+      resolveExecution: () => ({
+        accesses: [],
+        approvalRule: 'sub_emit()',
+        execute: async (ctx) => {
+          for (const ev of childEvents) await ctx.onSubagentEvent?.(ev);
+          return { output: 'sub-done' };
+        },
+      }),
+    };
+  }
+
+  it('缺省包装成 subagent_event 进入父 loop 事件流', async () => {
+    const h = harness(
+      [[toolCall('c1', 'sub_emit', {})], [text('结束')]],
+      [subEmitTool([{ type: 'text_delta', text: '子代理思考中' }])],
+    );
+
+    const result = await h.run();
+
+    expect(result.reason).toBe('completed');
+    const nested = h.events.find((e) => e.type === 'subagent_event');
+    expect(nested).toMatchObject({
+      type: 'subagent_event',
+      toolCallId: 'c1',
+      event: { type: 'text_delta', text: '子代理思考中' },
+    });
+  });
+
+  it('options.onSubagentEvent 设置时接管投递(不再进入 onEvent 流)', async () => {
+    const h = harness(
+      [[toolCall('c1', 'sub_emit', {})], [text('结束')]],
+      [subEmitTool([{ type: 'text_delta', text: 'x' }])],
+    );
+    const received: Array<{ id: string; ev: AgentLoopEvent }> = [];
+
+    const result = await h.run({
+      onSubagentEvent: (id, ev) => {
+        received.push({ id, ev });
+      },
+    });
+
+    expect(result.reason).toBe('completed');
+    expect(received).toHaveLength(1);
+    expect(received[0]).toMatchObject({ id: 'c1', ev: { type: 'text_delta', text: 'x' } });
+    expect(h.events.some((e) => e.type === 'subagent_event')).toBe(false);
+  });
+
+  it('execution.timeoutMs 覆盖 loop 级 toolTimeoutMs(长任务不被 120s 截断)', async () => {
+    const slowTool: ExecutableTool = {
+      name: 'slow',
+      description: 'fake slow tool',
+      parameters: { type: 'object' },
+      resolveExecution: () => ({
+        accesses: [],
+        approvalRule: 'slow()',
+        timeoutMs: 60_000,
+        execute: () =>
+          new Promise<ExecutableToolResult>((resolve) => {
+            setTimeout(() => resolve({ output: 'slow-ok' }), 200);
+          }),
+      }),
+    };
+    const h = harness(
+      [[toolCall('c1', 'slow', {})], [text('结束')]],
+      [slowTool],
+    );
+
+    // loop 级 50ms 会超时;工具自声明 60s 生效 → 正常完成
+    const result = await h.run({ toolTimeoutMs: 50 });
+
+    expect(result.reason).toBe('completed');
+    const toolResult = h.events.find((e) => e.type === 'tool_result');
+    expect(toolResult).toMatchObject({ name: 'slow', isError: false });
+  });
+});

@@ -1,7 +1,7 @@
 /**
- * registerBuiltinTools: one-shot registration of the detection agent's seven
- * builtin tools (video_meta / extract_frames / draw_boxes / read_file /
- * write_file / run_script / submit_detection).
+ * registerBuiltinTools: one-shot registration of the detection agent's eight
+ * builtin tools (video_meta / extract_frames / draw_boxes / load_video /
+ * read_file / write_file / run_script / submit_detection).
  *
  * Model-facing descriptions come from agent/config/toolset.json; the
  * submit_detection parameters are toolset.json's `$ref` to
@@ -16,6 +16,7 @@ import type { ExecutableTool } from '../contract';
 import type { ToolRegistry } from '../registry';
 import { createFileTools } from './fileTools';
 import { ToolserverClient } from './httpToolserver';
+import { createLoadVideoTool } from './loadVideo';
 import { createSubmitDetectionTool, loadSubmitDetectionSchema } from './submitDetection';
 import { createVideoTools } from './videoTools';
 
@@ -85,10 +86,14 @@ export function registerBuiltinTools(
 
   const tools: ExecutableTool[] = [
     ...createVideoTools(client, workspace, describe),
+    createLoadVideoTool(client, workspace, describe('load_video')),
     ...createFileTools(workspace, describe),
     createSubmitDetectionTool(
       describe('submit_detection'),
       expandToolsetParameters(entriesByName.get('submit_detection')),
+      // 传入 client 与 workspace:video_path 在 resolve 阶段做沙盒读校验,
+      // accesses 进权限链,与其他视频工具一致。
+      { client, workspace },
     ),
   ];
   for (const tool of tools) {
@@ -105,5 +110,15 @@ export {
   createVideoMetaTool,
   createVideoTools,
 } from './videoTools';
+export { createLoadVideoTool } from './loadVideo';
 export { createFileTools, createReadFileTool, createRunScriptTool, createWriteFileTool } from './fileTools';
 export { createSubmitDetectionTool, crossValidateDetection, loadSubmitDetectionSchema } from './submitDetection';
+export {
+  createSpawnSubagentTool,
+  MAX_CONCURRENT_SUBAGENTS,
+  SPAWN_SUBAGENT_TOOL_NAME,
+  SUBAGENT_MAX_STEPS,
+  SUBAGENT_TIMEOUT_MS,
+  type SpawnSubagentDeps,
+  type SpawnSubagentProviderHandle,
+} from './spawnSubagent';

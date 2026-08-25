@@ -1,8 +1,10 @@
 """FastAPI application factory and /tools/* endpoints.
 
 [文件说明]
-作用:三个 POST JSON 端点:/tools/video_meta、/tools/extract_frames、
-    /tools/draw_boxes。所有 video_path 解析后必须落在允许根(allowed_roots)
+作用:四个 POST JSON 端点:/tools/video_meta、/tools/extract_frames、
+    /tools/draw_boxes、/tools/prepare_video(视频大小守门:超过 max_mb
+    用 ffmpeg 阶梯降帧转码,产物放 <允许根>/.agent/transcoded/)。
+    所有 video_path 解析后必须落在允许根(allowed_roots)
     之内,越界返回 403;错误统一为 {"error": {"code", "message"}}。
     允许根:启动 --workspace 为初始根,运行期可经 POST /config/roots
     热注册新工作区(web 层切换工作区时调用,免重启)。
@@ -16,6 +18,8 @@ from __future__ import annotations
 
 import base64
 import io
+import shutil
+import subprocess
 import zlib
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -43,6 +47,13 @@ _HARD_MAX_FRAMES = 8
 # annotated frames go back to the user, keep them readable.
 _EXTRACT_JPEG_QUALITY = 70
 _ANNOTATED_JPEG_QUALITY = 85
+
+# prepare_video size gate: default cap and hard anti-misuse ceiling (MB).
+_DEFAULT_PREPARE_MAX_MB = 40.0
+_HARD_PREPARE_MAX_MB = 100.0
+# Uniform fps-downshift ladder (duration preserved, only frame rate drops);
+# the source fps itself is tried first (plain re-encode at crf 28).
+_FPS_LADDER = (12.0, 8.0, 6.0, 4.0, 3.0, 2.0)
 
 # Label->color palette convention (originally shared with the retired
 # quick-chat QA; kept local, no shared module).
@@ -87,6 +98,13 @@ class DrawBoxesRequest(BaseModel):
     boxes: List[Box] = Field(min_length=1)
 
 
+class PrepareVideoRequest(BaseModel):
+    video_path: str
+    max_mb: float = Field(
+        default=_DEFAULT_PREPARE_MAX_MB, gt=0, le=_HARD_PREPARE_MAX_MB
+    )
+
+
 def _error(status_code: int, code: str, message: str) -> HTTPException:
     """Build an HTTPException whose detail already matches the error contract."""
     return HTTPException(
@@ -128,6 +146,21 @@ def _meta_or_error(video: Path) -> Dict[str, Any]:
     if meta is None:
         raise _error(404, "video_meta_unavailable", "Video metadata unreadable")
     return meta
+
+
+def _transcode_dir(allowed_roots: List[Path], video: Path) -> Path:
+    """Transcode output dir under the allowed root that contains ``video``."""
+    root = next(r for r in allowed_roots if video.is_relative_to(r))
+    out_dir = root / ".agent" / "transcoded"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    return out_dir
+
+
+def _fps_candidates(src_fps: float) -> List[float]:
+    """Ladder: source fps first (plain re-encode), then uniform downshifts."""
+    candidates = [src_fps] if src_fps > 0 else []
+    candidates.extend(n for n in _FPS_LADDER if src_fps <= 0 or n < src_fps)
+    return candidates
 
 
 def _frame_index(meta: Dict[str, Any], timestamp: float) -> int:
@@ -287,5 +320,69 @@ def create_app(workspace: Path | str) -> FastAPI:
             "width": width,
             "height": height,
         }
+
+    @app.post("/tools/prepare_video")
+    def prepare_video(
+        body: PrepareVideoRequest, request: Request
+    ) -> Dict[str, Any]:
+        """Size gate for direct video upload: transcode-downshift if oversized.
+
+        <= max_mb: pass through untouched; else re-encode with ffmpeg along the
+        fps ladder (duration preserved, audio dropped) until under the cap.
+        """
+        video = _resolve(request, body.video_path)
+        meta = _meta_or_error(video)
+        max_bytes = int(body.max_mb * 1024 * 1024)
+        duration_s = meta["duration_sec"]
+        size = video.stat().st_size
+        if size <= max_bytes:
+            return {
+                "path": str(video),
+                "size_bytes": size,
+                "fps": meta["fps"],
+                "duration_s": duration_s,
+                "transcoded": False,
+            }
+        if shutil.which("ffmpeg") is None:
+            raise _error(500, "tool_unavailable", "ffmpeg not found in PATH")
+        out_dir = _transcode_dir(request.app.state.allowed_roots, video)
+        for fps in _fps_candidates(float(meta["fps"] or 0)):
+            tag = f"{fps:g}"
+            out = out_dir / f"{video.stem}_fps{tag}.mp4"
+            if not (out.is_file() and out.stat().st_size < max_bytes):
+                proc = subprocess.run(
+                    [
+                        "ffmpeg",
+                        "-y",
+                        "-i",
+                        str(video),
+                        "-vf",
+                        f"fps={tag}",
+                        "-c:v",
+                        "libx264",
+                        "-preset",
+                        "veryfast",
+                        "-crf",
+                        "28",
+                        "-an",
+                        str(out),
+                    ],
+                    capture_output=True,
+                )
+                if proc.returncode != 0:
+                    continue
+            if out.is_file() and out.stat().st_size < max_bytes:
+                return {
+                    "path": str(out),
+                    "size_bytes": out.stat().st_size,
+                    "fps": fps,
+                    "duration_s": duration_s,
+                    "transcoded": True,
+                }
+        raise _error(
+            422,
+            "transcode_failed",
+            f"All fps ladder candidates stayed >= {body.max_mb} MB: {video}",
+        )
 
     return app

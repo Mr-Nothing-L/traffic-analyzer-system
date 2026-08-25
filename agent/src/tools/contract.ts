@@ -38,6 +38,13 @@ export interface ExecutableToolContext {
   readonly toolCallId: string;
   readonly signal: AbortSignal;
   readonly onUpdate?: (update: ToolUpdate) => void;
+  /**
+   * 嵌套(子代理)loop 事件上报通道,由 loop 执行工具时注入:工具(如
+   * spawn_subagent)把子 loop 事件交给它,loop 侧包装成 AgentLoopEvent
+   * 'subagent_event' 进入父 loop 事件流。声明为 unknown 是为了避免
+   * contract ↔ loop 的循环导入;生产方保证传入 AgentLoopEvent。
+   */
+  readonly onSubagentEvent?: (event: unknown) => void | Promise<void>;
 }
 
 export interface RunnableToolExecution {
@@ -50,6 +57,11 @@ export interface RunnableToolExecution {
    */
   readonly approvalRule: string;
   readonly matchesRule?: (ruleArgs: string) => boolean;
+  /**
+   * 单次执行超时(ms);缺省用 loop 级 toolTimeoutMs。长任务工具
+   * (如 spawn_subagent,600s)在此抬高自己的上限。
+   */
+  readonly timeoutMs?: number;
   readonly execute: (ctx: ExecutableToolContext) => Promise<ExecutableToolResult>;
 }
 

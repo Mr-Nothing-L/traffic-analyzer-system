@@ -6,7 +6,7 @@
  * 调 recall API 从时间线移除该条及其后全部,进行中禁用)/ 工具气泡(参数摘要 + 结果折叠
  * (文本 + 图片缩略图,点击进画廊),失败标红)/
  * 审批卡(批准/本会话都批准/拒绝;历史未决显示「已失效」)/ 检测结果卡(11 位编码等宽高亮 +
- * markdown 报告))/ 失败条(错误 + 重试)/ composer 圆角盒(三行:附件预览行(图片缩略图 +
+ * 检出事件(逐事件标注图进画廊,无框/画框失败显示降级小字)+ markdown 报告))/ 失败条(错误 + 重试)/ composer 圆角盒(三行:附件预览行(图片缩略图 +
  * 视频块,视频同一时刻最多一个,可移除)/ 无边框 textarea(自动增高)/ 底部功能行(左:「+」
  * 上传图片或视频 + 权限模式选择器(逐条确认/自动通过/完全自主);右:压缩按钮 + 上下文圆环
  * + 发送/停止);图片粘贴/选择/拖拽 ≤4 张走 dataURL,
@@ -31,7 +31,7 @@ import type { AgentAccess, AgentMode, AgentSessionInfo, AgentUserEntry, Detectio
 import { useWorkspaceStore } from '../stores/workspace'
 import { ApiError } from '../api/client'
 import { mdToHtml } from '../utils/markdown'
-import { shouldSendOnEnter, toolLabel, workspaceVideoSrc } from '../utils/chatDisplay'
+import { copyText, detectionEventNote, shouldSendOnEnter, toolLabel, workspaceVideoSrc } from '../utils/chatDisplay'
 import UiIcon from '../components/UiIcon.vue'
 import ContextRing from '../components/chat/ContextRing.vue'
 
@@ -127,10 +127,11 @@ function fmtTime(ts?: number): string {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 
-/** 复制消息文本(静默成功,失败才提示)。 */
+/** 复制消息文本(静默成功,失败才提示)。非安全上下文(局域网 IP 直连)
+ * 无 navigator.clipboard,copyText 内部回退 execCommand。 */
 async function onCopy(text: string) {
   try {
-    await navigator.clipboard.writeText(text)
+    await copyText(text)
   } catch {
     message.error('复制失败')
   }
@@ -146,16 +147,19 @@ async function onRecall(i: number) {
   }
 }
 
-/* ---- 折叠状态:思考过程 / 工具结果,均按条目下标记,默认收起;切换/新建会话时重置 ---- */
+/* ---- 折叠状态:思考过程 / 工具结果 / 子代理思考,均按条目标记,默认收起;切换/新建会话时重置 ---- */
 const thinkOpen = reactive(new Set<number>())
 const toolOpen = reactive(new Set<number>())
-function toggle(set: Set<number>, i: number) {
-  if (set.has(i)) set.delete(i)
-  else set.add(i)
+/** 子代理思考折叠:`${工具条目下标}:${child 下标}`。 */
+const subThinkOpen = reactive(new Set<string>())
+function toggle<T>(set: Set<T>, key: T) {
+  if (set.has(key)) set.delete(key)
+  else set.add(key)
 }
 function resetFolds() {
   thinkOpen.clear()
   toolOpen.clear()
+  subThinkOpen.clear()
 }
 
 const lastThinkLine = (think: string) =>
@@ -345,7 +349,8 @@ function fileToDataUrl(file: File): Promise<string> {
   })
 }
 
-/* ---- 图片画廊:user 气泡附件图与工具结果图按时间序进画廊;点击放大,左右切换(按钮/键盘) ---- */
+/* ---- 图片画廊:user 气泡附件图 / 工具结果图 / 检测卡逐事件标注图按时间序进画廊;
+ * 点击放大,左右切换(按钮/键盘) ---- */
 const previewIndex = ref<number | null>(null)
 
 const galleryImages = computed(() => {
@@ -353,6 +358,12 @@ const galleryImages = computed(() => {
   for (const e of agent.entries) {
     if (e.kind === 'user' && e.images?.length) urls.push(...e.images)
     else if (e.kind === 'tool' && e.images.length) urls.push(...e.images)
+    else if (e.kind === 'detection') {
+      const p = asPayload(e.data)
+      if (p?.events) {
+        for (const ev of p.events) if (ev.annotated_image) urls.push(ev.annotated_image)
+      }
+    }
   }
   return urls
 })
@@ -682,9 +693,35 @@ onUnmounted(() => {
                 <span v-else-if="e.isError" class="tool-state err">失败</span>
                 <span v-else class="tool-state ok">完成</span>
               </button>
-              <div v-if="toolOpen.has(i) && e.done" class="tool-result">
+              <div v-if="toolOpen.has(i) && (e.done || e.children.length)" class="tool-result">
+                <!-- 子代理迷你时间线(spawn_subagent:think/text 聚合块 + 子工具一行小字) -->
+                <template v-for="(c, j) in e.children" :key="j">
+                  <div v-if="c.kind === 'think'" class="sub-think">
+                    <button class="think-head" @click="toggle(subThinkOpen, `${i}:${j}`)">
+                      <UiIcon
+                        name="up"
+                        :size="10"
+                        class="think-caret"
+                        :class="{ open: subThinkOpen.has(`${i}:${j}`) }"
+                      />
+                      <span>子代理思考</span>
+                    </button>
+                    <div v-if="subThinkOpen.has(`${i}:${j}`)" class="think-text">{{ c.text }}</div>
+                  </div>
+                  <div v-else-if="c.kind === 'text'" class="sub-text">{{ c.text }}</div>
+                  <div v-else class="sub-tool">
+                    工具调用:{{ toolLabel(c.name) }}
+                    <span class="tool-args">{{ argsSummary(c.args) }}</span>
+                    <span v-if="!c.done" class="tool-state">执行中…</span>
+                  </div>
+                </template>
                 <div v-if="e.result" class="tool-result-text">{{ e.result }}</div>
-                <div v-else-if="!e.images.length" class="tool-result-text">(无输出)</div>
+                <div v-else-if="e.done && !e.images.length" class="tool-result-text">(无输出)</div>
+                <!-- load_video:视频 part 体积巨大,只显示静态提示,不做播放器 -->
+                <div v-if="e.hasVideo" class="tool-video-note">
+                  <UiIcon name="video" :size="12" />
+                  <span>已加载完整视频(降帧)</span>
+                </div>
                 <div v-if="e.images.length" class="tool-imgs">
                   <img
                     v-for="u in e.images"
@@ -758,12 +795,28 @@ onUnmounted(() => {
                   v-if="asPayload(e.data)!.events?.some((ev) => ev.detected)"
                   class="detection-events"
                 >
-                  <span
+                  <div
                     v-for="ev in asPayload(e.data)!.events!.filter((ev) => ev.detected)"
                     :key="ev.event_id"
-                    class="detection-event"
-                    :title="ev.reasoning"
-                  >事件 {{ ev.event_id }}</span>
+                    class="detection-event-item"
+                  >
+                    <span class="detection-event" :title="ev.reasoning">
+                      事件 {{ ev.event_id }}
+                    </span>
+                    <!-- 逐事件标注图(点击进画廊);无图时按 meta 降级小字 -->
+                    <img
+                      v-if="ev.annotated_image"
+                      class="detection-event-img"
+                      :src="ev.annotated_image"
+                      :alt="`事件 ${ev.event_id} 标注图`"
+                      loading="lazy"
+                      @click="openPreview(ev.annotated_image!)"
+                    />
+                    <span
+                      v-else-if="detectionEventNote(asPayload(e.data)!.meta, ev.event_id)"
+                      class="detection-event-note"
+                    >{{ detectionEventNote(asPayload(e.data)!.meta, ev.event_id) }}</span>
+                  </div>
                 </div>
                 <div
                   v-if="asPayload(e.data)!.report_markdown"
@@ -1389,6 +1442,36 @@ onUnmounted(() => {
   cursor: zoom-in;
 }
 
+/* ---- 子代理迷你时间线(spawn_subagent 展开区内,同工具结果弱化风格) ---- */
+.sub-think {
+  margin: 2px 0;
+}
+
+.sub-text {
+  margin: 2px 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.sub-tool {
+  margin: 2px 0;
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-xs);
+  min-width: 0;
+}
+
+/* load_video:视频 part 不做播放器,仅静态提示行 */
+.tool-video-note {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  margin-top: var(--space-xs);
+  color: var(--color-text2);
+  font-family: var(--font-sans);
+  font-size: var(--text-xs);
+}
+
 /* ---- 审批卡片 ---- */
 .approval {
   margin: var(--space-sm) 0;
@@ -1516,6 +1599,14 @@ onUnmounted(() => {
   margin-top: var(--space-sm);
   display: flex;
   flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+
+/* 检出事件单元:chip + 标注图(或降级小字)纵向排列 */
+.detection-event-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
   gap: var(--space-xs);
 }
 
@@ -1527,6 +1618,22 @@ onUnmounted(() => {
   color: var(--color-accent);
   font-size: var(--text-xs);
   font-weight: 600;
+}
+
+/* 逐事件标注图(submit_detection 服务端生成,点击进画廊) */
+.detection-event-img {
+  width: 200px;
+  height: 130px;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  cursor: zoom-in;
+}
+
+/* 标注降级小字(无定位框 / 标注图生成失败) */
+.detection-event-note {
+  font-size: var(--text-xs);
+  color: var(--color-text2);
 }
 
 .detection-report {

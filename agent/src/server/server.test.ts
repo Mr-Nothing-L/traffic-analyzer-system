@@ -144,6 +144,23 @@ function submitTool(payload: unknown): ExecutableTool {
   };
 }
 
+/** 执行时经 ctx.onSubagentEvent 上报嵌套(子代理)事件的假工具。 */
+function subEmitTool(childEvents: unknown[], note: string): ExecutableTool {
+  return {
+    name: 'sub_emit',
+    description: 'fake tool emitting nested loop events',
+    parameters: { type: 'object' },
+    resolveExecution: () => ({
+      accesses: [],
+      approvalRule: 'sub_emit()',
+      execute: async (ctx): Promise<ExecutableToolResult> => {
+        for (const ev of childEvents) await ctx.onSubagentEvent?.(ev);
+        return { output: '子代理结论:正常', note };
+      },
+    }),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // HTTP / SSE 测试辅助
 // ---------------------------------------------------------------------------
@@ -355,6 +372,43 @@ describe('agent server', () => {
       'tool',
       'assistant',
     ]);
+  });
+
+  it('POST /chat:subagent_event 透传 SSE 且不落盘;tool 条目带 note 结论', async () => {
+    const provider = new ScriptedProvider([
+      [toolCall('c1', 'sub_emit', { task: '分析视频' })],
+      [text('总结')],
+    ]);
+    await startServer(provider, [
+      subEmitTool(
+        [{ type: 'text_delta', text: '子代理思考中' }],
+        '{"reason":"completed","steps":1}',
+      ),
+    ]);
+    const sessionId = await createSession('yolo');
+
+    const res = await startChat(sessionId, '分析一下');
+    if (res.body === null) throw new Error('no body');
+    const events = await readUntilDone(sseReader(res.body));
+
+    // SSE 原样透传嵌套事件,归属到父 toolCallId
+    const nested = events.filter((e) => e.type === 'subagent_event');
+    expect(nested).toHaveLength(1);
+    expect(nested[0]).toMatchObject({
+      type: 'subagent_event',
+      toolCallId: 'c1',
+      event: { type: 'text_delta', text: '子代理思考中' },
+    });
+
+    // 子事件流不落盘;结论留在 tool 条目的 output/note
+    const history = await getJson(`/sessions/${sessionId}/history`);
+    const entries = (history.json as { entries: TimelineEntry[] }).entries;
+    expect(entries.some((e) => JSON.stringify(e).includes('子代理思考中'))).toBe(false);
+    const toolEntry = entries.find((e) => e.kind === 'tool');
+    expect(toolEntry).toMatchObject({
+      name: 'sub_emit',
+      note: '{"reason":"completed","steps":1}',
+    });
   });
 
   it('approval 往返:manual 模式收到 approval_request,POST /approval approved 后继续', async () => {

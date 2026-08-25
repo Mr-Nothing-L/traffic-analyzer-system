@@ -35,6 +35,11 @@
  * /chat 的 SSE 事件流在转发的同时累积 TimelineEntry(user/assistant/tool/
  * approval/detection),每轮结束批量落盘。POST /chat 支持可选 images(最多
  * 4 张,base64 或 dataURL),转成 kosong image ContentPart 附在该轮 user message。
+ *
+ * 子代理:每个 session 的 registry 自动注册 spawn_subagent(app.ts 闭包注入
+ * provider/gate/systemPrompt,详见 tools/builtin/spawnSubagent.ts);子 loop
+ * 事件以 {type:'subagent_event', toolCallId, event} 原样透传 SSE(不落盘,
+ * 结论留在对应 tool 条目的 output/note 里)。
  */
 import { readFileSync, statSync } from 'node:fs';
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
@@ -50,7 +55,7 @@ import { compactMessagesWithSummary } from '../loop/summarize';
 import { CallbackApprovalService } from '../permissions/approval';
 import { PermissionGate } from '../permissions/gate';
 import type { PermissionMode, PermissionPolicyContext } from '../permissions/types';
-import { registerBuiltinTools } from '../tools/builtin';
+import { registerBuiltinTools, createSpawnSubagentTool, ToolserverClient } from '../tools/builtin';
 import type { ToolAccesses } from '../tools/contract';
 import { ToolRegistry } from '../tools/registry';
 
@@ -181,6 +186,23 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
+/**
+ * 工具结果传输/落盘裁剪:video part 的 dataURL 可达几十 MB(load_video),
+ * SSE 与 sqlite 都承受不起,替换为占位文本;image part 保留(历史要渲染)。
+ * 仅影响 SSE 事件与 entries 落盘,loop 内 messages 仍持原始内容。
+ */
+function sanitizeToolOutputForTransport(
+  output: string | ContentPart[],
+): string | ContentPart[] {
+  if (!Array.isArray(output)) return output;
+  return output.map((part): ContentPart => {
+    if (part.type === 'video_url') {
+      return { type: 'text', text: '[完整视频已发送给模型,不在此展示]' };
+    }
+    return part;
+  });
+}
+
 /** 解析可选 images 字段:接受 dataURL 或裸 base64,统一为 dataURL,最多 4 张。 */
 function parseImages(body: Record<string, unknown>): string[] {
   if (!Array.isArray(body.images)) return [];
@@ -246,7 +268,24 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       },
       snapshots,
     );
-    return { registry: toolsFactory(session), gate, bridge, busy: false };
+    const registry = toolsFactory(session);
+    // spawn_subagent 在 server 组装处闭包注入(provider/gate/systemPrompt),
+    // 不进 registerBuiltinTools(toolset.json 暂无该条目);自定义 toolsFactory
+    // 已自带同名工具时跳过。
+    if (registry.resolve('spawn_subagent') === undefined) {
+      registry.register(
+        createSpawnSubagentTool({
+          parentRegistry: registry,
+          workspace: { workspaceDir: session.workspaceDir, additionalDirs: [] },
+          providerFactory,
+          gate,
+          systemPrompt,
+          contextTokens,
+          toolserverClient: new ToolserverClient({}),
+        }),
+      );
+    }
+    return { registry, gate, bridge, busy: false };
   };
 
   /** 内存中无 runtime 时(恢复的 session)按需创建。 */
@@ -577,16 +616,25 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
             case 'tool_result': {
               const call = pendingCalls.get(event.toolCallId);
               pendingCalls.delete(event.toolCallId);
+              // load_video 的 output 含整段视频 dataURL(可达 ~50MB):SSE 与
+              // sqlite 都用裁剪版——video part 替换为占位文本;模型侧 messages
+              // 不受影响(loop 内部仍持原始 output)。图片 part 保留(历史要渲染)。
+              const safeOutput = sanitizeToolOutputForTransport(event.result.output);
               turnEntries.push({
                 kind: 'tool',
                 toolCallId: event.toolCallId,
                 name: event.name,
                 arguments: call?.arguments ?? null,
-                output: event.result.output,
+                output: safeOutput,
                 isError: event.isError,
+                ...(event.result.note !== undefined ? { note: event.result.note } : {}),
                 at: Date.now(),
               });
-              break;
+              emit({
+                ...event,
+                result: { ...event.result, output: safeOutput },
+              });
+              return;
             }
             case 'step_done':
               flushAssistant();

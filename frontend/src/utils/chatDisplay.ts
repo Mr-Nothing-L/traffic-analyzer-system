@@ -10,12 +10,52 @@ export const TOOL_LABELS: Record<string, string> = {
   write_file: '写文件',
   run_script: '运行脚本',
   submit_detection: '提交检测结果',
+  load_video: '加载视频',
+  spawn_subagent: '派生子代理',
 }
 
 /** 工具条目显示名:已知工具「中文名(原名)」,未知工具回退原名。 */
 export function toolLabel(name: string): string {
   const label = TOOL_LABELS[name]
   return label ? `${label}(${name})` : name
+}
+
+/** 复制文本到剪贴板:优先异步 Clipboard API;非安全上下文(如局域网 IP
+ * 直连,navigator.clipboard 为 undefined)回退隐藏 textarea + execCommand('copy')。
+ * 失败抛错,成功/失败提示由调用方负责。 */
+export async function copyText(text: string): Promise<void> {
+  const clipboard = typeof navigator !== 'undefined' ? navigator.clipboard : undefined
+  if (clipboard?.writeText) {
+    await clipboard.writeText(text)
+    return
+  }
+  const ta = document.createElement('textarea')
+  ta.value = text
+  ta.setAttribute('readonly', '')
+  // 不可见但保持可选取(display:none 的元素 select() 无效)
+  ta.style.position = 'fixed'
+  ta.style.top = '0'
+  ta.style.left = '0'
+  ta.style.opacity = '0'
+  document.body.appendChild(ta)
+  ta.focus()
+  ta.select()
+  try {
+    if (!document.execCommand('copy')) throw new Error('execCommand copy 返回 false')
+  } finally {
+    ta.remove()
+  }
+}
+
+/** 检测事件标注降级小字:meta.annotation_missing(画框失败)→「标注图生成失败」;
+ * meta.annotation_not_provided(未给定位框)→「无定位框」;都不在返回 null。 */
+export function detectionEventNote(
+  meta: { annotation_not_provided?: number[]; annotation_missing?: number[] } | undefined,
+  eventId: number,
+): string | null {
+  if (meta?.annotation_missing?.includes(eventId)) return '标注图生成失败'
+  if (meta?.annotation_not_provided?.includes(eventId)) return '无定位框'
+  return null
 }
 
 /** composer 的 Enter 是否触发发送:Shift+Enter 换行不发送;

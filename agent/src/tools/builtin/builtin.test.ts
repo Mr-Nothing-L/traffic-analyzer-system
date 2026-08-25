@@ -406,6 +406,7 @@ describe('submit_detection', () => {
 
   it('accepts a consistent all-zero (normal) submission with stopTurn', async () => {
     const result = await execute(tool(), {
+      video_path: 'demo.mp4',
       events: baseEvents(),
       binary_encoding: '0_0_0_0_0_0_0_0_0_0_0',
       normal: true,
@@ -417,6 +418,8 @@ describe('submit_detection', () => {
     const payload = JSON.parse(result.note as string);
     expect(payload.binary_encoding).toBe('0_0_0_0_0_0_0_0_0_0_0');
     expect(payload.events).toHaveLength(10);
+    // 无检出事件时不产生 meta,note 载荷保持向后兼容。
+    expect(payload.meta).toBeUndefined();
   });
 
   it('accepts a consistent detection and carries the structured payload', async () => {
@@ -432,6 +435,7 @@ describe('submit_detection', () => {
       evidence_frames: [3.0],
     };
     const result = await execute(tool(), {
+      video_path: 'demo.mp4',
       events,
       binary_encoding: '0_0_1_0_0_0_0_0_0_0_0',
       normal: false,
@@ -456,6 +460,7 @@ describe('submit_detection', () => {
     };
     // 模型把数组包成字符串(带前导换行),容错反序列化后应正常通过。
     const result = await execute(tool(), {
+      video_path: 'demo.mp4',
       events: '\n' + JSON.stringify(events),
       binary_encoding: '1_0_0_0_0_0_0_0_0_0_0',
       normal: false,
@@ -469,6 +474,7 @@ describe('submit_detection', () => {
 
   it('tolerates the whole input passed as a JSON string', async () => {
     const input = {
+      video_path: 'demo.mp4',
       events: baseEvents(),
       binary_encoding: '0_0_0_0_0_0_0_0_0_0_0',
       normal: true,
@@ -481,6 +487,7 @@ describe('submit_detection', () => {
 
   it('rejects when a set bit contradicts events.detected', async () => {
     const result = await execute(tool(), {
+      video_path: 'demo.mp4',
       events: baseEvents(),
       binary_encoding: '0_0_1_0_0_0_0_0_0_0_0',
       normal: false,
@@ -495,6 +502,7 @@ describe('submit_detection', () => {
     const events = baseEvents();
     events[0] = { ...events[0], detected: true, evidence_frames: [1.0] };
     const result = await execute(tool(), {
+      video_path: 'demo.mp4',
       events,
       binary_encoding: '1_0_0_0_0_0_0_0_0_0_0',
       normal: true,
@@ -508,6 +516,7 @@ describe('submit_detection', () => {
     const events = baseEvents();
     events[0] = { ...events[0], detected: true, evidence_frames: [] };
     const result = await execute(tool(), {
+      video_path: 'demo.mp4',
       events,
       binary_encoding: '1_0_0_0_0_0_0_0_0_0_0',
       normal: false,
@@ -521,6 +530,7 @@ describe('submit_detection', () => {
     const events = baseEvents();
     events[0] = { ...events[0], detected: true, evidence_frames: ['frame_3s.jpg'] };
     const result = await execute(tool(), {
+      video_path: 'demo.mp4',
       events,
       binary_encoding: '1_0_0_0_0_0_0_0_0_0_0',
       normal: false,
@@ -531,6 +541,7 @@ describe('submit_detection', () => {
 
   it('rejects an encoding with bit 9 set (schema pattern)', async () => {
     const result = await execute(tool(), {
+      video_path: 'demo.mp4',
       events: baseEvents(),
       binary_encoding: '0_0_0_0_0_0_0_0_1_0_0',
       normal: false,
@@ -543,20 +554,160 @@ describe('submit_detection', () => {
     const parameters = tool().parameters;
     expect(parameters['$ref']).toBeUndefined();
     expect(parameters['required']).toEqual(
-      expect.arrayContaining(['events', 'binary_encoding', 'normal', 'report_markdown']),
+      expect.arrayContaining(['video_path', 'events', 'binary_encoding', 'normal', 'report_markdown']),
     );
+  });
+
+  describe('per-event annotated images', () => {
+    const annotatingTool = (): ExecutableTool =>
+      createSubmitDetectionTool('提交检测结果', loadSubmitDetectionSchema(), {
+        client,
+        workspace,
+      });
+
+    function eventsWithDetected(extra: Record<string, unknown>): Array<Record<string, unknown>> {
+      const events = baseEvents();
+      events[2] = {
+        event_id: 3,
+        detected: true,
+        confidence: 0.9,
+        instances: [
+          { description: '白色小客车停靠应急车道', location: '画面右侧', start_sec: 2, end_sec: 8 },
+        ],
+        reasoning: '第 3-8 秒可见静止车辆',
+        evidence_frames: [3.0],
+        ...extra,
+      };
+      return events;
+    }
+
+    it('annotates a detected event with boxes via toolserver draw_boxes', async () => {
+      mockToolserver({ jpeg_base64: FAKE_JPEG_BASE64, width: 640, height: 360 });
+      const videoPath = path.join(workspaceDir, 'demo.mp4');
+      const boxes = [{ x1: 0.5, y1: 0.5, x2: 0.7, y2: 0.8, label: '白色小客车' }];
+      const result = await execute(annotatingTool(), {
+        video_path: videoPath,
+        // boxes 包成 JSON 字符串也应被容错反序列化(qwen3_xml 怪癖)。
+        events: eventsWithDetected({ boxes: JSON.stringify(boxes), box_frame: 3.0 }),
+        binary_encoding: '0_0_1_0_0_0_0_0_0_0_0',
+        normal: false,
+        report_markdown: '# 检测报告\n检出事件 3。',
+      });
+      expect(result.isError).toBeFalsy();
+      expect(result.stopTurn).toBe(true);
+
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://127.0.0.1:8601/tools/draw_boxes');
+      expect(JSON.parse(init.body as string)).toEqual({
+        video_path: videoPath,
+        timestamp: 3.0,
+        boxes,
+      });
+
+      const payload = JSON.parse(result.note as string);
+      expect(payload.events[2].annotated_image).toBe(
+        `data:image/jpeg;base64,${FAKE_JPEG_BASE64}`,
+      );
+      expect(payload.meta).toBeUndefined();
+    });
+
+    it('declares a read access on the sandbox-resolved video path', () => {
+      const videoPath = path.join(workspaceDir, 'demo.mp4');
+      const execution = runnable(annotatingTool(), {
+        video_path: videoPath,
+        events: eventsWithDetected({
+          boxes: [{ x1: 0.1, y1: 0.1, x2: 0.2, y2: 0.2 }],
+          box_frame: 3.0,
+        }),
+        binary_encoding: '0_0_1_0_0_0_0_0_0_0_0',
+        normal: false,
+        report_markdown: '# 报告',
+      });
+      expect(execution.accesses).toEqual([
+        { kind: 'file', operation: 'read', path: videoPath, recursive: undefined },
+      ]);
+    });
+
+    it('hard-vetoes a video_path outside the workspace', async () => {
+      const result = await execute(annotatingTool(), {
+        video_path: '../outside.mp4',
+        events: eventsWithDetected({
+          boxes: [{ x1: 0.1, y1: 0.1, x2: 0.2, y2: 0.2 }],
+          box_frame: 3.0,
+        }),
+        binary_encoding: '0_0_1_0_0_0_0_0_0_0_0',
+        normal: false,
+        report_markdown: '# 报告',
+      });
+      expect(result.isError).toBe(true);
+      expect(result.output).toContain('PATH_OUTSIDE_WORKSPACE');
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('degrades when draw_boxes fails: submission stands, meta.annotation_missing records the event', async () => {
+      mockToolserver({ error: { code: 'frame_unavailable', message: 'no frame at 3s' } }, 404);
+      const result = await execute(annotatingTool(), {
+        video_path: path.join(workspaceDir, 'demo.mp4'),
+        events: eventsWithDetected({
+          boxes: [{ x1: 0.5, y1: 0.5, x2: 0.7, y2: 0.8 }],
+          box_frame: 3.0,
+        }),
+        binary_encoding: '0_0_1_0_0_0_0_0_0_0_0',
+        normal: false,
+        report_markdown: '# 报告',
+      });
+      expect(result.isError).toBeFalsy();
+      expect(result.stopTurn).toBe(true);
+      const payload = JSON.parse(result.note as string);
+      expect(payload.events[2].annotated_image).toBeUndefined();
+      expect(payload.meta.annotation_missing).toEqual([3]);
+    });
+
+    it('degrades when the toolserver is unreachable', async () => {
+      fetchMock.mockRejectedValueOnce(new Error('connect ECONNREFUSED'));
+      const result = await execute(annotatingTool(), {
+        video_path: path.join(workspaceDir, 'demo.mp4'),
+        events: eventsWithDetected({
+          boxes: [{ x1: 0.5, y1: 0.5, x2: 0.7, y2: 0.8 }],
+          box_frame: 3.0,
+        }),
+        binary_encoding: '0_0_1_0_0_0_0_0_0_0_0',
+        normal: false,
+        report_markdown: '# 报告',
+      });
+      expect(result.isError).toBeFalsy();
+      const payload = JSON.parse(result.note as string);
+      expect(payload.meta.annotation_missing).toEqual([3]);
+    });
+
+    it('soft-records detected events without boxes/box_frame (no draw call, no rejection)', async () => {
+      const result = await execute(annotatingTool(), {
+        video_path: path.join(workspaceDir, 'demo.mp4'),
+        events: eventsWithDetected({}),
+        binary_encoding: '0_0_1_0_0_0_0_0_0_0_0',
+        normal: false,
+        report_markdown: '# 报告',
+      });
+      expect(result.isError).toBeFalsy();
+      expect(result.stopTurn).toBe(true);
+      expect(fetchMock).not.toHaveBeenCalled();
+      const payload = JSON.parse(result.note as string);
+      expect(payload.events[2].annotated_image).toBeUndefined();
+      expect(payload.meta.annotation_not_provided).toEqual([3]);
+    });
   });
 });
 
 describe('registerBuiltinTools', () => {
-  it('registers all seven builtin tools', () => {
+  it('registers all eight builtin tools', () => {
     const registry = new ToolRegistry();
     const tools = registerBuiltinTools(registry, { workspaceDir });
-    expect(tools).toHaveLength(7);
+    expect(tools).toHaveLength(8);
     expect(registry.list().map((tool) => tool.name).sort()).toEqual(
       [
         'draw_boxes',
         'extract_frames',
+        'load_video',
         'read_file',
         'run_script',
         'submit_detection',
