@@ -99,6 +99,14 @@
   - 新端点:`POST /sessions/{id}/recall`(撤回,截断 entries 与 kosong messages)、`POST /sessions/{id}/mode`、`POST /workspaces/restore`(按需恢复工作区磁盘历史会话)、web 代理侧 `POST /api/agent/uploads` 附件上传(视频/图片落盘返回路径,`AGENT_UPLOAD_MAX_MB` 控制上限,默认 500MB);`/chat` 另支持随消息携带 ≤4 张图片 dataURL。
   - 工作区绑定:session 必须绑定已存在的 `workspaceDir`(web 代理在 body 缺失时注入当前工作区);web 启动与工作区切换时旁路调用 restore,重启后历史会话立即可见。
   - 「送入对话」:工作区树每行常驻「→ 送入对话」按钮,把该视频(工作区相对路径)设为对话页待发送附件,不在对话页则跳转。
+- **后续迭代(2026-08-25 晚,参考 deepseek-harness)**:
+  - 抽帧升级:`extract_frames` 曾短线下线后恢复,新增 fps 采样(默认每秒 1 帧、单次上限 120、timestamps>fps>count);`load_video` 整段直传保留为备选(>40MB 自动均匀降帧)。
+  - 防截断:`AGENT_ENABLE_THINKING` 思考开关(压缩摘要固定关思考);截断残块不执行 + sticky `truncated` 标记 + 前端警示条。
+  - P1 持久化:轮次内按步增量落盘;断连不杀轮次(跑完落盘);SSE 带 seq + `GET /sessions/{id}/events?fromSeq=` 补齐与 inProgress;repair 简化版(悬挂 tool_calls 合成 isError 收尾);sessions.db `PRAGMA user_version`。
+  - P2 交互:`POST /sessions/{id}/cancel`(显式终止)与 `/steer`(进行中注入,下一 step 边界生效);前端刷新恢复(5s 轮询补齐)、停止接 cancel、进行中发送即插话。
+  - P3 压缩加固:摘要不短于原文则放弃;保留区按 token 从尾部累计;messages 软遮蔽(schema v2)。
+  - P4 对话 UI:增量 markdown(冻结尾两块)、Think 行运行中显示末行、审批接管 composer、工具行失败显示错误首行、上下文圆环点击弹层、turn 级 loading。
+  - 历史会话修复:启动恢复竞态(改 env 注入 `AGENT_RESTORE_WORKSPACES`);history 只读 entries(不再物化 messages,解决切换慢);selectSession 代际守卫;历史条目 markRaw。
 
 ## 遗留问题(2026-08-25 终态)
 
