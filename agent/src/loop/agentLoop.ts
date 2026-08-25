@@ -30,6 +30,10 @@ import { compactMessagesWithSummary } from './summarize';
 export const DEFAULT_MAX_STEPS_PER_TURN = 30;
 export const DEFAULT_TOOL_TIMEOUT_MS = 120_000;
 
+/** 截断残块 tool call 回灌给模型的提示(要求缩小单次输出重试)。 */
+export const TRUNCATED_TOOL_CALL_MESSAGE =
+  '输出达到 token 上限被截断,该工具调用参数不完整,请重试并缩小单次输出(如减少事件实例数或分次提交)';
+
 export type AgentLoopDoneReason =
   | 'completed'
   | 'stop_turn'
@@ -82,6 +86,8 @@ export type AgentLoopEvent =
       readonly stopResult?: ExecutableToolResult;
       /** reason === 'error' 时的错误信息。 */
       readonly error?: string;
+      /** 本轮任一步 generate 因 token 上限被截断(sticky,置位后不再清除)。 */
+      readonly truncated?: boolean;
     };
 
 export interface AgentLoopOptions {
@@ -120,6 +126,8 @@ export interface AgentLoopResult {
   readonly messages: Message[];
   /** 实际执行的 generate 步数。 */
   readonly steps: number;
+  /** 本轮任一步 generate 因 token 上限被截断(sticky)。 */
+  readonly truncated: boolean;
   /** reason === 'stop_turn' 时携带触发停止的工具结果。 */
   readonly stopResult?: ExecutableToolResult;
   /** reason === 'error' 时的错误信息。 */
@@ -143,6 +151,9 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   let lastUsedTokens: number | undefined;
   let errorStreak: { name: string; count: number; output: ExecutableToolResult['output'] | undefined } =
     { name: '', count: 0, output: undefined };
+  /** sticky 截断标记:任一步 finishReason==='truncated' 后整个 turn 的
+   * done 事件与返回值都带 truncated(参照 deepseek-harness 的粘性 max-tokens)。 */
+  let turnTruncated = false;
 
   const emit = async (event: AgentLoopEvent): Promise<void> => {
     await options.onEvent?.(event);
@@ -163,11 +174,18 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     reason: AgentLoopDoneReason,
     extra: { stopResult?: ExecutableToolResult; error?: string } = {},
   ): Promise<AgentLoopResult> => {
-    await emit({ type: 'done', reason, stopResult: extra.stopResult, error: extra.error });
+    await emit({
+      type: 'done',
+      reason,
+      stopResult: extra.stopResult,
+      error: extra.error,
+      ...(turnTruncated ? { truncated: true } : {}),
+    });
     return {
       reason,
       messages,
       steps,
+      truncated: turnTruncated,
       stopResult: extra.stopResult,
       error: extra.error,
     };
@@ -271,6 +289,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     steps += 1;
 
     let assistant: Message;
+    let stepTruncated = false;
     try {
       const generated = await generate(
         options.provider,
@@ -289,6 +308,10 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         { signal: options.signal },
       );
       assistant = generated.message;
+      // 本步被 token 上限截断:sticky 置位;本步 tool calls 中 arguments
+      // 无法 JSON.parse 的残块不执行,合成 isError 结果回灌提示重试。
+      stepTruncated = generated.finishReason === 'truncated';
+      if (stepTruncated) turnTruncated = true;
       if (generated.usage !== null && compaction !== undefined) {
         lastUsedTokens =
           generated.usage.inputOther +
@@ -320,7 +343,13 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     const tasks: ToolCallTask<ExecutableToolResult>[] = [];
     for (const call of assistant.toolCalls) {
       await emit({ type: 'tool_call_start', call });
-      tasks.push(await prepareTask(call));
+      // 截断步的残块(arguments 无法 JSON.parse)不执行,直接合成提示重试;
+      // 可解析的完整调用照常走 resolve + 权限裁决 + 调度执行。
+      tasks.push(
+        stepTruncated && !isParseableJson(call.arguments)
+          ? synthesizeTask({ output: TRUNCATED_TOOL_CALL_MESSAGE, isError: true })
+          : await prepareTask(call),
+      );
     }
     const results = await scheduler.runBatch(tasks);
 
@@ -427,6 +456,17 @@ function parseToolArguments(args: string | null): unknown {
     return JSON.parse(args) as unknown;
   } catch {
     return args;
+  }
+}
+
+/** arguments 能否 JSON.parse(null/空串按 {} 处理,视为可解析)。 */
+function isParseableJson(args: string | null): boolean {
+  if (args === null || args.trim() === '') return true;
+  try {
+    JSON.parse(args);
+    return true;
+  } catch {
+    return false;
   }
 }
 

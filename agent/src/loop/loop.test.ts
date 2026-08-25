@@ -15,6 +15,7 @@ import {
 } from '#/message';
 import type {
   ChatProvider,
+  FinishReason,
   GenerateOptions,
   StreamedMessage,
   ThinkingEffort,
@@ -30,6 +31,7 @@ import { ToolRegistry } from '../tools/registry';
 
 import {
   DEFAULT_MAX_STEPS_PER_TURN,
+  TRUNCATED_TOOL_CALL_MESSAGE,
   runAgentLoop,
   type AgentLoopEvent,
   type AgentLoopOptions,
@@ -53,9 +55,13 @@ class ScriptedProvider implements ChatProvider {
   readonly histories: Message[][] = [];
   /** 摘要调用收到的 tools(用于断言不传 tools)。 */
   readonly summaryTools: Tool[][] = [];
+  /** withThinking 收到的 effort(摘要关思考回退路径断言用)。 */
+  readonly thinkingEfforts: ThinkingEffort[] = [];
   private readonly script: StreamedMessagePart[][];
   /** 与 script 逐步对应的 usage(缺省 null = provider 不上报)。 */
   private readonly usages: (TokenUsage | null)[];
+  /** 与 script 逐步对应的 finishReason(缺省 'completed')。 */
+  private readonly finishReasons: (FinishReason | null)[];
   /** 摘要调用的应答队列;Error = 摘要失败(测回退);队列空 = 默认失败。 */
   private readonly summaries: (StreamedMessagePart[] | Error)[];
 
@@ -63,10 +69,12 @@ class ScriptedProvider implements ChatProvider {
     script: StreamedMessagePart[][],
     usages: (TokenUsage | null)[] = [],
     summaries: (StreamedMessagePart[] | Error)[] = [],
+    finishReasons: (FinishReason | null)[] = [],
   ) {
     this.script = [...script];
     this.usages = [...usages];
     this.summaries = [...summaries];
+    this.finishReasons = [...finishReasons];
   }
 
   generate(
@@ -88,23 +96,30 @@ class ScriptedProvider implements ChatProvider {
     if (parts === undefined) {
       return Promise.reject(new Error('script exhausted'));
     }
-    return Promise.resolve(streamOf(parts, this.usages.shift() ?? null));
+    return Promise.resolve(
+      streamOf(parts, this.usages.shift() ?? null, this.finishReasons.shift() ?? 'completed'),
+    );
   }
 
-  withThinking(_effort: ThinkingEffort): ChatProvider {
+  withThinking(effort: ThinkingEffort): ChatProvider {
+    this.thinkingEfforts.push(effort);
     return this;
   }
 }
 
-function streamOf(parts: StreamedMessagePart[], usage: TokenUsage | null = null): StreamedMessage {
+function streamOf(
+  parts: StreamedMessagePart[],
+  usage: TokenUsage | null = null,
+  finishReason: FinishReason | null = 'completed',
+): StreamedMessage {
   return {
     async *[Symbol.asyncIterator]() {
       for (const part of parts) yield part;
     },
     id: null,
     usage,
-    finishReason: 'completed',
-    rawFinishReason: 'stop',
+    finishReason,
+    rawFinishReason: finishReason === 'truncated' ? 'length' : 'stop',
   };
 }
 
@@ -157,10 +172,11 @@ function harness(
   gate: PermissionGate = yoloGate(),
   usages: (TokenUsage | null)[] = [],
   summaries: (StreamedMessagePart[] | Error)[] = [],
+  finishReasons: (FinishReason | null)[] = [],
 ): Harness {
   const registry = new ToolRegistry();
   for (const tool of tools) registry.register(tool);
-  const provider = new ScriptedProvider(script, usages, summaries);
+  const provider = new ScriptedProvider(script, usages, summaries, finishReasons);
   const events: AgentLoopEvent[] = [];
   return {
     provider,
@@ -569,6 +585,108 @@ describe('runAgentLoop', () => {
     const secondHistory = h.provider.histories[1] ?? [];
     const old = secondHistory.find((m) => m.toolCallId === 'old-1');
     expect(extractText(old ?? createUserMessage(''))).toBe('[已压缩]');
+  });
+
+  it('截断步:arguments 残块不执行并回灌重试提示,完整调用照常执行,done.truncated=true', async () => {
+    const execute = vi.fn(() => Promise.resolve({ output: 'echo-ok' }));
+    // 残块:arguments 无法 JSON.parse(截断在 JSON 中间)
+    const broken: ToolCall = {
+      type: 'function',
+      id: 'c-bad',
+      name: 'echo',
+      arguments: '{"events":[{"id":',
+    };
+    const h = harness(
+      [
+        [toolCall('c1', 'echo', { a: 1 }), broken],
+        [text('已缩小输出重试')],
+      ],
+      [echoTool(execute)],
+      yoloGate(),
+      [],
+      [],
+      ['truncated'],
+    );
+
+    const result = await h.run();
+
+    expect(result.reason).toBe('completed');
+    expect(result.truncated).toBe(true);
+    expect(doneEvent(h.events).truncated).toBe(true);
+    // 完整调用执行了一次;残块不进入工具(execute 只被 c1 调用)
+    expect(execute).toHaveBeenCalledTimes(1);
+
+    const fed = toolMessages(h.provider.histories[1] ?? []);
+    expect(fed).toHaveLength(2);
+    const byCallId = new Map(fed.map((m) => [m.toolCallId, extractText(m)]));
+    expect(byCallId.get('c1')).toBe('echo-ok');
+    expect(byCallId.get('c-bad')).toBe(TRUNCATED_TOOL_CALL_MESSAGE);
+
+    const badResult = h.events.find(
+      (e) => e.type === 'tool_result' && e.toolCallId === 'c-bad',
+    );
+    expect(badResult).toMatchObject({ isError: true });
+  });
+
+  it('sticky truncated:截断步之后正常完成,done 事件与结果仍带 truncated=true', async () => {
+    const h = harness(
+      [
+        [toolCall('c1', 'echo', {})],
+        [toolCall('c2', 'echo', {})],
+        [text('完成')],
+      ],
+      [echoTool()],
+      yoloGate(),
+      [],
+      [],
+      ['truncated', 'completed'],
+    );
+
+    const result = await h.run();
+
+    expect(result.reason).toBe('completed');
+    expect(result.steps).toBe(3);
+    expect(result.truncated).toBe(true);
+    expect(doneEvent(h.events).truncated).toBe(true);
+  });
+
+  it('无截断时:done 事件不带 truncated,result.truncated=false', async () => {
+    const h = harness([[text('正常')]], [echoTool()]);
+
+    const result = await h.run();
+
+    expect(result.truncated).toBe(false);
+    expect(doneEvent(h.events).truncated).toBeUndefined();
+  });
+
+  it('摘要调用走关思考 provider:非 openai-legacy provider 回退 withThinking(off)', async () => {
+    const initialMessages: Message[] = [
+      createUserMessage('第一轮'),
+      createAssistantMessage([{ type: 'text', text: '先看元数据' }], [
+        toolCall('old-1', 'echo', {}),
+      ]),
+      createToolMessage('old-1', '老工具结果'),
+      createAssistantMessage([{ type: 'text', text: '看完了' }]),
+      createUserMessage('继续'),
+    ];
+    const h = harness(
+      [[toolCall('c1', 'echo', {})], [text('结束')]],
+      [echoTool()],
+      yoloGate(),
+      // 第一步真实 usage 超阈(8600 ≥ 10000 × 0.85)→ 第二步前触发摘要压缩
+      [{ inputOther: 8600, inputCacheRead: 0, inputCacheCreation: 0, output: 100 }, null],
+      [[text('摘要内容')]],
+    );
+
+    const result = await h.run({
+      messages: initialMessages,
+      compaction: { maxContextTokens: 10_000, reservedContextSize: 0, maxRecentMessages: 2 },
+    });
+
+    expect(result.reason).toBe('completed');
+    expect(h.events.find((e) => e.type === 'compaction')).toMatchObject({ summarized: true });
+    // withThinkingDisabled 对非 openai-legacy provider 回退 withThinking('off')
+    expect(h.provider.thinkingEfforts).toContain('off');
   });
 });
 

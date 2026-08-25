@@ -655,6 +655,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
                 type: 'done',
                 reason: event.reason,
                 ...(event.error !== undefined ? { error: event.error } : {}),
+                ...(event.truncated === true ? { truncated: true } : {}),
               });
               return;
           }

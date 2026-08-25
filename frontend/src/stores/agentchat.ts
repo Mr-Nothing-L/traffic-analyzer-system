@@ -8,7 +8,8 @@
  * DELETE /api/agent/sessions/{id} → {status:'ok'};
  * POST   /api/agent/chat({sessionId,input,videoPath?,images?(dataURL,≤4)}) → SSE
  *   (每事件一行 'data: {json}\n\n',事件:text_delta/think_delta/tool_call_start/
- *   tool_result/step_done/approval_request/detection/context_usage/compaction/done);
+ *   tool_result/step_done/approval_request/detection/context_usage/compaction/done;
+ *   done {reason, error?, truncated?},truncated:true 表示输出达到 token 上限被截断);
  * POST   /api/agent/approval({requestId,decision,scope?}) → {status:'ok'};
  * POST   /api/agent/uploads(multipart file) → {path,name,size,contentType}(视频落工作区,
  *   返回 path 作 videoPath;GET /api/agent/uploads/{name} 供 <video> 预览);
@@ -138,10 +139,12 @@ export interface AgentDetectionEntry {
   data: unknown
 }
 
-/** 系统提示条目(如自动压缩提示),不进历史,仅流式期间插入时间线。 */
+/** 系统提示条目(如自动压缩提示、输出截断警示),不进历史,仅流式期间插入时间线。
+ * tone:'warn' 用警示色系(gold)渲染,缺省为中性灰。 */
 export interface AgentSystemEntry {
   kind: 'system'
   text: string
+  tone?: 'warn'
 }
 
 export type AgentEntry =
@@ -605,6 +608,14 @@ export const useAgentChatStore = defineStore('agentchat', () => {
         error.value = typeof ev.error === 'string' ? ev.error : 'Agent 运行出错'
       } else {
         status.value = 'done'
+        // 输出达到 token 上限被截断:时间线末尾插警示条目(仅本地,不落历史)
+        if (ev.truncated === true) {
+          entries.value.push({
+            kind: 'system',
+            text: '输出达到 token 上限被截断,部分内容可能不完整,可继续追问',
+            tone: 'warn',
+          })
+        }
       }
     }
     // step_done:无独立 UI(工具批结束的进度信号,时间线条目已自解释)

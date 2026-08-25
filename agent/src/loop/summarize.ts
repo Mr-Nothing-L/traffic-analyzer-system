@@ -4,7 +4,8 @@
  * 触发判定与切点安全边界完全复用 compaction.ts(只在 user 消息前切,
  * tool_call/tool 配对完整);本模块替换的是压缩内容本身:
  * 把压缩区(安全边界之前的历史)序列化后交给同一个 ChatProvider 做一次
- * 摘要调用(不传 tools、独立 60s 超时、maxCompletionTokens 2048 上限),
+ * 摘要调用(不传 tools、关思考 chat_template_kwargs、独立 60s 超时、
+ * maxCompletionTokens 2048 上限),
  * 摘要作为一条 user 消息(「[此前对话摘要]」前缀)替换整个压缩区,
  * 保留区不变。摘要调用失败/超时/返回空 → 回退 compaction.ts 的占位替换,
  * 绝不让 loop 因压缩而崩。
@@ -16,6 +17,8 @@ import { isAbortError } from '#/errors';
 import { generate } from '#/generate';
 import { createUserMessage, extractText, type Message } from '#/message';
 import type { ChatProvider } from '#/provider';
+
+import { withThinkingDisabled } from '../llm/provider';
 
 import {
   compactMessages,
@@ -121,7 +124,10 @@ async function callSummary(
   provider: ChatProvider,
   signal: AbortSignal | undefined,
 ): Promise<string | null> {
-  const capped = provider.withMaxCompletionTokens?.(SUMMARY_MAX_TOKENS) ?? provider;
+  // 摘要不需要长推理:用关思考版 provider(本地 vLLM/qwen3 实测省一半以上
+  // 时间);再叠加 2048 maxTokens 上限,60s 超时保持不变。
+  const noThinking = withThinkingDisabled(provider);
+  const capped = noThinking.withMaxCompletionTokens?.(SUMMARY_MAX_TOKENS) ?? noThinking;
   const controller = new AbortController();
   const onParentAbort = (): void => controller.abort();
   signal?.addEventListener('abort', onParentAbort, { once: true });

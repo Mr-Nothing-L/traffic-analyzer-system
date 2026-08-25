@@ -320,4 +320,51 @@ describe('SSE 流式事件', () => {
     expect(det.kind).toBe('detection');
     if (det.kind === 'detection') expect(det.data).toEqual(payload);
   });
+
+  // 截断警示:done {truncated:true} 时时间线末尾插入 warn 级 system 条目;
+  // 不带 truncated(或 reason=error)则不插。
+  it('done 带 truncated:true 时,末尾插入警示条目;普通 done 不插', async () => {
+    const { agent } = await load();
+    agent.sessionId = 's1';
+    stubChatStream([
+      { type: 'text_delta', text: '被截断的回答' },
+      { type: 'done', reason: 'stop_turn', truncated: true },
+    ]);
+    await agent.send('问一题');
+    vi.unstubAllGlobals();
+
+    expect(agent.status).toBe('done');
+    const last = agent.entries[agent.entries.length - 1];
+    expect(last).toEqual({
+      kind: 'system',
+      text: '输出达到 token 上限被截断,部分内容可能不完整,可继续追问',
+      tone: 'warn',
+    });
+  });
+
+  it('done 不带 truncated 时不插警示条目', async () => {
+    const { agent } = await load();
+    agent.sessionId = 's1';
+    stubChatStream([
+      { type: 'text_delta', text: '完整回答' },
+      { type: 'done', reason: 'stop_turn' },
+    ]);
+    await agent.send('问一题');
+    vi.unstubAllGlobals();
+
+    expect(agent.status).toBe('done');
+    expect(agent.entries.some((e) => e.kind === 'system')).toBe(false);
+  });
+
+  it('done reason=error 即使带 truncated 也走失败态,不插警示条目', async () => {
+    const { agent } = await load();
+    agent.sessionId = 's1';
+    stubChatStream([{ type: 'done', reason: 'error', error: 'boom', truncated: true }]);
+    await agent.send('问一题');
+    vi.unstubAllGlobals();
+
+    expect(agent.status).toBe('failed');
+    expect(agent.error).toBe('boom');
+    expect(agent.entries.some((e) => e.kind === 'system')).toBe(false);
+  });
 });

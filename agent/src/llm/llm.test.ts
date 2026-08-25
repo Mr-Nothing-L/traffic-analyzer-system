@@ -13,12 +13,22 @@ import { join } from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { generate } from '#/generate';
-import { createUserMessage, extractText, type ToolCall } from '#/message';
+import {
+  createAssistantMessage,
+  createToolMessage,
+  createUserMessage,
+  extractText,
+  type Message,
+  type ToolCall,
+} from '#/message';
 import { OpenAILegacyChatProvider } from '#/providers/openai-legacy';
 import type { Tool } from '#/tool';
 
+import { createCompactionConfig } from '../loop/compaction';
+import { compactMessagesWithSummary } from '../loop/summarize';
+
 import { buildProviderConfig, loadEnvLLMProviders, parseDotenv } from './env.ts';
-import { createProviderFromEnv } from './provider.ts';
+import { createProviderFromEnv, withThinkingDisabled } from './provider.ts';
 
 // ---------------------------------------------------------------------------
 // env.ts
@@ -326,5 +336,79 @@ describe('generate() over mock OpenAI SSE server', () => {
     await expect(generate(makeProvider(), '', [], [createUserMessage('hi')])).rejects.toThrow(
       /empty response/i,
     );
+  });
+
+  it('AGENT_ENABLE_THINKING=0 时请求带 chat_template_kwargs.enable_thinking=false', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'llm-thinking-'));
+    const envPath = join(dir, '.env');
+    writeFileSync(
+      envPath,
+      [
+        'LLM_PROVIDER_0_PROVIDER=vllm',
+        'LLM_PROVIDER_0_API_KEY=EMPTY',
+        'LLM_PROVIDER_0_MODEL=mock-model',
+        `LLM_PROVIDER_0_BASE_URL=${baseUrl}`,
+      ].join('\n'),
+    );
+    process.env.AGENT_ENABLE_THINKING = '0';
+    try {
+      const { provider } = createProviderFromEnv(envPath);
+      responseChunks = [sseChunk({ content: 'ok' }, 'stop'), USAGE_CHUNK];
+      await generate(provider, 'sys', [], [createUserMessage('hi')]);
+      expect(captured[0]?.body['chat_template_kwargs']).toEqual({ enable_thinking: false });
+    } finally {
+      delete process.env.AGENT_ENABLE_THINKING;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('AGENT_ENABLE_THINKING 缺省时 enable_thinking=true(默认开)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'llm-thinking-'));
+    const envPath = join(dir, '.env');
+    writeFileSync(
+      envPath,
+      [
+        'LLM_PROVIDER_0_PROVIDER=vllm',
+        'LLM_PROVIDER_0_API_KEY=EMPTY',
+        'LLM_PROVIDER_0_MODEL=mock-model',
+        `LLM_PROVIDER_0_BASE_URL=${baseUrl}`,
+      ].join('\n'),
+    );
+    delete process.env.AGENT_ENABLE_THINKING;
+    try {
+      const { provider } = createProviderFromEnv(envPath);
+      responseChunks = [sseChunk({ content: 'ok' }, 'stop'), USAGE_CHUNK];
+      await generate(provider, 'sys', [], [createUserMessage('hi')]);
+      expect(captured[0]?.body['chat_template_kwargs']).toEqual({ enable_thinking: true });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('withThinkingDisabled 克隆的请求带 enable_thinking=false', async () => {
+    responseChunks = [sseChunk({ content: 'ok' }, 'stop'), USAGE_CHUNK];
+    await generate(withThinkingDisabled(makeProvider()), 'sys', [], [createUserMessage('hi')]);
+    expect(captured[0]?.body['chat_template_kwargs']).toEqual({ enable_thinking: false });
+  });
+
+  it('compactMessagesWithSummary 的摘要请求关思考且 max_tokens=2048', async () => {
+    const messages: Message[] = [
+      createUserMessage('u1'),
+      createAssistantMessage([{ type: 'text', text: '调用工具' }], [
+        { type: 'function', id: 't1', name: 'echo', arguments: '{}' },
+      ]),
+      createToolMessage('t1', '工具结果'),
+      createAssistantMessage([{ type: 'text', text: '看完了' }]),
+      createUserMessage('u2'),
+      createAssistantMessage([{ type: 'text', text: 'a2' }]),
+    ];
+    const config = createCompactionConfig(1_000_000, { maxRecentMessages: 2 });
+    responseChunks = [sseChunk({ content: '摘要内容' }, 'stop'), USAGE_CHUNK];
+
+    const outcome = await compactMessagesWithSummary(messages, config, makeProvider(), true);
+
+    expect(outcome.summarized).toBe(true);
+    expect(captured[0]?.body['chat_template_kwargs']).toEqual({ enable_thinking: false });
+    expect(captured[0]?.body['max_tokens']).toBe(2048);
   });
 });

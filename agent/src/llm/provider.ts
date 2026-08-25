@@ -9,11 +9,38 @@
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import type { ChatProvider } from '#/provider';
 import { OpenAILegacyChatProvider } from '#/providers/openai-legacy';
 
 import { loadEnvLLMProviders, type EnvLLMProviderConfig } from './env.ts';
 
-/** 按 OpenAI 兼容协议处理的 provider 名(小写)。 */
+/** 视为「关闭思考」的 AGENT_ENABLE_THINKING 取值(小写比较)。 */
+const THINKING_OFF_VALUES: ReadonlySet<string> = new Set(['0', 'false', 'no', 'off']);
+
+/**
+ * 读取 AGENT_ENABLE_THINKING(默认 true;0/false/no/off 为关)。
+ * qwen3 类 thinking 模型关掉思考后简单问题的 completion 大幅下降,
+ * 摘要等不需要长推理的调用可省一半以上时间。
+ */
+export function isThinkingEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = env.AGENT_ENABLE_THINKING;
+  if (raw === undefined) return true;
+  return !THINKING_OFF_VALUES.has(raw.trim().toLowerCase());
+}
+
+/**
+ * 返回「思考关闭版」provider:OpenAI 兼容(openai-legacy)走
+ * chat_template_kwargs:{enable_thinking:false}(本地 vLLM/qwen3 支持);
+ * 其余 provider 回退 kosong 通用 withThinking('off')。
+ */
+export function withThinkingDisabled(provider: ChatProvider): ChatProvider {
+  if (provider instanceof OpenAILegacyChatProvider) {
+    return provider.withGenerationKwargs({
+      chat_template_kwargs: { enable_thinking: false },
+    });
+  }
+  return provider.withThinking('off');
+}
 export const OPENAI_COMPATIBLE_PROVIDERS: ReadonlySet<string> = new Set([
   'openai',
   'aliyun',
@@ -69,7 +96,12 @@ export function createProviderFromEnv(envPath: string = defaultEnvPath()): Provi
     baseUrl: config.baseUrl,
     model: config.model,
     maxTokens,
-    generationKwargs: { temperature: config.temperature },
+    generationKwargs: {
+      temperature: config.temperature,
+      // qwen3 系走 chat_template_kwargs 显式控制思考开关
+      // (AGENT_ENABLE_THINKING,默认开;vLLM 支持该参数)。
+      chat_template_kwargs: { enable_thinking: isThinkingEnabled() },
+    },
   });
   return { provider, model: config.model, config };
 }

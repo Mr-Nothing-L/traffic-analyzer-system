@@ -765,8 +765,14 @@ onUnmounted(() => {
               <div v-else class="approval-decided">已失效</div>
             </div>
 
-            <!-- 系统提示(自动压缩等,仅流式期间插入,不进历史) -->
-            <div v-else-if="e.kind === 'system'" class="system-note">{{ e.text }}</div>
+            <!-- 系统提示(自动压缩/截断警示等,仅流式期间插入,不进历史;warn 用警示色系) -->
+            <div
+              v-else-if="e.kind === 'system'"
+              class="system-note"
+              :class="{ warn: e.tone === 'warn' }"
+            >
+              {{ e.text }}
+            </div>
 
             <!-- 检测结果卡:11 位编码等宽高亮 + 检出事件 + markdown 报告 -->
             <div v-else-if="e.kind === 'detection'" class="detection">
@@ -1982,6 +1988,19 @@ onUnmounted(() => {
   text-align: center;
   font-size: var(--text-xs);
   color: var(--color-text2);
+}
+
+/* 警示级系统提示(输出截断等):gold 警示色系 */
+.system-note.warn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-xs);
+  padding: var(--space-xs) var(--space-sm);
+  border: 1px solid var(--color-gold);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-gold) 10%, var(--color-card));
+  color: var(--color-gold);
 }
 
 /* ---- 消息底部行:HH:MM + hover 显现的操作按钮组(参考 kimi-code) ---- */
