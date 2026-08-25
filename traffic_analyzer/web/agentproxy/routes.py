@@ -11,7 +11,11 @@
 - GET  /sessions                  透传(session 列表)。
 - GET  /sessions/{id}/history     透传(entries 时间线)。
 - POST /sessions/{id}/compact     透传(手动压缩上下文;进行中 → 409)。
+- POST /sessions/{id}/recall      透传(撤回某条用户消息及其后内容)。
 - DELETE /sessions/{id}           透传(删除 session)。
+- POST /uploads                   对话文件上传(落盘 <workspace>/.agent/uploads/,
+                                  见 uploads.py;不透传,web 层本地处理)。
+- GET  /uploads/{name}            已上传文件的流式预览(FileResponse,支持 Range)。
 - POST /chat      SSE 透传:httpx AsyncClient stream 读下游,
   StreamingResponse 逐块转发(不缓冲);客户端断连时在 generator finally
   里 aclose 下游响应与 client,取消下游请求。
@@ -198,6 +202,26 @@ async def compact_session(session_id: str, request: Request) -> JSONResponse:
     return _passthrough_error(resp.status_code, resp.content)
 
 
+@router.post("/sessions/{session_id}/recall")
+async def recall_session(session_id: str, request: Request) -> JSONResponse:
+    """透传 POST /sessions/{id}/recall(撤回某条用户消息及其后内容)。"""
+    runtime = _runtime(request)
+    if runtime is None or not runtime.enabled:
+        return _unavailable()
+    body = await request.body()
+    try:
+        async with AsyncClient(base_url=runtime.agent_url, timeout=_JSON_TIMEOUT) as client:
+            resp = await client.post(
+                f"/sessions/{session_id}/recall",
+                content=body,
+                headers={"Content-Type": "application/json"},
+            )
+    except httpx.HTTPError as exc:
+        logger.warning("agent /sessions/%s/recall unreachable: %s", session_id, exc)
+        return _unavailable(f"agent server unreachable: {exc}")
+    return _passthrough_error(resp.status_code, resp.content)
+
+
 @router.post("/approval")
 async def approval(request: Request) -> JSONResponse:
     """透传 POST /approval(审批回执)。"""
@@ -254,3 +278,9 @@ async def chat(request: Request) -> Any:
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# 上传/预览端点(web 层本地处理,不透传),聚合进同一 /api/agent 前缀。
+from traffic_analyzer.web.agentproxy import uploads as _uploads_mod
+
+router.include_router(_uploads_mod.router)

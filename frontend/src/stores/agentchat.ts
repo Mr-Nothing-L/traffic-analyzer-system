@@ -8,7 +8,11 @@
  * POST   /api/agent/chat({sessionId,input,videoPath?,images?(dataURL,≤4)}) → SSE
  *   (每事件一行 'data: {json}\n\n',事件:text_delta/think_delta/tool_call_start/
  *   tool_result/step_done/approval_request/detection/context_usage/compaction/done);
- * POST   /api/agent/approval({requestId,decision,scope?}) → {status:'ok'}。
+ * POST   /api/agent/approval({requestId,decision,scope?}) → {status:'ok'};
+ * POST   /api/agent/uploads(multipart file) → {path,name,size,contentType}(视频落工作区,
+ *   返回 path 作 videoPath;GET /api/agent/uploads/{name} 供 <video> 预览);
+ * POST   /api/agent/sessions/{id}/recall({entryIndex}) → {status:'ok'}(409=对话进行中;
+ *   entryIndex 为后端持久化条目下标,不含本地 system 条目)。
  * fetch+ReadableStream 按 \n\n 分块解析 data: 行,组件只接线,状态全部在这里。 */
 import { ref } from 'vue'
 import { defineStore } from 'pinia'
@@ -50,14 +54,20 @@ export interface AgentUserEntry {
   kind: 'user'
   text: string
   videoPath?: string
+  /** 上传视频的预览地址(/api/agent/uploads/{name});仅本次会话内有效,历史重载回退路径 chip。 */
+  videoSrc?: string
   /** dataURL 图片附件(发送时随消息上传,历史原样返回)。 */
   images?: string[]
+  /** 发送时间(epoch ms),用于气泡 HH:MM。 */
+  at?: number
 }
 
 export interface AgentAssistantEntry {
   kind: 'assistant'
   text: string
   think: string
+  /** 气泡创建时间(epoch ms)。 */
+  at?: number
 }
 
 export interface AgentToolEntry {
@@ -116,6 +126,22 @@ export type AgentEntry =
   | AgentApprovalEntry
   | AgentDetectionEntry
   | AgentSystemEntry
+
+/** 待发送的视频附件(同一时刻最多一个):
+ * 上传得来:path=uploads 返回路径,src=/api/agent/uploads/{name} 供预览;
+ * 工作区树「送入对话」:path=工作区相对路径,无 src(composer 显示图标块,气泡走路径 chip)。 */
+export interface PendingVideo {
+  path: string
+  name: string
+  src?: string
+}
+
+/** send 的附件参数(图片 dataURL ≤4;视频二选一:工作区路径或上传后路径)。 */
+export interface SendOptions {
+  videoPath?: string
+  videoSrc?: string
+  images?: string[]
+}
 
 /** 非 2xx 统一成 ApiError:agent 服务错误为 {error:{code,message}},
  * FastAPI 代理/其他后端为 {detail},两种都认。 */
@@ -195,10 +221,17 @@ function mapHistoryEntry(raw: unknown): AgentEntry | null {
         ? { images: e.images.map(String) }
         : {}),
       ...(e.videoPath != null ? { videoPath: String(e.videoPath) } : {}),
+      ...(e.videoSrc != null ? { videoSrc: String(e.videoSrc) } : {}),
+      ...(typeof e.at === 'number' ? { at: e.at } : {}),
     }
   }
   if (e.kind === 'assistant') {
-    return { kind: 'assistant', text: String(e.text ?? ''), think: String(e.think ?? '') }
+    return {
+      kind: 'assistant',
+      text: String(e.text ?? ''),
+      think: String(e.think ?? ''),
+      ...(typeof e.at === 'number' ? { at: e.at } : {}),
+    }
   }
   if (e.kind === 'tool') {
     return {
@@ -242,6 +275,16 @@ export const useAgentChatStore = defineStore('agentchat', () => {
   const usedTokens = ref<number | null>(null)
   /** 上下文窗口上限(默认 256k,以 context_usage 事件为准)。 */
   const maxTokens = ref(262144)
+  /** 待发送视频附件(composer 预览行;发送后清空)。树组件「送入对话」也写它。 */
+  const pendingVideo = ref<PendingVideo | null>(null)
+
+  function setPendingVideo(v: PendingVideo) {
+    pendingVideo.value = v
+  }
+
+  function clearPendingVideo() {
+    pendingVideo.value = null
+  }
 
   let ctrl: AbortController | null = null
   /** 轮次代际:切换/新建会话会中断在途流并递增,旧 runTurn 的收尾不再写状态。 */
@@ -365,7 +408,7 @@ export const useAgentChatStore = defineStore('agentchat', () => {
   function currentAssistant(): AgentAssistantEntry {
     const last = entries.value[entries.value.length - 1]
     if (last?.kind === 'assistant') return last
-    const entry: AgentAssistantEntry = { kind: 'assistant', text: '', think: '' }
+    const entry: AgentAssistantEntry = { kind: 'assistant', text: '', think: '', at: Date.now() }
     entries.value.push(entry)
     return entry
   }
@@ -500,25 +543,63 @@ export const useAgentChatStore = defineStore('agentchat', () => {
     }
   }
 
-  /** 发送一轮(压 user 条目);images 为 dataURL 数组(≤4)。进行中/审批中忽略。 */
-  async function send(input: string, videoPath?: string, images?: string[]) {
+  /** 发送一轮(压 user 条目);opts.images 为 dataURL 数组(≤4)。进行中/审批中忽略。 */
+  async function send(input: string, opts: SendOptions = {}) {
     const busy =
       status.value === 'connecting' ||
       status.value === 'running' ||
       status.value === 'awaiting_approval'
     if (!sessionId.value || busy) return
     lastInput = input
-    lastVideoPath = videoPath || undefined
-    lastImages = images?.length ? [...images] : undefined
+    lastVideoPath = opts.videoPath || undefined
+    lastImages = opts.images?.length ? [...opts.images] : undefined
     entries.value.push({
       kind: 'user',
       text: input,
+      at: Date.now(),
       ...(lastVideoPath ? { videoPath: lastVideoPath } : {}),
+      ...(opts.videoSrc ? { videoSrc: opts.videoSrc } : {}),
       ...(lastImages ? { images: lastImages } : {}),
     })
     await runTurn()
     // 首轮后标题/lastActiveAt 已变,刷新会话列表(失败不阻断)
     await fetchSessions().catch(() => {})
+  }
+
+  /** 上传视频文件落工作区(POST /api/agent/uploads),返回路径设为待发送视频附件。
+   * 失败抛 ApiError(调用方提示);成功后 pendingVideo.src 供 composer 预览。 */
+  async function uploadVideo(file: File) {
+    const fd = new FormData()
+    fd.append('file', file)
+    let res: Response
+    try {
+      res = await fetch('/api/agent/uploads', { method: 'POST', body: fd })
+    } catch {
+      throw new ApiError(0, '网络错误,无法连接后端')
+    }
+    if (!res.ok) throw await toApiError(res)
+    const r = (await res.json()) as { path?: string; name?: string }
+    if (!r.path || !r.name) throw new ApiError(0, '后端未返回视频路径')
+    pendingVideo.value = {
+      path: r.path,
+      name: r.name,
+      src: `/api/agent/uploads/${encodeURIComponent(r.name)}`,
+    }
+  }
+
+  /** 撤回:删到指定用户消息为止(含其后全部条目)。
+   * localIndex 是本地时间线下标;system 条目仅本地流式插入不落库,
+   * 提交给后端的 entryIndex 需剔除 system 后换算。409(对话进行中)原样抛给调用方。 */
+  async function recallFrom(localIndex: number) {
+    if (!sessionId.value) throw new ApiError(0, '无活动会话')
+    const target = entries.value[localIndex]
+    if (!target || target.kind !== 'user') throw new ApiError(0, '仅支持撤回用户消息')
+    const persistedIndex =
+      entries.value.slice(0, localIndex + 1).filter((e) => e.kind !== 'system').length - 1
+    await postJson(`/api/agent/sessions/${sessionId.value}/recall`, {
+      entryIndex: persistedIndex,
+    })
+    entries.value.splice(localIndex)
   }
 
   /** 失败重试:会话都没建上则重建;否则用上次输入重跑一轮(不重复压 user 条目)。 */
@@ -571,6 +652,9 @@ export const useAgentChatStore = defineStore('agentchat', () => {
     sessions,
     usedTokens,
     maxTokens,
+    pendingVideo,
+    setPendingVideo,
+    clearPendingVideo,
     fetchSessions,
     createSession,
     selectSession,
@@ -578,6 +662,8 @@ export const useAgentChatStore = defineStore('agentchat', () => {
     setMode,
     newSession,
     send,
+    uploadVideo,
+    recallFrom,
     retry,
     stop,
     respondApproval,

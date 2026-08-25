@@ -463,6 +463,91 @@ class TestCompactSession:
 
 
 # ---------------------------------------------------------------------------
+# POST /api/agent/sessions/{id}/recall
+# ---------------------------------------------------------------------------
+
+
+class TestRecallSession:
+    def test_passthrough(
+        self, proxy_app: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured: List[Dict[str, Any]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.method == "POST"
+            assert request.url.path == "/sessions/s-1/recall"
+            captured.append(json.loads(request.content))
+            return httpx.Response(200, json={"status": "ok"})
+
+        _patch_downstream(monkeypatch, handler)
+        client = TestClient(proxy_app)
+        resp = client.post("/api/agent/sessions/s-1/recall", json={"entryIndex": 3})
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "ok"}
+        assert captured == [{"entryIndex": 3}]
+
+    def test_conflict_passthrough(
+        self, proxy_app: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                409,
+                json={"error": {"code": "chat_in_progress",
+                                "message": "turn in progress"}},
+            )
+
+        _patch_downstream(monkeypatch, handler)
+        client = TestClient(proxy_app)
+        resp = client.post("/api/agent/sessions/s-1/recall", json={"entryIndex": 0})
+        assert resp.status_code == 409
+        assert resp.json()["error"]["code"] == "chat_in_progress"
+
+    def test_bad_entry_passthrough(
+        self, proxy_app: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                400,
+                json={"error": {"code": "invalid_entry",
+                                "message": "not a user entry"}},
+            )
+
+        _patch_downstream(monkeypatch, handler)
+        client = TestClient(proxy_app)
+        resp = client.post("/api/agent/sessions/s-1/recall", json={"entryIndex": 99})
+        assert resp.status_code == 400
+        assert resp.json()["error"]["code"] == "invalid_entry"
+
+    def test_not_found_passthrough(
+        self, proxy_app: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                404,
+                json={"error": {"code": "session_not_found",
+                                "message": "unknown session: s-x"}},
+            )
+
+        _patch_downstream(monkeypatch, handler)
+        client = TestClient(proxy_app)
+        resp = client.post("/api/agent/sessions/s-x/recall", json={"entryIndex": 0})
+        assert resp.status_code == 404
+        assert resp.json()["error"]["code"] == "session_not_found"
+
+    def test_downstream_unreachable(
+        self, proxy_app: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("connection refused", request=request)
+
+        _patch_downstream(monkeypatch, handler)
+        client = TestClient(proxy_app)
+        resp = client.post("/api/agent/sessions/s-1/recall", json={"entryIndex": 0})
+        assert resp.status_code == 503
+        assert resp.json()["error"]["code"] == "agent_unavailable"
+
+
+# ---------------------------------------------------------------------------
 # POST /api/agent/approval
 # ---------------------------------------------------------------------------
 

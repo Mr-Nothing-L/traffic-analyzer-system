@@ -235,6 +235,47 @@
   outline-offset: 1px;
 }
 
+/* ---------- 行内「送入对话」键(hover 显现,同会话栏删除键的纪律) ---------- */
+.send-chat-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  color: var(--color-text2);
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out);
+}
+
+.video-item:hover .send-chat-btn,
+.video-item:focus-within .send-chat-btn {
+  opacity: 1;
+}
+
+.send-chat-btn:hover {
+  color: var(--color-accent);
+  background: var(--color-accent-soft);
+}
+
+.send-chat-btn:active {
+  background: var(--color-accent-deep);
+}
+
+.send-chat-btn:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
 /* design.md §4:reduced-motion 折叠为 ≤150ms 淡入(取消位移/描边绘制/强调条滑入) */
 @media (prefers-reduced-motion: reduce) {
   .tree-dir:hover, .video-item:hover { transform: none; }

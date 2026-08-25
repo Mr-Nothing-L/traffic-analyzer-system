@@ -27,6 +27,14 @@ export type TimelineEntry =
       /** dataURL 形式的图片附件(无附件时为 [])。 */
       images: string[];
       videoPath?: string;
+      /**
+       * entry ↔ kosong message 映射:落盘该 user 条目时 session.messages 的
+       * 长度,即该条目对应 user message 在 messages 中的下标。recall 按此值
+       * 把 messages 截断到「该 user 消息之前」。旧数据(该字段缺失)不可撤回。
+       * 已知局限:手动/自动压缩(replaceMessages)只改内存不改盘,压缩后旧
+       * 条目的 messageIndex 可能不再精确对应内存布局,recall 取 min 兜底。
+       */
+      messageIndex?: number;
       at: number;
     }
   | {
@@ -167,6 +175,24 @@ export class SessionStorage {
       .prepare('SELECT message_json FROM messages WHERE session_id = ? ORDER BY seq ASC')
       .all(sessionId)
       .map((row) => JSON.parse(String(row.message_json)) as Message);
+  }
+
+  /**
+   * 截断时间线条目:只保留前 keepCount 条(删除尾部,recall 用)。
+   * seq 从 1 起、append 用 MAX(seq)+1、所有删除都是尾删,故 seq 始终连续,
+   * 可直接按 seq > keepCount 删。
+   */
+  truncateEntries(sessionId: string, keepCount: number): void {
+    this.db
+      .prepare('DELETE FROM entries WHERE session_id = ? AND seq > ?')
+      .run(sessionId, keepCount);
+  }
+
+  /** 截断 kosong 消息:只保留前 keepCount 条(seq 连续性同 truncateEntries)。 */
+  truncateMessages(sessionId: string, keepCount: number): void {
+    this.db
+      .prepare('DELETE FROM messages WHERE session_id = ? AND seq > ?')
+      .run(sessionId, keepCount);
   }
 
   /** DELETE 语义:三张表一起清(与 idle 过期只清内存相区别)。 */

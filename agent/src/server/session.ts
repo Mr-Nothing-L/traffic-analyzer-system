@@ -56,6 +56,9 @@ export interface SessionManagerOptions {
 export const DEFAULT_SESSION_IDLE_MS = 2 * 60 * 60 * 1000;
 export const DEFAULT_SWEEP_INTERVAL_MS = 60_000;
 
+/** recall 的结果:成功 / 未知 session / entryIndex 非法(越界、非 user、缺映射)。 */
+export type RecallResult = 'ok' | 'not_found' | 'invalid_entry';
+
 const TITLE_MAX_CHARS = 30;
 
 export class SessionManager {
@@ -176,6 +179,34 @@ export class SessionManager {
     session.messages.length = 0;
     session.messages.push(...messages);
     return true;
+  }
+
+  /**
+   * 撤回:删除 entries[entryIndex..](内存+磁盘),并把 kosong messages 截断到
+   * 该 user 条目对应的 user 消息之前(按条目落盘时记录的 messageIndex)。
+   * 返回 'ok' | 'not_found' | 'invalid_entry'(越界/非 user/缺映射的旧条目)。
+   */
+  recall(id: string, entryIndex: number): RecallResult {
+    const session = this.get(id);
+    if (session === undefined) return 'not_found';
+    const entry = session.entries[entryIndex];
+    if (entry === undefined || entry.kind !== 'user' || entry.messageIndex === undefined) {
+      return 'invalid_entry';
+    }
+    // 压缩(replaceMessages)只改内存:messageIndex 可能超出当前内存长度,取小者兜底。
+    const keepMessages = Math.min(entry.messageIndex, session.messages.length);
+    session.entries.length = entryIndex;
+    session.messages.length = keepMessages;
+    const storage = this.storages.get(session.workspaceDir);
+    storage?.truncateEntries(id, entryIndex);
+    storage?.truncateMessages(id, keepMessages);
+    if (entryIndex === 0 && session.title !== '') {
+      // 标题取自首个 user 条目;它被一并撤回时清空标题(下轮首个 user 条目重算)。
+      session.title = '';
+      storage?.updateTitle(id, '');
+    }
+    this.bumpLastActive(session, storage);
+    return 'ok';
   }
 
   /** 删除会话:内存 + 磁盘三张表一起清。未知 session 返回 false。 */

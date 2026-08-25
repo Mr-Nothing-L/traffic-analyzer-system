@@ -7,6 +7,9 @@
  *   GET    /sessions/{id}/history  → {entries:[TimelineEntry]}(渲染友好的时间线)
  *   POST   /sessions/{id}/compact  → {status:'ok',compacted,beforeTokens,afterTokens}
  *                                      (立即压缩该 session 历史;进行中 → 409)
+ *   POST   /sessions/{id}/recall   {entryIndex} → {status:'ok'}(撤回:删除
+ *                                      entries[entryIndex..] 并同步截断 kosong
+ *                                      messages;进行中 → 409;越界/非 user → 400)
  *   DELETE /sessions/{id}          → {status:'ok'}(同时取消挂起审批、删盘)
  *   POST   /chat                   → SSE 流(text/event-stream,每事件一行 'data: {json}\n\n')
  *   POST   /approval               → 审批回执(见 approvalBridge.ts)
@@ -328,6 +331,41 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
     });
   };
 
+  /** 撤回:截断 entries[entryIndex..] 与其后的 kosong messages(见
+   * SessionManager.recall)。进行中的轮次返回 409。 */
+  const handleRecall = (res: ServerResponse, sessionId: string, body: unknown): void => {
+    if (
+      !isRecord(body) ||
+      typeof body.entryIndex !== 'number' ||
+      !Number.isInteger(body.entryIndex) ||
+      body.entryIndex < 0
+    ) {
+      sendError(res, 400, 'invalid_request', 'entryIndex is required and must be a non-negative integer');
+      return;
+    }
+    const session = sessions.get(sessionId);
+    if (session === undefined) {
+      sendError(res, 404, 'session_not_found', `unknown session: ${sessionId}`);
+      return;
+    }
+    const runtime = runtimeFor(session);
+    if (runtime.busy) {
+      sendError(res, 409, 'chat_in_progress', `session ${session.id} already has a chat turn in progress`);
+      return;
+    }
+    const result = sessions.recall(sessionId, body.entryIndex);
+    if (result === 'invalid_entry') {
+      sendError(
+        res,
+        400,
+        'invalid_entry',
+        `entryIndex ${body.entryIndex} does not point to a recallable user entry`,
+      );
+      return;
+    }
+    sendJson(res, 200, { status: 'ok' });
+  };
+
   const handleApproval = (res: ServerResponse, body: unknown): void => {
     if (!isRecord(body) || typeof body.requestId !== 'string') {
       sendError(res, 400, 'invalid_request', 'requestId is required');
@@ -446,6 +484,9 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
     }
     const userMessage: Message = { role: 'user', content: userContent, toolCalls: [] };
     const baseLength = session.messages.length;
+    // entry ↔ message 映射:记录本轮 user 消息写入前的 messages 长度,
+    // recall 该 user 条目时按此值截断 messages(见 storage.ts messageIndex)。
+    userEntry.messageIndex = baseLength;
     const messages = [...session.messages, userMessage];
     sessions.appendMessages(session.id, [userMessage]);
 
@@ -566,6 +607,16 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
             return;
           }
           handleCompact(res, sessionId);
+          return;
+        }
+        const recallMatch = /^\/sessions\/([^/]+)\/recall$/.exec(url.pathname);
+        if (req.method === 'POST' && recallMatch !== null) {
+          const sessionId = recallMatch[1];
+          if (sessionId === undefined) {
+            sendError(res, 400, 'invalid_request', 'session id is required');
+            return;
+          }
+          handleRecall(res, sessionId, await readJsonBody(req));
           return;
         }
         const sessionMatch = /^\/sessions\/([^/]+)$/.exec(url.pathname);

@@ -5,6 +5,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
 import { useAppStore } from '../../stores/app'
+import { useAgentChatStore } from '../../stores/agentchat'
 import { useDashboardStore } from '../../stores/dashboard'
 import { useJobsStore } from '../../stores/jobs'
 import { usePresenceStore } from '../../stores/presence'
@@ -17,6 +18,7 @@ import UiIcon from '../UiIcon.vue'
 const props = defineProps<{ entries: TreeEntry[]; depth: number }>()
 
 const app = useAppStore()
+const agentChat = useAgentChatStore()
 const ws = useWorkspaceStore()
 const jobs = useJobsStore()
 const presence = usePresenceStore()
@@ -137,6 +139,13 @@ function onSelect(rel: string) {
   }
 }
 
+/** 行内「→ 送入对话」:把该视频设为 /chat 待发送附件(工作区相对路径,与 videoPath 约定一致),
+ * 不在对话页则跳转;composer 预览行出现该视频块,可移除。 */
+function onSendToChat(e: TreeEntry) {
+  agentChat.setPendingVideo({ path: e.rel, name: e.name })
+  if (route.name !== 'chat') router.push('/chat')
+}
+
 /** 行内「■ 停止」:取该视频最新任务的 id(运行中行必有 running job)。 */
 async function onStop(e: TreeEntry) {
   const job = jobs.latestJobForStem(tree.videoFor(e).stem)
@@ -209,6 +218,9 @@ async function onRetry(rel: string) {
         <div class="video-name file-name" :title="row.e.rel">{{ row.e.name }}</div>
         <div class="video-sub">{{ fmtBytes(row.e.size) }}</div>
       </div>
+      <button class="send-chat-btn" title="送入对话" @click.stop="onSendToChat(row.e)">
+        <UiIcon name="right" :size="11" />
+      </button>
       <span
         v-for="b in presence.badgesFor(row.e.rel, app.user)"
         :key="b.kind + b.name"

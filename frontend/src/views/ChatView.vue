@@ -1,11 +1,14 @@
 <script setup lang="ts">
 /** 统一对话整卡(问答 + 检测,后端统一走 /api/agent/*):
  * 左侧历史会话栏(列表 title + 相对时间 / 点击切换重建时间线 / 删除(optimistic + 确认)/ 新建)
- * + 右侧对话卡:顶条(状态 chip + 权限模式)/ 时间线(user 气泡(图片附件 + 视频路径 chip)/
- * assistant 流式气泡(思考折叠 + markdown)/ 工具气泡(参数摘要 + 结果折叠,失败标红)/
+ * + 右侧对话卡:顶条(状态 chip + 权限模式)/ 时间线(user 气泡(图片附件 + 视频预览或路径 chip)/
+ * assistant 流式气泡(思考折叠 + markdown)/ 消息底部行(HH:MM + hover 显现的复制;user 另有撤回,
+ * 调 recall API 从时间线移除该条及其后全部,进行中禁用)/ 工具气泡(参数摘要 + 结果折叠,失败标红)/
  * 审批卡(批准/本会话都批准/拒绝;历史未决显示「已失效」)/ 检测结果卡(11 位编码等宽高亮 +
- * markdown 报告))/ 失败条(错误 + 重试)/ 输入区(图片附件:粘贴/选择/拖拽 ≤4 张,缩略图可移除;
- * 视频路径(可选)+ 指令;Enter 发送 / Shift+Enter 换行 / 进行中可停止)。
+ * markdown 报告))/ 失败条(错误 + 重试)/ composer 圆角盒(三行:附件预览行(图片缩略图 +
+ * 视频块,视频同一时刻最多一个,可移除)/ 无边框 textarea(自动增高)/ 底部功能行(左:「+」
+ * 上传图片或视频;右:压缩按钮 + 上下文圆环 + 发送/停止);图片粘贴/选择/拖拽 ≤4 张走 dataURL,
+ * 视频粘贴/选择/拖拽走 /api/agent/uploads 落盘拿 path;Enter 发送 / Shift+Enter 换行)。
  * 图片画廊:点击气泡图放大,左右切换(按钮/键盘 ←→)。
  * 状态在 stores/agentchat.ts,组件只接线。 */
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
@@ -21,6 +24,7 @@ import {
 } from 'naive-ui'
 import { useAgentChatStore } from '../stores/agentchat'
 import type { AgentAccess, AgentMode, AgentSessionInfo, DetectionPayload } from '../stores/agentchat'
+import { ApiError } from '../api/client'
 import { mdToHtml } from '../utils/markdown'
 import UiIcon from '../components/UiIcon.vue'
 import ContextRing from '../components/chat/ContextRing.vue'
@@ -29,7 +33,6 @@ const agent = useAgentChatStore()
 const message = useMessage()
 
 const question = ref('')
-const videoPath = ref('')
 
 /* ---- 状态四态(+运行中):chip 文案与配色 ---- */
 const STATUS_LABEL: Record<string, string> = {
@@ -49,7 +52,9 @@ const busy = computed(
     agent.status === 'running' ||
     agent.status === 'awaiting_approval',
 )
-const canSend = computed(() => !!agent.sessionId && !!question.value.trim() && !busy.value)
+const canSend = computed(
+  () => !!agent.sessionId && !!question.value.trim() && !busy.value && !videoUploading.value,
+)
 
 /* ---- 历史会话栏:按最近活跃倒序;相对时间(后端为 epoch ms) ---- */
 const sortedSessions = computed(() =>
@@ -81,6 +86,32 @@ async function onDelete(id: string) {
     await agent.deleteSession(id)
   } catch (e) {
     message.error(`删除会话失败:${(e as Error).message}`)
+  }
+}
+
+/* ---- 消息底部行:HH:MM 时间 + hover 显现的操作(复制;user 另有撤回) ---- */
+function fmtTime(ts?: number): string {
+  if (!ts) return ''
+  const d = new Date(ts)
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
+/** 复制消息文本(静默成功,失败才提示)。 */
+async function onCopy(text: string) {
+  try {
+    await navigator.clipboard.writeText(text)
+  } catch {
+    message.error('复制失败')
+  }
+}
+
+/** 撤回:后端删库后本地移除该条及其后全部;409(进行中)按钮已禁用,兜底提示。 */
+async function onRecall(i: number) {
+  try {
+    await agent.recallFrom(i)
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 409) message.warning('对话进行中,无法撤回')
+    else message.error(`撤回失败:${(e as Error).message}`)
   }
 }
 
@@ -150,8 +181,9 @@ function asPayload(data: unknown): DetectionPayload | null {
 }
 const encodingBits = (enc: string) => enc.split('_')
 
-/* ---- 图片附件(≤4 张):「+」选择 / Ctrl+V 粘贴 / 拖拽均走 stageImages;
- * 暂存给缩略图 objectURL,发送时 FileReader 转 dataURL 随消息上传 ---- */
+/* ---- 附件:图片(≤4 张)暂存本地,发送时 FileReader 转 dataURL 随消息上传;
+ * 视频(同一时刻最多一个)粘贴/选择/拖拽后先 POST /api/agent/uploads 落盘,
+ * 返回 path 作 videoPath;「+」选择 / Ctrl+V 粘贴 / 拖拽均走 stageFiles ---- */
 const MAX_IMAGES = 4
 interface PendingImg {
   file: File
@@ -159,15 +191,9 @@ interface PendingImg {
 }
 const pending = ref<PendingImg[]>([])
 const fileInput = ref<HTMLInputElement | null>(null)
+const videoUploading = ref(false)
 
-function stageImages(files: Iterable<File>): boolean {
-  const list = Array.from(files)
-  if (!list.length) return false
-  const imgs = list.filter((f) => f.type.startsWith('image/'))
-  if (!imgs.length) {
-    message.warning('仅支持图片附件,视频请在上方填路径')
-    return false
-  }
+function stageImages(imgs: File[]): boolean {
   const room = MAX_IMAGES - pending.value.length
   if (room <= 0) {
     message.warning(`图片最多 ${MAX_IMAGES} 张`)
@@ -180,19 +206,52 @@ function stageImages(files: Iterable<File>): boolean {
   return true
 }
 
+/** 视频落盘为待发送附件;已有视频时替换(同一时刻最多一个)。 */
+async function stageVideo(file: File) {
+  if (videoUploading.value) return
+  videoUploading.value = true
+  try {
+    await agent.uploadVideo(file)
+  } catch (e) {
+    message.error(`视频上传失败:${(e as Error).message}`)
+  } finally {
+    videoUploading.value = false
+  }
+}
+
+async function stageFiles(files: Iterable<File>): Promise<boolean> {
+  const list = Array.from(files)
+  if (!list.length) return false
+  const imgs = list.filter((f) => f.type.startsWith('image/'))
+  const vids = list.filter((f) => f.type.startsWith('video/'))
+  if (!imgs.length && !vids.length) {
+    message.warning('仅支持图片或视频附件')
+    return false
+  }
+  let staged = imgs.length > 0 && stageImages(imgs)
+  if (vids.length) {
+    if (vids.length > 1) message.warning('视频附件最多一个,已取第一个')
+    await stageVideo(vids[0])
+    staged = true
+  }
+  return staged
+}
+
 function onFiles(ev: Event) {
   const input = ev.target as HTMLInputElement
   const files = Array.from(input.files || [])
   input.value = '' // 允许重复选择同一文件再次触发 change
-  stageImages(files)
+  stageFiles(files)
 }
 
-/* Ctrl+V 粘贴:有文件(如截图)才拦截,纯文本粘贴不受影响 */
+/* Ctrl+V 粘贴:有文件(截图/视频)才拦截,纯文本粘贴不受影响 */
 function onPaste(ev: ClipboardEvent) {
   const files = ev.clipboardData?.files
   if (!files?.length) return
   ev.preventDefault()
-  if (stageImages(files)) message.success('已添加附件')
+  stageFiles(files).then((ok) => {
+    if (ok) message.success('已添加附件')
+  })
 }
 
 /* 拖拽:计数器防子元素进出导致的 dragenter/dragleave 抖动 */
@@ -225,7 +284,10 @@ function onDrop(ev: DragEvent) {
   dragDepth = 0
   dragOver.value = false
   const files = ev.dataTransfer?.files
-  if (files?.length && stageImages(files)) message.success('已添加附件')
+  if (!files?.length) return
+  stageFiles(files).then((ok) => {
+    if (ok) message.success('已添加附件')
+  })
 }
 
 /** 卡片外区域拖放文件时阻止浏览器默认的导航打开行为。 */
@@ -301,7 +363,7 @@ function scrollToBottom() {
 async function onSend() {
   const q = question.value.trim()
   if (!q || !canSend.value) return
-  const vp = videoPath.value.trim()
+  const video = agent.pendingVideo
   let images: string[] | undefined
   if (pending.value.length) {
     try {
@@ -312,10 +374,14 @@ async function onSend() {
     }
     clearPending()
   }
+  agent.clearPendingVideo()
   question.value = ''
   await nextTick()
   scrollToBottom()
-  await agent.send(q, vp || undefined, images)
+  await agent.send(q, {
+    ...(video ? { videoPath: video.path, ...(video.src ? { videoSrc: video.src } : {}) } : {}),
+    ...(images ? { images } : {}),
+  })
   // 失败由失败条呈现(含重试),不打断式 toast
 }
 
@@ -431,7 +497,7 @@ onUnmounted(() => {
       @drop="onDrop"
     >
       <!-- 拖拽提示覆盖层(pointer-events: none,不干扰 dragleave 计数) -->
-      <div v-show="dragOver" class="drop-overlay">松开鼠标,将图片添加为附件</div>
+      <div v-show="dragOver" class="drop-overlay">松开鼠标,将图片或视频添加为附件</div>
 
       <!-- 顶条:标题 + 状态 chip + 权限模式 -->
       <div class="chat-bar">
@@ -457,45 +523,81 @@ onUnmounted(() => {
             输入问题或检测指令,如:检测这段视频的交通事件
           </div>
           <template v-for="(e, i) in agent.entries" :key="i">
-            <!-- user 气泡(右):图片附件 + 视频路径 chip + 指令文本 -->
+            <!-- user 气泡(右):图片附件 + 视频预览(或路径 chip)+ 指令文本;
+                 底部行:HH:MM + hover 显现的复制/撤回 -->
             <div v-if="e.kind === 'user'" class="row user">
-              <div class="bubble">
-                <div v-if="e.images?.length" class="img-group">
-                  <img
-                    v-for="u in e.images"
-                    :key="u"
-                    :src="u"
-                    alt=""
-                    loading="lazy"
-                    @click="openPreview(u)"
+              <div class="msg-col">
+                <div class="bubble">
+                  <div v-if="e.images?.length" class="img-group">
+                    <img
+                      v-for="u in e.images"
+                      :key="u"
+                      :src="u"
+                      alt=""
+                      loading="lazy"
+                      @click="openPreview(u)"
+                    />
+                  </div>
+                  <video
+                    v-if="e.videoSrc"
+                    class="bubble-video"
+                    :src="e.videoSrc"
+                    controls
+                    preload="metadata"
                   />
+                  <div v-else-if="e.videoPath" class="video-chip" :title="e.videoPath">
+                    <UiIcon name="video" :size="12" />
+                    <span class="video-chip-name">{{ e.videoPath }}</span>
+                  </div>
+                  <div class="bubble-text">{{ e.text }}</div>
                 </div>
-                <div v-if="e.videoPath" class="video-chip" :title="e.videoPath">
-                  <UiIcon name="video" :size="12" />
-                  <span class="video-chip-name">{{ e.videoPath }}</span>
+                <div class="msg-meta">
+                  <span class="msg-time">{{ fmtTime(e.at) }}</span>
+                  <span class="msg-actions">
+                    <button class="msg-act" title="复制" @click="onCopy(e.text)">
+                      <UiIcon name="copy" :size="12" />
+                    </button>
+                    <button
+                      class="msg-act"
+                      title="撤回此条及之后的消息"
+                      :disabled="busy"
+                      @click="onRecall(i)"
+                    >
+                      <UiIcon name="undo" :size="12" />
+                    </button>
+                  </span>
                 </div>
-                <div class="bubble-text">{{ e.text }}</div>
               </div>
             </div>
 
-            <!-- assistant 气泡(左):思考折叠 + markdown 正文 -->
+            <!-- assistant 气泡(左):思考折叠 + markdown 正文;底部行:HH:MM + 复制 -->
             <div v-else-if="e.kind === 'assistant'" class="row assistant">
               <div class="avatar"><UiIcon name="chip" :size="18" /></div>
-              <div class="bubble">
-                <div v-if="e.think" class="think">
-                  <button class="think-head" @click="toggle(thinkOpen, i)">
-                    <UiIcon
-                      name="up"
-                      :size="10"
-                      class="think-caret"
-                      :class="{ open: thinkOpen.has(i) }"
-                    />
-                    <span>思考过程</span>
-                  </button>
-                  <div v-if="thinkOpen.has(i)" class="think-text">{{ e.think }}</div>
-                  <div v-else class="think-line">{{ lastThinkLine(e.think) }}</div>
+              <div class="msg-col">
+                <div class="bubble">
+                  <div v-if="e.think" class="think">
+                    <button class="think-head" @click="toggle(thinkOpen, i)">
+                      <UiIcon
+                        name="up"
+                        :size="10"
+                        class="think-caret"
+                        :class="{ open: thinkOpen.has(i) }"
+                      />
+                      <span>思考过程</span>
+                    </button>
+                    <div v-if="thinkOpen.has(i)" class="think-text">{{ e.think }}</div>
+                    <div v-else class="think-line">{{ lastThinkLine(e.think) }}</div>
+                  </div>
+                  <div v-if="e.text" class="bubble-text bubble-md" v-html="mdToHtml(e.text)" />
                 </div>
-                <div v-if="e.text" class="bubble-text bubble-md" v-html="mdToHtml(e.text)" />
+                <div class="msg-meta">
+                  <span class="msg-time">{{ fmtTime(e.at) }}</span>
+                  <span class="msg-actions">
+                    <button class="msg-act" title="复制" @click="onCopy(e.text)">
+                      <UiIcon name="copy" :size="12" />
+                    </button>
+                  </span>
+                </div>
               </div>
             </div>
 
@@ -606,66 +708,81 @@ onUnmounted(() => {
         </n-button>
       </div>
 
-      <!-- 输入区:视频路径(可选)+ 暂存附件区 + 「+」/输入框/停止或发送;
-           粘贴事件冒泡到此处统一处理 -->
+      <!-- composer 圆角盒(三行):附件预览行 / 文本输入行(自动增高)/ 底部功能行
+           (左:「+」上传;右:压缩按钮 + 上下文圆环 + 发送/停止)。粘贴冒泡到此处统一处理 -->
       <div class="chat-composer" @paste="onPaste">
-        <!-- 上下文用量:右下角固定圆环(+用量超 60% 出现压缩按钮) -->
-        <div class="context-widget">
-          <button
-            v-if="showCompactBtn"
-            class="compact-btn"
-            :class="{ danger: contextRatio > 0.85 }"
-            :disabled="busy || compacting"
-            @click="onCompact"
-          >
-            {{ compacting ? '压缩中…' : compactLabel }}
-          </button>
-          <ContextRing :used="agent.usedTokens" :max="agent.maxTokens" />
-        </div>
-        <n-input
-          v-model:value="videoPath"
-          size="small"
-          placeholder="视频路径:工作区内相对/绝对路径,如 演示区/xxx.mp4(可选)"
-          :disabled="busy"
-        />
-        <div v-if="pending.length" class="attach-list">
-          <div v-for="(a, i) in pending" :key="a.url" class="attach-item">
-            <img class="attach-thumb" :src="a.url" :alt="a.file.name" />
-            <button class="attach-remove" title="移除" @click="removeAttachment(i)">
-              <UiIcon name="close" :size="10" />
-            </button>
+        <div class="composer-box">
+          <!-- 附件预览行:图片缩略图 + 视频块(小预览或图标块 + 文件名),均可移除 -->
+          <div v-if="pending.length || agent.pendingVideo" class="attach-list">
+            <div v-for="(a, i) in pending" :key="a.url" class="attach-item">
+              <img class="attach-thumb" :src="a.url" :alt="a.file.name" />
+              <button class="attach-remove" title="移除" @click="removeAttachment(i)">
+                <UiIcon name="close" :size="10" />
+              </button>
+            </div>
+            <div v-if="agent.pendingVideo" class="attach-video">
+              <video
+                v-if="agent.pendingVideo.src"
+                class="attach-video-preview"
+                :src="agent.pendingVideo.src"
+                preload="metadata"
+                muted
+              />
+              <span v-else class="attach-video-icon"><UiIcon name="video" :size="16" /></span>
+              <span class="attach-video-name" :title="agent.pendingVideo.path">
+                {{ agent.pendingVideo.name }}
+              </span>
+              <button class="attach-remove" title="移除" @click="agent.clearPendingVideo()">
+                <UiIcon name="close" :size="10" />
+              </button>
+            </div>
           </div>
-        </div>
-        <div class="chat-input-row">
-          <n-button
-            size="small"
-            quaternary
-            title="添加图片(最多 4 张)"
-            :disabled="busy"
-            @click="fileInput?.click()"
-          >
-            <template #icon><UiIcon name="plus" :size="14" /></template>
-          </n-button>
+          <!-- 文本输入行:无边框 textarea,自动增高时底部行跟随 -->
           <n-input
             v-model:value="question"
             type="textarea"
             :autosize="{ minRows: 1, maxRows: 4 }"
+            :bordered="false"
             placeholder="输入问题或检测指令,Enter 发送,Shift+Enter 换行"
             :disabled="busy"
             @keydown.enter.exact.prevent="onSend"
           />
-          <n-button v-if="busy" size="small" @click="agent.stop()">停止</n-button>
-          <n-button v-else type="primary" size="small" :disabled="!canSend" @click="onSend">
-            <template #icon><UiIcon name="send" :size="12" /></template>
-            发送
-          </n-button>
+          <!-- 底部功能行 -->
+          <div class="composer-bar">
+            <button
+              class="bar-btn"
+              title="添加图片或视频附件"
+              :disabled="busy || videoUploading"
+              @click="fileInput?.click()"
+            >
+              <UiIcon name="plus" :size="14" />
+            </button>
+            <span v-if="videoUploading" class="bar-hint">视频上传中…</span>
+            <span class="bar-spacer" />
+            <button
+              v-if="showCompactBtn"
+              class="compact-btn"
+              :class="{ danger: contextRatio > 0.85 }"
+              :disabled="busy || compacting"
+              @click="onCompact"
+            >
+              {{ compacting ? '压缩中…' : compactLabel }}
+            </button>
+            <ContextRing :used="agent.usedTokens" :max="agent.maxTokens" />
+            <button v-if="busy" class="bar-btn" title="停止" @click="agent.stop()">
+              <UiIcon name="stop" :size="12" />
+            </button>
+            <button v-else class="send-btn" title="发送" :disabled="!canSend" @click="onSend">
+              <UiIcon name="send" :size="13" />
+            </button>
+          </div>
         </div>
         <input
           ref="fileInput"
           type="file"
           hidden
           multiple
-          accept="image/*"
+          accept="image/*,video/*"
           @change="onFiles"
         />
       </div>
@@ -1375,29 +1492,109 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 
-/* ---- 输入区 ---- */
+/* ---- 输入区(composer 圆角盒:附件预览行 / 文本输入行 / 底部功能行) ---- */
 .chat-composer {
-  position: relative; /* 上下文圆环浮层定位基准 */
   border-top: 1px solid var(--color-border);
   padding: var(--space-sm) var(--space-lg);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-sm);
 }
 
-/* ---- 上下文用量浮层:对话右下角(输入区上方) ---- */
-.context-widget {
-  position: absolute;
-  top: -44px;
-  right: var(--space-lg);
+.composer-box {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-surface-2);
+  padding: var(--space-sm);
+  transition: border-color var(--dur-fast) var(--ease-out);
+}
+
+.composer-box:focus-within {
+  border-color: var(--color-accent);
+}
+
+/* 盒内 textarea 无边框无底色(融入盒子),禁用态不动盒子描边 */
+.composer-box :deep(.n-input) {
+  background: transparent;
+}
+
+.composer-box :deep(.n-input__textarea-el) {
+  font-size: var(--text-md);
+}
+
+/* ---- 底部功能行:左「+」,右 压缩按钮 + 圆环 + 发送/停止 ---- */
+.composer-bar {
   display: flex;
   align-items: center;
   gap: var(--space-sm);
-  padding: 2px var(--space-xs);
+}
+
+.bar-spacer {
+  flex: 1;
+}
+
+.bar-hint {
+  font-size: var(--text-xs);
+  color: var(--color-text2);
+}
+
+.bar-btn,
+.send-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border-radius: 50%;
+  cursor: pointer;
+  transition:
+    background var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out);
+}
+
+.bar-btn {
   border: 1px solid var(--color-border);
-  border-radius: var(--radius);
   background: var(--color-card);
-  box-shadow: var(--shadow);
+  color: var(--color-text2);
+}
+
+.bar-btn:hover:not(:disabled) {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+  background: var(--color-hover-bg);
+}
+
+.bar-btn:active:not(:disabled) {
+  background: var(--color-accent-soft);
+}
+
+.send-btn {
+  border: 1px solid var(--color-accent);
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+}
+
+.send-btn:hover:not(:disabled) {
+  background: var(--color-accent-hover);
+  border-color: var(--color-accent-hover);
+}
+
+.send-btn:active:not(:disabled) {
+  filter: brightness(0.95);
+}
+
+.bar-btn:focus-visible,
+.send-btn:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+.bar-btn:disabled,
+.send-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .compact-btn {
@@ -1434,10 +1631,80 @@ onUnmounted(() => {
   color: var(--color-text2);
 }
 
-.chat-input-row {
+/* ---- 消息底部行:HH:MM + hover 显现的操作按钮组(参考 kimi-code) ---- */
+.msg-col {
   display: flex;
+  flex-direction: column;
+  min-width: 0;
+  max-width: 65%;
+}
+
+.row.user .msg-col {
   align-items: flex-end;
+}
+
+.msg-col .bubble {
+  max-width: 100%;
+}
+
+.msg-meta {
+  display: flex;
+  align-items: center;
   gap: var(--space-sm);
+  padding: 2px var(--space-xs) 0;
+}
+
+.msg-time {
+  font-size: var(--text-xs);
+  color: var(--color-text2);
+}
+
+.msg-actions {
+  display: inline-flex;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease-out);
+}
+
+.msg-col:hover .msg-actions,
+.msg-col:focus-within .msg-actions {
+  opacity: 1;
+}
+
+.msg-act {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--color-text2);
+  cursor: pointer;
+  transition:
+    color var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out);
+}
+
+.msg-act:hover:not(:disabled) {
+  color: var(--color-accent);
+  background: var(--color-hover-bg);
+}
+
+.msg-act:active:not(:disabled) {
+  background: var(--color-accent-soft);
+}
+
+.msg-act:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+.msg-act:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
 /* ---- 暂存附件区 ---- */
@@ -1459,6 +1726,60 @@ onUnmounted(() => {
   object-fit: cover;
   border-radius: var(--radius-sm);
   border: 1px solid var(--color-border);
+}
+
+/* ---- 视频附件块(composer 预览行):小预览或图标块 + 文件名 ---- */
+.attach-video {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  max-width: 280px;
+  padding: var(--space-xs) var(--space-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-card);
+}
+
+.attach-video-preview {
+  width: 72px;
+  height: 48px;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
+  background: var(--color-stage-bg);
+}
+
+.attach-video-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 48px;
+  border-radius: var(--radius-sm);
+  background: var(--color-stage-bg);
+  color: var(--color-on-accent);
+}
+
+.attach-video-name {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--color-text2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- user 气泡内视频小播放器(上传附件,src=/api/agent/uploads/{name}) ---- */
+.bubble-video {
+  display: block;
+  width: min(320px, 100%);
+  max-height: 180px;
+  margin-bottom: var(--space-sm);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: var(--color-stage-bg);
 }
 
 .attach-remove {
