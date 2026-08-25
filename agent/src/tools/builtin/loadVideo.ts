@@ -1,14 +1,14 @@
 /**
  * load_video: load an entire video into the model context as a single
- * `video_url` content part (data:video/mp4;base64), instead of sampling
- * frames with extract_frames.
+ * `video_url` content part (data:video/mp4;base64).
  *
  * Flow: sandbox-validate `video_path` (read) → POST /tools/prepare_video on
  * the Python toolserver (transcodes / downsamples when over `max_mb`,
  * default 40) → read the prepared file back and inline it as a base64 data
  * URL. If the prepared file still exceeds 50MB the base64 payload would be
  * too large for the chat request, so the call fails with an isError result
- * pointing the model at extract_frames instead.
+ * telling the model to inspect key moments with draw_boxes instead
+ * (extract_frames 已下线,不再作为回退建议)。
  */
 import { readFile } from 'node:fs/promises';
 
@@ -91,7 +91,7 @@ export function createLoadVideoTool(
             return {
               output:
                 `视频经降帧/转码后仍有 ${sizeMb}MB,超过 ${HARD_MAX_BYTES / (1024 * 1024)}MB 上限,` +
-                '无法整段加载。请改用 extract_frames 抽帧分析。',
+                '无法整段加载。请改用 draw_boxes 对关键时刻逐帧核对分析。',
               isError: true,
             };
           }

@@ -144,11 +144,11 @@ describe('load_video', () => {
     expect(execution.approvalRule).toContain(videoPath);
   });
 
-  it('fails over to extract_frames when the prepared file is still > 50MB', async () => {
+  it('fails over to draw_boxes when the prepared file is still > 50MB', async () => {
     mockPrepareVideo(preparedPayload({ size_bytes: 60 * 1024 * 1024, transcoded: true }));
     const result = await execute({ video_path: path.join(workspaceDir, 'demo.mp4') });
     expect(result.isError).toBe(true);
-    expect(result.output).toContain('extract_frames');
+    expect(result.output).toContain('draw_boxes');
     expect(result.output).toContain('50');
   });
 

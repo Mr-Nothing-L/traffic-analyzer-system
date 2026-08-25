@@ -158,7 +158,7 @@ async function buildVideoPart(
       return {
         output:
           `视频经降帧/转码后仍有 ${(prepared.data.size_bytes / (1024 * 1024)).toFixed(1)}MB,` +
-          '超过 50MB 上限,无法直传给子代理;请在 task 中让子代理改用 extract_frames 抽帧分析。',
+          '超过 50MB 上限,无法直传给子代理;请在 task 中让子代理改用 draw_boxes 对关键时刻逐帧核对。',
         isError: true,
       };
     }

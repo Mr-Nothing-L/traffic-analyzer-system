@@ -699,14 +699,13 @@ describe('submit_detection', () => {
 });
 
 describe('registerBuiltinTools', () => {
-  it('registers all eight builtin tools', () => {
+  it('registers all seven builtin tools (extract_frames 已下线)', () => {
     const registry = new ToolRegistry();
     const tools = registerBuiltinTools(registry, { workspaceDir });
-    expect(tools).toHaveLength(8);
+    expect(tools).toHaveLength(7);
     expect(registry.list().map((tool) => tool.name).sort()).toEqual(
       [
         'draw_boxes',
-        'extract_frames',
         'load_video',
         'read_file',
         'run_script',

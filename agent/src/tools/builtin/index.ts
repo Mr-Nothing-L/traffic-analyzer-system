@@ -1,7 +1,8 @@
 /**
- * registerBuiltinTools: one-shot registration of the detection agent's eight
- * builtin tools (video_meta / extract_frames / draw_boxes / load_video /
- * read_file / write_file / run_script / submit_detection).
+ * registerBuiltinTools: one-shot registration of the detection agent's seven
+ * builtin tools (video_meta / draw_boxes / load_video / read_file /
+ * write_file / run_script / submit_detection). extract_frames 已于
+ * 2026-08-25 下线(不再注册),实现保留在 videoTools.ts 以便需要时恢复。
  *
  * Model-facing descriptions come from agent/config/toolset.json; the
  * submit_detection parameters are toolset.json's `$ref` to
@@ -85,7 +86,11 @@ export function registerBuiltinTools(
   const client = new ToolserverClient({ baseUrl: options.toolserverUrl });
 
   const tools: ExecutableTool[] = [
-    ...createVideoTools(client, workspace, describe),
+    // extract_frames 已下线(2026-08-25):视觉输入统一走 load_video 整段直传,
+    // 局部放大核对用 draw_boxes。createVideoTools 仍会构造它,这里过滤掉不注册。
+    ...createVideoTools(client, workspace, describe).filter(
+      (tool) => tool.name !== 'extract_frames',
+    ),
     createLoadVideoTool(client, workspace, describe('load_video')),
     ...createFileTools(workspace, describe),
     createSubmitDetectionTool(
