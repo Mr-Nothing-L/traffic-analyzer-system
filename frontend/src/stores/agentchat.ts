@@ -14,7 +14,14 @@
  * POST   /api/agent/uploads(multipart file) → {path,name,size,contentType}(视频落工作区,
  *   返回 path 作 videoPath;GET /api/agent/uploads/{name} 供 <video> 预览);
  * POST   /api/agent/sessions/{id}/recall({entryIndex}) → {status:'ok'}(409=对话进行中;
- *   entryIndex 为后端持久化条目下标,不含本地 system 条目)。
+ *   entryIndex 为后端持久化条目下标,不含本地 system 条目);
+ * GET    /api/agent/sessions/{id}/events?fromSeq=N → {events:[{seq,entry}],inProgress}
+ *   (断连续传:已落盘条目中 seq>N 的部分;inProgress 表示服务端轮次仍在跑——
+ *   断连不再杀轮次,刷新后据此 5s 轮询补齐,不做实时流重连);
+ * POST   /api/agent/sessions/{id}/cancel → 显式终止进行中轮次(409 no_active_turn);
+ * POST   /api/agent/sessions/{id}/steer({input,videoPath?,images?}) → 进行中插话,
+ *   下一 step 边界生效(409 no_active_turn 回退 /chat);生效时 SSE 收到
+ *   {type:'steer',text,images,videoPath?,seq} 事件(本地乐观插入,按 text 去重)。
  * fetch+ReadableStream 按 \n\n 分块解析 data: 行,组件只接线,状态全部在这里。 */
 import { markRaw, ref, watch } from 'vue'
 import { defineStore } from 'pinia'
@@ -65,6 +72,8 @@ export interface AgentUserEntry {
   images?: string[]
   /** 发送时间(epoch ms),用于气泡 HH:MM。 */
   at?: number
+  /** 进行中插话(steer)标记:仅本地流式期间存在,历史重载不恢复。 */
+  steered?: boolean
 }
 
 export interface AgentAssistantEntry {
@@ -337,6 +346,9 @@ export const useAgentChatStore = defineStore('agentchat', () => {
   const maxTokens = ref(262144)
   /** 待发送视频附件(composer 预览行;发送后清空)。树组件「送入对话」也写它。 */
   const pendingVideo = ref<PendingVideo | null>(null)
+  /** 恢复态:刷新/断网后服务端轮次仍在跑,本地无 SSE 流,靠 5s 轮询补齐。
+   * UI 据此显示「分析仍在进行中」常驻条。 */
+  const recovering = ref(false)
 
   function setPendingVideo(v: PendingVideo) {
     pendingVideo.value = v
@@ -356,15 +368,34 @@ export const useAgentChatStore = defineStore('agentchat', () => {
   let lastInput = ''
   let lastVideoPath: string | undefined
   let lastImages: string[] | undefined
+  /** 恢复轮询定时器(events 5s 轮询;recovering 期间存活)。 */
+  let pollTimer: ReturnType<typeof setInterval> | null = null
+  /** events 续传水位:已对齐的服务端落盘 seq(seq 从 1 起,等于已落盘条数)。 */
+  let pollSeq = 0
+  /** 乐观插入的 steer 文本多重集合:SSE steer 事件/轮询补齐的 user 条目
+   * 按 text 消费一条,避免与本地乐观条目重复。 */
+  let pendingSteers: string[] = []
 
   function stop() {
     ctrl?.abort()
+    stopPolling()
   }
 
-  /** 切换/新建会话前调用:中断在途流,并使其 AbortError 收尾失效(不得覆盖新状态)。 */
+  function stopPolling() {
+    if (pollTimer !== null) {
+      clearInterval(pollTimer)
+      pollTimer = null
+    }
+  }
+
+  /** 切换/新建会话前调用:中断在途流,并使其 AbortError 收尾失效(不得覆盖新状态)。
+   * 同时收尾恢复态:停轮询、清 steer 去重账。 */
   function supersedeTurn() {
     turnSeq += 1
     ctrl?.abort()
+    stopPolling()
+    recovering.value = false
+    pendingSteers = []
   }
 
   /** 上次输入快照清空(新建/切换会话后,失败重试不得把旧输入重放进新会话)。 */
@@ -405,6 +436,88 @@ export const useAgentChatStore = defineStore('agentchat', () => {
       sessions?: AgentSessionInfo[]
     }
     sessions.value = Array.isArray(r.sessions) ? r.sessions : []
+  }
+
+  /* ---- 断连恢复:events 轮询(简化方案,不做实时流重连) ---- */
+
+  /** 合并一批已落盘条目(带 seq):推进水位;user 条目命中乐观 steer 账时
+   * 跳过(本地条目已在),其余 markRaw 压入时间线(落盘条目不再变更)。 */
+  function mergePersistedEvents(events: Array<{ seq?: unknown; entry?: unknown }>) {
+    for (const ev of events) {
+      if (typeof ev.seq === 'number' && ev.seq > pollSeq) pollSeq = ev.seq
+      const mapped = mapHistoryEntry(ev.entry)
+      if (mapped === null) continue
+      if (mapped.kind === 'user') {
+        const i = pendingSteers.indexOf(mapped.text)
+        if (i >= 0) {
+          pendingSteers.splice(i, 1) // 本地乐观 steer 条目已在,去重跳过
+          continue
+        }
+      }
+      entries.value.push(markRaw(mapped))
+    }
+  }
+
+  /** 拉一次 events 并合并;inProgress 变 false 时收尾恢复态(停轮询、置完成)。
+   * 网络抖动静默,下轮重试;切换会话后的晚到响应整体丢弃。 */
+  async function pollEvents(id: string) {
+    if (sessionId.value !== id) {
+      stopPolling()
+      return
+    }
+    let r: { events?: Array<{ seq?: unknown; entry?: unknown }>; inProgress?: boolean }
+    try {
+      r = (await reqJson(
+        `/api/agent/sessions/${id}/events?fromSeq=${pollSeq}`,
+        'GET',
+      )) as typeof r
+    } catch {
+      return // 网络抖动:下轮重试
+    }
+    if (sessionId.value !== id) return // 轮询在途期间已切换会话
+    mergePersistedEvents(Array.isArray(r.events) ? r.events : [])
+    if (r.inProgress !== true) {
+      stopPolling()
+      recovering.value = false
+      if (status.value === 'running') status.value = 'done'
+      await fetchSessions().catch(() => {}) // 标题/用量已变,刷新列表(失败不阻断)
+    }
+  }
+
+  /** 启动 5s 轮询(先停旧定时器,幂等)。 */
+  function startPolling(id: string) {
+    stopPolling()
+    pollTimer = setInterval(() => {
+      void pollEvents(id)
+    }, 5000)
+  }
+
+  /** 手动「刷新进度」:立即拉一次 events(恢复条按钮)。 */
+  async function refreshProgress() {
+    if (sessionId.value) await pollEvents(sessionId.value)
+  }
+
+  /** selectSession 收尾的恢复探测:以已加载条数为水位拉 events,
+   * inProgress=true 则进入恢复态(status running + 常驻条 + 5s 轮询)。
+   * 探测失败(网络/404)不阻塞会话切换。 */
+  async function resumeFromServer(id: string, gen: number) {
+    pollSeq = entries.value.length
+    let r: { events?: Array<{ seq?: unknown; entry?: unknown }>; inProgress?: boolean }
+    try {
+      r = (await reqJson(
+        `/api/agent/sessions/${id}/events?fromSeq=${pollSeq}`,
+        'GET',
+      )) as typeof r
+    } catch {
+      return
+    }
+    if (gen !== selectSeq || sessionId.value !== id) return // 探测在途期间已切换
+    mergePersistedEvents(Array.isArray(r.events) ? r.events : [])
+    if (r.inProgress === true) {
+      recovering.value = true
+      status.value = 'running'
+      startPolling(id)
+    }
   }
 
   /** 创建会话:workspaceDir 由后端代理注入,前端只传权限模式。 */
@@ -461,6 +574,8 @@ export const useAgentChatStore = defineStore('agentchat', () => {
       // 会话切换:沿用列表里的最近已知用量(没有则清空等下一次 context_usage)
       usedTokens.value = typeof info?.usedTokens === 'number' ? info.usedTokens : null
       status.value = 'idle'
+      // 断连恢复探测:服务端轮次仍在跑则进入恢复态(轮询补齐)
+      await resumeFromServer(id, gen)
     } catch (e) {
       status.value = 'failed'
       error.value = (e as Error).message
@@ -610,6 +725,25 @@ export const useAgentChatStore = defineStore('agentchat', () => {
       status.value = 'awaiting_approval'
     } else if (ev.type === 'detection') {
       entries.value.push({ kind: 'detection', data: ev.data })
+    } else if (ev.type === 'steer') {
+      // 进行中插话生效:本地已乐观插入(发 /steer 成功时)则按 text 去重跳过,
+      // 否则(他端插入)补一条带「已插话」标记的 user 条目
+      const text = String(ev.text ?? '')
+      const i = pendingSteers.indexOf(text)
+      if (i >= 0) {
+        pendingSteers.splice(i, 1)
+      } else {
+        entries.value.push({
+          kind: 'user',
+          text,
+          steered: true,
+          at: Date.now(),
+          ...(Array.isArray(ev.images) && ev.images.length
+            ? { images: ev.images.map(String) }
+            : {}),
+          ...(ev.videoPath != null ? { videoPath: String(ev.videoPath) } : {}),
+        })
+      }
     } else if (ev.type === 'context_usage') {
       const used = Number(ev.usedTokens)
       const max = Number(ev.maxTokens)
@@ -634,6 +768,57 @@ export const useAgentChatStore = defineStore('agentchat', () => {
       }
     }
     // step_done:无独立 UI(工具批结束的进度信号,时间线条目已自解释)
+  }
+
+  /** 进行中插话:POST /steer,成功后乐观插入带「已插话」标记的 user 条目
+   * (SSE steer 事件/轮询补齐到达时按 text 去重)。409 no_active_turn 表示
+   * 轮次恰好结束:返回 false 由调用方回退正常 /chat;其他错误原样抛。 */
+  async function trySteer(input: string, opts: SendOptions): Promise<boolean> {
+    try {
+      await postJson(`/api/agent/sessions/${sessionId.value}/steer`, {
+        input,
+        ...(opts.videoPath ? { videoPath: opts.videoPath } : {}),
+        ...(opts.images?.length ? { images: opts.images } : {}),
+      })
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409) {
+        // 恢复态下轮次已结束:停轮询收尾,随后走正常 /chat 重连实时流
+        stopPolling()
+        recovering.value = false
+        return false
+      }
+      throw e
+    }
+    pendingSteers.push(input)
+    entries.value.push({
+      kind: 'user',
+      text: input,
+      steered: true,
+      at: Date.now(),
+      ...(opts.videoPath ? { videoPath: opts.videoPath } : {}),
+      ...(opts.videoSrc ? { videoSrc: opts.videoSrc } : {}),
+      ...(opts.images?.length ? { images: [...opts.images] } : {}),
+    })
+    return true
+  }
+
+  /** 显式终止进行中轮次:POST /cancel(断连不再杀轮次,停止语义由它承担;
+   * 本地流随后会收到 done 自然收尾)。409 no_active_turn 说明服务端轮次已结束
+   * (恢复态滞后),拉齐 events 收尾;其他错误抛给调用方提示。 */
+  async function cancelTurn() {
+    if (!sessionId.value) return
+    try {
+      await postJson(`/api/agent/sessions/${sessionId.value}/cancel`, {})
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409) {
+        await pollEvents(sessionId.value)
+        return
+      }
+      throw e
+    }
+    // 恢复态(本地无流)收不到 done:主动拉齐一次;服务端收尾有延迟时
+    // inProgress 仍为 true,由在跑的轮询继续补齐直至结束
+    if (recovering.value) await pollEvents(sessionId.value)
   }
 
   /** 发起一轮 /chat SSE(不压 user 条目;send/retry 共用)。 */
@@ -705,14 +890,18 @@ export const useAgentChatStore = defineStore('agentchat', () => {
     }
   }
 
-  /** 发送一轮(压 user 条目);opts.images 为 dataURL 数组(≤4)。进行中/审批中忽略。
+  /** 发送一轮(压 user 条目);opts.images 为 dataURL 数组(≤4)。
+   * 进行中(running/awaiting_approval)改走 /steer 插话(乐观插入 user 条目,
+   * 409 no_active_turn 回退正常 /chat);connecting 中忽略。
    * 无会话(工作区切换后已清空)时先按当前工作区惰性建会话,建不上则交给失败条/重试。 */
   async function send(input: string, opts: SendOptions = {}) {
-    const busy =
-      status.value === 'connecting' ||
-      status.value === 'running' ||
-      status.value === 'awaiting_approval'
-    if (busy) return
+    if (status.value === 'connecting') return
+    const busy = status.value === 'running' || status.value === 'awaiting_approval'
+    if (busy) {
+      if (!sessionId.value) return
+      if (await trySteer(input, opts)) return
+      // 409 回退:轮次已结束,落入正常发送路径
+    }
     if (!sessionId.value) {
       await createSession()
       if (!sessionId.value) return // 建会话失败:状态已置 failed,由失败条重试兜底
@@ -820,6 +1009,7 @@ export const useAgentChatStore = defineStore('agentchat', () => {
     usedTokens,
     maxTokens,
     pendingVideo,
+    recovering,
     setPendingVideo,
     clearPendingVideo,
     fetchSessions,
@@ -833,6 +1023,8 @@ export const useAgentChatStore = defineStore('agentchat', () => {
     recallFrom,
     retry,
     stop,
+    cancelTurn,
+    refreshProgress,
     respondApproval,
     compactContext,
   }

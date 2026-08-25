@@ -3,8 +3,9 @@
  *
  * 触发参数照搬 vendor/kimi-code
  * packages/agent-core-v2/src/agent/fullCompaction/strategy.ts 的
- * DEFAULT_COMPACTION_CONFIG:triggerRatio 0.85、reservedContextSize 50_000、
- * maxRecentMessages 4。
+ * DEFAULT_COMPACTION_CONFIG:triggerRatio 0.85、reservedContextSize 50_000。
+ * 保留区改为按 token 预算(retainTokens,默认 50_000 = 原 reservedContextSize
+ * 语义)从尾部向前累计,maxRecentMessages 退化为条数下限保护(默认 2)。
  *
  * 本模块只做「替换老工具结果为占位」的机械压缩;LLM 摘要压缩在
  * summarize.ts(参考 vendor fullCompaction:总结中段、保留最近消息),
@@ -27,7 +28,12 @@ export interface CompactionConfig {
   readonly triggerRatio: number;
   /** 预留输出空间:used + reserved >= max 同样触发(与 vendor 一致)。 */
   readonly reservedContextSize: number;
-  /** 保留区最少包含的最近消息条数(再向前扩展到 user 边界)。 */
+  /**
+   * 保留区 token 预算:从尾部向前累计,保留区总量不超过该值,
+   * 且仍以 user 消息为安全边界(只在 user 边界提交扩展)。
+   */
+  readonly retainTokens: number;
+  /** 保留区条数下限:预算再小也至少保留最近这么多条(再向前扩展到 user 边界)。 */
   readonly maxRecentMessages: number;
   /** 工具结果占位文本。 */
   readonly placeholder: string;
@@ -36,7 +42,8 @@ export interface CompactionConfig {
 export const DEFAULT_COMPACTION_PARAMS = {
   triggerRatio: 0.85,
   reservedContextSize: 50_000,
-  maxRecentMessages: 4,
+  retainTokens: 50_000,
+  maxRecentMessages: 2,
   placeholder: '[已压缩]',
 } as const;
 
@@ -53,6 +60,7 @@ export function createCompactionConfig(
     triggerRatio: overrides.triggerRatio ?? DEFAULT_COMPACTION_PARAMS.triggerRatio,
     reservedContextSize:
       overrides.reservedContextSize ?? DEFAULT_COMPACTION_PARAMS.reservedContextSize,
+    retainTokens: overrides.retainTokens ?? DEFAULT_COMPACTION_PARAMS.retainTokens,
     maxRecentMessages:
       overrides.maxRecentMessages ?? DEFAULT_COMPACTION_PARAMS.maxRecentMessages,
     placeholder: overrides.placeholder ?? DEFAULT_COMPACTION_PARAMS.placeholder,
@@ -145,9 +153,10 @@ export interface CompactionSplit {
 
 /**
  * 计算压缩区/保留区切点(安全边界,与 vendor canSplitAfter 同义):
- * 保留区 = 从末尾取 maxRecentMessages 条再向前扩展到最近的 user 消息;
- * 压缩区 = [firstNonSystem, keepFrom)。压缩区为空或找不到 user 边界时
- * 返回 undefined(宁愿不压也不切坏进行中的交互)。
+ * 保留区 = 从尾部向前累计,总量不超过 retainTokens,下限为最近
+ * maxRecentMessages 条,且始终落在 user 消息上(向前扩展只在 user 边界
+ * 提交);压缩区 = [firstNonSystem, keepFrom)。压缩区为空或找不到 user
+ * 边界时返回 undefined(宁愿不压也不切坏进行中的交互)。
  */
 export function splitForCompaction(
   messages: readonly Message[],
@@ -158,12 +167,30 @@ export function splitForCompaction(
     firstNonSystem += 1;
   }
 
+  // 下限:最近 maxRecentMessages 条,向前扩展到最近的 user 边界。
   let keepFrom = Math.max(firstNonSystem, messages.length - config.maxRecentMessages);
   while (keepFrom > firstNonSystem && messages[keepFrom]?.role !== 'user') {
     keepFrom -= 1;
   }
   if (messages[keepFrom]?.role !== 'user') return undefined;
   if (keepFrom <= firstNonSystem) return undefined; // 压缩区为空
+
+  // token 预算内继续向前扩展:逐段(上一 user 边界到当前 keepFrom)累计,
+  // 加上该段会超预算即停;找不到完整段可加时保持下限保留区。
+  if (config.retainTokens > 0) {
+    let retained = estimateMessagesTokens(messages.slice(keepFrom));
+    let pending = 0;
+    for (let scan = keepFrom - 1; scan > firstNonSystem; scan -= 1) {
+      const message = messages[scan];
+      if (message === undefined) break;
+      pending += estimateMessageTokens(message);
+      if (message.role !== 'user') continue;
+      if (retained + pending > config.retainTokens) break;
+      retained += pending;
+      pending = 0;
+      keepFrom = scan;
+    }
+  }
   return { firstNonSystem, keepFrom };
 }
 

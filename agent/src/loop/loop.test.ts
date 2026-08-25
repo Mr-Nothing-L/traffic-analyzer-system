@@ -587,6 +587,50 @@ describe('runAgentLoop', () => {
     expect(extractText(old ?? createUserMessage(''))).toBe('[已压缩]');
   });
 
+  it('摘要估算不短于压缩区时放弃压缩:compaction_abandoned 事件,历史原样保留', async () => {
+    const initialMessages: Message[] = [
+      createUserMessage('第一轮'),
+      createAssistantMessage([{ type: 'text', text: '先看元数据' }], [
+        toolCall('old-1', 'echo', {}),
+      ]),
+      createToolMessage('old-1', '老工具结果'),
+      createAssistantMessage([{ type: 'text', text: '看完了' }]),
+      createUserMessage('继续'),
+    ];
+    const h = harness(
+      [[toolCall('c1', 'echo', {})], [text('结束')]],
+      [echoTool(() => Promise.resolve({ output: 'small-ok' }))],
+      yoloGate(),
+      [
+        { inputOther: 8600, inputCacheRead: 0, inputCacheCreation: 0, output: 100 },
+        null,
+      ],
+      // 摘要返回超长文本:估算 token 远超压缩区 → 放弃本次压缩
+      [[text('冗长摘要'.repeat(2000))]],
+    );
+
+    const result = await h.run({
+      messages: initialMessages,
+      compaction: { maxContextTokens: 10_000, reservedContextSize: 0, maxRecentMessages: 2 },
+    });
+
+    expect(result.reason).toBe('completed');
+    // 不发生压缩:无 compaction 事件,有 abandoned 事件且摘要不短于压缩区
+    expect(h.events.some((e) => e.type === 'compaction')).toBe(false);
+    const abandoned = h.events.find((e) => e.type === 'compaction_abandoned');
+    expect(abandoned).toBeDefined();
+    if (abandoned?.type === 'compaction_abandoned') {
+      expect(abandoned.summaryTokens).toBeGreaterThanOrEqual(abandoned.zoneTokens);
+    }
+    // 历史原样:老工具结果未被摘要替换,也未被占位替换
+    const secondHistory = h.provider.histories[1] ?? [];
+    const old = secondHistory.find((m) => m.toolCallId === 'old-1');
+    expect(extractText(old ?? createUserMessage(''))).toBe('老工具结果');
+    expect(
+      secondHistory.some((m) => m.role === 'user' && extractText(m).includes(SUMMARY_PREFIX)),
+    ).toBe(false);
+  });
+
   it('截断步:arguments 残块不执行并回灌重试提示,完整调用照常执行,done.truncated=true', async () => {
     const execute = vi.fn(() => Promise.resolve({ output: 'echo-ok' }));
     // 残块:arguments 无法 JSON.parse(截断在 JSON 中间)
@@ -765,6 +809,60 @@ describe('compaction', () => {
     expect(outcome.compactedToolResults).toBe(1);
     const t1 = outcome.messages.find((m) => m.toolCallId === 't1');
     expect(extractText(t1 ?? createUserMessage(''))).toBe('[已压缩]');
+  });
+
+  it('保留区按 retainTokens 从尾部向前累计:预算越大保留越多(仍以 user 为安全边界)', () => {
+    const messages: Message[] = [
+      createUserMessage('u1'),
+      ...bigToolExchange('t1', 1000),
+      createUserMessage('u2'),
+      ...bigToolExchange('t2', 1000),
+      createUserMessage('u3'),
+      ...bigToolExchange('t3', 1000),
+      createAssistantMessage([{ type: 'text', text: 'a3' }]),
+    ];
+
+    // 预算极小:只保留下限(maxRecentMessages=2 向前扩展到 u3),t1/t2 都被压
+    const tight = compactMessages(
+      messages,
+      createCompactionConfig(1_000_000, { maxRecentMessages: 2, retainTokens: 10 }),
+      true,
+    );
+    expect(tight.compactedToolResults).toBe(2);
+
+    // 预算够两轮:保留区扩展到 u2(再加 u1 一轮会超预算),只有 t1 被压
+    const loose = compactMessages(
+      messages,
+      createCompactionConfig(1_000_000, { maxRecentMessages: 2, retainTokens: 1000 }),
+      true,
+    );
+    expect(loose.compactedToolResults).toBe(1);
+    const t1 = loose.messages.find((m) => m.toolCallId === 't1');
+    expect(extractText(t1 ?? createUserMessage(''))).toBe('[已压缩]');
+    const t2 = loose.messages.find((m) => m.toolCallId === 't2');
+    expect(extractText(t2 ?? createUserMessage('')).length).toBe(1000);
+  });
+
+  it('retainTokens 固定时保留区随内容长度变化:最近一轮变长则少保留一轮', () => {
+    // 与上一个用例同构,但最近一轮的工具结果更长:同样的 1000 预算下
+    // 保留区装不下 u2 一轮,只保留 u3 起 → t2 也被压。
+    const messages: Message[] = [
+      createUserMessage('u1'),
+      ...bigToolExchange('t1', 1000),
+      createUserMessage('u2'),
+      ...bigToolExchange('t2', 1000),
+      createUserMessage('u3'),
+      ...bigToolExchange('t3', 3000),
+      createAssistantMessage([{ type: 'text', text: 'a3' }]),
+    ];
+    const outcome = compactMessages(
+      messages,
+      createCompactionConfig(1_000_000, { maxRecentMessages: 2, retainTokens: 1000 }),
+      true,
+    );
+    expect(outcome.compactedToolResults).toBe(2);
+    const t3 = outcome.messages.find((m) => m.toolCallId === 't3');
+    expect(extractText(t3 ?? createUserMessage('')).length).toBe(3000);
   });
 });
 

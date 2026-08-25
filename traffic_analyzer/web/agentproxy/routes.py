@@ -243,6 +243,53 @@ async def set_session_mode(session_id: str, request: Request) -> JSONResponse:
     return _passthrough_error(resp.status_code, resp.content)
 
 
+@router.get("/sessions/{session_id}/events")
+async def session_events(session_id: str, request: Request) -> JSONResponse:
+    """透传 GET /sessions/{id}/events?fromSeq=N(断连/刷新后补齐条目 + inProgress)。"""
+    runtime = _runtime(request)
+    if runtime is None or not runtime.enabled:
+        return _unavailable()
+    query = f"?{request.url.query}" if request.url.query else ""
+    return await _simple_passthrough(
+        runtime, "GET", f"/sessions/{session_id}/events{query}"
+    )
+
+
+@router.post("/sessions/{session_id}/cancel")
+async def cancel_session_turn(session_id: str, request: Request) -> JSONResponse:
+    """透传 POST /sessions/{id}/cancel(显式终止进行中轮次,无 body)。"""
+    runtime = _runtime(request)
+    if runtime is None or not runtime.enabled:
+        return _unavailable()
+    try:
+        async with AsyncClient(base_url=runtime.agent_url, timeout=_JSON_TIMEOUT) as client:
+            resp = await client.post(f"/sessions/{session_id}/cancel")
+    except httpx.HTTPError as exc:
+        logger.warning("agent /sessions/%s/cancel unreachable: %s", session_id, exc)
+        return _unavailable(f"agent server unreachable: {exc}")
+    return _passthrough_error(resp.status_code, resp.content)
+
+
+@router.post("/sessions/{session_id}/steer")
+async def steer_session(session_id: str, request: Request) -> JSONResponse:
+    """透传 POST /sessions/{id}/steer(轮次进行中注入用户消息,下一 step 边界生效)。"""
+    runtime = _runtime(request)
+    if runtime is None or not runtime.enabled:
+        return _unavailable()
+    body = await request.body()
+    try:
+        async with AsyncClient(base_url=runtime.agent_url, timeout=_JSON_TIMEOUT) as client:
+            resp = await client.post(
+                f"/sessions/{session_id}/steer",
+                content=body,
+                headers={"Content-Type": "application/json"},
+            )
+    except httpx.HTTPError as exc:
+        logger.warning("agent /sessions/%s/steer unreachable: %s", session_id, exc)
+        return _unavailable(f"agent server unreachable: {exc}")
+    return _passthrough_error(resp.status_code, resp.content)
+
+
 @router.post("/approval")
 async def approval(request: Request) -> JSONResponse:
     """透传 POST /approval(审批回执)。"""

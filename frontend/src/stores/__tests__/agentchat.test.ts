@@ -486,3 +486,260 @@ describe('SSE 流式事件', () => {
     expect(agent.entries.some((e) => e.kind === 'system')).toBe(false);
   });
 });
+
+// 断连恢复 + steer + cancel 测试(P1/P2 前端):
+// - selectSession 后 GET events 显示 inProgress=true → 进入恢复态(running + recovering),
+//   5s 轮询补齐落盘条目,inProgress=false 后收尾并停轮询;
+// - 进行中发送走 /steer(乐观插入 steered user 条目),409 no_active_turn 回退 /chat;
+// - SSE steer 事件/轮询补齐的 user 条目与本地乐观条目按 text 去重;
+// - 停止按钮走 /cancel 显式终止服务端轮次。
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+describe('断连恢复(events 轮询)', () => {
+  it('selectSession 后 inProgress=true:进入恢复态,轮询补齐并在结束后收尾停轮询', async () => {
+    vi.useFakeTimers();
+    const { agent } = await load();
+    let eventCalls = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: unknown) => {
+        const url = String(input);
+        if (url.endsWith('/history')) {
+          return historyResponse([{ kind: 'user', text: '首轮', images: [], at: 1 }]);
+        }
+        if (url.includes('/events')) {
+          eventCalls += 1;
+          if (eventCalls === 1) return jsonResponse({ events: [], inProgress: true });
+          return jsonResponse({
+            events: [{ seq: 2, entry: { kind: 'assistant', text: '恢复的回答', think: '', at: 2 } }],
+            inProgress: false,
+          });
+        }
+        return jsonResponse({ sessions: [] });
+      }),
+    );
+
+    await agent.selectSession('s1');
+    expect(agent.status).toBe('running'); // 恢复态按运行中呈现
+    expect(agent.recovering).toBe(true);
+    expect(agent.entries).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(5000); // 第一次轮询:补齐 + 收尾
+    expect(agent.entries).toHaveLength(2);
+    expect(agent.entries[1]).toMatchObject({ kind: 'assistant', text: '恢复的回答' });
+    expect(agent.recovering).toBe(false);
+    expect(agent.status).toBe('done');
+
+    const callsAfterDone = eventCalls;
+    await vi.advanceTimersByTimeAsync(20000);
+    expect(eventCalls).toBe(callsAfterDone); // inProgress=false 后轮询已停
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it('工作区切换:恢复轮询停止,恢复态清除', async () => {
+    vi.useFakeTimers();
+    const { ws, agent } = await load();
+    ws.path = '/ws/a';
+    await nextTick();
+    let eventCalls = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: unknown) => {
+        const url = String(input);
+        if (url.endsWith('/history')) {
+          return historyResponse([{ kind: 'user', text: '首轮', images: [], at: 1 }]);
+        }
+        if (url.includes('/events')) {
+          eventCalls += 1;
+          return jsonResponse({ events: [], inProgress: true }); // 一直在跑
+        }
+        return jsonResponse({ sessions: [] });
+      }),
+    );
+
+    await agent.selectSession('s1');
+    expect(agent.recovering).toBe(true);
+
+    ws.path = '/ws/b'; // 工作区切换:重置会话态,轮询必须停
+    await nextTick();
+    expect(agent.recovering).toBe(false);
+    expect(agent.status).toBe('idle');
+
+    const calls = eventCalls;
+    await vi.advanceTimersByTimeAsync(20000);
+    expect(eventCalls).toBe(calls);
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it('恢复轮询补齐的 steer user 条目与本地乐观条目去重', async () => {
+    vi.useFakeTimers();
+    const { agent } = await load();
+    let eventCalls = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: unknown) => {
+        const url = String(input);
+        if (url.endsWith('/history')) {
+          return historyResponse([{ kind: 'user', text: '首轮', images: [], at: 1 }]);
+        }
+        if (url.endsWith('/steer')) return jsonResponse({ status: 'ok', queued: true });
+        if (url.includes('/events')) {
+          eventCalls += 1;
+          if (eventCalls === 1) return jsonResponse({ events: [], inProgress: true });
+          // 服务端落盘的 steer user 条目(seq 2)与本地乐观条目同文,应去重
+          return jsonResponse({
+            events: [
+              { seq: 2, entry: { kind: 'user', text: '插话', images: [], at: 2 } },
+              { seq: 3, entry: { kind: 'assistant', text: '收尾', think: '', at: 3 } },
+            ],
+            inProgress: false,
+          });
+        }
+        return jsonResponse({ sessions: [] });
+      }),
+    );
+
+    await agent.selectSession('s1'); // 进入恢复态(running)
+    await agent.send('插话'); // 进行中 → /steer,乐观插入
+    expect(agent.entries).toHaveLength(2);
+    expect(agent.entries[1]).toMatchObject({ kind: 'user', text: '插话', steered: true });
+
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(agent.entries).toHaveLength(3); // steer user 条目不重复,只补 assistant
+    expect(agent.entries[1]).toMatchObject({ kind: 'user', text: '插话', steered: true });
+    expect(agent.entries[2]).toMatchObject({ kind: 'assistant', text: '收尾' });
+    expect(agent.recovering).toBe(false);
+    expect(agent.status).toBe('done');
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+});
+
+describe('steer 插话', () => {
+  it('进行中发送走 /steer:乐观插入带 steered 标记的 user 条目,不发 /chat', async () => {
+    const { agent } = await load();
+    agent.sessionId = 's1';
+    agent.status = 'running';
+    const calls: Array<{ url: string; body?: unknown }> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: unknown, init?: { body?: unknown }) => {
+        calls.push({ url: String(input), body: init?.body });
+        return jsonResponse({ status: 'ok', queued: true });
+      }),
+    );
+
+    await agent.send('插话一句');
+    vi.unstubAllGlobals();
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe('/api/agent/sessions/s1/steer');
+    expect(JSON.parse(String(calls[0]!.body))).toMatchObject({ input: '插话一句' });
+    expect(agent.entries).toHaveLength(1);
+    expect(agent.entries[0]).toMatchObject({ kind: 'user', text: '插话一句', steered: true });
+    expect(agent.status).toBe('running'); // 轮次仍进行中,状态不变
+  });
+
+  it('steer 409 no_active_turn:回退正常 /chat 发送(不带 steered 标记)', async () => {
+    const { agent } = await load();
+    agent.sessionId = 's1';
+    agent.status = 'running';
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: unknown) => {
+        const url = String(input);
+        if (url.endsWith('/steer')) {
+          return jsonResponse(
+            { error: { code: 'no_active_turn', message: 'no chat turn in progress' } },
+            409,
+          );
+        }
+        if (url.endsWith('/chat')) {
+          return sseResponse([
+            { type: 'text_delta', text: '回答' },
+            { type: 'done', reason: 'stop_turn' },
+          ]);
+        }
+        return jsonResponse({ sessions: [] });
+      }),
+    );
+
+    await agent.send('新问题');
+    vi.unstubAllGlobals();
+
+    expect(agent.entries.map((e) => e.kind)).toEqual(['user', 'assistant']);
+    expect(agent.entries[0]).toMatchObject({ kind: 'user', text: '新问题' });
+    expect('steered' in agent.entries[0]!).toBe(false); // 正常发送不带插话标记
+    expect(agent.status).toBe('done');
+  });
+
+  it('SSE steer 事件(本地无乐观条目,他端插入):补一条带 steered 标记的 user 条目', async () => {
+    const { agent } = await load();
+    agent.sessionId = 's1';
+    stubChatStream([
+      { type: 'text_delta', text: '先答一半' },
+      { type: 'steer', text: '他端插话', images: [] },
+      { type: 'done', reason: 'stop_turn' },
+    ]);
+    await agent.send('首轮');
+    vi.unstubAllGlobals();
+
+    expect(agent.entries.map((e) => e.kind)).toEqual(['user', 'assistant', 'user']);
+    expect(agent.entries[2]).toMatchObject({ kind: 'user', text: '他端插话', steered: true });
+  });
+});
+
+describe('cancel 显式终止', () => {
+  it('恢复态 cancelTurn:POST /cancel 后拉齐 events 收尾(停轮询)', async () => {
+    vi.useFakeTimers();
+    const { agent } = await load();
+    let cancelCalled = false;
+    let eventCalls = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: unknown) => {
+        const url = String(input);
+        if (url.endsWith('/history')) {
+          return historyResponse([{ kind: 'user', text: '首轮', images: [], at: 1 }]);
+        }
+        if (url.endsWith('/cancel')) {
+          cancelCalled = true;
+          return jsonResponse({ status: 'ok' });
+        }
+        if (url.includes('/events')) {
+          eventCalls += 1;
+          if (eventCalls === 1) return jsonResponse({ events: [], inProgress: true });
+          return jsonResponse({
+            events: [
+              { seq: 2, entry: { kind: 'assistant', text: '被取消前的部分', think: '', at: 2 } },
+            ],
+            inProgress: false,
+          });
+        }
+        return jsonResponse({ sessions: [] });
+      }),
+    );
+
+    await agent.selectSession('s1');
+    expect(agent.recovering).toBe(true);
+
+    await agent.cancelTurn();
+    expect(cancelCalled).toBe(true);
+    expect(agent.entries).toHaveLength(2); // 拉齐取消前已落盘的部分
+    expect(agent.recovering).toBe(false);
+    expect(agent.status).toBe('done');
+
+    const calls = eventCalls;
+    await vi.advanceTimersByTimeAsync(20000);
+    expect(eventCalls).toBe(calls); // 收尾后轮询已停
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+});

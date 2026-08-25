@@ -8,7 +8,8 @@
  * maxCompletionTokens 2048 上限),
  * 摘要作为一条 user 消息(「[此前对话摘要]」前缀)替换整个压缩区,
  * 保留区不变。摘要调用失败/超时/返回空 → 回退 compaction.ts 的占位替换,
- * 绝不让 loop 因压缩而崩。
+ * 绝不让 loop 因压缩而崩。摘要生成但估算 token 不短于压缩区时放弃本次
+ * 压缩(abandoned,消息原样返回,由 loop 发 compaction_abandoned 事件)。
  *
  * 防递归:摘要走 kosong generate() 直调 provider,不经过 runAgentLoop,
  * 摘要请求自身永远不会再触发压缩。
@@ -22,6 +23,7 @@ import { withThinkingDisabled } from '../llm/provider';
 
 import {
   compactMessages,
+  estimateMessageTokens,
   estimateMessagesTokens,
   shouldCompact,
   splitForCompaction,
@@ -53,10 +55,20 @@ export const SUMMARY_SYSTEM_PROMPT = [
 export interface SummarizedCompactionOutcome extends CompactionOutcome {
   /** true = LLM 摘要替换压缩区;false = 占位替换或未压缩。 */
   readonly summarized: boolean;
+  /**
+   * true = 摘要已生成但估算 token 不短于压缩区,放弃本次压缩
+   * (消息原样返回;参考 deepseek-harness region.ts 的
+   * "summary is not smaller than the shadowed content" 规则)。
+   */
+  readonly abandoned: boolean;
   /** 压缩前的 token 估算(heuristic)。 */
   readonly beforeTokens: number;
   /** 压缩后的 token 估算(heuristic)。 */
   readonly afterTokens: number;
+  /** abandoned=true 时:压缩区的 token 估算。 */
+  readonly zoneTokens?: number;
+  /** abandoned=true 时:摘要消息(含前缀)的 token 估算。 */
+  readonly summaryTokens?: number;
 }
 
 /**
@@ -77,6 +89,7 @@ export async function compactMessagesWithSummary(
     compacted: false,
     compactedToolResults: 0,
     summarized: false,
+    abandoned: false,
     beforeTokens,
     afterTokens: beforeTokens,
   };
@@ -89,6 +102,13 @@ export async function compactMessagesWithSummary(
   const summary = await callSummary(zone, provider, signal);
   if (summary !== null) {
     const summaryMessage = createUserMessage(`${SUMMARY_PREFIX}\n\n${summary}`);
+    // 摘要不比压缩区短:放弃本次压缩(不回退占位——压了反而更长没有意义),
+    // 消息原样返回,由调用方(loop)发 compaction_abandoned 事件。
+    const zoneTokens = estimateMessagesTokens(zone);
+    const summaryTokens = estimateMessageTokens(summaryMessage);
+    if (summaryTokens >= zoneTokens) {
+      return { ...unchanged, abandoned: true, zoneTokens, summaryTokens };
+    }
     const next: Message[] = [
       ...messages.slice(0, split.firstNonSystem),
       summaryMessage,
@@ -99,6 +119,7 @@ export async function compactMessagesWithSummary(
       compacted: true,
       compactedToolResults: zone.filter((m) => m.role === 'tool').length,
       summarized: true,
+      abandoned: false,
       beforeTokens,
       afterTokens: estimateMessagesTokens(next),
     };
@@ -109,6 +130,7 @@ export async function compactMessagesWithSummary(
   return {
     ...fallback,
     summarized: false,
+    abandoned: false,
     beforeTokens,
     afterTokens: estimateMessagesTokens(fallback.messages),
   };

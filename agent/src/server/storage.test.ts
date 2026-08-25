@@ -1,6 +1,7 @@
 /**
- * SessionStorage 单元测试:PRAGMA user_version 建库标记/版本校验、
- * loadEntriesAfter 续传查询。真实 node:sqlite 临时库,不打模型 API。
+ * SessionStorage 单元测试:PRAGMA user_version 建库标记/版本校验/迁移、
+ * loadEntriesAfter 续传查询、messages 软遮蔽(replaceMessages/truncateMessages)。
+ * 真实 node:sqlite 临时库,不打模型 API。
  */
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -8,6 +9,8 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+
+import { createUserMessage, extractText, type Message } from '#/message';
 
 import { SCHEMA_VERSION, SessionStorage, type TimelineEntry } from './storage';
 
@@ -92,6 +95,130 @@ describe('loadEntriesAfter', () => {
 
     expect(storage.loadEntriesAfter('s1', 1).map((r) => r.seq)).toEqual([2, 3]);
     expect(storage.loadEntriesAfter('s1', 3)).toEqual([]);
+    storage.close();
+  });
+});
+
+describe('messages 软遮蔽(shadowed)', () => {
+  /** 直读 messages 原始行(含遮蔽行),验证 shadowed 标记与 seq 续接。 */
+  function rawMessageRows(
+    dbPath: string,
+    sessionId: string,
+  ): { seq: number; shadowed: number; text: string }[] {
+    const db = new DatabaseSync(dbPath);
+    try {
+      return db
+        .prepare('SELECT seq, shadowed, message_json FROM messages WHERE session_id = ? ORDER BY seq ASC')
+        .all(sessionId)
+        .map((row) => ({
+          seq: Number(row.seq),
+          shadowed: Number(row.shadowed),
+          text: extractText(JSON.parse(String(row.message_json)) as Message),
+        }));
+    } finally {
+      db.close();
+    }
+  }
+
+  it('replaceMessages 软遮蔽旧行:读取只看新序列,seq 续接,后续 append 不受干扰', () => {
+    const storage = new SessionStorage(workspace);
+    storage.appendMessages('s1', [
+      createUserMessage('一'),
+      createUserMessage('二'),
+      createUserMessage('三'),
+    ]);
+
+    storage.replaceMessages('s1', [createUserMessage('摘要'), createUserMessage('四')]);
+
+    // 读取只看活跃序列
+    expect(storage.loadMessages('s1').map((m) => extractText(m))).toEqual(['摘要', '四']);
+    // 旧行软遮蔽保留;新行 seq 从全局 MAX+1 续接
+    expect(rawMessageRows(storage.dbPath, 's1')).toEqual([
+      { seq: 1, shadowed: 1, text: '一' },
+      { seq: 2, shadowed: 1, text: '二' },
+      { seq: 3, shadowed: 1, text: '三' },
+      { seq: 4, shadowed: 0, text: '摘要' },
+      { seq: 5, shadowed: 0, text: '四' },
+    ]);
+
+    // 增量落盘(P1)继续 append:seq 续接,遮蔽行不参与读取
+    storage.appendMessages('s1', [createUserMessage('五')]);
+    expect(storage.loadMessages('s1').map((m) => extractText(m))).toEqual(['摘要', '四', '五']);
+    expect(rawMessageRows(storage.dbPath, 's1').at(-1)).toEqual({ seq: 6, shadowed: 0, text: '五' });
+    storage.close();
+  });
+
+  it('二次压缩:再次 replaceMessages 只遮蔽当前活跃行', () => {
+    const storage = new SessionStorage(workspace);
+    storage.appendMessages('s1', [createUserMessage('一'), createUserMessage('二')]);
+    storage.replaceMessages('s1', [createUserMessage('摘要1')]);
+    storage.replaceMessages('s1', [createUserMessage('摘要2')]);
+
+    expect(storage.loadMessages('s1').map((m) => extractText(m))).toEqual(['摘要2']);
+    expect(rawMessageRows(storage.dbPath, 's1')).toEqual([
+      { seq: 1, shadowed: 1, text: '一' },
+      { seq: 2, shadowed: 1, text: '二' },
+      { seq: 3, shadowed: 1, text: '摘要1' },
+      { seq: 4, shadowed: 0, text: '摘要2' },
+    ]);
+    storage.close();
+  });
+
+  it('truncateMessages 仍物理尾删活跃序列,遮蔽行不动', () => {
+    const storage = new SessionStorage(workspace);
+    storage.appendMessages('s1', [createUserMessage('一'), createUserMessage('二')]);
+    storage.replaceMessages('s1', [createUserMessage('摘要'), createUserMessage('四'), createUserMessage('五')]);
+
+    // recall 语义:活跃序列只保留前 2 条,尾部物理删除
+    storage.truncateMessages('s1', 2);
+    expect(storage.loadMessages('s1').map((m) => extractText(m))).toEqual(['摘要', '四']);
+    expect(rawMessageRows(storage.dbPath, 's1')).toEqual([
+      { seq: 1, shadowed: 1, text: '一' },
+      { seq: 2, shadowed: 1, text: '二' },
+      { seq: 3, shadowed: 0, text: '摘要' },
+      { seq: 4, shadowed: 0, text: '四' },
+    ]);
+
+    // keepCount=0:活跃序列全删,遮蔽行仍不动
+    storage.truncateMessages('s1', 0);
+    expect(storage.loadMessages('s1')).toEqual([]);
+    expect(rawMessageRows(storage.dbPath, 's1')).toHaveLength(2);
+
+    // 截断后 append 仍按全局 MAX(seq)+1 续接(剩余行为遮蔽行 seq 1/2)
+    storage.appendMessages('s1', [createUserMessage('新')]);
+    expect(storage.loadMessages('s1').map((m) => extractText(m))).toEqual(['新']);
+    expect(rawMessageRows(storage.dbPath, 's1').at(-1)).toEqual({ seq: 3, shadowed: 0, text: '新' });
+    storage.close();
+  });
+
+  it('老库迁移(v1 无 shadowed 列):加列默认 0、版本升到 2、旧数据可读可压缩', () => {
+    // 模拟 v1 旧库:messages 表无 shadowed 列,user_version=1。
+    const dir = path.join(workspace, '.agent');
+    mkdirSync(dir, { recursive: true });
+    const dbPath = path.join(dir, 'sessions.db');
+    const db = new DatabaseSync(dbPath);
+    db.exec('CREATE TABLE messages (session_id TEXT NOT NULL, seq INTEGER NOT NULL, message_json TEXT NOT NULL, PRIMARY KEY (session_id, seq))');
+    db.exec('CREATE TABLE sessions (id TEXT PRIMARY KEY, workspace_dir TEXT NOT NULL, mode TEXT NOT NULL, title TEXT NOT NULL DEFAULT \'\', created_at INTEGER NOT NULL, last_active_at INTEGER NOT NULL)');
+    db.exec('CREATE TABLE entries (session_id TEXT NOT NULL, seq INTEGER NOT NULL, entry_json TEXT NOT NULL, PRIMARY KEY (session_id, seq))');
+    db.prepare('INSERT INTO messages (session_id, seq, message_json) VALUES (?, ?, ?)').run(
+      's1',
+      1,
+      JSON.stringify(createUserMessage('旧消息')),
+    );
+    db.exec('PRAGMA user_version = 1');
+    db.close();
+
+    const storage = new SessionStorage(workspace);
+    expect(userVersion(dbPath)).toBe(2);
+    // 旧行默认 shadowed=0:迁移后照常可读
+    expect(storage.loadMessages('s1').map((m) => extractText(m))).toEqual(['旧消息']);
+    // 迁移后软遮蔽路径正常:旧行被遮蔽,新序列 seq 续接
+    storage.replaceMessages('s1', [createUserMessage('摘要')]);
+    expect(storage.loadMessages('s1').map((m) => extractText(m))).toEqual(['摘要']);
+    expect(rawMessageRows(storage.dbPath, 's1')).toEqual([
+      { seq: 1, shadowed: 1, text: '旧消息' },
+      { seq: 2, shadowed: 0, text: '摘要' },
+    ]);
     storage.close();
   });
 });

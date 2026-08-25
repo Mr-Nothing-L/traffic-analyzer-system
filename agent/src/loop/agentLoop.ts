@@ -72,6 +72,17 @@ export type AgentLoopEvent =
     }
   | {
       /**
+       * 摘要已生成但估算不短于压缩区:放弃本次压缩,消息保持不变
+       * (不回退占位)。仅记录,不触发整体回写。
+       */
+      readonly type: 'compaction_abandoned';
+      /** 压缩区 token 估算(heuristic)。 */
+      readonly zoneTokens: number;
+      /** 摘要消息(含前缀)token 估算(heuristic)。 */
+      readonly summaryTokens: number;
+    }
+  | {
+      /**
        * 子代理嵌套事件:工具(如 spawn_subagent)在执行期间经
        * ctx.onSubagentEvent 上报子 loop 事件,loop 包装成本事件进入父
        * 事件流;server 原样透传 SSE(前端按 toolCallId 归属到对应工具)。
@@ -303,6 +314,13 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
             summarized: outcome.summarized,
             beforeTokens: outcome.beforeTokens,
             afterTokens: outcome.afterTokens,
+          });
+        } else if (outcome.abandoned) {
+          // 摘要不短于压缩区:放弃压缩,消息不变(不重置水位、不整体回写)。
+          await emit({
+            type: 'compaction_abandoned',
+            zoneTokens: outcome.zoneTokens ?? 0,
+            summaryTokens: outcome.summaryTokens ?? 0,
           });
         }
       } catch (error) {

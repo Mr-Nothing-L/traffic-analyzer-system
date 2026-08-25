@@ -640,6 +640,84 @@ class TestSessionMode:
 
 
 # ---------------------------------------------------------------------------
+# GET /sessions/{id}/events · POST /sessions/{id}/cancel · /steer
+# ---------------------------------------------------------------------------
+
+
+class TestSessionEventsCancelSteer:
+    def test_events_passthrough_with_query(
+        self, proxy_app: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.method == "GET"
+            assert request.url.path == "/sessions/s-1/events"
+            assert request.url.params["fromSeq"] == "7"
+            return httpx.Response(200, json={"events": [], "inProgress": True})
+
+        _patch_downstream(monkeypatch, handler)
+        client = TestClient(proxy_app)
+        resp = client.get("/api/agent/sessions/s-1/events?fromSeq=7")
+        assert resp.status_code == 200
+        assert resp.json() == {"events": [], "inProgress": True}
+
+    def test_cancel_passthrough(
+        self, proxy_app: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.method == "POST"
+            assert request.url.path == "/sessions/s-1/cancel"
+            return httpx.Response(200, json={"status": "ok"})
+
+        _patch_downstream(monkeypatch, handler)
+        client = TestClient(proxy_app)
+        resp = client.post("/api/agent/sessions/s-1/cancel")
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "ok"}
+
+    def test_cancel_no_active_turn_passthrough(
+        self, proxy_app: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                409, json={"error": {"code": "no_active_turn", "message": "no turn"}}
+            )
+
+        _patch_downstream(monkeypatch, handler)
+        client = TestClient(proxy_app)
+        resp = client.post("/api/agent/sessions/s-1/cancel")
+        assert resp.status_code == 409
+        assert resp.json()["error"]["code"] == "no_active_turn"
+
+    def test_steer_passthrough_body(
+        self, proxy_app: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured: List[Dict[str, Any]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/sessions/s-1/steer"
+            captured.append(json.loads(request.content))
+            return httpx.Response(200, json={"status": "ok", "queued": True})
+
+        _patch_downstream(monkeypatch, handler)
+        client = TestClient(proxy_app)
+        resp = client.post("/api/agent/sessions/s-1/steer", json={"input": "补充说明"})
+        assert resp.status_code == 200
+        assert captured == [{"input": "补充说明"}]
+
+    def test_downstream_unreachable(
+        self, proxy_app: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("connection refused", request=request)
+
+        _patch_downstream(monkeypatch, handler)
+        client = TestClient(proxy_app)
+        resp = client.post("/api/agent/sessions/s-1/steer", json={"input": "x"})
+        assert resp.status_code == 503
+        assert resp.json()["error"]["code"] == "agent_unavailable"
+
+
+# ---------------------------------------------------------------------------
 # POST /api/agent/approval
 # ---------------------------------------------------------------------------
 

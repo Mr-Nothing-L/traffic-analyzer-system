@@ -6,12 +6,15 @@
  * 调 recall API 从时间线移除该条及其后全部,进行中禁用)/ 工具气泡(参数摘要 + 结果折叠
  * (文本 + 图片缩略图,点击进画廊),失败标红)/
  * 审批卡(批准/本会话都批准/拒绝;历史未决显示「已失效」)/ 检测结果卡(11 位编码等宽高亮 +
- * 检出事件(逐事件标注图进画廊,无框/画框失败显示降级小字)+ markdown 报告))/ 失败条(错误 + 重试)/ composer 圆角盒(三行:附件预览行(图片缩略图 +
+ * 检出事件(逐事件标注图进画廊,无框/画框失败显示降级小字)+ markdown 报告))/ 失败条(错误 + 重试)/
+ * 恢复条(刷新/断网后服务端轮次仍在跑:常驻「分析仍在进行中」+ 刷新进度,5s 轮询补齐)/
+ * composer 圆角盒(三行:附件预览行(图片缩略图 +
  * 视频块,视频同一时刻最多一个,可移除)/ 无边框 textarea(自动增高)/ 底部功能行(左:「+」
  * 上传图片或视频 + 权限模式选择器(逐条确认/自动通过/完全自主);右:压缩按钮 + 上下文圆环
  * + 发送/停止);图片粘贴/选择/拖拽 ≤4 张走 dataURL,
  * 视频粘贴/选择/拖拽走 /api/agent/uploads 落盘拿 path;Enter 发送 / Shift+Enter 换行,
  * 输入法合成态(isComposing)中的 Enter 是选词上屏,不发送)。
+ * 进行中输入框不禁用:发送即 /steer 插话(气泡带「已插话」标记),停止走 /cancel 显式终止。
  * 工作区视频(无 src)气泡内按 path 确定性推 /api/workspace/stream 小播放器预览;
  * 工具条目为思考过程同款弱化样式(无卡片,工具名走中文映射),点击展开结果。
  * 图片画廊:点击气泡图放大,左右切换(按钮/键盘 ←→)。
@@ -52,16 +55,17 @@ const STATUS_LABEL: Record<string, string> = {
 }
 const statusLabel = computed(() => STATUS_LABEL[agent.status] ?? agent.status)
 
-/** 进行中(建会话/跑轮次/等审批):禁用发送与模式切换,显示停止。 */
+/** 进行中(建会话/跑轮次/等审批):显示停止;发送仍可用(走 steer 插话)。 */
 const busy = computed(
   () =>
     agent.status === 'connecting' ||
     agent.status === 'running' ||
     agent.status === 'awaiting_approval',
 )
-/* 无会话也可点发送:send 内按当前工作区惰性建会话(工作区切换后 sessionId 已清空) */
+/* 无会话也可点发送:send 内按当前工作区惰性建会话(工作区切换后 sessionId 已清空);
+ * 进行中也可发送(走 /steer 插话),仅 connecting(建会话/切会话在途)禁用 */
 const canSend = computed(
-  () => !!question.value.trim() && !busy.value && !videoUploading.value,
+  () => !!question.value.trim() && agent.status !== 'connecting' && !videoUploading.value,
 )
 
 /* ---- 历史会话栏:按最近活跃倒序;相对时间(后端为 epoch ms) ---- */
@@ -434,11 +438,36 @@ async function onSend() {
   question.value = ''
   await nextTick()
   scrollToBottom()
-  await agent.send(q, {
-    ...(video ? { videoPath: video.path, ...(video.src ? { videoSrc: video.src } : {}) } : {}),
-    ...(images ? { images } : {}),
-  })
-  // 失败由失败条呈现(含重试),不打断式 toast
+  try {
+    await agent.send(q, {
+      ...(video ? { videoPath: video.path, ...(video.src ? { videoSrc: video.src } : {}) } : {}),
+      ...(images ? { images } : {}),
+    })
+  } catch (e) {
+    // 正常轮次失败由失败条呈现;steer 插话失败(非 409)直接提示
+    message.error(`发送失败:${(e as Error).message}`)
+  }
+}
+
+/** 停止:显式终止服务端轮次(断连不再杀轮次,仅 abort 本地流停不掉服务端)。 */
+async function onStop() {
+  try {
+    await agent.cancelTurn()
+  } catch (e) {
+    message.error(`停止失败:${(e as Error).message}`)
+  }
+}
+
+/** 恢复条「刷新进度」:立即拉一次 events 补齐(平时 5s 自动轮询)。 */
+const refreshing = ref(false)
+async function onRefreshProgress() {
+  if (refreshing.value) return
+  refreshing.value = true
+  try {
+    await agent.refreshProgress()
+  } finally {
+    refreshing.value = false
+  }
 }
 
 async function onRetry() {
@@ -629,6 +658,7 @@ onUnmounted(() => {
                 </div>
                 <div class="msg-meta">
                   <span class="msg-time">{{ fmtTime(e.at) }}</span>
+                  <span v-if="e.steered" class="steer-tag">已插话</span>
                   <span class="msg-actions">
                     <button class="msg-act" title="复制" @click="onCopy(e.text)">
                       <UiIcon name="copy" :size="12" />
@@ -836,6 +866,14 @@ onUnmounted(() => {
         </div>
       </n-scrollbar>
 
+      <!-- 恢复条:刷新/断网后服务端轮次仍在跑(本地无 SSE 流),5s 轮询补齐,可手动刷新 -->
+      <div v-if="agent.recovering" class="resume-bar">
+        <span class="resume-text">分析仍在进行中,每 5 秒自动补齐进度</span>
+        <n-button size="small" :disabled="refreshing" @click="onRefreshProgress">
+          {{ refreshing ? '刷新中…' : '刷新进度' }}
+        </n-button>
+      </div>
+
       <!-- 失败条:错误信息 + 重试 -->
       <div v-if="agent.status === 'failed'" class="fail-bar">
         <span class="fail-text" :title="agent.error ?? ''">{{ agent.error || '运行失败' }}</span>
@@ -874,14 +912,15 @@ onUnmounted(() => {
               </button>
             </div>
           </div>
-          <!-- 文本输入行:无边框 textarea,自动增高时底部行跟随 -->
+          <!-- 文本输入行:无边框 textarea,自动增高时底部行跟随;
+               进行中不禁用(发送即 steer 插话),仅 connecting 禁用 -->
           <n-input
             v-model:value="question"
             type="textarea"
             :autosize="{ minRows: 1, maxRows: 4 }"
             :bordered="false"
             placeholder="输入问题或检测指令,Enter 发送,Shift+Enter 换行"
-            :disabled="busy"
+            :disabled="agent.status === 'connecting'"
             @keydown.enter="onComposerEnter"
           />
           <!-- 底部功能行 -->
@@ -931,10 +970,16 @@ onUnmounted(() => {
               {{ compacting ? '压缩中…' : compactLabel }}
             </button>
             <ContextRing :used="agent.usedTokens" :max="agent.maxTokens" />
-            <button v-if="busy" class="bar-btn" title="停止" @click="agent.stop()">
+            <!-- 停止(显式 cancel 服务端轮次)与发送并存:进行中发送即 steer 插话 -->
+            <button v-if="busy" class="bar-btn" title="停止" @click="onStop">
               <UiIcon name="stop" :size="12" />
             </button>
-            <button v-else class="send-btn" title="发送" :disabled="!canSend" @click="onSend">
+            <button
+              class="send-btn"
+              :title="busy ? '插话(进行中注入)' : '发送'"
+              :disabled="!canSend"
+              @click="onSend"
+            >
               <UiIcon name="send" :size="13" />
             </button>
           </div>
@@ -1732,6 +1777,32 @@ onUnmounted(() => {
 .bubble-md :deep(.md td) {
   padding: 2px var(--space-sm);
   border: 1px solid var(--color-border);
+}
+
+/* ---- 恢复条(断连恢复:服务端轮次仍在跑,轮询补齐) ---- */
+.resume-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-xs) var(--space-lg);
+  border-top: 1px solid var(--color-border);
+  background: var(--color-blue-soft);
+}
+
+.resume-text {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-sm);
+  color: var(--color-blue);
+}
+
+/* 「已插话」小标记(steer 注入的 user 气泡,仅本地流式期间存在) */
+.steer-tag {
+  font-size: var(--text-xs);
+  color: var(--color-blue);
+  background: var(--color-blue-soft);
+  border-radius: var(--radius-sm);
+  padding: 0 var(--space-xs);
 }
 
 /* ---- 失败条 ---- */

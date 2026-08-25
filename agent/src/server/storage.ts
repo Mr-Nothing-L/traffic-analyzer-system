@@ -6,9 +6,13 @@
  *   sessions(id, workspace_dir, mode, title, created_at, last_active_at)
  *   entries(session_id, seq, entry_json)   —— 渲染友好的时间线条目(自包含,
  *                                             前端无需懂 kosong Message)
- *   messages(session_id, seq, message_json)—— kosong Message 序列化,供续跑恢复
+ *   messages(session_id, seq, message_json, shadowed)
+ *                                       —— kosong Message 序列化,供续跑恢复;
+ *                                          shadowed=1 为压缩回写时软遮蔽的旧行,
+ *                                          读取只看 shadowed=0
  *
- * entries/messages 以 (session_id, seq) 为主键,seq 单调递增保证顺序。
+ * entries/messages 以 (session_id, seq) 为主键,seq 单调递增保证顺序
+ * (messages 的 seq 含遮蔽行也连续,append 始终 MAX(seq)+1 续接)。
  */
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
@@ -97,12 +101,13 @@ CREATE TABLE IF NOT EXISTS messages (
   session_id TEXT NOT NULL,
   seq INTEGER NOT NULL,
   message_json TEXT NOT NULL,
+  shadowed INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (session_id, seq)
 );
 `;
 
-/** 当前 schema 版本:建库时写入 PRAGMA user_version,打开已有库时校验。 */
-export const SCHEMA_VERSION = 1;
+/** 当前 schema 版本:建库时写入 PRAGMA user_version,打开已有库时校验/迁移。 */
+export const SCHEMA_VERSION = 2;
 
 export class SessionStorage {
   readonly dbPath: string;
@@ -118,10 +123,19 @@ export class SessionStorage {
       | undefined;
     const version = Number(versionRow?.user_version ?? 0);
     if (version === 0) {
-      // 新库,或本次改造前创建的旧库(SCHEMA 全部 IF NOT EXISTS,幂等):
-      // 建表并标记版本。
+      // 新库:建表并标记版本。例外:更老版本创建的库可能已有表但从未写过
+      // user_version——SCHEMA 的 IF NOT EXISTS 不会给已有 messages 表补列,
+      // 按 v1 语义补 shadowed。
       this.db.exec(SCHEMA);
+      const hasShadowed = this.db
+        .prepare("SELECT 1 AS found FROM pragma_table_info('messages') WHERE name = 'shadowed'")
+        .get();
+      if (hasShadowed === undefined) {
+        this.db.exec('ALTER TABLE messages ADD COLUMN shadowed INTEGER NOT NULL DEFAULT 0');
+      }
       this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    } else if (version < SCHEMA_VERSION) {
+      this.migrate(version);
     } else if (version !== SCHEMA_VERSION) {
       this.db.close();
       throw new Error(
@@ -129,6 +143,16 @@ export class SessionStorage {
           `请用匹配版本的 agent server 打开或迁移该库(${this.dbPath})`,
       );
     }
+  }
+
+  /** 逐版本迁移旧库到当前 SCHEMA_VERSION。 */
+  private migrate(from: number): void {
+    if (from < 2) {
+      // v1 → v2:messages 表加 shadowed 列(软遮蔽,见 replaceMessages);
+      // 已有行默认 0(全部活跃),语义与旧库一致。
+      this.db.exec('ALTER TABLE messages ADD COLUMN shadowed INTEGER NOT NULL DEFAULT 0');
+    }
+    this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
   }
 
   insertSession(session: StoredSession): void {
@@ -213,7 +237,9 @@ export class SessionStorage {
 
   loadMessages(sessionId: string): Message[] {
     return this.db
-      .prepare('SELECT message_json FROM messages WHERE session_id = ? ORDER BY seq ASC')
+      .prepare(
+        'SELECT message_json FROM messages WHERE session_id = ? AND shadowed = 0 ORDER BY seq ASC',
+      )
       .all(sessionId)
       .map((row) => JSON.parse(String(row.message_json)) as Message);
   }
@@ -229,17 +255,37 @@ export class SessionStorage {
       .run(sessionId, keepCount);
   }
 
-  /** 截断 kosong 消息:只保留前 keepCount 条(seq 连续性同 truncateEntries)。 */
+  /**
+   * 截断 kosong 消息:物理尾删活跃(shadowed=0)序列,只保留前 keepCount 条
+   * (recall 用;被遮蔽的历史行不动)。活跃行 seq 始终连续(append 续接、
+   * 删除都是尾删),按活跃序列中第 keepCount 条的 seq 截尾即可。
+   */
   truncateMessages(sessionId: string, keepCount: number): void {
+    if (keepCount <= 0) {
+      this.db
+        .prepare('DELETE FROM messages WHERE session_id = ? AND shadowed = 0')
+        .run(sessionId);
+      return;
+    }
+    const cutoff = this.db
+      .prepare(
+        'SELECT seq FROM messages WHERE session_id = ? AND shadowed = 0 ORDER BY seq ASC LIMIT 1 OFFSET ?',
+      )
+      .get(sessionId, keepCount - 1);
+    if (cutoff === undefined) return; // 活跃序列不足 keepCount 条,无尾可删
     this.db
-      .prepare('DELETE FROM messages WHERE session_id = ? AND seq > ?')
-      .run(sessionId, keepCount);
+      .prepare('DELETE FROM messages WHERE session_id = ? AND shadowed = 0 AND seq > ?')
+      .run(sessionId, Number(cutoff.seq));
   }
 
   /** 整体重写某 session 的消息序列(压缩后落盘;entries 显示表不动),
-   * 使重启/懒恢复后仍保持压缩态。重写后 seq 从 1 重新连续递增。 */
+   * 使重启/懒恢复后仍保持压缩态。旧活跃行软遮蔽(shadowed=1,留在库中
+   * 可查)而非物理删除;新序列 append ,seq 从全局 MAX(seq)+1 续接,与
+   * P1 的增量落盘水位互不干扰。 */
   replaceMessages(sessionId: string, messages: readonly Message[]): void {
-    this.db.prepare('DELETE FROM messages WHERE session_id = ?').run(sessionId);
+    this.db
+      .prepare('UPDATE messages SET shadowed = 1 WHERE session_id = ? AND shadowed = 0')
+      .run(sessionId);
     this.appendMessages(sessionId, messages);
   }
 
