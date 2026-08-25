@@ -651,7 +651,11 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
                 emit({ type: 'detection', data });
                 turnEntries.push({ kind: 'detection', data, at: Date.now() });
               }
-              emit({ type: 'done', reason: event.reason });
+              emit({
+                type: 'done',
+                reason: event.reason,
+                ...(event.error !== undefined ? { error: event.error } : {}),
+              });
               return;
           }
           emit(event);
