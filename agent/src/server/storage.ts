@@ -101,6 +101,9 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 `;
 
+/** 当前 schema 版本:建库时写入 PRAGMA user_version,打开已有库时校验。 */
+export const SCHEMA_VERSION = 1;
+
 export class SessionStorage {
   readonly dbPath: string;
   private readonly db: DatabaseSync;
@@ -110,7 +113,22 @@ export class SessionStorage {
     mkdirSync(dir, { recursive: true });
     this.dbPath = path.join(dir, 'sessions.db');
     this.db = new DatabaseSync(this.dbPath);
-    this.db.exec(SCHEMA);
+    const versionRow = this.db.prepare('PRAGMA user_version').get() as
+      | Record<string, unknown>
+      | undefined;
+    const version = Number(versionRow?.user_version ?? 0);
+    if (version === 0) {
+      // 新库,或本次改造前创建的旧库(SCHEMA 全部 IF NOT EXISTS,幂等):
+      // 建表并标记版本。
+      this.db.exec(SCHEMA);
+      this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    } else if (version !== SCHEMA_VERSION) {
+      this.db.close();
+      throw new Error(
+        `sessions.db schema 版本不兼容:库为 v${version},当前代码支持 v${SCHEMA_VERSION};` +
+          `请用匹配版本的 agent server 打开或迁移该库(${this.dbPath})`,
+      );
+    }
   }
 
   insertSession(session: StoredSession): void {
@@ -166,6 +184,22 @@ export class SessionStorage {
       .prepare('SELECT entry_json FROM entries WHERE session_id = ? ORDER BY seq ASC')
       .all(sessionId)
       .map((row) => JSON.parse(String(row.entry_json)) as TimelineEntry);
+  }
+
+  /** events 续传:返回 seq > fromSeq 的条目,每条带落盘 seq(前端据以推进水位)。 */
+  loadEntriesAfter(
+    sessionId: string,
+    fromSeq: number,
+  ): { seq: number; entry: TimelineEntry }[] {
+    return this.db
+      .prepare(
+        'SELECT seq, entry_json FROM entries WHERE session_id = ? AND seq > ? ORDER BY seq ASC',
+      )
+      .all(sessionId, fromSeq)
+      .map((row) => ({
+        seq: Number(row.seq),
+        entry: JSON.parse(String(row.entry_json)) as TimelineEntry,
+      }));
   }
 
   appendMessages(sessionId: string, messages: readonly Message[]): void {

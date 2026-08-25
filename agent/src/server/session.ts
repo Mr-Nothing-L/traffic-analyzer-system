@@ -19,6 +19,7 @@ import type { Message } from '#/message';
 
 import type { PermissionMode } from '../permissions/types';
 
+import { repairTailMessages } from './repair';
 import { SessionStorage, type StoredSession, type TimelineEntry } from './storage';
 
 export interface Session {
@@ -130,6 +131,21 @@ export class SessionManager {
     if (cached !== undefined) return cached.entries;
     for (const storage of this.storages.values()) {
       if (storage.getSession(id) !== undefined) return storage.loadEntries(id);
+    }
+    return undefined;
+  }
+
+  /**
+   * events 续传(GET /sessions/{id}/events):返回磁盘上 seq > fromSeq 的
+   * 条目(带 seq)。entries 内存与磁盘同步双写,直接以磁盘为准;未知
+   * session 返回 undefined。
+   */
+  getEntriesAfter(
+    id: string,
+    fromSeq: number,
+  ): { seq: number; entry: TimelineEntry }[] | undefined {
+    for (const storage of this.storages.values()) {
+      if (storage.getSession(id) !== undefined) return storage.loadEntriesAfter(id, fromSeq);
     }
     return undefined;
   }
@@ -305,12 +321,20 @@ export class SessionManager {
   }
 
   private materialize(storage: SessionStorage, row: StoredSession): Session {
+    // 崩溃恢复:半截轮次可能留下「assistant 带 toolCalls 但工具结果未全部
+    // 落盘」的悬挂尾部,合成 isError 工具消息补齐(见 repair.ts),并回写
+    // 磁盘,保证恢复的历史 provider-valid。
+    const loaded = storage.loadMessages(row.id);
+    const repaired = repairTailMessages(loaded);
+    if (repaired !== loaded) {
+      storage.appendMessages(row.id, repaired.slice(loaded.length));
+    }
     return {
       id: row.id,
       workspaceDir: row.workspaceDir,
       mode: row.mode,
       title: row.title,
-      messages: storage.loadMessages(row.id),
+      messages: [...repaired],
       entries: storage.loadEntries(row.id),
       createdAt: row.createdAt,
       lastActiveAt: row.lastActiveAt,

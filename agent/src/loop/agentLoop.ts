@@ -111,6 +111,13 @@ export interface AgentLoopOptions {
   readonly signal?: AbortSignal;
   readonly onEvent?: (event: AgentLoopEvent) => void | Promise<void>;
   /**
+   * 按步持久化回调(可选):每个 step 结束(step_done 事件发出)前调用,
+   * 参数为上一步以来回灌进 messages 的增量(assistant / tool 消息),
+   * 供 server 同步落盘——崩溃时半截轮次不丢。压缩发生时历史被整体折叠,
+   * 增量水位随之重置(压缩后的整体回写由调用方负责)。
+   */
+  readonly onStepPersist?: (appended: readonly Message[]) => void | Promise<void>;
+  /**
    * 子代理事件回调:设置后接管子代理事件的投递(不再自动包装成
    * 'subagent_event' 进入 onEvent 流);缺省时 loop 自动包装转发。
    */
@@ -157,6 +164,14 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
 
   const emit = async (event: AgentLoopEvent): Promise<void> => {
     await options.onEvent?.(event);
+  };
+  /** 已通知调用方持久化的 messages 水位(下标);压缩整体折叠后重置。 */
+  let persistedLength = messages.length;
+  const flushStepMessages = async (): Promise<void> => {
+    if (messages.length <= persistedLength) return;
+    const appended = messages.slice(persistedLength);
+    persistedLength = messages.length;
+    await options.onStepPersist?.(appended);
   };
   /** 工具上报的子代理事件:options.onSubagentEvent 设置时交给它接管,
    * 否则包装成 'subagent_event' 进入本 loop 的事件流(server 透传 SSE)。 */
@@ -272,6 +287,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         );
         if (outcome.compacted) {
           messages = outcome.messages;
+          // 历史被整体折叠:增量水位重置,压缩前的增量由调用方整体回写覆盖。
+          persistedLength = messages.length;
           await emit({
             type: 'compaction',
             compactedToolResults: outcome.compactedToolResults,
@@ -333,6 +350,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     messages = [...messages, assistant];
 
     if (assistant.toolCalls.length === 0) {
+      await flushStepMessages();
       await emit({ type: 'step_done', step: steps });
       return finish('completed');
     }
@@ -377,6 +395,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         stopResult = result;
       }
     }
+    await flushStepMessages();
     await emit({ type: 'step_done', step: steps });
     if (stopResult !== undefined) return finish('stop_turn', { stopResult });
     // 熔断:同一工具连续失败达到上限,终止循环防止无效重试烧 token

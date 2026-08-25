@@ -5,6 +5,11 @@
  *   POST   /sessions               → {sessionId}(workspaceDir 必填且须为已存在目录)
  *   GET    /sessions               → {sessions:[{id,workspaceDir,mode,title,createdAt,lastActiveAt}]}
  *   GET    /sessions/{id}/history  → {entries:[TimelineEntry]}(渲染友好的时间线)
+ *   GET    /sessions/{id}/events?fromSeq=N
+ *                                    → {events:[{seq,entry}],inProgress}(断线续传:
+ *                                      已落盘 entries 中 seq>N 的部分;inProgress 标记
+ *                                      该 session 是否有进行中的轮次;fromSeq 缺省 0,
+ *                                      非法 → 400,未知 session → 404)
  *   POST   /sessions/{id}/compact  → {status:'ok',compacted,summarized,beforeTokens,afterTokens}
  *                                      (立即 LLM 摘要压缩该 session 历史,失败回退
  *                                       占位替换,压缩后落盘;进行中 → 409)
@@ -34,7 +39,12 @@
  *
  * 持久化:SessionManager 委托 node:sqlite(<workspaceDir>/.agent/sessions.db);
  * /chat 的 SSE 事件流在转发的同时累积 TimelineEntry(user/assistant/tool/
- * approval/detection),每轮结束批量落盘。POST /chat 支持可选 images(最多
+ * approval/detection),按步增量落盘:user 条目立即落盘,之后每个 step_done
+ * 把累计条目与 loop 回灌的增量 messages(onStepPersist)同步 append,finally
+ * 兜底落盘剩余条目——崩溃/断连不丢半截轮次;轮内发生自动压缩时 messages 仍
+ * 在轮末整体重写(replaceMessages)。SSE 断连不 abort 轮次:loop 跑完照常
+ * 落盘,写出错只标记客户端断开;恢复续跑时 SessionManager 对悬挂 tool calls
+ * 做尾部修复(见 repair.ts)。POST /chat 支持可选 images(最多
  * 4 张,base64 或 dataURL),转成 kosong image ContentPart 附在该轮 user message。
  *
  * 子代理:每个 session 的 registry 自动注册 spawn_subagent(app.ts 闭包注入
@@ -361,6 +371,23 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
     sendJson(res, 200, { entries });
   };
 
+  /** 断线续传:已落盘 entries 中 seq > fromSeq 的部分(带 seq)+ 该 session
+   * 是否有进行中轮次(inProgress)。前端刷新后用它补齐进度。 */
+  const handleGetEvents = (res: ServerResponse, sessionId: string, url: URL): void => {
+    const raw = url.searchParams.get('fromSeq');
+    if (raw !== null && !/^\d+$/.test(raw)) {
+      sendError(res, 400, 'invalid_request', 'fromSeq must be a non-negative integer');
+      return;
+    }
+    const fromSeq = raw === null ? 0 : Number(raw);
+    const events = sessions.getEntriesAfter(sessionId, fromSeq);
+    if (events === undefined) {
+      sendError(res, 404, 'session_not_found', `unknown session: ${sessionId}`);
+      return;
+    }
+    sendJson(res, 200, { events, inProgress: runtimes.get(sessionId)?.busy === true });
+  };
+
   const handleDeleteSession = (res: ServerResponse, sessionId: string): void => {
     if (!sessions.delete(sessionId)) {
       sendError(res, 404, 'session_not_found', `unknown session: ${sessionId}`);
@@ -513,16 +540,26 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       Connection: 'keep-alive',
     });
 
-    const controller = new AbortController();
+    // 断连不杀轮次:req close 只标记客户端断开,loop 继续跑完并落盘
+    // (maxSteps 兜底);SSE 写出错同样只标记断开,不再抛出。
+    let clientDisconnected = false;
     req.on('close', () => {
-      controller.abort();
+      clientDisconnected = true;
     });
 
+    // SSE 事件带 seq:发出时已落盘 entries 的水位(= 当前最大落盘 seq),
+    // 前端刷新后以最后收到的 seq 调 GET /sessions/{id}/events?fromSeq=N 补齐。
     const emit = (event: unknown): void => {
-      writeSseEvent(res, event);
+      if (clientDisconnected) return;
+      const payload = isRecord(event) ? { ...event, seq: session.entries.length } : event;
+      try {
+        writeSseEvent(res, payload);
+      } catch {
+        clientDisconnected = true;
+      }
     };
 
-    // ---- 时间线条目累积(与 SSE 转发并行,每轮结束批量落盘) ----
+    // ---- 时间线条目累积:按步增量落盘(finally 兜底剩余),不再等轮末批量 ----
     const turnEntries: TimelineEntry[] = [];
     const userEntry: TimelineEntry = {
       kind: 'user',
@@ -532,6 +569,13 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       at: Date.now(),
     };
     turnEntries.push(userEntry);
+    /** 已落盘的 turnEntries 水位;flushEntries 把新增部分同步 append。 */
+    let persistedEntries = 0;
+    const flushEntries = (): void => {
+      if (persistedEntries >= turnEntries.length) return;
+      sessions.appendEntries(session.id, turnEntries.slice(persistedEntries));
+      persistedEntries = turnEntries.length;
+    };
 
     let assistantText = '';
     let assistantThink = '';
@@ -578,11 +622,15 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
     userEntry.messageIndex = baseLength;
     const messages = [...session.messages, userMessage];
     sessions.appendMessages(session.id, [userMessage]);
+    flushEntries(); // user 条目立即落盘:崩溃也至少保留用户输入。
 
     const { provider, model } = providerFactory();
     /** 本轮是否发生过自动压缩:发生后 messages 已被整体折叠,结束时需整体
      * 回写(replaceMessages)而非增量 append。 */
     let compactedInTurn = false;
+    /** 已增量落盘的 messages 水位:user 已落,之后按步(onStepPersist)推进;
+     * 轮末把剩余部分(如 max_steps/cancelled 末步)兜底补齐。 */
+    let persistedMessages = baseLength + 1;
 
     try {
       const result = await runAgentLoop({
@@ -593,7 +641,12 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
         gate: runtime.gate,
         messages,
         compaction: { maxContextTokens: contextTokens },
-        signal: controller.signal,
+        onStepPersist: (appended) => {
+          // loop 按步回灌的 assistant / tool 消息同步落盘(sqlite 同步写,
+          // 在 onEvent 同一调用栈内完成,不引入异步积压)。
+          sessions.appendMessages(session.id, appended);
+          persistedMessages += appended.length;
+        },
         onEvent: (event: AgentLoopEvent) => {
           switch (event.type) {
             case 'text_delta':
@@ -640,9 +693,11 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
             }
             case 'step_done':
               flushAssistant();
+              flushEntries();
               break;
             case 'done':
               flushAssistant();
+              flushEntries();
               if (event.reason === 'stop_turn' && event.stopResult?.note !== undefined) {
                 let data: unknown;
                 try {
@@ -664,10 +719,12 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
           emit(event);
         },
       });
-      // 回灌后的增量消息(assistant / tool)并入会话历史(user 已在上面追加);
-      // 本轮发生过自动压缩时历史已被折叠,整体重写(内存 + 磁盘)而非增量 append。
+      // 回灌后的增量消息(assistant / tool)并入会话历史(user 已在上面追加,
+      // 各步增量已由 onStepPersist 落盘,这里只兜底剩余部分——如 max_steps /
+      // cancelled 时未发 step_done 的末步);本轮发生过自动压缩时历史已被折叠,
+      // 整体重写(内存 + 磁盘)而非增量 append。
       if (compactedInTurn) sessions.replaceMessages(session.id, result.messages);
-      else sessions.appendMessages(session.id, result.messages.slice(baseLength + 1));
+      else sessions.appendMessages(session.id, result.messages.slice(persistedMessages));
     } catch (error) {
       emit({
         type: 'done',
@@ -676,11 +733,15 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       });
     } finally {
       flushAssistant();
-      sessions.appendEntries(session.id, turnEntries);
+      flushEntries(); // 失败/中断的轮次也把剩余条目落盘,保证不丢。
       runtime.bridge.unbindSettleHook();
       runtime.bridge.unbindEmitter();
       runtime.busy = false;
-      res.end();
+      try {
+        res.end();
+      } catch {
+        // 客户端已断开:忽略写回错误。
+      }
     }
   };
 
@@ -712,6 +773,16 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
             return;
           }
           handleGetHistory(res, sessionId);
+          return;
+        }
+        const eventsMatch = /^\/sessions\/([^/]+)\/events$/.exec(url.pathname);
+        if (req.method === 'GET' && eventsMatch !== null) {
+          const sessionId = eventsMatch[1];
+          if (sessionId === undefined) {
+            sendError(res, 400, 'invalid_request', 'session id is required');
+            return;
+          }
+          handleGetEvents(res, sessionId, url);
           return;
         }
         const compactMatch = /^\/sessions\/([^/]+)\/compact$/.exec(url.pathname);
