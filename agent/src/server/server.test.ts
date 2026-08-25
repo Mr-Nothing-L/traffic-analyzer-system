@@ -24,6 +24,7 @@ import type { ExecutableTool, ExecutableToolResult } from '../tools/contract';
 import { ToolRegistry } from '../tools/registry';
 
 import { createAgentServer, defaultSystemPrompt, type AgentServer } from './app';
+import { SUMMARY_PREFIX, SUMMARY_SYSTEM_PROMPT } from '../loop/summarize';
 import type { Session } from './session';
 import type { TimelineEntry } from './storage';
 
@@ -39,18 +40,32 @@ class ScriptedProvider implements ChatProvider {
   private readonly script: StreamedMessagePart[][];
   /** 与 script 逐步对应的 usage(缺省 null = provider 不上报)。 */
   private readonly usages: (TokenUsage | null)[];
+  /** 摘要调用的应答队列;Error = 摘要失败(测回退);队列空 = 默认失败。 */
+  private readonly summaries: (StreamedMessagePart[] | Error)[];
 
-  constructor(script: StreamedMessagePart[][], usages: (TokenUsage | null)[] = []) {
+  constructor(
+    script: StreamedMessagePart[][],
+    usages: (TokenUsage | null)[] = [],
+    summaries: (StreamedMessagePart[] | Error)[] = [],
+  ) {
     this.script = [...script];
     this.usages = [...usages];
+    this.summaries = [...summaries];
   }
 
   generate(
-    _systemPrompt: string,
+    systemPrompt: string,
     _tools: Tool[],
     history: Message[],
     _options?: GenerateOptions,
   ): Promise<StreamedMessage> {
+    // 按调用内容分场景:摘要调用(system prompt 为摘要指令)走 summaries 队列。
+    if (systemPrompt === SUMMARY_SYSTEM_PROMPT) {
+      const summary = this.summaries.shift();
+      if (summary === undefined) return Promise.reject(new Error('summary not scripted'));
+      if (summary instanceof Error) return Promise.reject(summary);
+      return Promise.resolve(streamOf(summary));
+    }
     this.histories.push(history.map((m) => m));
     const parts = this.script.shift();
     if (parts === undefined) return Promise.reject(new Error('script exhausted'));
@@ -629,7 +644,7 @@ describe('agent server', () => {
     expect(sessions[0]).toMatchObject({ id: sessionId, usedTokens: 600 });
   });
 
-  it('POST /sessions/{id}/compact:压缩老工具结果,返回前后 token 估算', async () => {
+  it('POST /sessions/{id}/compact:LLM 摘要替换压缩区,返回 summarized 与前后 token 估算', async () => {
     // 大输出工具:压缩后 before/after token 估算差异明显
     const bigEcho: ExecutableTool = {
       name: 'echo',
@@ -641,12 +656,17 @@ describe('agent server', () => {
         execute: () => Promise.resolve({ output: 'x'.repeat(2000) }),
       }),
     };
-    const provider = new ScriptedProvider([
-      [toolCall('c1', 'echo', {})],
-      [text('第一轮完')],
-      [toolCall('c2', 'echo', {})],
-      [text('第二轮完')],
-    ]);
+    const summaryText = '视频 演示区/v1.mp4;事件 2 检出,证据帧 f3,置信度中;结论尚未提交';
+    const provider = new ScriptedProvider(
+      [
+        [toolCall('c1', 'echo', {})],
+        [text('第一轮完')],
+        [toolCall('c2', 'echo', {})],
+        [text('第二轮完')],
+      ],
+      [],
+      [[text(summaryText)]],
+    );
     await startServer(provider, [bigEcho]);
     const sessionId = await createSession('yolo');
 
@@ -661,19 +681,35 @@ describe('agent server', () => {
     const body = compact.json as {
       status: string;
       compacted: boolean;
+      summarized: boolean;
       beforeTokens: number;
       afterTokens: number;
     };
     expect(body.status).toBe('ok');
     expect(body.compacted).toBe(true);
+    expect(body.summarized).toBe(true);
     expect(body.afterTokens).toBeLessThan(body.beforeTokens);
 
-    // 第一轮的工具结果已被占位替换;第二轮(保留区)不受影响
+    // 压缩区(第一轮)被一条摘要 user 消息替换;保留区(第二轮)不受影响
     const messages = agentServer?.sessions.get(sessionId)?.messages ?? [];
-    const old = messages.find((m) => m.toolCallId === 'c1');
+    const first = messages[0];
+    expect(first?.role).toBe('user');
+    const firstText = JSON.stringify(first?.content);
+    expect(firstText).toContain(SUMMARY_PREFIX);
+    expect(firstText).toContain('演示区/v1.mp4');
+    expect(messages.some((m) => m.toolCallId === 'c1')).toBe(false);
     const recent = messages.find((m) => m.toolCallId === 'c2');
-    expect(JSON.stringify(old?.content)).toContain('[已压缩]');
     expect(JSON.stringify(recent?.content)).toContain('x'.repeat(2000));
+
+    // 压缩已落盘:重建 server(模拟进程重启)后恢复的仍是压缩后的历史
+    await agentServer?.close();
+    await startServer(provider, [bigEcho], { restoreWorkspaceDirs: [workspace] });
+    const restored = agentServer?.sessions.get(sessionId)?.messages ?? [];
+    expect(restored.length).toBe(messages.length);
+    expect(JSON.stringify(restored[0]?.content)).toContain(SUMMARY_PREFIX);
+    // 压缩区(第一轮,含 c1 的大输出)已折叠;保留区(第二轮 c2)原样保留
+    expect(restored.some((m) => m.toolCallId === 'c1')).toBe(false);
+    expect(restored.some((m) => m.toolCallId === 'c2')).toBe(true);
   });
 
   it('POST /sessions/{id}/compact:单轮会话无可压缩内容 → noop(compacted=false)', async () => {
@@ -687,7 +723,7 @@ describe('agent server', () => {
 
     const compact = await postJson(`/sessions/${sessionId}/compact`, {});
     expect(compact.status).toBe(200);
-    expect(compact.json).toMatchObject({ status: 'ok', compacted: false });
+    expect(compact.json).toMatchObject({ status: 'ok', compacted: false, summarized: false });
   });
 
   it('POST /sessions/{id}/compact:未知 session → 404;进行中 → 409', async () => {

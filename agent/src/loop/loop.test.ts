@@ -39,6 +39,7 @@ import {
   createCompactionConfig,
   shouldCompact,
 } from './compaction';
+import { SUMMARY_PREFIX, SUMMARY_SYSTEM_PROMPT } from './summarize';
 
 // ---------------------------------------------------------------------------
 // 假 provider:按脚本逐轮返回 parts
@@ -48,23 +49,40 @@ class ScriptedProvider implements ChatProvider {
   readonly name = 'scripted';
   readonly modelName = 'scripted-model';
   readonly thinkingEffort = null;
-  /** 每次 generate 调用收到的历史快照。 */
+  /** 每次 generate 调用收到的历史快照(不含摘要调用)。 */
   readonly histories: Message[][] = [];
+  /** 摘要调用收到的 tools(用于断言不传 tools)。 */
+  readonly summaryTools: Tool[][] = [];
   private readonly script: StreamedMessagePart[][];
   /** 与 script 逐步对应的 usage(缺省 null = provider 不上报)。 */
   private readonly usages: (TokenUsage | null)[];
+  /** 摘要调用的应答队列;Error = 摘要失败(测回退);队列空 = 默认失败。 */
+  private readonly summaries: (StreamedMessagePart[] | Error)[];
 
-  constructor(script: StreamedMessagePart[][], usages: (TokenUsage | null)[] = []) {
+  constructor(
+    script: StreamedMessagePart[][],
+    usages: (TokenUsage | null)[] = [],
+    summaries: (StreamedMessagePart[] | Error)[] = [],
+  ) {
     this.script = [...script];
     this.usages = [...usages];
+    this.summaries = [...summaries];
   }
 
   generate(
-    _systemPrompt: string,
-    _tools: Tool[],
+    systemPrompt: string,
+    tools: Tool[],
     history: Message[],
     _options?: GenerateOptions,
   ): Promise<StreamedMessage> {
+    // 按调用内容分场景:摘要调用(system prompt 为摘要指令)走 summaries 队列。
+    if (systemPrompt === SUMMARY_SYSTEM_PROMPT) {
+      this.summaryTools.push(tools);
+      const summary = this.summaries.shift();
+      if (summary === undefined) return Promise.reject(new Error('summary not scripted'));
+      if (summary instanceof Error) return Promise.reject(summary);
+      return Promise.resolve(streamOf(summary));
+    }
     this.histories.push(history.map((m) => m));
     const parts = this.script.shift();
     if (parts === undefined) {
@@ -138,10 +156,11 @@ function harness(
   tools: ExecutableTool[],
   gate: PermissionGate = yoloGate(),
   usages: (TokenUsage | null)[] = [],
+  summaries: (StreamedMessagePart[] | Error)[] = [],
 ): Harness {
   const registry = new ToolRegistry();
   for (const tool of tools) registry.register(tool);
-  const provider = new ScriptedProvider(script, usages);
+  const provider = new ScriptedProvider(script, usages, summaries);
   const events: AgentLoopEvent[] = [];
   return {
     provider,
@@ -425,6 +444,9 @@ describe('runAgentLoop', () => {
     });
 
     expect(result.reason).toBe('completed');
+    // 摘要队列空 → 摘要调用默认失败 → 回退占位替换
+    const compaction = h.events.find((e) => e.type === 'compaction');
+    expect(compaction).toMatchObject({ compactedToolResults: 1, summarized: false });
     const secondHistory = h.provider.histories[1] ?? [];
     const old = secondHistory.find((m) => m.toolCallId === 'old-1');
     expect(extractText(old ?? createUserMessage(''))).toBe('[已压缩]');
@@ -458,7 +480,7 @@ describe('runAgentLoop', () => {
     expect(h.events.some((e) => e.type === 'compaction')).toBe(false);
   });
 
-  it('真实 usage 超阈(≥ maxTokens × 0.85)时下一步前自动压缩并 emit compaction', async () => {
+  it('真实 usage 超阈(≥ maxTokens × 0.85)时下一步前自动压缩:LLM 摘要替换压缩区', async () => {
     const initialMessages: Message[] = [
       createUserMessage('第一轮'),
       createAssistantMessage([{ type: 'text', text: '先看元数据' }], [
@@ -470,6 +492,7 @@ describe('runAgentLoop', () => {
     ];
     // maxContextTokens=10000,触发线 8500;heuristic 估算远低于阈值
     // (reservedContextSize=0 关闭预留触发),仅靠真实 usage 驱动压缩。
+    const summaryText = '视频 演示区/v1.mp4(时长 10s);事件 1 检出,证据帧 f1/f2,置信度高;结论尚未提交';
     const h = harness(
       [[toolCall('c1', 'echo', {})], [text('结束')]],
       [echoTool(() => Promise.resolve({ output: 'small-ok' }))],
@@ -478,6 +501,7 @@ describe('runAgentLoop', () => {
         { inputOther: 8600, inputCacheRead: 0, inputCacheCreation: 0, output: 100 },
         null,
       ],
+      [[text(summaryText)]],
     );
 
     const result = await h.run({
@@ -487,8 +511,61 @@ describe('runAgentLoop', () => {
 
     expect(result.reason).toBe('completed');
     const compaction = h.events.find((e) => e.type === 'compaction');
-    expect(compaction).toEqual({ type: 'compaction', compactedToolResults: 1 });
-    // 第二步历史中,老工具结果已被占位替换
+    expect(compaction).toMatchObject({ compactedToolResults: 1, summarized: true });
+    expect(
+      compaction !== undefined && compaction.type === 'compaction'
+        ? compaction.afterTokens < compaction.beforeTokens
+        : false,
+    ).toBe(true);
+    // 摘要调用不传 tools
+    expect(h.provider.summaryTools).toHaveLength(1);
+    expect(h.provider.summaryTools[0]).toEqual([]);
+
+    // 第二步历史:压缩区被一条摘要 user 消息替换,含前缀与关键字段
+    const secondHistory = h.provider.histories[1] ?? [];
+    const first = secondHistory[0];
+    expect(first?.role).toBe('user');
+    const firstText = extractText(first ?? createUserMessage(''));
+    expect(firstText).toContain(SUMMARY_PREFIX);
+    expect(firstText).toContain('演示区/v1.mp4');
+    expect(firstText).toContain('证据帧 f1/f2');
+    // 老工具结果已随压缩区整体移除(不再是占位)
+    expect(secondHistory.some((m) => m.toolCallId === 'old-1')).toBe(false);
+    // 保留区不变:当前 user 轮次与新工具结果仍在
+    expect(secondHistory.some((m) => m.role === 'user' && extractText(m) === '继续')).toBe(true);
+    expect(secondHistory.some((m) => m.toolCallId === 'c1')).toBe(true);
+  });
+
+  it('摘要调用失败时回退占位替换:compaction 事件 summarized=false,loop 不崩', async () => {
+    const initialMessages: Message[] = [
+      createUserMessage('第一轮'),
+      createAssistantMessage([{ type: 'text', text: '先看元数据' }], [
+        toolCall('old-1', 'echo', {}),
+      ]),
+      createToolMessage('old-1', '老工具结果'),
+      createAssistantMessage([{ type: 'text', text: '看完了' }]),
+      createUserMessage('继续'),
+    ];
+    const h = harness(
+      [[toolCall('c1', 'echo', {})], [text('结束')]],
+      [echoTool(() => Promise.resolve({ output: 'small-ok' }))],
+      yoloGate(),
+      [
+        { inputOther: 8600, inputCacheRead: 0, inputCacheCreation: 0, output: 100 },
+        null,
+      ],
+      [new Error('summary boom')],
+    );
+
+    const result = await h.run({
+      messages: initialMessages,
+      compaction: { maxContextTokens: 10_000, reservedContextSize: 0, maxRecentMessages: 2 },
+    });
+
+    expect(result.reason).toBe('completed');
+    const compaction = h.events.find((e) => e.type === 'compaction');
+    expect(compaction).toMatchObject({ compactedToolResults: 1, summarized: false });
+    // 回退为占位替换:老工具结果仍在骨架中,内容变占位
     const secondHistory = h.provider.histories[1] ?? [];
     const old = secondHistory.find((m) => m.toolCallId === 'old-1');
     expect(extractText(old ?? createUserMessage(''))).toBe('[已压缩]');

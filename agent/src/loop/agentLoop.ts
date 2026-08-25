@@ -21,11 +21,11 @@ import type { ToolRegistry } from '../tools/registry';
 import { ToolScheduler, type ToolCallTask } from '../tools/scheduler';
 
 import {
-  compactMessages,
   createCompactionConfig,
   type CompactionConfig,
   type CompactionOverrides,
 } from './compaction';
+import { compactMessagesWithSummary } from './summarize';
 
 export const DEFAULT_MAX_STEPS_PER_TURN = 30;
 export const DEFAULT_TOOL_TIMEOUT_MS = 120_000;
@@ -56,9 +56,15 @@ export type AgentLoopEvent =
       readonly maxTokens: number;
     }
   | {
-      /** 自动压缩实际发生时发出(替换老工具结果为占位)。 */
+      /** 自动压缩实际发生时发出(LLM 摘要或回退占位)。 */
       readonly type: 'compaction';
       readonly compactedToolResults: number;
+      /** true = 压缩区被 LLM 摘要替换;false = 回退为占位替换。 */
+      readonly summarized: boolean;
+      /** 压缩前 token 估算(heuristic)。 */
+      readonly beforeTokens: number;
+      /** 压缩后 token 估算(heuristic)。 */
+      readonly afterTokens: number;
     }
   | {
       readonly type: 'done';
@@ -203,14 +209,33 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     if (steps >= maxSteps) return finish('max_steps');
     if (compaction !== undefined) {
       // 触发判断优先真实 usage(≥ maxTokens × triggerRatio 即视为要爆了),
-      // 不可用(force=false)时回退 compactMessages 内部的 token 估算 heuristic。
+      // 不可用(force=false)时回退 token 估算 heuristic;压缩内容优先 LLM
+      // 摘要,摘要失败回退占位替换(见 summarize.ts)。
       const overByUsage =
         lastUsedTokens !== undefined &&
         lastUsedTokens >= compaction.maxContextTokens * compaction.triggerRatio;
-      const outcome = compactMessages(messages, compaction, overByUsage);
-      if (outcome.compacted) {
-        messages = outcome.messages;
-        await emit({ type: 'compaction', compactedToolResults: outcome.compactedToolResults });
+      try {
+        const outcome = await compactMessagesWithSummary(
+          messages,
+          compaction,
+          options.provider,
+          overByUsage,
+          options.signal,
+        );
+        if (outcome.compacted) {
+          messages = outcome.messages;
+          await emit({
+            type: 'compaction',
+            compactedToolResults: outcome.compactedToolResults,
+            summarized: outcome.summarized,
+            beforeTokens: outcome.beforeTokens,
+            afterTokens: outcome.afterTokens,
+          });
+        }
+      } catch (error) {
+        // 摘要调用期间的父级取消(用户停止/断连):按取消收尾;
+        // 其余异常 summarize.ts 已回退兜底,理论不可达,跳过本次压缩继续。
+        if (isAbortError(error) || isAborted()) return finish('cancelled');
       }
     }
     steps += 1;

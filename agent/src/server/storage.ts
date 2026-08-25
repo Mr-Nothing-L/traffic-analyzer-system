@@ -31,8 +31,9 @@ export type TimelineEntry =
        * entry ↔ kosong message 映射:落盘该 user 条目时 session.messages 的
        * 长度,即该条目对应 user message 在 messages 中的下标。recall 按此值
        * 把 messages 截断到「该 user 消息之前」。旧数据(该字段缺失)不可撤回。
-       * 已知局限:手动/自动压缩(replaceMessages)只改内存不改盘,压缩后旧
-       * 条目的 messageIndex 可能不再精确对应内存布局,recall 取 min 兜底。
+       * 注:压缩(手动/自动)会把 messages 整体重写落盘(见 replaceMessages),
+       * 压缩区折叠为一条摘要消息后,旧条目的 messageIndex 相对新布局偏大,
+       * recall 取 min 兜底即「截到保留区起点(摘要之后)」,语义仍成立。
        */
       messageIndex?: number;
       at: number;
@@ -193,6 +194,13 @@ export class SessionStorage {
     this.db
       .prepare('DELETE FROM messages WHERE session_id = ? AND seq > ?')
       .run(sessionId, keepCount);
+  }
+
+  /** 整体重写某 session 的消息序列(压缩后落盘;entries 显示表不动),
+   * 使重启/懒恢复后仍保持压缩态。重写后 seq 从 1 重新连续递增。 */
+  replaceMessages(sessionId: string, messages: readonly Message[]): void {
+    this.db.prepare('DELETE FROM messages WHERE session_id = ?').run(sessionId);
+    this.appendMessages(sessionId, messages);
   }
 
   /** DELETE 语义:三张表一起清(与 idle 过期只清内存相区别)。 */

@@ -5,8 +5,9 @@
  *   POST   /sessions               → {sessionId}(workspaceDir 必填且须为已存在目录)
  *   GET    /sessions               → {sessions:[{id,workspaceDir,mode,title,createdAt,lastActiveAt}]}
  *   GET    /sessions/{id}/history  → {entries:[TimelineEntry]}(渲染友好的时间线)
- *   POST   /sessions/{id}/compact  → {status:'ok',compacted,beforeTokens,afterTokens}
- *                                      (立即压缩该 session 历史;进行中 → 409)
+ *   POST   /sessions/{id}/compact  → {status:'ok',compacted,summarized,beforeTokens,afterTokens}
+ *                                      (立即 LLM 摘要压缩该 session 历史,失败回退
+ *                                       占位替换,压缩后落盘;进行中 → 409)
  *   POST   /sessions/{id}/recall   {entryIndex} → {status:'ok'}(撤回:删除
  *                                      entries[entryIndex..] 并同步截断 kosong
  *                                      messages;进行中 → 409;越界/非 user → 400)
@@ -17,7 +18,8 @@
  * 上下文窗口:AGENT_CONTEXT_TOKENS(默认 262144 = 256k)。/chat 每步 generate
  * 后按真实 usage 透传 context_usage 事件并记录 session.lastKnownUsage(GET
  * /sessions 摘要带 usedTokens);上一步用量 ≥ 窗口 × 0.85 时,下一步 generate
- * 前自动压缩(替换老工具结果为占位)并透传 compaction 事件。
+ * 前自动压缩(优先 LLM 摘要替换压缩区,失败回退占位替换,压缩后整体落盘)
+ * 并透传 compaction 事件(带 summarized/beforeTokens/afterTokens)。
  *
  * 错误统一 {error:{code,message}};未知 session → 404。同 session 的 /chat
  * 用简单互斥串行,不同 session 并行。provider / tools 均可注入以便测试。
@@ -36,11 +38,8 @@ import type { ChatProvider } from '#/provider';
 
 import { createProviderFromEnv } from '../llm/provider';
 import { runAgentLoop, type AgentLoopEvent } from '../loop/agentLoop';
-import {
-  compactMessages,
-  createCompactionConfig,
-  estimateMessagesTokens,
-} from '../loop/compaction';
+import { createCompactionConfig } from '../loop/compaction';
+import { compactMessagesWithSummary } from '../loop/summarize';
 import { CallbackApprovalService } from '../permissions/approval';
 import { PermissionGate } from '../permissions/gate';
 import type { PermissionMode, PermissionPolicyContext } from '../permissions/types';
@@ -303,9 +302,10 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
     sendJson(res, 200, { status: 'ok' });
   };
 
-  /** 手动压缩:立即对该 session 的 messages 执行 compactMessages(强制触发,
-   * 不走过阈判断;无可压缩内容时 noop)。进行中的轮次返回 409。 */
-  const handleCompact = (res: ServerResponse, sessionId: string): void => {
+  /** 手动压缩:立即对该 session 的 messages 做 LLM 摘要压缩(强制触发,
+   * 不走过阈判断;摘要失败回退占位替换;无可压缩内容时 noop),压缩后
+   * messages 整体重写落盘。进行中的轮次返回 409。 */
+  const handleCompact = async (res: ServerResponse, sessionId: string): Promise<void> => {
     const session = sessions.get(sessionId);
     if (session === undefined) {
       sendError(res, 404, 'session_not_found', `unknown session: ${sessionId}`);
@@ -316,18 +316,20 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       sendError(res, 409, 'chat_in_progress', `session ${session.id} already has a chat turn in progress`);
       return;
     }
-    const beforeTokens = estimateMessagesTokens(session.messages);
-    const outcome = compactMessages(
+    const { provider } = providerFactory();
+    const outcome = await compactMessagesWithSummary(
       session.messages,
       createCompactionConfig(contextTokens),
+      provider,
       true,
     );
     if (outcome.compacted) sessions.replaceMessages(session.id, outcome.messages);
     sendJson(res, 200, {
       status: 'ok',
       compacted: outcome.compacted,
-      beforeTokens,
-      afterTokens: estimateMessagesTokens(session.messages),
+      summarized: outcome.summarized,
+      beforeTokens: outcome.beforeTokens,
+      afterTokens: outcome.afterTokens,
     });
   };
 
@@ -491,6 +493,9 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
     sessions.appendMessages(session.id, [userMessage]);
 
     const { provider, model } = providerFactory();
+    /** 本轮是否发生过自动压缩:发生后 messages 已被整体折叠,结束时需整体
+     * 回写(replaceMessages)而非增量 append。 */
+    let compactedInTurn = false;
 
     try {
       const result = await runAgentLoop({
@@ -512,6 +517,9 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
               break;
             case 'context_usage':
               sessions.setLastKnownUsage(session.id, event.usedTokens);
+              break;
+            case 'compaction':
+              compactedInTurn = true;
               break;
             case 'tool_call_start':
               flushAssistant();
@@ -555,8 +563,10 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
           emit(event);
         },
       });
-      // 回灌后的增量消息(assistant / tool)并入会话历史(user 已在上面追加)。
-      sessions.appendMessages(session.id, result.messages.slice(baseLength + 1));
+      // 回灌后的增量消息(assistant / tool)并入会话历史(user 已在上面追加);
+      // 本轮发生过自动压缩时历史已被折叠,整体重写(内存 + 磁盘)而非增量 append。
+      if (compactedInTurn) sessions.replaceMessages(session.id, result.messages);
+      else sessions.appendMessages(session.id, result.messages.slice(baseLength + 1));
     } catch (error) {
       emit({
         type: 'done',
@@ -606,7 +616,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
             sendError(res, 400, 'invalid_request', 'session id is required');
             return;
           }
-          handleCompact(res, sessionId);
+          await handleCompact(res, sessionId);
           return;
         }
         const recallMatch = /^\/sessions\/([^/]+)\/recall$/.exec(url.pathname);

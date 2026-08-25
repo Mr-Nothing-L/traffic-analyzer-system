@@ -1,20 +1,21 @@
 /**
- * 比率触发的上下文压缩(简化版,刻意不做 LLM 总结)。
+ * 比率触发的上下文压缩(占位替换路径 + 切点安全规则)。
  *
  * 触发参数照搬 vendor/kimi-code
  * packages/agent-core-v2/src/agent/fullCompaction/strategy.ts 的
  * DEFAULT_COMPACTION_CONFIG:triggerRatio 0.85、reservedContextSize 50_000、
  * maxRecentMessages 4。
  *
- * 与 vendor 的差异(有意为之):
- * - 不做 LLM 总结。超阈时只把压缩区内的工具结果输出替换为 '[已压缩]' 占位,
- *   消息骨架(含 assistant.toolCalls 与 tool 消息的配对)完整保留——OpenAI
- *   兼容 API 要求 tool 消息与 tool call 严格配对,直接丢消息会破坏请求合法性。
- * - token 估算用简单 heuristic(字符数 / 4 + 图片/音视频固定高估),不引入
- *   tokenizer 依赖。
- * - 切点安全规则与 vendor canSplitAfter 同义:保留区必须以一条 user 消息
- *   开头(即切点落在上一轮完整交互结束之后、下一条 user 消息之前),保证
- *   当前进行中的 user 轮次永远不会被切进压缩区。
+ * 本模块只做「替换老工具结果为占位」的机械压缩;LLM 摘要压缩在
+ * summarize.ts(参考 vendor fullCompaction:总结中段、保留最近消息),
+ * 摘要失败时回退到本模块的占位替换。消息骨架(含 assistant.toolCalls 与
+ * tool 消息的配对)完整保留——OpenAI 兼容 API 要求 tool 消息与 tool call
+ * 严格配对,直接丢消息会破坏请求合法性。
+ * token 估算用简单 heuristic(字符数 / 4 + 图片/音视频固定高估),不引入
+ * tokenizer 依赖。
+ * 切点安全规则(splitForCompaction)与 vendor canSplitAfter 同义:保留区
+ * 必须以一条 user 消息开头(即切点落在上一轮完整交互结束之后、下一条
+ * user 消息之前),保证当前进行中的 user 轮次永远不会被切进压缩区。
  */
 import type { Message } from '#/message';
 
@@ -135,12 +136,42 @@ export interface CompactionOutcome {
   readonly compactedToolResults: number;
 }
 
+export interface CompactionSplit {
+  /** 压缩区起点(头部 system 消息之后)。 */
+  readonly firstNonSystem: number;
+  /** 保留区起点(压缩区终点,开区间;保证落在 user 消息上)。 */
+  readonly keepFrom: number;
+}
+
+/**
+ * 计算压缩区/保留区切点(安全边界,与 vendor canSplitAfter 同义):
+ * 保留区 = 从末尾取 maxRecentMessages 条再向前扩展到最近的 user 消息;
+ * 压缩区 = [firstNonSystem, keepFrom)。压缩区为空或找不到 user 边界时
+ * 返回 undefined(宁愿不压也不切坏进行中的交互)。
+ */
+export function splitForCompaction(
+  messages: readonly Message[],
+  config: CompactionConfig,
+): CompactionSplit | undefined {
+  let firstNonSystem = 0;
+  while (firstNonSystem < messages.length && messages[firstNonSystem]?.role === 'system') {
+    firstNonSystem += 1;
+  }
+
+  let keepFrom = Math.max(firstNonSystem, messages.length - config.maxRecentMessages);
+  while (keepFrom > firstNonSystem && messages[keepFrom]?.role !== 'user') {
+    keepFrom -= 1;
+  }
+  if (messages[keepFrom]?.role !== 'user') return undefined;
+  if (keepFrom <= firstNonSystem) return undefined; // 压缩区为空
+  return { firstNonSystem, keepFrom };
+}
+
 /**
  * 超阈时把压缩区内的工具结果输出替换为占位文本。
  *
- * 保留区 = 最近的 user 轮次:从末尾取 maxRecentMessages 条,再向前扩展到
- * 最近的 user 消息(安全边界);压缩区 = 头部 system 消息之后、保留区之前。
- * 找不到 user 边界时放弃压缩(宁愿不压也不切坏进行中的交互)。
+ * 保留区 = 最近的 user 轮次(切点规则见 splitForCompaction);找不到 user
+ * 边界时放弃压缩(宁愿不压也不切坏进行中的交互)。
  *
  * force = true 时跳过 shouldCompact 的 heuristic 阈值判断(调用方已用真实
  * usage 判定超阈,或是用户手动触发);安全边界与幂等规则不受影响。
@@ -157,16 +188,9 @@ export function compactMessages(
   };
   if (!force && !shouldCompact(messages, config)) return unchanged;
 
-  let firstNonSystem = 0;
-  while (firstNonSystem < messages.length && messages[firstNonSystem]?.role === 'system') {
-    firstNonSystem += 1;
-  }
-
-  let keepFrom = Math.max(firstNonSystem, messages.length - config.maxRecentMessages);
-  while (keepFrom > firstNonSystem && messages[keepFrom]?.role !== 'user') {
-    keepFrom -= 1;
-  }
-  if (messages[keepFrom]?.role !== 'user') return unchanged;
+  const split = splitForCompaction(messages, config);
+  if (split === undefined) return unchanged;
+  const { firstNonSystem, keepFrom } = split;
 
   let compactedToolResults = 0;
   const next = messages.map((message, index) => {

@@ -171,13 +171,14 @@ export class SessionManager {
     if (session !== undefined) session.lastKnownUsage = usedTokens;
   }
 
-  /** 整体替换 session 的消息历史(手动/自动压缩后);未知 session 返回 false。
-   * 只改内存态:磁盘上的原始消息保留,重启恢复后由 loop 压缩兜底。 */
+  /** 整体替换 session 的消息历史(手动/自动压缩后),内存 + 磁盘同步;
+   * 未知 session 返回 false。entries 显示表不动。 */
   replaceMessages(id: string, messages: readonly Message[]): boolean {
     const session = this.sessions.get(id);
     if (session === undefined) return false;
     session.messages.length = 0;
     session.messages.push(...messages);
+    this.storages.get(session.workspaceDir)?.replaceMessages(id, messages);
     return true;
   }
 
@@ -193,7 +194,7 @@ export class SessionManager {
     if (entry === undefined || entry.kind !== 'user' || entry.messageIndex === undefined) {
       return 'invalid_entry';
     }
-    // 压缩(replaceMessages)只改内存:messageIndex 可能超出当前内存长度,取小者兜底。
+    // 压缩后 messages 已整体重写落盘:messageIndex 相对新布局可能偏大,取小者兜底。
     const keepMessages = Math.min(entry.messageIndex, session.messages.length);
     session.entries.length = entryIndex;
     session.messages.length = keepMessages;
