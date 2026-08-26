@@ -121,7 +121,6 @@ async function onSelect(s: AgentSessionInfo) {
     message.error(`工作区不可用:${(e as Error).message}`)
     return
   }
-  resetFolds()
   await nextTick()
   scrollToBottom()
 }
@@ -141,7 +140,7 @@ function fmtTime(ts?: number): string {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 
-/** 复制成功标记:按消息 key(u-{i}/a-{i})记住刚复制的那条,图标变 ✓,1s 后换回。 */
+/** 复制成功标记:按条目 id 记住刚复制的那条,图标变 ✓,1s 后换回。 */
 const copiedKey = ref<string | null>(null)
 let copiedTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -163,43 +162,37 @@ async function onCopy(key: string, text: string) {
 }
 
 /** 撤回:后端删库后本地移除该条及其后全部;409(进行中)按钮已禁用,兜底提示。 */
-async function onRecall(i: number) {
+async function onRecall(e: AgentUserEntry) {
   try {
-    await agent.recallFrom(i)
-  } catch (e) {
-    if (e instanceof ApiError && e.status === 409) message.warning('对话进行中,无法撤回')
-    else message.error(`撤回失败:${(e as Error).message}`)
+    await agent.recallFrom(e.id)
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 409) message.warning('对话进行中,无法撤回')
+    else if (err instanceof ApiError && err.message.includes('尚未落盘')) return // 乐观条目未确认,静默
+    else message.error(`撤回失败:${(err as Error).message}`)
   }
 }
 
-/* ---- 折叠状态:思考过程 / 工具结果 / 子代理思考,均按条目标记,默认收起;切换/新建会话时重置 ---- */
-const thinkOpen = reactive(new Set<number>())
-const toolOpen = reactive(new Set<number>())
-/** 子代理思考折叠:`${工具条目下标}:${child 下标}`。 */
+/* ---- 折叠状态:思考过程 / 工具结果 / 子代理思考,均按条目 id 标记,默认收起;
+ * id 随条目全局唯一且随会话重建,切换/新建会话后旧 id 自然失效(不会串到新
+ * 会话的条目上,无需手工重置;撤回/换会话后残留 id 无人引用)。 ---- */
+const thinkOpen = reactive(new Set<string>())
+const toolOpen = reactive(new Set<string>())
+/** 子代理思考折叠:`${工具条目 id}:${child 下标}`。 */
 const subThinkOpen = reactive(new Set<string>())
 function toggle<T>(set: Set<T>, key: T) {
   if (set.has(key)) set.delete(key)
   else set.add(key)
 }
-function resetFolds() {
-  thinkOpen.clear()
-  toolOpen.clear()
-  subThinkOpen.clear()
-}
 
 /* ---- 流式渲染态:最后一个 assistant 条目在对话进行中走增量渲染;
  * 思考折叠行仅在「思考仍在流入」(该条目还没有正文)时取末行并横向跟随 ---- */
-const streamingEntryIndex = computed(() => {
-  if (!busy.value) return -1
-  const last = agent.entries.length - 1
-  return agent.entries[last]?.kind === 'assistant' ? last : -1
+const streamingEntry = computed(() => {
+  if (!busy.value) return null
+  const last = agent.entries[agent.entries.length - 1]
+  return last?.kind === 'assistant' ? last : null
 })
-const isStreamingEntry = (i: number) => i === streamingEntryIndex.value
-const isThinkLive = (i: number) => {
-  if (!isStreamingEntry(i)) return false
-  const e = agent.entries[i]
-  return e.kind === 'assistant' && !e.text
-}
+const isStreamingEntry = (e: { id: string }) => streamingEntry.value?.id === e.id
+const isThinkLive = (e: AgentAssistantEntry) => streamingEntry.value?.id === e.id && !e.text
 
 /* ---- 工具参数摘要:JSON 解析成 k=v 串,超长截断;非 JSON 原文截断 ---- */
 function argsSummary(args: string): string {
@@ -593,7 +586,6 @@ async function onModeSelect(m: AgentMode) {
 }
 
 async function onNewSession() {
-  resetFolds()
   await agent.newSession()
 }
 
@@ -713,7 +705,7 @@ onUnmounted(() => {
           <div v-if="!agent.entries.length" class="chat-empty">
             输入问题或检测指令,如:检测这段视频的交通事件
           </div>
-          <template v-for="(e, i) in agent.entries" :key="i">
+          <template v-for="e in agent.entries" :key="e.id">
             <!-- user 气泡(右):图片附件 + 视频预览(或路径 chip)+ 指令文本;
                  底部行:HH:MM + hover 显现的复制/撤回 -->
             <div v-if="e.kind === 'user'" class="row user">
@@ -721,8 +713,8 @@ onUnmounted(() => {
                 <div class="bubble">
                   <div v-if="e.images?.length" class="img-group">
                     <img
-                      v-for="u in e.images"
-                      :key="u"
+                      v-for="(u, j) in e.images"
+                      :key="`${e.id}:${j}`"
                       :src="u"
                       alt=""
                       loading="lazy"
@@ -746,14 +738,14 @@ onUnmounted(() => {
                   <span class="msg-time">{{ fmtTime(e.at) }}</span>
                   <span v-if="e.steered" class="steer-tag">已插话</span>
                   <span class="msg-actions">
-                    <button class="msg-act" title="复制" @click="onCopy(`u-${i}`, e.text)">
-                      <UiIcon :name="copiedKey === `u-${i}` ? 'check' : 'copy'" :size="12" />
+                    <button class="msg-act" title="复制" @click="onCopy(e.id, e.text)">
+                      <UiIcon :name="copiedKey === e.id ? 'check' : 'copy'" :size="12" />
                     </button>
                     <button
                       class="msg-act"
                       title="撤回此条及之后的消息"
                       :disabled="busy"
-                      @click="onRecall(i)"
+                      @click="onRecall(e)"
                     >
                       <UiIcon name="undo" :size="12" />
                     </button>
@@ -768,27 +760,27 @@ onUnmounted(() => {
               <div class="msg-col">
                 <div class="bubble">
                   <div v-if="e.think" class="think">
-                    <button class="think-head" @click="toggle(thinkOpen, i)">
+                    <button class="think-head" @click="toggle(thinkOpen, e.id)">
                       <UiIcon
                         name="up"
                         :size="10"
                         class="think-caret"
-                        :class="{ open: thinkOpen.has(i) }"
+                        :class="{ open: thinkOpen.has(e.id) }"
                       />
                       <span>思考过程</span>
                     </button>
-                    <div v-if="thinkOpen.has(i)" class="think-text">{{ e.think }}</div>
+                    <div v-if="thinkOpen.has(e.id)" class="think-text">{{ e.think }}</div>
                     <!-- 折叠态摘要:运行中(思考仍在流入)显示末行并横向跟随滚动,结束后显示首行 -->
-                    <ThinkLine v-else :think="e.think" :live="isThinkLive(i)" />
+                    <ThinkLine v-else :think="e.think" :live="isThinkLive(e)" />
                   </div>
                   <!-- 正文:流式期间增量渲染(冻结已完成块),定格后一次性完整渲染 -->
-                  <MdStream v-if="e.text" :text="e.text" :streaming="isStreamingEntry(i)" />
+                  <MdStream v-if="e.text" :text="e.text" :streaming="isStreamingEntry(e)" />
                 </div>
                 <div class="msg-meta">
                   <span class="msg-time">{{ fmtTime(e.at) }}</span>
                   <span class="msg-actions">
-                    <button class="msg-act" title="复制" @click="onCopy(`a-${i}`, e.text)">
-                      <UiIcon :name="copiedKey === `a-${i}` ? 'check' : 'copy'" :size="12" />
+                    <button class="msg-act" title="复制" @click="onCopy(e.id, e.text)">
+                      <UiIcon :name="copiedKey === e.id ? 'check' : 'copy'" :size="12" />
                     </button>
                   </span>
                 </div>
@@ -799,12 +791,12 @@ onUnmounted(() => {
                  中文映射);整行点击展开结果(文本 + 图片缩略图,进画廊);
                  失败时折叠态单行直接显示错误内容首行(红色) -->
             <div v-else-if="e.kind === 'tool'" class="tool">
-              <button class="tool-head" @click="toggle(toolOpen, i)">
+              <button class="tool-head" @click="toggle(toolOpen, e.id)">
                 <UiIcon
                   name="up"
                   :size="10"
                   class="think-caret"
-                  :class="{ open: toolOpen.has(i) }"
+                  :class="{ open: toolOpen.has(e.id) }"
                 />
                 <span class="tool-title">工具调用:{{ toolLabel(e.name) }}</span>
                 <span class="tool-args">{{ argsSummary(e.args) }}</span>
@@ -816,20 +808,20 @@ onUnmounted(() => {
                 >{{ toolErrorSummary(e.result) }}</span>
                 <span v-else class="tool-state ok">完成</span>
               </button>
-              <div v-if="toolOpen.has(i) && (e.done || e.children.length)" class="tool-result">
+              <div v-if="toolOpen.has(e.id) && (e.done || e.children.length)" class="tool-result">
                 <!-- 子代理迷你时间线(spawn_subagent:think/text 聚合块 + 子工具一行小字) -->
-                <template v-for="(c, j) in e.children" :key="j">
+                <template v-for="(c, j) in e.children" :key="`${e.id}:${j}`">
                   <div v-if="c.kind === 'think'" class="sub-think">
-                    <button class="think-head" @click="toggle(subThinkOpen, `${i}:${j}`)">
+                    <button class="think-head" @click="toggle(subThinkOpen, `${e.id}:${j}`)">
                       <UiIcon
                         name="up"
                         :size="10"
                         class="think-caret"
-                        :class="{ open: subThinkOpen.has(`${i}:${j}`) }"
+                        :class="{ open: subThinkOpen.has(`${e.id}:${j}`) }"
                       />
                       <span>子代理思考</span>
                     </button>
-                    <div v-if="subThinkOpen.has(`${i}:${j}`)" class="think-text">{{ c.text }}</div>
+                    <div v-if="subThinkOpen.has(`${e.id}:${j}`)" class="think-text">{{ c.text }}</div>
                   </div>
                   <div v-else-if="c.kind === 'text'" class="sub-text">{{ c.text }}</div>
                   <div v-else class="sub-tool">
@@ -847,8 +839,8 @@ onUnmounted(() => {
                 </div>
                 <div v-if="e.images.length" class="tool-imgs">
                   <img
-                    v-for="u in e.images"
-                    :key="u"
+                    v-for="(u, j) in e.images"
+                    :key="`${e.id}:${j}`"
                     :src="u"
                     alt=""
                     loading="lazy"

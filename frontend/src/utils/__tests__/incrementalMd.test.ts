@@ -75,11 +75,10 @@ describe('IncrementalMd(冻结缓存)', () => {
     expect(b).toBe(a);
   });
 
-  it('非追加输入(撤回/换会话)整体重置:缓存清空,generation 递增', () => {
+  it('非追加输入(异常输入)整体重置:缓存清空后按新文本重新冻结', () => {
     const r = new IncrementalMd();
-    const g0 = r.update('一\n\n二\n\n三\n\n四').generation;
+    r.update('一\n\n二\n\n三\n\n四');
     const out = r.update('完全不同的新文本\n\n第二块\n\n第三块\n\n第四块');
-    expect(out.generation).toBe(g0 + 1);
     expect(out.frozen[0].html).toBe(mdToHtml('完全不同的新文本'));
   });
 

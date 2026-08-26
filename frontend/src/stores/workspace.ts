@@ -189,7 +189,9 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     }
   }
 
-  /** 目录弹窗确认后的统一切换:POST + 重置勾选/选中 + 重载树。 */
+  /** 目录弹窗确认后的统一切换:POST + 重置勾选/选中,树转后台重载(不阻塞
+   * 调用方——agent 会话栏跨工作区切换会话等路径不等待大工作区的树重载,
+   * 聊天区先渲染;树由 treeLoading 标记自行显示加载态)。 */
   async function applyWorkspace(newPath: string) {
     const ws = await apiFetch<{ path: string }>('/workspace', {
       method: 'POST',
@@ -198,7 +200,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     path.value = ws.path
     checked.clear()
     currentRel.value = null
-    await loadTree()
+    void loadTree().catch(() => {}) // loadTree 内部自吞错误,catch 兜底防未处理拒绝
     return ws
   }
 

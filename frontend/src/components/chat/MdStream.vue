@@ -13,7 +13,7 @@ const props = defineProps<{
   streaming: boolean
 }>()
 
-// 组件实例跟随一条消息存活;消息文本只会追加,非追加时渲染器内部自动重置
+// 组件实例跟随一条消息存活(v-for 按条目 id 复用);消息文本只会追加
 const renderer = new IncrementalMd()
 const parts = computed(() => (props.streaming ? renderer.update(props.text) : null))
 const fullHtml = computed(() => (props.streaming ? '' : mdToHtml(props.text)))
@@ -21,8 +21,7 @@ const fullHtml = computed(() => (props.streaming ? '' : mdToHtml(props.text)))
 
 <template>
   <div v-if="parts" class="bubble-text bubble-md">
-    <!-- generation 进 key:非追加重置后同偏移的旧块 DOM 不复用 -->
-    <div v-for="b in parts.frozen" :key="`${parts.generation}:${b.key}`" v-html="b.html" />
+    <div v-for="b in parts.frozen" :key="b.key" v-html="b.html" />
     <div v-html="parts.tailHtml" />
   </div>
   <div v-else class="bubble-text bubble-md" v-html="fullHtml" />

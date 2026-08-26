@@ -455,11 +455,12 @@ describe('SSE 流式事件', () => {
 
     expect(agent.status).toBe('done');
     const last = agent.entries[agent.entries.length - 1];
-    expect(last).toEqual({
+    expect(last).toMatchObject({
       kind: 'system',
       text: '输出达到 token 上限被截断,部分内容可能不完整,可继续追问',
       tone: 'warn',
     });
+    expect(typeof last.id).toBe('string'); // 条目进入时间线即有前端 id
   });
 
   it('done 不带 truncated 时不插警示条目', async () => {
@@ -938,5 +939,269 @@ describe('deleteSession 跨工作区守卫', () => {
     expect(calls.some((c) => c.url === '/api/workspace' && c.method === 'POST')).toBe(false);
     expect(ws.path).toBe('/ws/a');
     expect(agent.sessionId).toBe('s3'); // 当前工作区内最近的(虽然比 s2 旧)
+  });
+});
+
+// D4 回归:条目 id + 会话实例替换 + 落盘序号 seq。
+describe('条目身份(entryId/seq)', () => {
+  it('条目进入时间线即赋 id:历史加载与流式条目都有,且互不相同', async () => {
+    const { agent } = await load();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: unknown) => {
+        if (String(input).endsWith('/history')) {
+          return historyResponse([{ kind: 'user', text: 'hi', images: [], at: 1 }]);
+        }
+        return jsonResponse({ sessions: [] });
+      }),
+    );
+    await agent.selectSession('s1');
+    stubChatStream([
+      { type: 'text_delta', text: '答', seq: 2 },
+      { type: 'done', reason: 'stop_turn', seq: 2 },
+    ]);
+    await agent.send('再问');
+    vi.unstubAllGlobals();
+
+    const ids = agent.entries.map((e) => e.id);
+    expect(ids).toHaveLength(3); // 历史 user + 新 user + assistant
+    expect(new Set(ids).size).toBe(3); // 全局唯一
+    for (const id of ids) expect(typeof id).toBe('string');
+    // 落盘序号:历史条目 = 数组位置+1,流式 user 条目按水位+1 推算
+    expect(agent.entries[0]).toMatchObject({ kind: 'user', seq: 1 });
+    expect(agent.entries[1]).toMatchObject({ kind: 'user', seq: 2 });
+  });
+
+  it('撤回按条目 id 定位:entryIndex 直送落盘序号-1,不再做下标换算', async () => {
+    const { agent } = await load();
+    const bodies: unknown[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: unknown, init?: { body?: unknown }) => {
+        const url = String(input);
+        if (url.endsWith('/history')) {
+          // 中间夹一条本地 system 条目(截断警示)验证:撤回定位不再受其干扰
+          return historyResponse([
+            { kind: 'user', text: '第一问', images: [], at: 1 },
+            { kind: 'assistant', text: '答一', think: '', at: 2 },
+          ]);
+        }
+        if (url.endsWith('/recall')) {
+          bodies.push(init?.body ? JSON.parse(String(init.body)) : null);
+          return jsonResponse({ status: 'ok' });
+        }
+        return jsonResponse({ sessions: [] });
+      }),
+    );
+    await agent.selectSession('s1');
+    const first = agent.entries[0]!;
+    await agent.recallFrom(first.id);
+    vi.unstubAllGlobals();
+
+    expect(bodies).toEqual([{ entryIndex: 0 }]); // seq 1 → 后端下标 0
+    expect(agent.entries).toEqual([]);
+  });
+
+  it('撤回流式轮次产生的条目:seq 来自 SSE 事件水位(含前置 system 条目也不换算错)', async () => {
+    const { agent } = await load();
+    agent.sessionId = 's1';
+    const bodies: unknown[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: unknown, init?: { body?: unknown }) => {
+        const url = String(input);
+        if (url.endsWith('/recall')) {
+          bodies.push(init?.body ? JSON.parse(String(init.body)) : null);
+          return jsonResponse({ status: 'ok' });
+        }
+        if (url.endsWith('/api/agent/chat')) {
+          return sseResponse([
+            { type: 'compaction', seq: 0 }, // 本地 system 条目:不落盘、不占 seq
+            { type: 'text_delta', text: '答', seq: 2 },
+            { type: 'done', reason: 'stop_turn', truncated: true, seq: 2 },
+          ]);
+        }
+        return jsonResponse({ sessions: [] });
+      }),
+    );
+    await agent.send('问一');
+    // 时间线:user + system(压缩提示)+ assistant + system(截断警示)
+    expect(agent.entries.map((e) => e.kind)).toEqual(['user', 'system', 'assistant', 'system']);
+    const user = agent.entries[0]!;
+    await agent.recallFrom(user.id);
+    vi.unstubAllGlobals();
+
+    expect(bodies).toEqual([{ entryIndex: 0 }]); // 落盘序号 1,剔除 system 的换算已删除
+    expect(agent.entries).toEqual([]);
+  });
+});
+
+// D4 回归:同文本两次 steer 不误判——乐观账按条目 id 队列消费,
+// 两次「快点」各绑各的,轮询/SSE 补齐不得把两条折叠成一条。
+describe('同文本多次 steer', () => {
+  it('SSE steer 事件按 id 队列出队:同文本两次插话各保留一条,seq 各自绑定', async () => {
+    const { agent } = await load();
+    agent.sessionId = 's1';
+    // 可控 SSE 流:先发一轮 /chat 挂起,插话两次后事件才到达(真实时序)
+    const enc = new TextEncoder();
+    let pushEvent: (e: unknown) => void = () => {};
+    let closeStream: () => void = () => {};
+    const stream = new ReadableStream<Uint8Array>({
+      start(c) {
+        pushEvent = (e) => c.enqueue(enc.encode(`data: ${JSON.stringify(e)}\n\n`));
+        closeStream = () => c.close();
+      },
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: unknown) => {
+        const url = String(input);
+        if (url.endsWith('/steer')) return jsonResponse({ status: 'ok' });
+        if (url.endsWith('/api/agent/chat')) {
+          return new Response(stream, {
+            status: 200,
+            headers: { 'Content-Type': 'text/event-stream' },
+          });
+        }
+        return jsonResponse({ sessions: [] });
+      }),
+    );
+
+    const turn = agent.send('首轮'); // 进入 running(流挂起,未发事件)
+    await agent.send('快点'); // 第一次插话(乐观插入)
+    await agent.send('快点'); // 第二次同文本插话
+    // 后端契约:同批 steer 条目整体 flush 后逐条 emit,事件 seq 同为批末水位 3
+    pushEvent({ type: 'steer', text: '快点', images: [], seq: 3 });
+    pushEvent({ type: 'steer', text: '快点', images: [], seq: 3 });
+    pushEvent({ type: 'text_delta', text: '好的', seq: 4 });
+    pushEvent({ type: 'done', reason: 'stop_turn', seq: 4 });
+    closeStream();
+    await turn;
+    vi.unstubAllGlobals();
+
+    const users = agent.entries.filter((e) => e.kind === 'user');
+    expect(users.map((e) => (e.kind === 'user' ? e.text : ''))).toEqual(['首轮', '快点', '快点']);
+    expect(users.map((e) => (e.kind === 'user' ? !!e.steered : false))).toEqual([false, true, true]);
+    // 两次插话各自绑到落盘序号 2/3(而非都算到一条头上)
+    expect(users.map((e) => (e.kind === 'user' ? e.seq : undefined))).toEqual([1, 2, 3]);
+  });
+
+  it('轮询补齐的同文本 steer:user 落盘条目按 id 队列消费,不重复插入', async () => {
+    vi.useFakeTimers();
+    const { agent } = await load();
+    let eventCalls = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: unknown) => {
+        const url = String(input);
+        if (url.endsWith('/history')) {
+          return historyResponse([{ kind: 'user', text: '首轮', images: [], at: 1 }]);
+        }
+        if (url.endsWith('/steer')) return jsonResponse({ status: 'ok', queued: true });
+        if (url.includes('/events')) {
+          eventCalls += 1;
+          if (eventCalls === 1) return jsonResponse({ events: [], inProgress: true });
+          return jsonResponse({
+            events: [
+              { seq: 2, entry: { kind: 'user', text: '快点', images: [], at: 2 } },
+              { seq: 3, entry: { kind: 'user', text: '快点', images: [], at: 3 } },
+              { seq: 4, entry: { kind: 'assistant', text: '好的', think: '', at: 4 } },
+            ],
+            inProgress: false,
+          });
+        }
+        return jsonResponse({ sessions: [] });
+      }),
+    );
+
+    await agent.selectSession('s1'); // 进入恢复态(running)
+    await agent.send('快点'); // 第一次插话
+    await agent.send('快点'); // 第二次同文本插话
+    expect(agent.entries).toHaveLength(3);
+
+    await vi.advanceTimersByTimeAsync(5000);
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+
+    // 两条落盘的「快点」各消费一条乐观账;只补 assistant,不再重复插 user
+    expect(agent.entries.map((e) => (e.kind === 'user' ? e.text : e.kind))).toEqual([
+      '首轮',
+      '快点',
+      '快点',
+      'assistant',
+    ]);
+    const steered = agent.entries.filter((e) => e.kind === 'user' && e.steered);
+    expect(steered.map((e) => (e as { seq?: number }).seq)).toEqual([2, 3]); // seq 绑回乐观条目
+  });
+});
+
+// D4 回归:快速连续切换两个不同工作区的会话,时间线必须属于最后选中的会话
+// (旧实现靠 selectSeq 手工守卫;新实现 = 实例替换后晚到响应整体丢弃)。
+describe('快速跨工作区切换会话', () => {
+  it('s2@wsB 在途时点 s3@wsA:晚到的 s2 历史不写回,时间线属于 s3', async () => {
+    const { ws, agent } = await load();
+    ws.path = '/ws/a';
+    await nextTick();
+    agent.sessions = [
+      { id: 's2', workspaceDir: '/ws/b' },
+      { id: 's3', workspaceDir: '/ws/a' },
+    ];
+    // POST /api/workspace 与 /history 都可控:精确交错两次跨工作区点击
+    const wsPosts: Array<(r: Response) => void> = [];
+    const releases = new Map<string, (r: Response) => void>();
+    const sessionList = [
+      { id: 's2', workspaceDir: '/ws/b' },
+      { id: 's3', workspaceDir: '/ws/a' },
+    ];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: unknown, init?: { method?: string }) => {
+        const url = String(input);
+        const method = init?.method ?? 'GET';
+        if (url === '/api/workspace' && method === 'POST') {
+          const dir = wsPosts.length === 0 ? '/ws/b' : '/ws/a';
+          return new Promise<Response>((resolve) => wsPosts.push(() => resolve(jsonResponse({ path: dir }))));
+        }
+        if (url.endsWith('/history')) {
+          return new Promise<Response>((resolve) => releases.set(url, resolve));
+        }
+        if (url === '/api/agent/sessions') return Promise.resolve(jsonResponse({ sessions: sessionList }));
+        return Promise.resolve(jsonResponse({ entries: [] }));
+      }),
+    );
+
+    // 第一次点击 s2@wsB:切工作区(完成)+ history 在途
+    const p2 = agent.openSession('s2');
+    wsPosts[0]!(() => undefined);
+    await vi.waitFor(() => {
+      expect(agent.status).toBe('connecting'); // selectSession('s2') 已发起
+    });
+    // 第二次点击 s3@wsA:再切回 wsA(其 watch 会作废 s2 的选择)
+    const p3 = agent.openSession('s3');
+    await vi.waitFor(() => {
+      expect(wsPosts.length).toBe(2); // s3 的 applyWorkspace 已发起
+    });
+    wsPosts[1]!(() => undefined);
+    // s3 的 history 先落地:生效
+    await vi.waitFor(() => {
+      expect(releases.size).toBe(2);
+    });
+    releases.get('/api/agent/sessions/s3/history')!(
+      historyResponse([{ kind: 'user', text: 'A 会话', images: [], at: 1 }]),
+    );
+    await p3;
+    expect(agent.sessionId).toBe('s3');
+    expect(agent.entries).toHaveLength(1);
+    // s2 的 history 晚到:实例已被替换,整体丢弃
+    releases.get('/api/agent/sessions/s2/history')!(
+      historyResponse([{ kind: 'user', text: 'B 会话', images: [], at: 2 }]),
+    );
+    await p2;
+    vi.unstubAllGlobals();
+
+    expect(agent.sessionId).toBe('s3');
+    expect(ws.path).toBe('/ws/a');
+    expect(agent.entries).toHaveLength(1);
+    expect(agent.entries[0]).toMatchObject({ kind: 'user', text: 'A 会话' });
   });
 });

@@ -9,8 +9,9 @@
  * 围栏闭合后的下一个空行才恢复可切。
  *
  * 冻结块以「块在源码中的起始偏移」为 key:追加式流不会改已冻结区,偏移稳定,
- * Vue 按 key 复用 DOM 而不是重挂。非追加输入(撤回/换会话复用实例)整体重置,
- * generation 递增供调用方作缓存失效力。
+ * Vue 按条目 id 复用组件实例、按偏移复用 DOM 而不是重挂(每个 assistant 条目
+ * 一个渲染器实例,随条目生灭;换会话/撤回后是新条目新实例,不再需要 generation
+ * 之类的重置补偿)。
  * settled(轮次结束)后由调用方一次性 mdToHtml 完整渲染,自愈增量期的边界偏差。 */
 import { mdToHtml } from './markdown'
 
@@ -54,24 +55,20 @@ export interface IncrementalMdResult {
   frozen: FrozenMdBlock[]
   /** 末尾不稳定区(至多 UNSTABLE_TAIL_BLOCKS 个块 + 增长)的整体渲染。 */
   tailHtml: string
-  /** 非追加输入重置时递增;调用方 key 里带上它丢弃旧 DOM。 */
-  generation: number
 }
 
-/** 单条流式 assistant 文本的增量渲染器;一个实例跟随一条消息。 */
+/** 单条流式 assistant 文本的增量渲染器;一个实例跟随一条消息(随条目生灭)。 */
 export class IncrementalMd {
   private prevText = ''
   /** 冻结缓存:块起始偏移 → HTML(追加流下偏移不变,命中即不重解析)。 */
   private cache = new Map<number, string>()
-  private generation = 0
   private cached: IncrementalMdResult | null = null
 
   /** 折叠当前已累计文本,返回 冻结块 + 尾部 HTML。同文本幂等(渲染路径可反复调)。 */
   update(text: string): IncrementalMdResult {
     if (this.cached !== null && text === this.prevText) return this.cached
     if (!text.startsWith(this.prevText)) {
-      this.cache.clear()
-      this.generation += 1
+      this.cache.clear() // 非追加输入(异常输入):整体重置缓存
     }
     this.prevText = text
     const blocks = splitMdBlocks(text)
@@ -87,7 +84,7 @@ export class IncrementalMd {
     }
     const tailStart = frozenCount > 0 ? blocks[frozenCount].start : 0
     const tailHtml = mdToHtml(text.slice(tailStart))
-    this.cached = { frozen, tailHtml, generation: this.generation }
+    this.cached = { frozen, tailHtml }
     return this.cached
   }
 }

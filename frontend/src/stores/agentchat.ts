@@ -9,21 +9,28 @@
  * POST   /api/agent/chat({sessionId,input,videoPath?,images?(dataURL,≤4)}) → SSE
  *   (每事件一行 'data: {json}\n\n',事件:text_delta/think_delta/tool_call_start/
  *   tool_result/step_done/approval_request/detection/context_usage/compaction/done;
+ *   每个事件都带 seq=发出时后端已落盘条数水位,据此维护会话落盘水位 persistedSeq);
  *   done {reason, error?, truncated?},truncated:true 表示输出达到 token 上限被截断);
  * POST   /api/agent/approval({requestId,decision,scope?}) → {status:'ok'};
  * POST   /api/agent/uploads(multipart file) → {path,name,size,contentType}(视频落工作区,
  *   返回 path 作 videoPath;GET /api/agent/uploads/{name} 供 <video> 预览);
  * POST   /api/agent/sessions/{id}/recall({entryIndex}) → {status:'ok'}(409=对话进行中;
- *   entryIndex 为后端持久化条目下标,不含本地 system 条目);
+ *   entryIndex 为后端持久化条目下标,前端按条目落盘序号 seq(seq-1=下标)直送,
+ *   本地 system 条目不落盘、天然不在其列);
  * GET    /api/agent/sessions/{id}/events?fromSeq=N → {events:[{seq,entry}],inProgress}
  *   (断连续传:已落盘条目中 seq>N 的部分;inProgress 表示服务端轮次仍在跑——
  *   断连不再杀轮次,刷新后据此 5s 轮询补齐,不做实时流重连);
  * POST   /api/agent/sessions/{id}/cancel → 显式终止进行中轮次(409 no_active_turn);
  * POST   /api/agent/sessions/{id}/steer({input,videoPath?,images?}) → 进行中插话,
  *   下一 step 边界生效(409 no_active_turn 回退 /chat);生效时 SSE 收到
- *   {type:'steer',text,images,videoPath?,seq} 事件(本地乐观插入,按 text 去重)。
- * fetch+ReadableStream 按 \n\n 分块解析 data: 行,组件只接线,状态全部在这里。 */
-import { markRaw, ref, watch } from 'vue'
+ *   {type:'steer',text,images,videoPath?,seq} 事件(本地乐观插入,按条目 id
+ *   先入先出绑定去重,同文本两次插话不误判);轮末未消费的插话以
+ *   {type:'steer_dropped',text} 告知,乐观条目随之移出时间线。
+ * fetch+ReadableStream 按 \n\n 分块解析 data: 行,组件只接线,状态全部在这里。
+ * 会话的「活动」收敛为 ActiveSession 实例:SSE 流、断线轮询、取消、steer 乐观账、
+ * 失败重试快照、落盘水位都封装在实例内;切会话/新建/切工作区=store 整体替换实例
+ * (swap),旧实例 dispose 后晚到的异步收尾一律丢弃。 */
+import { markRaw, ref, watch, type Ref } from 'vue'
 import { defineStore } from 'pinia'
 import { ApiError } from '../api/client'
 import { useWorkspaceStore } from './workspace'
@@ -62,8 +69,14 @@ export interface AgentSessionInfo {
 }
 
 export interface AgentUserEntry {
+  /** 前端条目 id(进入时间线即赋,全局唯一):v-for key/折叠态/撤回定位都用它。 */
+  id: string
   kind: 'user'
   text: string
+  /** 后端落盘序号(1 起,seq-1=后端持久化下标):历史加载按数组位置赋;
+   * 乐观 steer 在 SSE/轮询确认落盘时绑定;正常发送按会话落盘水位推算。
+   * 撤回按它直送后端 entryIndex(后端契约不变,前端不再做下标换算)。 */
+  seq?: number
   videoPath?: string
   /** 上传视频的预览地址(/api/agent/uploads/{name});仅本次会话内有效,
    * 历史重载由 videoPath 确定性推 /api/workspace/stream(见 utils/chatDisplay)。 */
@@ -77,6 +90,8 @@ export interface AgentUserEntry {
 }
 
 export interface AgentAssistantEntry {
+  /** 前端条目 id(见 AgentUserEntry.id)。 */
+  id: string
   kind: 'assistant'
   text: string
   think: string
@@ -93,9 +108,11 @@ export type AgentSubItem =
   | { kind: 'tool'; id: string; name: string; args: string; done: boolean }
 
 export interface AgentToolEntry {
-  kind: 'tool'
-  /** tool_call_start 的 call.id,tool_result 按它回填。 */
+  /** 前端条目 id(见 AgentUserEntry.id)。 */
   id: string
+  kind: 'tool'
+  /** tool_call_start 的 call.id,tool_result 按它回填(区别于前端条目 id)。 */
+  callId: string
   name: string
   /** call.arguments 原文(JSON 字符串)。 */
   args: string
@@ -111,6 +128,8 @@ export interface AgentToolEntry {
 }
 
 export interface AgentApprovalEntry {
+  /** 前端条目 id(见 AgentUserEntry.id)。 */
+  id: string
   kind: 'approval'
   requestId: string
   toolName: string
@@ -158,6 +177,8 @@ export interface DetectionPayload {
 }
 
 export interface AgentDetectionEntry {
+  /** 前端条目 id(见 AgentUserEntry.id)。 */
+  id: string
   kind: 'detection'
   data: unknown
 }
@@ -165,6 +186,8 @@ export interface AgentDetectionEntry {
 /** 系统提示条目(如自动压缩提示、输出截断警示),不进历史,仅流式期间插入时间线。
  * tone:'warn' 用警示色系(gold)渲染,缺省为中性灰。 */
 export interface AgentSystemEntry {
+  /** 前端条目 id(见 AgentUserEntry.id)。 */
+  id: string
   kind: 'system'
   text: string
   tone?: 'warn'
@@ -289,14 +312,26 @@ function hasToolVideo(output: unknown): boolean {
   )
 }
 
-/** GET history 的条目 → 本地时间线条目;不认识/缺 kind 的条目丢弃。 */
-function mapHistoryEntry(raw: unknown): AgentEntry | null {
+/** 前端条目 id 发号器(模块级递增,跨会话全局唯一):折叠态/复制态在会话切换
+ * 的窗口期仍持有旧条目 id,id 全局唯一才不会串到新会话的同名条目上。 */
+let entryIdSeq = 0
+function nextEntryId(): string {
+  entryIdSeq += 1
+  return `e${entryIdSeq}`
+}
+
+/** GET history/events 的条目 → 本地时间线条目:进入时间线即赋前端条目 id;
+ * seq 给定时记录落盘序号(history 按数组位置、events 按事件携带的 seq)。
+ * 不认识/缺 kind 的条目丢弃。 */
+function mapHistoryEntry(raw: unknown, seq?: number): AgentEntry | null {
   if (!raw || typeof raw !== 'object') return null
   const e = raw as Record<string, unknown>
   if (e.kind === 'user') {
     return {
+      id: nextEntryId(),
       kind: 'user',
       text: String(e.text ?? ''),
+      ...(seq != null ? { seq } : {}),
       ...(Array.isArray(e.images) && e.images.length
         ? { images: e.images.map(String) }
         : {}),
@@ -307,6 +342,7 @@ function mapHistoryEntry(raw: unknown): AgentEntry | null {
   }
   if (e.kind === 'assistant') {
     return {
+      id: nextEntryId(),
       kind: 'assistant',
       text: String(e.text ?? ''),
       think: String(e.think ?? ''),
@@ -315,8 +351,9 @@ function mapHistoryEntry(raw: unknown): AgentEntry | null {
   }
   if (e.kind === 'tool') {
     return {
+      id: nextEntryId(),
       kind: 'tool',
-      id: String(e.toolCallId ?? ''),
+      callId: String(e.toolCallId ?? ''),
       name: String(e.name ?? ''),
       args:
         typeof e.arguments === 'string' ? e.arguments : JSON.stringify(e.arguments ?? ''),
@@ -331,6 +368,7 @@ function mapHistoryEntry(raw: unknown): AgentEntry | null {
   if (e.kind === 'approval') {
     const decision = e.decision != null ? String(e.decision) : undefined
     return {
+      id: nextEntryId(),
       kind: 'approval',
       requestId: String(e.requestId ?? ''),
       toolName: String(e.toolName ?? ''),
@@ -341,8 +379,497 @@ function mapHistoryEntry(raw: unknown): AgentEntry | null {
       ...(decision ? { decision } : { stale: true }),
     }
   }
-  if (e.kind === 'detection') return { kind: 'detection', data: e.data }
+  if (e.kind === 'detection') return { id: nextEntryId(), kind: 'detection', data: e.data }
   return null
+}
+
+/** ActiveSession 写共享状态的通道:会话编排(选择/新建/删除/工作区切换)留在
+ * store,实例只经 host 读写时间线与运行状态。 */
+interface SessionHost {
+  sessionId: Ref<string | null>
+  entries: Ref<AgentEntry[]>
+  status: Ref<AgentStatus>
+  error: Ref<string | null>
+  recovering: Ref<boolean>
+  usedTokens: Ref<number | null>
+  maxTokens: Ref<number>
+  /** 轮询收尾/首轮结束后刷新会话列表(失败由实例吞掉)。 */
+  fetchSessions(): Promise<void>
+}
+
+/** 活动会话控制器:一次「选中/新建」生命周期内的全部在途工作——SSE 流式轮次、
+ * 断线恢复轮询、取消、steer 乐观账、失败重试快照、后端落盘水位。切会话/新建/
+ * 切工作区 = store 整体替换实例(swap):旧实例 dispose 时中断其流与轮询,此后
+ * 任何晚到的异步收尾因 disposed 不再写共享状态——store 顶层的 turnSeq/selectSeq/
+ * pollTimer/pollSeq/pendingSteers 五个代际计数器由此被实例生命周期取代。 */
+class ActiveSession {
+  private disposed = false
+  /** 在途 SSE 轮次的中断器(stop/替换实例时中断)。 */
+  private ctrl: AbortController | null = null
+  /** 轮次代际(实例内):retry 连点等并发 runTurn 时,旧轮次的收尾不写状态。 */
+  private turnSeq = 0
+  /** 恢复轮询定时器(recovering 期间存活)。 */
+  private pollTimer: ReturnType<typeof setInterval> | null = null
+  /** 后端落盘水位(已落盘条数;后端 seq 从 1 起=落盘序号):events 轮询的
+   * fromSeq,也是给本地新 user 条目推算落盘序号(+1)的基准。 */
+  private persistedSeq = 0
+  /** 乐观 steer 条目 id 队列(先入先出):POST /steer 成功入队;SSE steer 事件/
+   * 轮询补齐按到达顺序出队绑定落盘 seq——同文本两次插话各占一席,不误判。 */
+  private pendingSteerIds: string[] = []
+  /** 失败重试快照:随实例生灭(切会话自然作废,无需手工清空)。 */
+  private lastInput = ''
+  private lastVideoPath: string | undefined
+  private lastImages: string[] | undefined
+
+  constructor(private host: SessionHost) {}
+
+  /** 会话被替换/工作区切换:中断在途流与轮询、清乐观账,此后晚到的收尾一律丢弃。 */
+  dispose() {
+    this.disposed = true
+    this.ctrl?.abort()
+    this.stopPolling()
+    this.pendingSteerIds = []
+  }
+
+  /** 离开页面/删除当前会话:中断在途流、停轮询;实例仍有效(会话未替换)。 */
+  stop() {
+    this.ctrl?.abort()
+    this.stopPolling()
+  }
+
+  /** 历史重载后校准落盘水位(条目 seq 即其数组下标+1)。 */
+  syncPersisted(seq: number) {
+    this.persistedSeq = seq
+  }
+
+  /** 撤回成功后回卷水位:后端只保留前 seq-1 条。 */
+  rewindTo(seq: number) {
+    this.persistedSeq = seq - 1
+  }
+
+  /* ---- 断连恢复:events 轮询(简化方案,不做实时流重连) ---- */
+
+  /** selectSession 收尾的恢复探测:以已加载水位拉一次 events,inProgress=true
+   * 则进入恢复态(status running + 常驻条 + 5s 轮询)。探测失败(网络/404)
+   * 不阻塞会话切换。 */
+  async resumeFromServer() {
+    let r: { events?: Array<{ seq?: unknown; entry?: unknown }>; inProgress?: boolean }
+    try {
+      r = (await reqJson(
+        `/api/agent/sessions/${this.host.sessionId.value}/events?fromSeq=${this.persistedSeq}`,
+        'GET',
+      )) as typeof r
+    } catch {
+      return
+    }
+    if (this.disposed) return // 探测在途期间已切换会话
+    this.mergePersistedEvents(Array.isArray(r.events) ? r.events : [])
+    if (r.inProgress === true) {
+      this.host.recovering.value = true
+      this.host.status.value = 'running'
+      this.startPolling()
+    }
+  }
+
+  private stopPolling() {
+    if (this.pollTimer !== null) {
+      clearInterval(this.pollTimer)
+      this.pollTimer = null
+    }
+  }
+
+  private startPolling() {
+    this.stopPolling()
+    this.pollTimer = setInterval(() => {
+      void this.pollEvents()
+    }, 5000)
+  }
+
+  /** 拉一次 events 并合并;inProgress 变 false 时收尾恢复态(停轮询、置完成)。
+   * 网络抖动静默,下轮重试;切换会话后的晚到响应整体丢弃。 */
+  async pollEvents() {
+    if (this.disposed) return
+    let r: { events?: Array<{ seq?: unknown; entry?: unknown }>; inProgress?: boolean }
+    try {
+      r = (await reqJson(
+        `/api/agent/sessions/${this.host.sessionId.value}/events?fromSeq=${this.persistedSeq}`,
+        'GET',
+      )) as typeof r
+    } catch {
+      return // 网络抖动:下轮重试
+    }
+    if (this.disposed) return // 轮询在途期间已切换会话
+    this.mergePersistedEvents(Array.isArray(r.events) ? r.events : [])
+    if (r.inProgress !== true) {
+      this.stopPolling()
+      this.host.recovering.value = false
+      if (this.host.status.value === 'running') this.host.status.value = 'done'
+      await this.host.fetchSessions().catch(() => {}) // 标题/用量已变,刷新列表(失败不阻断)
+    }
+  }
+
+  /** 合并一批已落盘条目(带 seq):推进水位;user 条目命中乐观 steer 账时绑定
+   * 真实 seq 并跳过(本地条目已在),其余 markRaw 压入时间线(落盘条目不再变更)。 */
+  private mergePersistedEvents(events: Array<{ seq?: unknown; entry?: unknown }>) {
+    for (const ev of events) {
+      const seq = typeof ev.seq === 'number' ? ev.seq : 0
+      if (seq > this.persistedSeq) this.persistedSeq = seq
+      const mapped = mapHistoryEntry(ev.entry, seq > 0 ? seq : undefined)
+      if (mapped === null) continue
+      if (mapped.kind === 'user' && this.bindPendingSteer(seq)) continue
+      this.host.entries.value.push(markRaw(mapped))
+    }
+  }
+
+  /** steer 乐观账出队:FIFO 取一个待绑定条目,把落盘 seq 写回它(它已在时间线,
+   * 落盘版跳过插入)。队列空说明是他端插入,返回 false。 */
+  private bindPendingSteer(seq: number): boolean {
+    const id = this.pendingSteerIds.shift()
+    if (id === undefined) return false
+    const local = this.host.entries.value.find((e) => e.id === id)
+    if (local && local.kind === 'user' && seq > 0) local.seq = seq
+    return true
+  }
+
+  /* ---- SSE 流式轮次 ---- */
+
+  /** 发起一轮 /chat SSE;input 给定则先压 user 条目并更新重试快照(撤回定位用
+   * 落盘水位+1 作 seq),不给则用快照重跑(失败重试,不重复压条目)。 */
+  async runTurn(input?: string, opts: SendOptions = {}) {
+    if (input !== undefined) {
+      this.lastInput = input
+      this.lastVideoPath = opts.videoPath || undefined
+      this.lastImages = opts.images?.length ? [...opts.images] : undefined
+      this.persistedSeq += 1
+      this.host.entries.value.push({
+        id: nextEntryId(),
+        kind: 'user',
+        text: input,
+        at: Date.now(),
+        seq: this.persistedSeq,
+        ...(this.lastVideoPath ? { videoPath: this.lastVideoPath } : {}),
+        ...(opts.videoSrc ? { videoSrc: opts.videoSrc } : {}),
+        ...(this.lastImages ? { images: this.lastImages } : {}),
+      })
+    }
+    const seq = ++this.turnSeq
+    const { sessionId, status, error } = this.host
+    status.value = 'running'
+    error.value = null
+    this.ctrl = new AbortController()
+    try {
+      let res: Response
+      try {
+        res = await fetch('/api/agent/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sessionId: sessionId.value,
+            input: this.lastInput,
+            ...(this.lastVideoPath ? { videoPath: this.lastVideoPath } : {}),
+            ...(this.lastImages ? { images: this.lastImages } : {}),
+          }),
+          signal: this.ctrl.signal,
+        })
+      } catch (e) {
+        if ((e as Error).name === 'AbortError') return
+        throw new ApiError(0, '网络错误,无法连接后端')
+      }
+      if (!res.ok || !res.body) throw await toApiError(res)
+
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buf = ''
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        if (this.disposed) return
+        buf += decoder.decode(value, { stream: true })
+        // SSE 事件以空行(\n\n)分隔;每行 data: {json}
+        let sep: number
+        while ((sep = buf.indexOf('\n\n')) >= 0) {
+          const raw = buf.slice(0, sep)
+          buf = buf.slice(sep + 2)
+          for (const line of raw.split('\n')) {
+            if (!line.startsWith('data:')) continue
+            let ev: Record<string, unknown>
+            try {
+              ev = JSON.parse(line.slice(5).trim())
+            } catch {
+              continue // 非 JSON 行(注释/心跳)忽略
+            }
+            this.handleEvent(ev)
+          }
+        }
+      }
+      // 流结束但没收到 done(代理中断等):停在运行态会卡死 UI,按失败处理
+      if (!this.disposed && (status.value === 'running' || status.value === 'awaiting_approval')) {
+        status.value = 'failed'
+        error.value = 'SSE 流异常中断,未收到完成事件'
+      }
+    } catch (e) {
+      if ((e as Error).name === 'AbortError') {
+        // stop()/dispose 主动中断:静默收尾,已收到内容保留在条目里;
+        // 已被替换的旧实例不写状态(切换/新建会话场景)
+        if (!this.disposed && seq === this.turnSeq) status.value = 'done'
+        return
+      }
+      if (!this.disposed) {
+        status.value = 'failed'
+        error.value = (e as Error).message
+      }
+    } finally {
+      if (seq === this.turnSeq) this.ctrl = null
+    }
+  }
+
+  /** 失败重试:用上次输入重跑一轮(不重复压 user 条目)。 */
+  async retryTurn() {
+    if (!this.lastInput) return
+    await this.runTurn()
+  }
+
+  /** 进行中插话:POST /steer,成功后乐观插入带「已插话」标记的 user 条目并入
+   * 乐观账(SSE steer 事件/轮询补齐按 id 队列去重)。409 no_active_turn 表示
+   * 轮次恰好结束:停轮询收尾恢复态,返回 false 由调用方回退正常 /chat;其他
+   * 错误原样抛。 */
+  async steer(input: string, opts: SendOptions): Promise<boolean> {
+    const { sessionId, recovering } = this.host
+    try {
+      await postJson(`/api/agent/sessions/${sessionId.value}/steer`, {
+        input,
+        ...(opts.videoPath ? { videoPath: opts.videoPath } : {}),
+        ...(opts.images?.length ? { images: opts.images } : {}),
+      })
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409) {
+        // 恢复态下轮次已结束:停轮询收尾,随后走正常 /chat 重连实时流
+        this.stopPolling()
+        recovering.value = false
+        return false
+      }
+      throw e
+    }
+    if (this.disposed) return true // 在途期间会话已切换:新会话不接管旧插话
+    const id = nextEntryId()
+    this.pendingSteerIds.push(id)
+    this.host.entries.value.push({
+      id,
+      kind: 'user',
+      text: input,
+      steered: true,
+      at: Date.now(),
+      ...(opts.videoPath ? { videoPath: opts.videoPath } : {}),
+      ...(opts.videoSrc ? { videoSrc: opts.videoSrc } : {}),
+      ...(opts.images?.length ? { images: [...opts.images] } : {}),
+    })
+    return true
+  }
+
+  /** 显式终止进行中轮次:POST /cancel(断连不再杀轮次,停止语义由它承担;
+   * 本地流随后会收到 done 自然收尾)。409 no_active_turn 说明服务端轮次已结束
+   * (恢复态滞后),拉齐 events 收尾;其他错误抛给调用方提示。 */
+  async cancel() {
+    const { sessionId, recovering } = this.host
+    if (!sessionId.value) return
+    try {
+      await postJson(`/api/agent/sessions/${sessionId.value}/cancel`, {})
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409) {
+        await this.pollEvents()
+        return
+      }
+      throw e
+    }
+    // 恢复态(本地无流)收不到 done:主动拉齐一次;服务端收尾有延迟时
+    // inProgress 仍为 true,由在跑的轮询继续补齐直至结束
+    if (recovering.value) await this.pollEvents()
+  }
+
+  /** 流式中追加文本/思考:最后一个条目是 assistant 就续写,否则开新气泡
+   * (工具气泡会自然切断前后两段 assistant 文本)。 */
+  private currentAssistant(): AgentAssistantEntry {
+    const entries = this.host.entries.value
+    const last = entries[entries.length - 1]
+    if (last?.kind === 'assistant') return last
+    const entry: AgentAssistantEntry = {
+      id: nextEntryId(),
+      kind: 'assistant',
+      text: '',
+      think: '',
+      at: Date.now(),
+    }
+    entries.push(entry)
+    return entry
+  }
+
+  private handleEvent(ev: Record<string, unknown>) {
+    // 每个事件都带 seq(发出时后端已落盘条数):单调推进落盘水位
+    if (typeof ev.seq === 'number' && ev.seq > this.persistedSeq) this.persistedSeq = ev.seq
+    const { entries, status, error, usedTokens, maxTokens } = this.host
+    if (ev.type === 'text_delta') {
+      this.currentAssistant().text += String(ev.text ?? '')
+    } else if (ev.type === 'think_delta') {
+      this.currentAssistant().think += String(ev.text ?? '')
+    } else if (ev.type === 'tool_call_start') {
+      const call = ev.call as { id?: unknown; name?: unknown; arguments?: unknown } | undefined
+      entries.value.push({
+        id: nextEntryId(),
+        kind: 'tool',
+        callId: String(call?.id ?? ''),
+        name: String(call?.name ?? ''),
+        args:
+          typeof call?.arguments === 'string'
+            ? call.arguments
+            : JSON.stringify(call?.arguments ?? ''),
+        result: '',
+        images: [],
+        hasVideo: false,
+        children: [],
+        isError: false,
+        done: false,
+      })
+    } else if (ev.type === 'tool_result') {
+      const callId = String(ev.toolCallId ?? '')
+      const tool = [...entries.value]
+        .reverse()
+        .find((e): e is AgentToolEntry => e.kind === 'tool' && e.callId === callId)
+      if (tool) {
+        tool.done = true
+        tool.isError = ev.isError === true
+        const output = (ev.result as { output?: unknown } | undefined)?.output
+        tool.result = formatToolOutput(output)
+        tool.images = extractToolImages(output)
+        tool.hasVideo = hasToolVideo(output)
+      }
+      // 审批后的 tool_result 到达即说明流已恢复
+      if (status.value === 'awaiting_approval') status.value = 'running'
+    } else if (ev.type === 'subagent_event') {
+      // 子代理嵌套事件:按 toolCallId 挂到对应 spawn_subagent 工具条目的 children,
+      // 不建独立顶层条目;不落盘(历史只留工具条目的结论 output)。
+      const callId = String(ev.toolCallId ?? '')
+      const tool = [...entries.value]
+        .reverse()
+        .find((e): e is AgentToolEntry => e.kind === 'tool' && e.callId === callId)
+      const child = ev.event as Record<string, unknown> | undefined
+      if (tool && child) {
+        if (child.type === 'think_delta' || child.type === 'text_delta') {
+          const kind = child.type === 'think_delta' ? ('think' as const) : ('text' as const)
+          const last = tool.children[tool.children.length - 1]
+          // 连续同类 delta 聚合进同一尾巴条目;中间插过工具调用则开新块
+          if (last?.kind === kind) last.text += String(child.text ?? '')
+          else tool.children.push({ kind, text: String(child.text ?? '') })
+        } else if (child.type === 'tool_call_start') {
+          const call = child.call as
+            | { id?: unknown; name?: unknown; arguments?: unknown }
+            | undefined
+          tool.children.push({
+            kind: 'tool',
+            id: String(call?.id ?? ''),
+            name: String(call?.name ?? ''),
+            args:
+              typeof call?.arguments === 'string'
+                ? call.arguments
+                : JSON.stringify(call?.arguments ?? ''),
+            done: false,
+          })
+        } else if (child.type === 'tool_result') {
+          const cid = String(child.toolCallId ?? '')
+          const ct = [...tool.children]
+            .reverse()
+            .find(
+              (c): c is Extract<AgentSubItem, { kind: 'tool' }> =>
+                c.kind === 'tool' && c.id === cid,
+            )
+          if (ct) ct.done = true
+        }
+        // 其余子事件(step_done/done 等)无独立 UI
+      }
+    } else if (ev.type === 'approval_request') {
+      entries.value.push({
+        id: nextEntryId(),
+        kind: 'approval',
+        requestId: String(ev.requestId ?? ''),
+        toolName: String(ev.toolName ?? ''),
+        approvalRule: String(ev.approvalRule ?? ''),
+        ...(ev.description != null ? { description: String(ev.description) } : {}),
+        accesses: Array.isArray(ev.accesses) ? (ev.accesses as AgentAccess[]) : [],
+      })
+      status.value = 'awaiting_approval'
+    } else if (ev.type === 'detection') {
+      entries.value.push({ id: nextEntryId(), kind: 'detection', data: ev.data })
+    } else if (ev.type === 'steer') {
+      // 进行中插话生效:本地已乐观插入(发 /steer 成功时)则按 id 队列出队绑定
+      // 落盘 seq 后跳过;否则(他端插入)补一条带「已插话」标记的 user 条目。
+      // 同批多条 steer 共享事件水位(seq=批末位置),按剩余排队数回推各自序号。
+      if (this.pendingSteerIds.length) {
+        const id = this.pendingSteerIds.shift()!
+        const local = entries.value.find((e) => e.id === id)
+        if (
+          local &&
+          local.kind === 'user' &&
+          typeof ev.seq === 'number' &&
+          ev.seq > this.pendingSteerIds.length
+        ) {
+          local.seq = ev.seq - this.pendingSteerIds.length
+        }
+      } else {
+        entries.value.push({
+          id: nextEntryId(),
+          kind: 'user',
+          text: String(ev.text ?? ''),
+          steered: true,
+          at: Date.now(),
+          ...(typeof ev.seq === 'number' ? { seq: ev.seq } : {}),
+          ...(Array.isArray(ev.images) && ev.images.length
+            ? { images: ev.images.map(String) }
+            : {}),
+          ...(ev.videoPath != null ? { videoPath: String(ev.videoPath) } : {}),
+        })
+      }
+    } else if (ev.type === 'steer_dropped') {
+      // 轮末未消费的插话:服务端从未落盘,乐观条目移出时间线并出队,
+      // 保持本地与后端落盘逐条对齐(按文本在乐观账中定位)。
+      const text = String(ev.text ?? '')
+      const idx = this.pendingSteerIds.findIndex((id) => {
+        const e = entries.value.find((x) => x.id === id)
+        return e?.kind === 'user' && e.text === text
+      })
+      if (idx >= 0) {
+        const [id] = this.pendingSteerIds.splice(idx, 1)
+        const i = entries.value.findIndex((e) => e.id === id)
+        if (i >= 0) entries.value.splice(i, 1)
+      }
+    } else if (ev.type === 'context_usage') {
+      const used = Number(ev.usedTokens)
+      const max = Number(ev.maxTokens)
+      if (Number.isFinite(used) && used >= 0) usedTokens.value = used
+      if (Number.isFinite(max) && max > 0) maxTokens.value = max
+    } else if (ev.type === 'compaction') {
+      entries.value.push({ id: nextEntryId(), kind: 'system', text: '上下文已自动压缩' })
+    } else if (ev.type === 'done') {
+      // 落盘水位兜底:done 的 seq 在异常路径先于轮末兜底落盘,以本地非 system
+      // 条目数对齐(本地与后端逐条对齐是既有契约;见 rewindTo/seq 注释)。
+      const localCount = entries.value.filter((e) => e.kind !== 'system').length
+      if (localCount > this.persistedSeq) this.persistedSeq = localCount
+      if (ev.reason === 'error') {
+        status.value = 'failed'
+        error.value = typeof ev.error === 'string' ? ev.error : 'Agent 运行出错'
+      } else {
+        status.value = 'done'
+        // 输出达到 token 上限被截断:时间线末尾插警示条目(仅本地,不落历史)
+        if (ev.truncated === true) {
+          entries.value.push({
+            id: nextEntryId(),
+            kind: 'system',
+            text: '输出达到 token 上限被截断,部分内容可能不完整,可继续追问',
+            tone: 'warn',
+          })
+        }
+      }
+    }
+    // step_done:无独立 UI(工具批结束的进度信号,时间线条目已自解释)
+  }
 }
 
 export const useAgentChatStore = defineStore('agentchat', () => {
@@ -372,71 +899,58 @@ export const useAgentChatStore = defineStore('agentchat', () => {
     pendingVideo.value = null
   }
 
-  let ctrl: AbortController | null = null
-  /** 轮次代际:切换/新建会话会中断在途流并递增,旧 runTurn 的收尾不再写状态。 */
-  let turnSeq = 0
-  /** 选择代际:selectSession 的 history 请求在途期间,若发生更新的选择/
-   * 新建会话/工作区切换,晚到的响应必须丢弃(stale write 会把已清空的旧
-   * 工作区会话写回时间线)。 */
-  let selectSeq = 0
-  let lastInput = ''
-  let lastVideoPath: string | undefined
-  let lastImages: string[] | undefined
-  /** 恢复轮询定时器(events 5s 轮询;recovering 期间存活)。 */
-  let pollTimer: ReturnType<typeof setInterval> | null = null
-  /** events 续传水位:已对齐的服务端落盘 seq(seq 从 1 起,等于已落盘条数)。 */
-  let pollSeq = 0
-  /** 乐观插入的 steer 文本多重集合:SSE steer 事件/轮询补齐的 user 条目
-   * 按 text 消费一条,避免与本地乐观条目重复。 */
-  let pendingSteers: string[] = []
+  /** 当前活动会话实例(未选中/已清空为 null);selectSession/createSession/
+   * 工作区切换经 swap 整体替换。 */
+  let active: ActiveSession | null = null
+
+  /** 实例的共享状态通道(时间线/运行状态 refs + 会话列表刷新)。 */
+  const host: SessionHost = {
+    sessionId,
+    entries,
+    status,
+    error,
+    recovering,
+    usedTokens,
+    maxTokens,
+    fetchSessions: () => fetchSessions(),
+  }
+
+  /** 会话替换唯一入口:dispose 旧实例(中断其 SSE 流与恢复轮询、清乐观账,
+   * 晚到的异步收尾从此丢弃)并退出恢复态。会话级字段(sessionId/entries/…)
+   * 由调用方按需清理(切换在途失败时旧时间线仍可见,与既有行为一致)。 */
+  function swap(next: ActiveSession | null) {
+    active?.dispose()
+    active = next
+    recovering.value = false
+  }
+
+  /** 取当前会话实例;不存在则现建(测试/恢复现场手动置 running 态的兜底)。 */
+  function ensureActive(): ActiveSession {
+    if (active === null) active = new ActiveSession(host)
+    return active
+  }
 
   function stop() {
-    ctrl?.abort()
-    stopPolling()
-  }
-
-  function stopPolling() {
-    if (pollTimer !== null) {
-      clearInterval(pollTimer)
-      pollTimer = null
-    }
-  }
-
-  /** 切换/新建会话前调用:中断在途流,并使其 AbortError 收尾失效(不得覆盖新状态)。
-   * 同时收尾恢复态:停轮询、清 steer 去重账。 */
-  function supersedeTurn() {
-    turnSeq += 1
-    ctrl?.abort()
-    stopPolling()
-    recovering.value = false
-    pendingSteers = []
-  }
-
-  /** 上次输入快照清空(新建/切换会话后,失败重试不得把旧输入重放进新会话)。 */
-  function resetLastTurn() {
-    lastInput = ''
-    lastVideoPath = undefined
-    lastImages = undefined
+    active?.stop()
   }
 
   /* ---- 工作区切换:后端在建会话时注入当前工作区作 workspaceDir,旧会话仍绑旧工作区,
-   * 新工作区相对路径送入旧会话会解析失败。监听工作区路径变化:清当前会话态与 pendingVideo
-   * (不删后端历史会话),下次发送/进入对话时按新工作区惰性建新会话。
-   * 首次加载(prev 为 null)不算切换;selectSession 不动工作区路径,不会误触发。 */
+   * 新工作区相对路径送入旧会话会解析失败。监听工作区路径变化:替换会话实例并清
+   * 当前会话态与 pendingVideo(不删后端历史会话),下次发送/进入对话时按新工作区
+   * 惰性建新会话。首次加载(prev 为 null)不算切换;selectSession 不动工作区路径,
+   * 不会误触发。 */
   const wsStore = useWorkspaceStore()
   watch(
     () => wsStore.path,
     (next, prev) => {
       if (prev == null || next === prev) return
-      supersedeTurn()
-      selectSeq += 1 // 使在途的 selectSession 失效:旧工作区会话不得写回
+      swap(null) // 旧实例作废:在途流/轮询/晚到的 history 一并失效
       sessionId.value = null
       entries.value = []
       usedTokens.value = null
       pendingVideo.value = null
       error.value = null
       status.value = 'idle'
-      resetLastTurn()
       // 切换端点已同步触发 agent server 恢复该工作区的磁盘历史(set_workspace
       // 返回时 restore 已完成),此处重拉列表让恢复的会话立即可见;
       // 失败不阻塞切换,仅留在控制台。
@@ -452,102 +966,24 @@ export const useAgentChatStore = defineStore('agentchat', () => {
     sessions.value = Array.isArray(r.sessions) ? r.sessions : []
   }
 
-  /* ---- 断连恢复:events 轮询(简化方案,不做实时流重连) ---- */
-
-  /** 合并一批已落盘条目(带 seq):推进水位;user 条目命中乐观 steer 账时
-   * 跳过(本地条目已在),其余 markRaw 压入时间线(落盘条目不再变更)。 */
-  function mergePersistedEvents(events: Array<{ seq?: unknown; entry?: unknown }>) {
-    for (const ev of events) {
-      if (typeof ev.seq === 'number' && ev.seq > pollSeq) pollSeq = ev.seq
-      const mapped = mapHistoryEntry(ev.entry)
-      if (mapped === null) continue
-      if (mapped.kind === 'user') {
-        const i = pendingSteers.indexOf(mapped.text)
-        if (i >= 0) {
-          pendingSteers.splice(i, 1) // 本地乐观 steer 条目已在,去重跳过
-          continue
-        }
-      }
-      entries.value.push(markRaw(mapped))
-    }
-  }
-
-  /** 拉一次 events 并合并;inProgress 变 false 时收尾恢复态(停轮询、置完成)。
-   * 网络抖动静默,下轮重试;切换会话后的晚到响应整体丢弃。 */
-  async function pollEvents(id: string) {
-    if (sessionId.value !== id) {
-      stopPolling()
-      return
-    }
-    let r: { events?: Array<{ seq?: unknown; entry?: unknown }>; inProgress?: boolean }
-    try {
-      r = (await reqJson(
-        `/api/agent/sessions/${id}/events?fromSeq=${pollSeq}`,
-        'GET',
-      )) as typeof r
-    } catch {
-      return // 网络抖动:下轮重试
-    }
-    if (sessionId.value !== id) return // 轮询在途期间已切换会话
-    mergePersistedEvents(Array.isArray(r.events) ? r.events : [])
-    if (r.inProgress !== true) {
-      stopPolling()
-      recovering.value = false
-      if (status.value === 'running') status.value = 'done'
-      await fetchSessions().catch(() => {}) // 标题/用量已变,刷新列表(失败不阻断)
-    }
-  }
-
-  /** 启动 5s 轮询(先停旧定时器,幂等)。 */
-  function startPolling(id: string) {
-    stopPolling()
-    pollTimer = setInterval(() => {
-      void pollEvents(id)
-    }, 5000)
-  }
-
   /** 手动「刷新进度」:立即拉一次 events(恢复条按钮)。 */
   async function refreshProgress() {
-    if (sessionId.value) await pollEvents(sessionId.value)
-  }
-
-  /** selectSession 收尾的恢复探测:以已加载条数为水位拉 events,
-   * inProgress=true 则进入恢复态(status running + 常驻条 + 5s 轮询)。
-   * 探测失败(网络/404)不阻塞会话切换。 */
-  async function resumeFromServer(id: string, gen: number) {
-    pollSeq = entries.value.length
-    let r: { events?: Array<{ seq?: unknown; entry?: unknown }>; inProgress?: boolean }
-    try {
-      r = (await reqJson(
-        `/api/agent/sessions/${id}/events?fromSeq=${pollSeq}`,
-        'GET',
-      )) as typeof r
-    } catch {
-      return
-    }
-    if (gen !== selectSeq || sessionId.value !== id) return // 探测在途期间已切换
-    mergePersistedEvents(Array.isArray(r.events) ? r.events : [])
-    if (r.inProgress === true) {
-      recovering.value = true
-      status.value = 'running'
-      startPolling(id)
-    }
+    if (sessionId.value) await ensureActive().pollEvents()
   }
 
   /** 创建会话:workspaceDir 由后端代理注入,前端只传权限模式。 */
   async function createSession() {
-    supersedeTurn()
-    selectSeq += 1 // 新建取代任何在途的 selectSession
+    swap(null) // 取代任何在途实例(selectSession/runTurn/轮询一并作废)
     status.value = 'connecting'
     error.value = null
     sessionId.value = null
     usedTokens.value = null
-    resetLastTurn()
     try {
       const r = (await postJson('/api/agent/sessions', { mode: mode.value })) as {
         sessionId?: string
       }
       if (!r.sessionId) throw new ApiError(0, '后端未返回 sessionId')
+      if (active !== null) return // 在途期间发生了更新的选择/切换:让位
       sessionId.value = r.sessionId
       status.value = 'idle'
       await fetchSessions().catch(() => {}) // 列表出现新会话(无标题)
@@ -557,31 +993,33 @@ export const useAgentChatStore = defineStore('agentchat', () => {
     }
   }
 
-  /** 切换历史会话:拉 history 重建时间线;权限模式跟随会话属性。 */
+  /** 切换历史会话:拉 history 重建时间线;权限模式跟随会话属性。
+   * 在途期间发生更新的选择/新建/工作区切换都会 swap 掉调用时的实例,晚到的
+   * 响应因实例已 dispose 被丢弃(旧工作区会话不得写回时间线)。 */
   async function selectSession(id: string) {
     if (id === sessionId.value && entries.value.length) return
-    supersedeTurn()
-    const gen = ++selectSeq
+    const s = new ActiveSession(host)
+    swap(s)
     status.value = 'connecting'
     error.value = null
-    resetLastTurn()
     try {
       const r = (await reqJson(`/api/agent/sessions/${id}/history`, 'GET')) as {
         entries?: unknown[]
       }
-      // 在途期间发生了更新的选择/新建/工作区切换:丢弃晚到的历史
-      if (gen !== selectSeq) return
+      if (active !== s) return // 在途期间发生了更新的选择/新建/工作区切换:丢弃晚到的历史
       entries.value = (Array.isArray(r.entries) ? r.entries : [])
-        .map((raw) => {
-          const e = mapHistoryEntry(raw)
+        .map((raw, i) => {
           // 历史条目落盘后不再变更:markRaw 跳过深响应式代理(工具结果/
           // 附件里的大 base64 字符串逐层 proxy 化开销可观);流式轮次新
-          // 压入的条目不受影响,仍走正常响应式更新。
+          // 压入的条目不受影响,仍走正常响应式更新。seq=数组下标+1
+          // (后端落盘序号,撤回定位用)。
+          const e = mapHistoryEntry(raw, i + 1)
           return e === null ? null : markRaw(e)
         })
         .filter((e): e is AgentEntry => e !== null)
       sessionId.value = id
-      const info = sessions.value.find((s) => s.id === id)
+      s.syncPersisted(entries.value.length)
+      const info = sessions.value.find((x) => x.id === id)
       if (info?.mode === 'manual' || info?.mode === 'auto' || info?.mode === 'yolo') {
         mode.value = info.mode
       }
@@ -589,10 +1027,12 @@ export const useAgentChatStore = defineStore('agentchat', () => {
       usedTokens.value = typeof info?.usedTokens === 'number' ? info.usedTokens : null
       status.value = 'idle'
       // 断连恢复探测:服务端轮次仍在跑则进入恢复态(轮询补齐)
-      await resumeFromServer(id, gen)
+      await s.resumeFromServer()
     } catch (e) {
-      status.value = 'failed'
-      error.value = (e as Error).message
+      if (active === s) {
+        status.value = 'failed'
+        error.value = (e as Error).message
+      }
     }
   }
 
@@ -656,271 +1096,6 @@ export const useAgentChatStore = defineStore('agentchat', () => {
     await createSession()
   }
 
-  /** 流式中追加文本/思考:最后一个条目是 assistant 就续写,否则开新气泡
-   * (工具气泡会自然切断前后两段 assistant 文本)。 */
-  function currentAssistant(): AgentAssistantEntry {
-    const last = entries.value[entries.value.length - 1]
-    if (last?.kind === 'assistant') return last
-    const entry: AgentAssistantEntry = { kind: 'assistant', text: '', think: '', at: Date.now() }
-    entries.value.push(entry)
-    return entry
-  }
-
-  function handleEvent(ev: Record<string, unknown>) {
-    if (ev.type === 'text_delta') {
-      currentAssistant().text += String(ev.text ?? '')
-    } else if (ev.type === 'think_delta') {
-      currentAssistant().think += String(ev.text ?? '')
-    } else if (ev.type === 'tool_call_start') {
-      const call = ev.call as { id?: unknown; name?: unknown; arguments?: unknown } | undefined
-      entries.value.push({
-        kind: 'tool',
-        id: String(call?.id ?? ''),
-        name: String(call?.name ?? ''),
-        args:
-          typeof call?.arguments === 'string'
-            ? call.arguments
-            : JSON.stringify(call?.arguments ?? ''),
-        result: '',
-        images: [],
-        hasVideo: false,
-        children: [],
-        isError: false,
-        done: false,
-      })
-    } else if (ev.type === 'tool_result') {
-      const id = String(ev.toolCallId ?? '')
-      const tool = [...entries.value]
-        .reverse()
-        .find((e): e is AgentToolEntry => e.kind === 'tool' && e.id === id)
-      if (tool) {
-        tool.done = true
-        tool.isError = ev.isError === true
-        const output = (ev.result as { output?: unknown } | undefined)?.output
-        tool.result = formatToolOutput(output)
-        tool.images = extractToolImages(output)
-        tool.hasVideo = hasToolVideo(output)
-      }
-      // 审批后的 tool_result 到达即说明流已恢复
-      if (status.value === 'awaiting_approval') status.value = 'running'
-    } else if (ev.type === 'subagent_event') {
-      // 子代理嵌套事件:按 toolCallId 挂到对应 spawn_subagent 工具条目的 children,
-      // 不建独立顶层条目;不落盘(历史只留工具条目的结论 output)。
-      const id = String(ev.toolCallId ?? '')
-      const tool = [...entries.value]
-        .reverse()
-        .find((e): e is AgentToolEntry => e.kind === 'tool' && e.id === id)
-      const child = ev.event as Record<string, unknown> | undefined
-      if (tool && child) {
-        if (child.type === 'think_delta' || child.type === 'text_delta') {
-          const kind = child.type === 'think_delta' ? ('think' as const) : ('text' as const)
-          const last = tool.children[tool.children.length - 1]
-          // 连续同类 delta 聚合进同一尾巴条目;中间插过工具调用则开新块
-          if (last?.kind === kind) last.text += String(child.text ?? '')
-          else tool.children.push({ kind, text: String(child.text ?? '') })
-        } else if (child.type === 'tool_call_start') {
-          const call = child.call as
-            | { id?: unknown; name?: unknown; arguments?: unknown }
-            | undefined
-          tool.children.push({
-            kind: 'tool',
-            id: String(call?.id ?? ''),
-            name: String(call?.name ?? ''),
-            args:
-              typeof call?.arguments === 'string'
-                ? call.arguments
-                : JSON.stringify(call?.arguments ?? ''),
-            done: false,
-          })
-        } else if (child.type === 'tool_result') {
-          const cid = String(child.toolCallId ?? '')
-          const ct = [...tool.children]
-            .reverse()
-            .find(
-              (c): c is Extract<AgentSubItem, { kind: 'tool' }> =>
-                c.kind === 'tool' && c.id === cid,
-            )
-          if (ct) ct.done = true
-        }
-        // 其余子事件(step_done/done 等)无独立 UI
-      }
-    } else if (ev.type === 'approval_request') {
-      entries.value.push({
-        kind: 'approval',
-        requestId: String(ev.requestId ?? ''),
-        toolName: String(ev.toolName ?? ''),
-        approvalRule: String(ev.approvalRule ?? ''),
-        ...(ev.description != null ? { description: String(ev.description) } : {}),
-        accesses: Array.isArray(ev.accesses) ? (ev.accesses as AgentAccess[]) : [],
-      })
-      status.value = 'awaiting_approval'
-    } else if (ev.type === 'detection') {
-      entries.value.push({ kind: 'detection', data: ev.data })
-    } else if (ev.type === 'steer') {
-      // 进行中插话生效:本地已乐观插入(发 /steer 成功时)则按 text 去重跳过,
-      // 否则(他端插入)补一条带「已插话」标记的 user 条目
-      const text = String(ev.text ?? '')
-      const i = pendingSteers.indexOf(text)
-      if (i >= 0) {
-        pendingSteers.splice(i, 1)
-      } else {
-        entries.value.push({
-          kind: 'user',
-          text,
-          steered: true,
-          at: Date.now(),
-          ...(Array.isArray(ev.images) && ev.images.length
-            ? { images: ev.images.map(String) }
-            : {}),
-          ...(ev.videoPath != null ? { videoPath: String(ev.videoPath) } : {}),
-        })
-      }
-    } else if (ev.type === 'context_usage') {
-      const used = Number(ev.usedTokens)
-      const max = Number(ev.maxTokens)
-      if (Number.isFinite(used) && used >= 0) usedTokens.value = used
-      if (Number.isFinite(max) && max > 0) maxTokens.value = max
-    } else if (ev.type === 'compaction') {
-      entries.value.push({ kind: 'system', text: '上下文已自动压缩' })
-    } else if (ev.type === 'done') {
-      if (ev.reason === 'error') {
-        status.value = 'failed'
-        error.value = typeof ev.error === 'string' ? ev.error : 'Agent 运行出错'
-      } else {
-        status.value = 'done'
-        // 输出达到 token 上限被截断:时间线末尾插警示条目(仅本地,不落历史)
-        if (ev.truncated === true) {
-          entries.value.push({
-            kind: 'system',
-            text: '输出达到 token 上限被截断,部分内容可能不完整,可继续追问',
-            tone: 'warn',
-          })
-        }
-      }
-    }
-    // step_done:无独立 UI(工具批结束的进度信号,时间线条目已自解释)
-  }
-
-  /** 进行中插话:POST /steer,成功后乐观插入带「已插话」标记的 user 条目
-   * (SSE steer 事件/轮询补齐到达时按 text 去重)。409 no_active_turn 表示
-   * 轮次恰好结束:返回 false 由调用方回退正常 /chat;其他错误原样抛。 */
-  async function trySteer(input: string, opts: SendOptions): Promise<boolean> {
-    try {
-      await postJson(`/api/agent/sessions/${sessionId.value}/steer`, {
-        input,
-        ...(opts.videoPath ? { videoPath: opts.videoPath } : {}),
-        ...(opts.images?.length ? { images: opts.images } : {}),
-      })
-    } catch (e) {
-      if (e instanceof ApiError && e.status === 409) {
-        // 恢复态下轮次已结束:停轮询收尾,随后走正常 /chat 重连实时流
-        stopPolling()
-        recovering.value = false
-        return false
-      }
-      throw e
-    }
-    pendingSteers.push(input)
-    entries.value.push({
-      kind: 'user',
-      text: input,
-      steered: true,
-      at: Date.now(),
-      ...(opts.videoPath ? { videoPath: opts.videoPath } : {}),
-      ...(opts.videoSrc ? { videoSrc: opts.videoSrc } : {}),
-      ...(opts.images?.length ? { images: [...opts.images] } : {}),
-    })
-    return true
-  }
-
-  /** 显式终止进行中轮次:POST /cancel(断连不再杀轮次,停止语义由它承担;
-   * 本地流随后会收到 done 自然收尾)。409 no_active_turn 说明服务端轮次已结束
-   * (恢复态滞后),拉齐 events 收尾;其他错误抛给调用方提示。 */
-  async function cancelTurn() {
-    if (!sessionId.value) return
-    try {
-      await postJson(`/api/agent/sessions/${sessionId.value}/cancel`, {})
-    } catch (e) {
-      if (e instanceof ApiError && e.status === 409) {
-        await pollEvents(sessionId.value)
-        return
-      }
-      throw e
-    }
-    // 恢复态(本地无流)收不到 done:主动拉齐一次;服务端收尾有延迟时
-    // inProgress 仍为 true,由在跑的轮询继续补齐直至结束
-    if (recovering.value) await pollEvents(sessionId.value)
-  }
-
-  /** 发起一轮 /chat SSE(不压 user 条目;send/retry 共用)。 */
-  async function runTurn() {
-    const seq = ++turnSeq
-    status.value = 'running'
-    error.value = null
-    ctrl = new AbortController()
-    try {
-      let res: Response
-      try {
-        res = await fetch('/api/agent/chat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            sessionId: sessionId.value,
-            input: lastInput,
-            ...(lastVideoPath ? { videoPath: lastVideoPath } : {}),
-            ...(lastImages ? { images: lastImages } : {}),
-          }),
-          signal: ctrl.signal,
-        })
-      } catch (e) {
-        if ((e as Error).name === 'AbortError') return
-        throw new ApiError(0, '网络错误,无法连接后端')
-      }
-      if (!res.ok || !res.body) throw await toApiError(res)
-
-      const reader = res.body.getReader()
-      const decoder = new TextDecoder()
-      let buf = ''
-      for (;;) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buf += decoder.decode(value, { stream: true })
-        // SSE 事件以空行(\n\n)分隔;每行 data: {json}
-        let sep: number
-        while ((sep = buf.indexOf('\n\n')) >= 0) {
-          const raw = buf.slice(0, sep)
-          buf = buf.slice(sep + 2)
-          for (const line of raw.split('\n')) {
-            if (!line.startsWith('data:')) continue
-            let ev: Record<string, unknown>
-            try {
-              ev = JSON.parse(line.slice(5).trim())
-            } catch {
-              continue // 非 JSON 行(注释/心跳)忽略
-            }
-            handleEvent(ev)
-          }
-        }
-      }
-      // 流结束但没收到 done(代理中断等):停在运行态会卡死 UI,按失败处理
-      if (status.value === 'running' || status.value === 'awaiting_approval') {
-        status.value = 'failed'
-        error.value = 'SSE 流异常中断,未收到完成事件'
-      }
-    } catch (e) {
-      if ((e as Error).name === 'AbortError') {
-        // stop() 主动中断:静默收尾,已收到内容保留在条目里;
-        // 已被 supersedeTurn 接管的旧轮次不写状态(切换/新建会话场景)
-        if (seq === turnSeq) status.value = 'done'
-        return
-      }
-      status.value = 'failed'
-      error.value = (e as Error).message
-    } finally {
-      if (seq === turnSeq) ctrl = null
-    }
-  }
-
   /** 发送一轮(压 user 条目);opts.images 为 dataURL 数组(≤4)。
    * 进行中(running/awaiting_approval)改走 /steer 插话(乐观插入 user 条目,
    * 409 no_active_turn 回退正常 /chat);connecting 中忽略。
@@ -930,27 +1105,22 @@ export const useAgentChatStore = defineStore('agentchat', () => {
     const busy = status.value === 'running' || status.value === 'awaiting_approval'
     if (busy) {
       if (!sessionId.value) return
-      if (await trySteer(input, opts)) return
+      if (await ensureActive().steer(input, opts)) return
       // 409 回退:轮次已结束,落入正常发送路径
     }
     if (!sessionId.value) {
       await createSession()
       if (!sessionId.value) return // 建会话失败:状态已置 failed,由失败条重试兜底
     }
-    lastInput = input
-    lastVideoPath = opts.videoPath || undefined
-    lastImages = opts.images?.length ? [...opts.images] : undefined
-    entries.value.push({
-      kind: 'user',
-      text: input,
-      at: Date.now(),
-      ...(lastVideoPath ? { videoPath: lastVideoPath } : {}),
-      ...(opts.videoSrc ? { videoSrc: opts.videoSrc } : {}),
-      ...(lastImages ? { images: lastImages } : {}),
-    })
-    await runTurn()
+    const s = ensureActive()
+    await s.runTurn(input, opts)
     // 首轮后标题/lastActiveAt 已变,刷新会话列表(失败不阻断)
     await fetchSessions().catch(() => {})
+  }
+
+  /** 停止:显式终止服务端轮次(POST /cancel;本地流随后收到 done 自然收尾)。 */
+  async function cancelTurn() {
+    await active?.cancel()
   }
 
   /** 上传视频文件落工作区(POST /api/agent/uploads),返回路径设为待发送视频附件。
@@ -974,29 +1144,32 @@ export const useAgentChatStore = defineStore('agentchat', () => {
     }
   }
 
-  /** 撤回:删到指定用户消息为止(含其后全部条目)。
-   * localIndex 是本地时间线下标;system 条目仅本地流式插入不落库,
-   * 提交给后端的 entryIndex 需剔除 system 后换算。409(对话进行中)原样抛给调用方。 */
-  async function recallFrom(localIndex: number) {
+  /** 撤回:删到指定用户消息为止(含其后全部条目)。entryId 是前端条目 id
+   * (ChatView 定位),落到后端契约:条目落盘序号 seq-1 即 entryIndex(乐观
+   * steer 已在生效时绑定 seq;system 条目不落盘、不在其列)。409(对话进行中)
+   * 原样抛给调用方。 */
+  async function recallFrom(entryId: string) {
     if (!sessionId.value) throw new ApiError(0, '无活动会话')
-    const target = entries.value[localIndex]
+    const idx = entries.value.findIndex((e) => e.id === entryId)
+    const target = entries.value[idx]
     if (!target || target.kind !== 'user') throw new ApiError(0, '仅支持撤回用户消息')
-    const persistedIndex =
-      entries.value.slice(0, localIndex + 1).filter((e) => e.kind !== 'system').length - 1
+    const seq = target.seq
+    if (seq == null) throw new ApiError(0, '该消息尚未落盘,无法撤回')
     await postJson(`/api/agent/sessions/${sessionId.value}/recall`, {
-      entryIndex: persistedIndex,
+      entryIndex: seq - 1,
     })
-    entries.value.splice(localIndex)
+    entries.value.splice(idx)
+    active?.rewindTo(seq)
   }
 
-  /** 失败重试:会话都没建上则重建;否则用上次输入重跑一轮(不重复压 user 条目)。 */
+  /** 失败重试:会话都没建上则重建;否则用上次输入重跑一轮(不重复压 user 条目,
+   * 快照随会话实例存续,切换会话自然作废)。 */
   async function retry() {
     if (!sessionId.value) {
       await createSession()
       return
     }
-    if (!lastInput) return
-    await runTurn()
+    await ensureActive().retryTurn()
   }
 
   /** 审批回执:approved/rejected,scope:'session' 表示本会话都批准。
