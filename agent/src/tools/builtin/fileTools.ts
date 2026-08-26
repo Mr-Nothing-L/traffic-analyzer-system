@@ -5,7 +5,10 @@
  * vetoes returned as isError results (never entering the permission chain).
  * write_file declares a file write access so the permission chain can gate
  * it; run_script executes a script file inside the workspace (sh → bash,
- * py → python3) with a bounded timeout and truncated captured output.
+ * py → python3) with a bounded timeout and truncated captured output. A
+ * script can read/write arbitrary workspace files, so run_script declares
+ * the execute-level `all` access: non-yolo modes ask for human approval and
+ * the scheduler never runs it in parallel with other tools.
  */
 import { execFile } from 'node:child_process';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
@@ -263,7 +266,7 @@ export function createRunScriptTool(
         Math.max(1, parsed.data.timeout_sec ?? DEFAULT_TIMEOUT_SEC),
       );
       return {
-        accesses: ToolAccesses.readFile(scriptPath),
+        accesses: ToolAccesses.all(),
         approvalRule: `run_script(${scriptPath})`,
         execute: async (ctx): Promise<ExecutableToolResult> => {
           try {

@@ -133,8 +133,8 @@
       "parameters": { "$ref": "./submit_detection.schema.json" },
       "returns": "{accepted: true} 或 {accepted: false, errors: [...]}(schema 校验失败,需修正后重新调用)",
       "limits": [
-        "参数必须符合 submit_detection.schema.json;位 9 恒为 0 由正则强制",
-        "binary_encoding、normal 与 events 的 detected 必须互相一致(运行时校验,不一致会被拒绝)",
+        "参数必须符合 submit_detection.schema.json;位 9 为正常指示位:无任何事件检出时为 1(编码 {0_0_0_0_0_0_0_0_1_0_0}),其余情况为 0",
+        "binary_encoding、normal 与 events 的 detected 必须互相一致:事件位(1-8、10、11)与 detected 一致,位 9=1 当且仅当无任何事件检出,normal 与位 9 一致(运行时校验,不一致会被拒绝)",
         "detected=true 的事件 evidence_frames 不得为空",
         "detected=true 但缺 boxes/box_frame 不会被拒绝,会在结果 meta.annotation_not_provided 中记录,前端降级为无标注图展示;draw_boxes 标注失败同理记入 meta.annotation_missing,不阻塞提交",
         "提交后本轮分析即结束,不再进行其他工具调用"

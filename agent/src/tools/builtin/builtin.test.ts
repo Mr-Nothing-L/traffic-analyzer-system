@@ -444,13 +444,11 @@ describe('run_script', () => {
     expect(result.output).toContain('PATH_OUTSIDE_WORKSPACE');
   });
 
-  it('declares a read access and an approvalRule containing the script path', () => {
+  it('declares an execute-level (all) access and an approvalRule containing the script path', () => {
     writeFileSync(path.join(workspaceDir, 'a.sh'), 'true\n');
     const execution = runnable(fileTool('run_script'), { path: 'a.sh' });
     const scriptPath = path.join(workspaceDir, 'a.sh');
-    expect(execution.accesses).toEqual([
-      { kind: 'file', operation: 'read', path: scriptPath, recursive: undefined },
-    ]);
+    expect(execution.accesses).toEqual([{ kind: 'all' }]);
     expect(execution.approvalRule).toContain(scriptPath);
   });
 });
@@ -470,11 +468,11 @@ describe('submit_detection', () => {
     }));
   }
 
-  it('accepts a consistent all-zero (normal) submission with stopTurn', async () => {
+  it('accepts a normal submission (bit 9=1, normal=true) with stopTurn', async () => {
     const result = await execute(tool(), {
       video_path: 'demo.mp4',
       events: baseEvents(),
-      binary_encoding: '0_0_0_0_0_0_0_0_0_0_0',
+      binary_encoding: '0_0_0_0_0_0_0_0_1_0_0',
       normal: true,
       report_markdown: '# 检测报告\n未检出任何事件。',
     });
@@ -482,7 +480,7 @@ describe('submit_detection', () => {
     expect(result.stopTurn).toBe(true);
     expect(result.output).toBe('检测结果已提交');
     const payload = JSON.parse(result.note as string);
-    expect(payload.binary_encoding).toBe('0_0_0_0_0_0_0_0_0_0_0');
+    expect(payload.binary_encoding).toBe('0_0_0_0_0_0_0_0_1_0_0');
     expect(payload.events).toHaveLength(10);
     // 无检出事件时不产生 meta,note 载荷保持向后兼容。
     expect(payload.meta).toBeUndefined();
@@ -542,7 +540,7 @@ describe('submit_detection', () => {
     const input = {
       video_path: 'demo.mp4',
       events: baseEvents(),
-      binary_encoding: '0_0_0_0_0_0_0_0_0_0_0',
+      binary_encoding: '0_0_0_0_0_0_0_0_1_0_0',
       normal: true,
       report_markdown: '# 报告',
     };
@@ -605,7 +603,7 @@ describe('submit_detection', () => {
     expect(result.isError).toBe(true);
   });
 
-  it('rejects an encoding with bit 9 set (schema pattern)', async () => {
+  it('rejects when bit 9 disagrees with normal (bit 9=1 but normal=false)', async () => {
     const result = await execute(tool(), {
       video_path: 'demo.mp4',
       events: baseEvents(),
@@ -614,6 +612,34 @@ describe('submit_detection', () => {
       report_markdown: '# 报告',
     });
     expect(result.isError).toBe(true);
+    expect(result.output).toContain('位 9');
+    expect(result.output).toContain('normal=false');
+  });
+
+  it('rejects an all-zero encoding claimed as normal (bit 9 must be 1)', async () => {
+    const result = await execute(tool(), {
+      video_path: 'demo.mp4',
+      events: baseEvents(),
+      binary_encoding: '0_0_0_0_0_0_0_0_0_0_0',
+      normal: true,
+      report_markdown: '# 报告',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain('位 9 应为 1');
+  });
+
+  it('rejects bit 9=1 when an event is detected', async () => {
+    const events = baseEvents();
+    events[0] = { ...events[0], detected: true, evidence_frames: [1.0] };
+    const result = await execute(tool(), {
+      video_path: 'demo.mp4',
+      events,
+      binary_encoding: '1_0_0_0_0_0_0_0_1_0_0',
+      normal: true,
+      report_markdown: '# 报告',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain('位 9 应为 0');
   });
 
   it('inlines the submit_detection.schema.json as tool parameters', () => {

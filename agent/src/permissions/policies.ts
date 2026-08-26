@@ -1,7 +1,8 @@
 /**
  * Built-in permission policies, in chain order (first hit wins):
  * yolo-mode-approve → sensitive-file-access-ask → session-approval-history →
- * auto-mode-approve → default-readonly-approve → fallback-ask.
+ * execute-access-ask → auto-mode-approve → default-readonly-approve →
+ * fallback-ask.
  *
  * Ported from MoonshotAI/kimi-code (MIT)
  * packages/agent-core-v2/src/agent/permissionPolicy/policies/, minus DI.
@@ -46,8 +47,23 @@ export class SensitiveFileAccessAskPolicy implements PermissionPolicy {
 }
 
 /**
- * auto 模式:自动批准一切工具操作。链上排在 sensitive-file-access-ask 之后,
- * 故敏感文件访问仍会在更前面 ask(关键问题仍询问)。
+ * 执行级访问(kind 'all',如 run_script):脚本可读写工作区任意文件,
+ * 无法静态枚举其资源访问,故除 yolo(链首已放行)外一律人工批准,
+ * auto 模式也不例外。排在 session-approval-history 之后,会话内已批准
+ * 的 approvalRule 仍可放行;敏感文件硬 veto 在沙盒层先行,不受影响。
+ */
+export class ExecuteAccessAskPolicy implements PermissionPolicy {
+  readonly name = 'execute-access-ask';
+
+  evaluate(context: PermissionPolicyContext): PermissionPolicyResult | undefined {
+    const hit = context.execution.accesses?.some((access) => access.kind === 'all');
+    return hit === true ? { kind: 'ask' } : undefined;
+  }
+}
+
+/**
+ * auto 模式:自动批准一切工具操作。链上排在 sensitive-file-access-ask 与
+ * execute-access-ask 之后,故敏感文件访问与执行级访问仍会在更前面 ask。
  */
 export class AutoModeApprovePolicy implements PermissionPolicy {
   readonly name = 'auto-mode-approve';
@@ -97,6 +113,7 @@ export function createDefaultPolicies(store: SessionApprovalStore): PermissionPo
     new YoloModeApprovePolicy(),
     new SensitiveFileAccessAskPolicy(),
     new SessionApprovalHistoryPolicy(store),
+    new ExecuteAccessAskPolicy(),
     new AutoModeApprovePolicy(),
     new DefaultReadonlyApprovePolicy(),
     new FallbackAskPolicy(),

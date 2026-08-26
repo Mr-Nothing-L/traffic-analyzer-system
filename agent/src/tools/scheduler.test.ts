@@ -147,6 +147,28 @@ describe('ToolScheduler', () => {
     await pReader;
   });
 
+  it('never runs a run_script (all) task in parallel with a write task', async () => {
+    const scheduler = new ToolScheduler<string>();
+    const log: string[] = [];
+    const writer = trackedTask('writer', ToolAccesses.writeFile('/ws/other.txt'), log);
+    const script = trackedTask('script', ToolAccesses.all(), log);
+
+    const pWriter = scheduler.add(writer.task);
+    const pScript = scheduler.add(script.task);
+
+    expect(writer.started).toBe(true);
+    expect(script.started).toBe(false);
+
+    writer.finish();
+    await pWriter;
+    await flushMicrotasks();
+    expect(script.started).toBe(true);
+
+    script.finish();
+    await pScript;
+    expect(log).toEqual(['start:writer', 'end:writer', 'start:script', 'end:script']);
+  });
+
   it('runBatch preserves result order even when execution order differs', async () => {
     const scheduler = new ToolScheduler<string>();
     const log: string[] = [];

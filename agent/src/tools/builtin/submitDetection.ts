@@ -4,9 +4,10 @@
  * The model-facing parameter schema is agent/config/submit_detection.schema.json
  * (loaded and inlined by index.ts where toolset.json references it via $ref).
  * On top of the schema, this tool enforces the runtime cross-checks documented
- * in toolset.json `limits`:
- *   - binary_encoding bit i (1..11, 9 reserved) must match events[event_id=i].detected
- *   - normal === true iff binary_encoding is all zeros
+ * in toolset.json `limits` (ADR-0001 semantics):
+ *   - binary_encoding bit i (i in 1..8, 10, 11) must match events[event_id=i].detected
+ *   - bit 9 is the normal indicator: 1 iff no event is detected
+ *   - the `normal` flag must equal bit 9
  *   - detected === true requires a non-empty evidence_frames
  * Violations are returned as isError results describing each inconsistency so
  * the model can fix and retry. A valid submission returns
@@ -38,9 +39,10 @@ import { ToolserverClient } from './httpToolserver';
 import { invalidInputResult, resolveSandboxPath } from './utils';
 
 const ACTIVE_EVENT_IDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 10, 11]);
-const RESERVED_BIT_INDEX = 9;
+/** Bit 9 carries no event category; it is the normal indicator (ADR-0001). */
+const NORMAL_BIT_INDEX = 9;
 const ENCODING_LENGTH = 11;
-const BINARY_ENCODING_PATTERN = /^[01]_[01]_[01]_[01]_[01]_[01]_[01]_[01]_0_[01]_[01]$/;
+const BINARY_ENCODING_PATTERN = /^[01]_[01]_[01]_[01]_[01]_[01]_[01]_[01]_[01]_[01]_[01]$/;
 
 const instanceSchema = z.strictObject({
   description: z.string(),
@@ -62,7 +64,7 @@ const eventSchema = z.strictObject({
     .number()
     .int()
     .refine((id) => ACTIVE_EVENT_IDS.has(id), {
-      message: 'event_id 必须是活跃事件编号之一:1-8、10、11(9 为保留位)',
+      message: 'event_id 必须是活跃事件编号之一:1-8、10、11(9 为正常指示位,不对应事件)',
     }),
   detected: z.boolean(),
   confidence: z.number().min(0).max(1),
@@ -81,7 +83,7 @@ const submitDetectionInputSchema = z.strictObject({
   events: z.array(eventSchema).min(1),
   binary_encoding: z
     .string()
-    .regex(BINARY_ENCODING_PATTERN, '必须是 11 位 0/1,以下划线连接,且位 9 恒为 0'),
+    .regex(BINARY_ENCODING_PATTERN, '必须是 11 位 0/1,以下划线连接'),
   normal: z.boolean(),
   report_markdown: z.string().min(1),
 });
@@ -156,7 +158,7 @@ export function crossValidateDetection(input: SubmitDetectionInput): string[] {
   const detectedById = new Map(input.events.map((event) => [event.event_id, event.detected]));
 
   for (let position = 1; position <= ENCODING_LENGTH; position++) {
-    if (position === RESERVED_BIT_INDEX) continue;
+    if (position === NORMAL_BIT_INDEX) continue;
     const bit = bits[position - 1];
     const bitSet = bit === '1';
     const detected = detectedById.get(position);
@@ -175,10 +177,20 @@ export function crossValidateDetection(input: SubmitDetectionInput): string[] {
     }
   }
 
-  const allZero = bits.every((bit) => bit === '0');
-  if (input.normal !== allZero) {
+  // ADR-0001:位 9 是正常指示位——为 1 当且仅当无任何事件检出。
+  const bit9 = bits[NORMAL_BIT_INDEX - 1];
+  const bit9Set = bit9 === '1';
+  const anyDetected = input.events.some((event) => event.detected);
+  if (bit9Set !== !anyDetected) {
     violations.push(
-      `normal=${input.normal},但 binary_encoding ${allZero ? '为全零(应为 normal=true)' : '含置位(应为 normal=false)'}`,
+      `binary_encoding 位 9 为 ${bit9 ?? '?'},但 events 中${
+        anyDetected ? '存在 detected=true 的事件,位 9 应为 0' : '所有事件均未检出,位 9 应为 1(正常指示位)'
+      }`,
+    );
+  }
+  if (input.normal !== bit9Set) {
+    violations.push(
+      `normal=${input.normal},与 binary_encoding 位 9(${bit9 ?? '?'})不一致:位 9 为 1 时 normal 必须为 true,位 9 为 0 时必须为 false`,
     );
   }
 

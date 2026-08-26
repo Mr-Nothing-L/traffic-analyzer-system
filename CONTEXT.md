@@ -11,7 +11,7 @@
 _Avoid_: action, event type
 
 **事件编号 (Event ID)**:
-事件类别的全局标识,采用标注文档 v4.5 的 action 编号(1-8, 10-11)。编号同时定义二进制编码的位序。编号 9 = 正常占位(见「二进制编码」),不对应任何事件类别。
+事件类别的全局标识,采用标注文档 v4.5 的 action 编号(1-8, 10-11)。编号同时定义二进制编码的位序。编号 9 = 正常指示位(见「二进制编码」),不对应任何事件类别。
 _Avoid_: action number, bit position, index
 
 ### 检测流水线
@@ -62,7 +62,7 @@ _Avoid_: skip, early-return, error
 
 _Avoid_: classification code, event flags
 
-> **⚠️ 代码与目标语义差异**:当前代码中位 9 恒为 0(不作为正常指示),全零编码 `{0_0_0_0_0_0_0_0_0_0_0}` 表示正常。目标语义为位 9 = 正常指示位。详见 [ADR-0001](docs/adr/0001-binary-encoding-bit-9-semantics.md)。
+> 位 9 语义已按 ADR-0001 全面对齐:批量侧(`report_generator.py`)与 agent 侧(`submit_detection` 及其 schema/提示词)均已实现位 9 = 正常指示位,全零编码不再是合法的正常编码。详见 [ADR-0001](docs/adr/0001-binary-encoding-bit-9-semantics.md)。
 
 **SFT 标签 (SFT Label)**:
 一段视频的结构化训练样本,基于分析结果(事件结果 + 证据帧)改写而成。属性值受 `event_options.yaml` 封闭枚举约束,可在 Web UI 中人工编辑。与二进制编码/报告并列为系统的核心输出。

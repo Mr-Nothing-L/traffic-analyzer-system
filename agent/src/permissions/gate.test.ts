@@ -79,6 +79,57 @@ describe('PermissionGate', () => {
     expect(handler).toHaveBeenCalledTimes(1);
   });
 
+  it('manual mode asks for execute-level (all) accesses like run_script', async () => {
+    const handler = vi.fn(autoApprove);
+    const { gate } = gateWith('manual', handler);
+
+    const decision = await gate.authorize(
+      context(execution(accesses.all(), 'run_script(/ws/a.sh)'), 'run_script'),
+    );
+
+    expect(decision).toEqual({ kind: 'approve', policyName: 'execute-access-ask' });
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it('auto mode still asks for execute-level (all) accesses like run_script', async () => {
+    const handler = vi.fn(autoApprove);
+    const { gate } = gateWith('auto', handler);
+
+    const decision = await gate.authorize(
+      context(execution(accesses.all(), 'run_script(/ws/a.sh)'), 'run_script'),
+    );
+
+    expect(decision).toEqual({ kind: 'approve', policyName: 'execute-access-ask' });
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it('yolo mode approves execute-level (all) accesses without asking', async () => {
+    const handler = vi.fn(autoApprove);
+    const { gate } = gateWith('yolo', handler);
+
+    const decision = await gate.authorize(
+      context(execution(accesses.all(), 'run_script(/ws/a.sh)'), 'run_script'),
+    );
+
+    expect(decision).toEqual({ kind: 'approve', policyName: 'yolo-mode-approve' });
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('session-scope approval short-circuits the execute-access ask', async () => {
+    const handler = vi.fn(() =>
+      Promise.resolve<ApprovalResponse>({ decision: 'approved', scope: 'session' }),
+    );
+    const { gate } = gateWith('auto', handler);
+    const exec = execution(accesses.all(), 'run_script(/ws/a.sh)');
+
+    const first = await gate.authorize(context(exec, 'run_script'));
+    expect(first).toEqual({ kind: 'approve', policyName: 'execute-access-ask' });
+
+    const second = await gate.authorize(context(exec, 'run_script'));
+    expect(second).toEqual({ kind: 'approve', policyName: 'session-approval-history' });
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
   it('setMode changes subsequent adjudications', async () => {
     const handler = vi.fn(autoApprove);
     const { gate } = gateWith('manual', handler);

@@ -8,24 +8,18 @@
 
 目标语义:**位 9 = 正常指示位**。当视频无任何事件检出(正常)时,位 9 = 1,其余位 = 0,编码为 `{0_0_0_0_0_0_0_0_1_0_0}`。当有事件检出时,位 9 = 0,对应事件位置 1。
 
-## 当前代码与目标的差异
+## 迁移状态:已完成
 
-`report_generator.py` 的 `to_binary_encoding()` 遍历 event_id 1..11,仅检查每个事件是否被检出。event_id 9 不在 `event_categories.yaml` 中定义,因此 `detected_map.get(9, False)` 恒为 `False`——位 9 **恒为 0**。当前代码的"正常"表示为全零编码 `{0_0_0_0_0_0_0_0_0_0_0}`。
+位 9 = 正常指示位的目标语义已在两侧实现,全零编码不再是合法的正常编码:
 
-这与目标语义不兼容:目标语义下正常 = 位 9 为 1,全零编码在目标语义中无定义。
-
-## 迁移计划
-
-1. 在 `to_binary_encoding()` 中增加逻辑:当无事件检出且 `rejected=False` 时,设位 9 = 1。
-2. 预筛拒绝(`rejected=True`)时编码改为全 `_`(当前代码产出全零,需修正)。
-3. 更新 `BinaryEncoding` 模型文档。
-4. 校验下游消费方(报告渲染、SFT 标签、Web UI)是否依赖"全零 = 正常"的假设。
-5. 更新 CLAUDE.md 中"编号 9 = 正常占位,恒为 0"的描述。
+- **批量侧**:`traffic_analyzer/core/report_generator.py` 的 `to_binary_encoding()` 在无事件检出时置位 9=1;预筛拒绝产出全 `_` 编码(`reject_report_factory.py`)。
+- **Agent 侧**:`agent/src/tools/builtin/submitDetection.ts` 的编码正则放开位 9 为 0/1,运行时校验要求:位 i(i∈1-8、10、11)与 `events.detected` 一致;位 9=1 当且仅当无任何事件检出;`normal` 与位 9 一致。模型侧契约(`agent/config/submit_detection.schema.json`、`agent/config/toolset.json`、`agent/prompts/chat_system.md`、`agent/prompts/detect_system.md`)同步更新。
 
 ## 影响范围
 
-- `traffic_analyzer/core/report_generator.py` — `to_binary_encoding()`
-- `traffic_analyzer/orchestrator/reject_report_factory.py` — 预筛拒绝的编码
-- `traffic_analyzer/models/report.py` — `BinaryEncoding` 模型注释
-- `CLAUDE.md` — 事件编号表备注
-- 下游:报告消费者、SFT 标签改写、批量评估脚本
+- `traffic_analyzer/core/report_generator.py` — `to_binary_encoding()`(已完成)
+- `traffic_analyzer/orchestrator/reject_report_factory.py` — 预筛拒绝的编码(已完成)
+- `traffic_analyzer/models/report.py` — `BinaryEncoding` 模型注释(已完成)
+- `CLAUDE.md` — 事件编号表备注(已完成)
+- `agent/src/tools/builtin/submit_detection.ts` + `agent/config/*` + `agent/prompts/*` — agent 侧提交契约(已完成)
+- 下游:报告消费者、SFT 标签改写、批量评估脚本(已随迁移校验)
