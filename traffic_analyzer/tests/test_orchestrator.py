@@ -728,6 +728,22 @@ class TestAdjudicationStep:
         assert "逐事件推理链" in md
         assert "报告渲染过程中发生错误" not in md
 
+    def test_fallback_returns_raw_candidates_as_event_results(self) -> None:
+        """AdjudicationStep._fallback must convert raw candidates to EventResults."""
+        step = AdjudicationStep(MagicMock(), MagicMock())
+        context = _make_adjudication_context()
+
+        result = step._fallback(context, Exception("adjudication failed"))
+
+        assert result.event_results
+        result_ids = {r.event_id for r in result.event_results}
+        assert result_ids == {1, 2}
+        by_id = {r.event_id: r for r in result.event_results}
+        assert by_id[1].detected is True
+        assert by_id[1].event_name == "Active A"
+        assert by_id[2].detected is False
+        assert "Fallback" in result.adjudication_reasoning
+
 
 # ---------------------------------------------------------------------------
 # Reject report factory

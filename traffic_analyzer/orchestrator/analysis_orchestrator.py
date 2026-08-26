@@ -12,7 +12,7 @@ Wires all modules together into a cohesive analysis pipeline:
 [文件说明]
 作用:主流水线编排类 AnalysisOrchestrator。analyze() 串联:[1/4]视频预处理(粗/精细采样,预筛拒绝时直接出拒绝报告)→[2/4]专家层事件检测→[3/4]裁决(失败时兜底用原始候选)→[3.4/4]锚定核验(推翻幻觉检出)→[3.5/4]SFT 标签改写与证据导出(可选)→[4/4]生成最终报告;from_config_dir() 为工厂方法。
 上游:traffic_analyzer/cli.py(命令行入口);tests/test_orchestrator.py、tests/test_evidence_exporter.py。
-下游:core/config_manager.py(YAML 配置加载)、core/video_preprocessor.py、core/vlm_engine.py、core/pipeline_steps.py(ExpertAgentLayer/AdjudicationStep)、core/grounding_verification.py、core/sft_label_rewrite.py、core/evidence_exporter.py、core/report_generator.py、models/schemas.py(AnalysisContext/Report 等)、utils/tool_call_logger.py;同包 candidate_fallback、orchestrator_exceptions、reject_report_factory、video_meta_extractor。
+下游:core/config_manager.py(YAML 配置加载)、core/video_preprocessor.py、core/vlm_engine.py、core/pipeline_steps.py(ExpertAgentLayer/AdjudicationStep)、core/grounding_verification.py、core/sft_label_rewrite.py、core/evidence_exporter.py、core/report_generator.py、models/schemas.py(AnalysisContext/Report 等)、utils/tool_call_logger.py;同包 orchestrator_exceptions、reject_report_factory、video_meta_extractor。
 """
 
 from __future__ import annotations
@@ -46,7 +46,6 @@ from traffic_analyzer.models.schemas import (
 from traffic_analyzer.utils.progress import emit_run_done, emit_step
 from traffic_analyzer.utils.tool_call_logger import tool_call
 
-from .candidate_fallback import fallback_candidates_to_event_results
 from .orchestrator_exceptions import OrchestratorError
 from .reject_report_factory import generate_reject_report
 from .video_meta_extractor import extract_video_meta
@@ -254,26 +253,14 @@ class AnalysisOrchestrator:
         adj_reasoning_chain: List[Dict[str, Any]] = []
         adj_audit_log: List[Any] = []
         if self._adjudication_step:
-            try:
-                adj_result = self._adjudication_step.execute(context)
-                if adj_result.success and adj_result.data:
-                    adj_data = adj_result.data
-                    event_results = adj_data.event_results
-                    adj_reasoning = adj_data.adjudication_reasoning
-                    adj_reasoning_chain = adj_data.reasoning_chain
-                    adj_audit_log = adj_data.audit_log
-                    logger.info("  Adjudication reasoning: %s", adj_reasoning[:100] + "..." if len(adj_reasoning) > 100 else adj_reasoning)
-            except FatalAPIError:
-                raise
-            except Exception as exc:
-                logger.error(
-                    "[orchestrator:analyze] ADJUDICATION_ERROR | video=%s | %s",
-                    video_path,
-                    exc,
-                    exc_info=True,
-                )
-                # Fallback: convert raw candidates to EventResults
-                event_results = fallback_candidates_to_event_results(candidates)
+            adj_result = self._adjudication_step.execute(context)
+            if adj_result.success and adj_result.data:
+                adj_data = adj_result.data
+                event_results = adj_data.event_results
+                adj_reasoning = adj_data.adjudication_reasoning
+                adj_reasoning_chain = adj_data.reasoning_chain
+                adj_audit_log = adj_data.audit_log
+                logger.info("  Adjudication reasoning: %s", adj_reasoning[:100] + "..." if len(adj_reasoning) > 100 else adj_reasoning)
         else:
             logger.warning("No AdjudicationStep configured, skipping")
         step_times["adjudication"] = time.perf_counter() - t0
