@@ -108,7 +108,7 @@ default `output/sft_labels`), `--config-dir`, `--log-level`. Full list:
 `python3 -m traffic_analyzer analyze --help`.
 
 While analyzing in a terminal, a **rich live progress panel** shows one swimlane per
-expert (8 event experts + adjudication + SFT labeling + report); in non-TTY output
+expert (10 event experts + adjudication + SFT labeling + report); in non-TTY output
 (web subprocess, pipes) it degrades to `EXPERT_PROGRESS` marker lines that the web UI
 parses instead. Exit codes: `0` success, `1` error, `2` video rejected by the
 prefilter (no report file written).
@@ -167,7 +167,7 @@ python3 -m traffic_analyzer web --host 0.0.0.0 --port 9000 --workspace ./workspa
   switch it from the toolbar (or preselect with `--workspace`).
 - **Inference** — check one or many videos and start inference; jobs run queued in
   the background. The **expert workshop** panel shows an 11-lane pixel-style
-  animation (8 category experts + adjudication + SFT labeling + report) with
+  animation (10 category experts + adjudication + SFT labeling + report) with
   per-lane live progress. A running job can be stopped at any time (SIGTERM, then
   SIGKILL), and a stopped/failed video can be retried with the ↻ button. Jobs run
   the same `analyze` pipeline with `--sft-label`, so every job also produces an SFT
@@ -240,10 +240,9 @@ leave it empty) and workspaces are unrestricted.**
 
 ## Mock Demo Mode (removed)
 
-> **Deprecated:** the legacy `?mock=1` demo mode — and its supporting scripts
-> `scripts/build_mock_data.py` / `scripts/e2e_mock_test.py` — was removed along
-> with the legacy UI. The old commands no longer work; kept here only as
-> historical context.
+> **Removed:** the legacy `?mock=1` demo mode and its supporting scripts
+> (`scripts/build_mock_data.py` and `scripts/e2e_mock_test.py`) have been
+> deleted. The old commands no longer work.
 
 For an end-to-end UI self-test (Playwright against the real backend: login →
 workspace load → sidebar → video detail → SFT editor → dashboard → logout,
@@ -301,7 +300,7 @@ encoding, always 0) — do not comment the block out. `adjudication_rules` in th
 file guide the final cross-event ruling; adding or tuning an event needs no code
 changes. Run `validate-config` after editing.
 
-### Expert phase labels — `web/expert_phases.json`
+### Expert phase labels — `traffic_analyzer/web/expert_phases.json`
 
 The per-lane progress animation labels (e.g. "scanning the emergency lane",
 "cross-adjudication") shown in the web expert workshop and CLI progress panel, per
@@ -324,9 +323,9 @@ Dashboard review states live in `<workspace>/analysis/review_states.json`.
 ## Testing
 
 ```bash
-python3 -m pytest traffic_analyzer/tests -q   # Python suite (~860 tests, VLM mocked)
-cd agent && npx vitest run                    # TS agent runtime suite (~140 tests, mock LLM)
-cd frontend && npx vitest run                 # frontend suite (~95 tests)
+python3 -m pytest traffic_analyzer/tests -q   # Python suite (~900 tests, VLM mocked)
+cd agent && npx vitest run                    # TS agent runtime suite (~252 tests, mock LLM)
+cd frontend && npx vitest run                 # frontend suite (~166 tests)
 ```
 
 The pytest suite mocks all VLM calls and covers config validation, the CLI, the
@@ -343,9 +342,10 @@ python3 scripts/e2e_v2_smoke.py      # 8-step batch-pipeline UI smoke (see the s
 ## Event Categories
 
 The binary encoding is `{bit_1_..._bit_11}` — bit *i* ↔ `event_id` *i* (annotation
-doc v4.5 numbering). Bit 9 is the reserved "normal" placeholder, always 0; inactive
-events keep their bit and always report 0. Example: `1_0_1_0_0_0_0_0_0_0_0` =
-events 1 and 3 detected.
+doc v4.5 numbering). Bit 9 is the "normal" indicator: it is 1 when the video was
+analyzed and no event was detected (ADR-0001); inactive events keep their bit and
+always report 0. Example: `1_0_1_0_0_0_0_0_0_0_0` = events 1 and 3 detected,
+`0_0_0_0_0_0_0_0_1_0_0` = normal.
 
 | Bit | Code | Event | Active |
 |---|---|---|---|
@@ -357,9 +357,9 @@ events 1 and 3 detected.
 | 6 | F | Heavy Congestion (拥堵) | ✓ |
 | 7 | G | Road Construction (道路施工) | ✓ |
 | 8 | H | Vehicle Reversing (车辆逆行/倒车) | ✓ |
-| 9 | — | — (reserved "normal" placeholder, always 0) | — |
-| 10 | J | Thrown Objects (抛洒物) | ✗ |
-| 11 | K | Lane Change over Solid Line (实线变道) | ✗ |
+| 9 | — | — (normal indicator: 1 if analyzed with no event) | — |
+| 10 | J | Thrown Objects (抛洒物) | ✓ |
+| 11 | K | Lane Change over Solid Line (实线变道) | ✓ |
 
 ---
 

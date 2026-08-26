@@ -86,8 +86,13 @@ docs/v4.5_images/
 # HTML artifacts
 architecture_diagram.html
 演示区/
+
+# Runtime/local state (per-machine, not versioned)
+.agent/
+traffic_analyzer/config/agent_workspaces.json
 traffic_analyzer/config/users.db
 traffic_analyzer/config/.env
+traffic_analyzer/web/config/last_workspace.json
 frontend/node_modules/
 frontend/dist/
 

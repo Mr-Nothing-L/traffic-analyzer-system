@@ -97,7 +97,7 @@ python3 -m traffic_analyzer analyze \
 导出一条 SFT 训练样本到 `--sft-output-dir`，默认 `output/sft_labels`）、`--config-dir`、
 `--log-level`。完整列表见 `python3 -m traffic_analyzer analyze --help`。
 
-在终端中运行时显示 **rich 实时进度面板**：每个专家一条泳道（8 个事件专家 + 裁决 + SFT
+在终端中运行时显示 **rich 实时进度面板**：每个专家一条泳道（10 个事件专家 + 裁决 + SFT
 标注 + 报告）；非 TTY 输出（Web 子进程、管道）自动退化为 `EXPERT_PROGRESS` 标记行，供
 Web 前端解析。退出码：`0` 成功，`1` 错误，`2` 视频被预过滤器筛除（不写报告文件）。
 
@@ -145,7 +145,7 @@ python3 -m traffic_analyzer web --host 0.0.0.0 --port 9000 --workspace ./workspa
 - **工作区** — 视频与分析结果统一放在一个工作目录下，可在工具栏切换（或用 `--workspace`
   预选）。
 - **推理** — 勾选单个或多个视频开始推理，任务在后台队列执行。**专家工作间**面板以
-  像素风格泳道动画实时展示进度（8 个类别专家 + 裁决 + SFT 标注 + 报告，共 11 条泳道）。
+  像素风格泳道动画实时展示进度（10 个类别专家 + 裁决 + SFT 标注 + 报告，共 11 条泳道）。
   运行中的任务可随时点「停止」（先 SIGTERM 后 SIGKILL），已停止/失败的视频可点 ↻ 重试。
   任务跑的是同一条 `analyze` 流水线并开启 `--sft-label`，因此每个任务同时产出 SFT 样本
   与证据文件。
@@ -208,8 +208,8 @@ TRAFFIC_ANALYZER_WORKSPACE_DIRS=/data/videos,/srv/datasets
 
 ## mock 演示模式（已删除）
 
-> **已废弃：** 旧的 `?mock=1` 演示模式及其配套脚本 `scripts/build_mock_data.py` /
-> `scripts/e2e_mock_test.py` 已随 legacy 界面一并删除，旧命令不再可用，此处仅作历史说明。
+> **已删除：** 旧的 `?mock=1` 演示模式及其配套脚本 `scripts/build_mock_data.py` /
+> `scripts/e2e_mock_test.py` 已从仓库移除，旧命令不再可用。
 
 端到端界面自测改用 `scripts/e2e_v2_smoke.py`（Playwright 驱动真实后端：登录 →
 加载工作区 → 侧栏树 → 视频详情 → SFT 编辑器 → 数据看板 → 登出，截图存
@@ -265,7 +265,7 @@ python3 scripts/e2e_v2_smoke.py --port 8609 --video-fragment 01-02_Event_129
 编码位、恒为 0），不要整段注释。同文件的 `adjudication_rules` 指导最终跨事件裁决；新增
 或调整事件无需改代码，改完跑一次 `validate-config` 校验。
 
-### 专家阶段文案 — `web/expert_phases.json`
+### 专家阶段文案 — `traffic_analyzer/web/expert_phases.json`
 
 专家工作间与 CLI 进度面板中各泳道的阶段文案（如「巡检应急车道」「交叉裁决」），按事件
 和裁决泳道分别定义。纯展示层，可随意修改。
@@ -287,9 +287,9 @@ CLI 分析把报告写到 `--output`（或 stdout）；`--sft-label` 时另写
 ## 测试
 
 ```bash
-python3 -m pytest traffic_analyzer/tests -q   # Python 套件（约 860 个，VLM 全部 mock）
-cd agent && npx vitest run                    # TS agent 运行时套件（约 140 个，mock LLM）
-cd frontend && npx vitest run                 # 前端套件（约 95 个）
+python3 -m pytest traffic_analyzer/tests -q   # Python 套件（约 900 个，VLM 全部 mock）
+cd agent && npx vitest run                    # TS agent 运行时套件（约 252 个，mock LLM）
+cd frontend && npx vitest run                 # 前端套件（约 166 个）
 ```
 
 pytest 套件 mock 全部 VLM 调用，覆盖配置校验、CLI、分析流水线与 Web API（含 `/api/agent`
@@ -304,8 +304,8 @@ python3 scripts/e2e_v2_smoke.py      # 8 步，批量流水线 UI 冒烟（见�
 ## 事件类别
 
 二进制编码格式 `{bit_1_..._bit_11}`，**bit i ↔ event_id i**（event_id 即标注文档 v4.5
-的 action 编号）。bit 9 为保留的"正常"占位，恒为 0；未激活事件保留其位、恒报 0。
-示例：`1_0_1_0_0_0_0_0_0_0_0` 表示检出事件 1 与 3。
+的 action 编号）。bit 9 为正常指示位：已分析且无事件检出时为 1（ADR-0001）；未激活事件保留其位、恒报 0。
+示例：`1_0_1_0_0_0_0_0_0_0_0` 表示检出事件 1 与 3，`0_0_0_0_0_0_0_0_1_0_0` 表示正常。
 
 | bit | 编码 | 事件 | 激活 |
 |---|---|---|---|
@@ -317,9 +317,9 @@ python3 scripts/e2e_v2_smoke.py      # 8 步，批量流水线 UI 冒烟（见�
 | 6 | F | 拥堵 | ✓ |
 | 7 | G | 道路施工 | ✓ |
 | 8 | H | 车辆逆行/倒车 | ✓ |
-| 9 | — | —（保留"正常"占位，恒 0） | — |
-| 10 | J | 抛洒物 | ✗ |
-| 11 | K | 实线变道 | ✗ |
+| 9 | — | —（正常指示位：已分析且无事件时为 1） | — |
+| 10 | J | 抛洒物 | ✓ |
+| 11 | K | 实线变道 | ✓ |
 
 ---
 

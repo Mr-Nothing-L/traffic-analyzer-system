@@ -31,7 +31,6 @@
 | `--color-stage-bg` | `#1C1A17` | 视频/证据舞台深色底(阶段 4 提升) |
 | `--color-accent-deep` | `#F0C4AB` | chip hover 联动加深底(阶段 5 提升) |
 | `--color-dot-muted` | `#D8D1C2` | 排队状态点(阶段 5 提升) |
-| `--color-stage-bg` | `#1C1A17` | 视频/逐帧/证据画布舞台深色底(legacy pv-wrap/ev-stage) |
 
 阴影/圆角:`--shadow`(1px 2px + 4px 14px, 5–6% 黑)、`--shadow-hover`、`--radius: 12px`、`--radius-sm: 8px`。
 
@@ -75,4 +74,4 @@ silent success 优先(无庆功 toast);破坏性操作用 optimistic update + �
 
 ## Provenance
 
-由 `docs/web_ui_review_and_refactor_plan.md` 评审决策产生(2026-08-04);调色板/字体提取自 `traffic_analyzer/web/static/css/tokens.css`(legacy `:root`),非新发明。
+由 `docs/web_ui_review_and_refactor_plan.md` 评审决策产生(2026-08-04);调色板/字体提取自 `frontend/src/styles/tokens.css`(legacy `:root`),非新发明。

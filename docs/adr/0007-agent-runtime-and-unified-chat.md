@@ -42,3 +42,16 @@
 - **双语言运行时**:TS agent 服务 + Python toolserver/web 两套进程,运维与排错成本高于单语言部署。
 - **kosong vendor 的同步责任**:上游修复与改进不会自动流入,需要人工跟踪 kimi-code 仓库并手动同步(见 `agent/src/kosong/VENDORED.md`)。
 - **会话恢复复杂度**:会话按工作区分库存储(`<workspace>/.agent/sessions.db`),agent server 启动时需从配置的多个 workspace 逐个恢复历史 session,跨工作区的会话语义与恢复边界比单库方案复杂。
+
+## 实施后补记
+
+以下为决策落地后追加的实现细节,作为 ADR 正文的延伸:
+
+- **持久化加固**:引入 `TurnPersister`,按 step 增量落盘并在压缩后即时回写,断连不中断运行中轮次;SSE 带 seq 并支持 `GET /sessions/{id}/events?fromSeq=` 补齐,repair 机制处理悬挂 tool_calls。
+- **交互端点扩展**:新增 `POST /sessions/{id}/recall`(撤回消息并截断 entries/kosong messages)、`POST /sessions/{id}/mode`(切换权限模式)、`POST /sessions/{id}/cancel`(显式终止)、`POST /sessions/{id}/steer`(进行中注入提示,下一 step 边界生效)。
+- **子代理能力**:server 组装时向工具注册表注入 `spawn_subagent`,支持 agent 内部派生专项子任务。
+- **结构化 payload 通道**:`/chat` 流式响应除文本 delta 外,透传 tool_call/tool_result/approval_request/structured_payload 等事件类型,前端可按类型渲染工具气泡、审批卡片与检测结果卡。
+- **工具服务根目录鉴权**:Python toolserver 的 `POST /config/roots` 受 workspace 根目录白名单约束,越界注册返回 403,切换工作区时由 web 层热注册而无需重启。
+- **工作区登记表自查恢复**:agent 服务启动时依据 `AGENT_RESTORE_WORKSPACES` 逐个恢复工作区的历史会话,并定期自查 sessions.db 一致性。
+- **位 9 对齐 ADR-0001**:agent 侧 `submit_detection` 及 schema/提示词均实现位 9 为「正常指示位」(已分析且无事件检出时为 1),与批量流水线输出契约一致。
+- **事件契约生成物**:`scripts/gen_agent_event_contract.py` 从 `event_categories.yaml` 与 `annotation_spec.yaml` 生成 `agent/config/event_contract.json`,作为 agent 系统 prompt 中事件定义摘要与裁决规则段的唯一注入源。

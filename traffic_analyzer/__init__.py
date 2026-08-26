@@ -10,5 +10,5 @@ in surveillance videos using Large Vision-Language Models.
 下游:无(纯元数据,不导入任何模块)。
 """
 
-__version__ = "5.0.0"
+__version__ = "7.0.0"
 __author__ = "Traffic Analyzer Team"
