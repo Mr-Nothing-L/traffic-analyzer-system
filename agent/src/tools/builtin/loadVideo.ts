@@ -3,8 +3,9 @@
  * `video_url` content part (data:video/mp4;base64).
  *
  * Flow: sandbox-validate `video_path` (read) → POST /tools/prepare_video on
- * the Python toolserver (transcodes / downsamples when over `max_mb`,
- * default 40) → sandbox-validate the returned prepared path (same strict
+ * the Python toolserver (transcodes / downsamples when over `max_mb`; the
+ * 40MB default lives in toolserver/server.py — TS 只透传,未提供时不发送) →
+ * sandbox-validate the returned prepared path (same strict
  * workspace resolver) → read the prepared file back and inline it as a base64
  * data URL. If the prepared file still exceeds 50MB the base64 payload would
  * be too large for the chat request, so the call fails with an isError result
@@ -24,14 +25,19 @@ import {
 } from '../contract';
 import type { ToolserverClient } from './httpToolserver';
 import { resolveWorkspacePath } from './fileTools';
+import type { ToolsetEntrySpec } from './videoTools';
 import {
   invalidInputResult,
   toolserverErrorResult,
 } from './utils';
 
-const DEFAULT_MAX_MB = 40;
-/** Hard ceiling on the prepared file; base64 inflates it ~33% on the wire. */
-const HARD_MAX_BYTES = 50 * 1024 * 1024;
+/**
+ * Hard ceiling on the prepared file; base64 inflates it ~33% on the wire.
+ * 该上限唯一执法点在 TS 侧(agent 聊天请求的体积约束,toolserver 无对应
+ * 检查;load_video 与 spawn_subagent 视频直传共用本常量);模型可见文案
+ * (40MB 默认/50MB 拒绝)以 toolset.json 的 limits 为准。
+ */
+export const PREPARED_VIDEO_HARD_MAX_BYTES = 50 * 1024 * 1024;
 const READ_TIMEOUT_MS = 60_000;
 
 interface PrepareVideoResponse {
@@ -50,40 +56,26 @@ const loadVideoInputSchema = z.strictObject({
 export function createLoadVideoTool(
   client: ToolserverClient,
   workspace: WorkspaceConfig,
-  description: string,
+  spec: ToolsetEntrySpec,
 ): ExecutableTool {
   return {
     name: 'load_video',
-    description,
-    parameters: {
-      type: 'object',
-      properties: {
-        video_path: { type: 'string', description: '视频文件路径(沙盒工作区内)' },
-        max_mb: {
-          type: 'number',
-          exclusiveMinimum: 0,
-          default: DEFAULT_MAX_MB,
-          description: `超过该大小(MB)时由服务端降帧/转码,默认 ${DEFAULT_MAX_MB}`,
-        },
-      },
-      required: ['video_path'],
-      additionalProperties: false,
-    },
+    description: spec.description,
+    parameters: spec.parameters,
     resolveExecution(rawInput: unknown) {
       const parsed = loadVideoInputSchema.safeParse(rawInput);
       if (!parsed.success) return invalidInputResult('load_video', parsed.error);
       const resolved = resolveWorkspacePath(parsed.data.video_path, workspace, 'read');
       if (!resolved.ok) return resolved.result;
       const videoPath = resolved.path;
-      const maxMb = parsed.data.max_mb ?? DEFAULT_MAX_MB;
       return {
         accesses: ToolAccesses.readFile(videoPath),
         approvalRule: `load_video(${videoPath})`,
         execute: async (): Promise<ExecutableToolResult> => {
-          const result = await client.post<PrepareVideoResponse>('/tools/prepare_video', {
-            video_path: videoPath,
-            max_mb: maxMb,
-          });
+          // max_mb 未提供时不发送,由 toolserver 取默认值(server.py 单一权威)。
+          const body: Record<string, unknown> = { video_path: videoPath };
+          if (parsed.data.max_mb !== undefined) body['max_mb'] = parsed.data.max_mb;
+          const result = await client.post<PrepareVideoResponse>('/tools/prepare_video', body);
           if (!result.ok) return toolserverErrorResult(result.error);
           const prepared = result.data;
 
@@ -95,11 +87,11 @@ export function createLoadVideoTool(
           const preparedResolved = resolveWorkspacePath(prepared.path, workspace, 'read');
           if (!preparedResolved.ok) return preparedResolved.result;
 
-          if (prepared.size_bytes > HARD_MAX_BYTES) {
+          if (prepared.size_bytes > PREPARED_VIDEO_HARD_MAX_BYTES) {
             const sizeMb = (prepared.size_bytes / (1024 * 1024)).toFixed(1);
             return {
               output:
-                `视频经降帧/转码后仍有 ${sizeMb}MB,超过 ${HARD_MAX_BYTES / (1024 * 1024)}MB 上限,` +
+                `视频经降帧/转码后仍有 ${sizeMb}MB,超过 ${PREPARED_VIDEO_HARD_MAX_BYTES / (1024 * 1024)}MB 上限,` +
                 '无法整段加载。请改用 extract_frames(fps=1 全片采样,或对关键时刻用 timestamps)分析,必要时用 draw_boxes 逐帧核对。',
               isError: true,
             };

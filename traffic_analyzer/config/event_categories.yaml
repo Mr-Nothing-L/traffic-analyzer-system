@@ -11,7 +11,9 @@
 #      report_generator、batch_evaluate.py 及 web/evidence_api.py 使用。
 #
 # 事件定义 / 检测模式 / Prompt 模板 / 裁决规则 全部通过 YAML 配置。
-# 新增事件无需改代码，只需在本文件追加并运行 validate-config。
+# 新增事件无需改代码，只需在本文件追加并运行 validate-config；
+# agent 侧消费 event_contract.json 生成物，追加事件后另需运行
+# scripts/gen_agent_event_contract.py 重新生成（pytest --check 守护同步）。
 #
 # 输出格式：二进制编码 {bit_1_bit_2_..._bit_11}
 # 位序 = 全局事件编号 1..11（标注文档 v4.5 的 action 编号；编号 9 = 正常占位，恒为 0）。

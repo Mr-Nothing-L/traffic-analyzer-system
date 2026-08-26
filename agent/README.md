@@ -40,9 +40,11 @@ agent/
   协议尚未接入,配置了会抛错。
 - `loop/`:多步「generate → 工具调用 → 回灌消息」主循环;按真实 usage 跟踪
   上下文用量,达到窗口 85% 自动压缩(优先 LLM 摘要,失败回退占位替换)。
-- `tools/`:7 个内置工具——`video_meta` / `extract_frames` / `draw_boxes`
-  (经 HTTP 调 Python 工具服务)、`read_file` / `write_file` / `run_script`
-  (沙盒内)、`submit_detection`(结构化检测输出,即停止信号)。
+- `tools/`:8 个内置工具——`video_meta` / `extract_frames` / `draw_boxes` /
+  `load_video`(经 HTTP 调 Python 工具服务)、`read_file` / `write_file` /
+  `run_script`(沙盒内)、`submit_detection`(结构化检测输出,即停止信号);
+  description 与 parameters(模型可见 JSON Schema)来自 `config/toolset.json`。
+  另有 `spawn_subagent` 由 server 组装时闭包注入。
 - `permissions/`:三档权限模式 `manual` / `auto` / `yolo`;写类工具按策略
   裁决,需审批时经 SSE `approval_request` 事件挂起等待 `/approval` 回执。
 - `sandbox/`:路径安全——文件与脚本工具的所有路径必须 resolve 在 session
@@ -99,12 +101,23 @@ src/server/main.ts`,cwd 为本目录),并把 `/api/agent/*` 反向代理过来(S
 
 - `prompts/chat_system.md`:统一对话系统 prompt(问答 + 检测双能力,模型自主
   判断意图;正式检测必须 `submit_detection` 收尾)。这是 server 默认加载的主
-  prompt。
-- `prompts/detect_system.md`:旧检测专用 prompt,仅在 `chat_system.md` 缺失时
-  作回退(并打警告)。
-- `config/toolset.json`:给模型看的工具清单(每个工具的 description /
-  when_to_use / parameters / returns / limits),`registerBuiltinTools` 启动时
-  读取;改工具描述改这里,不改代码。
+  prompt,缺失即启动失败。事件定义摘要/裁决规则段不手抄:prompt 中放置
+  `{{EVENT_DEFINITIONS}}`、`{{ADJUDICATION_RULES}}`、`{{ACTIVE_EVENT_COUNT}}`、
+  `{{ACTIVE_EVENT_ID_LIST}}` 占位符,启动时用 `config/event_contract.json` 渲染。
+- `config/event_contract.json`:事件契约生成物(活跃事件编号、名称、定义、
+  标注边界、裁决规则、编码位宽),由仓库根
+  `python3 scripts/gen_agent_event_contract.py` 从
+  `traffic_analyzer/config/event_categories.yaml` 与 `annotation_spec.yaml`
+  生成,勿手改;`submit_detection` 的活跃事件枚举/编码位宽从它派生。
+  pytest(`traffic_analyzer/tests/test_agent_event_contract.py`)用 `--check`
+  守护生成物与 YAML 同步。
+- `config/toolset.json`:给模型看的工具清单;每个工具的 description 与
+  parameters(模型可见 JSON Schema)在本文件维护,`registerBuiltinTools`
+  启动时加载并原样发给 provider——改工具描述/参数 schema 改这里,不改代码;
+  缺条目或缺 description 会启动失败。parameters 支持
+  `{"$ref": "./xxx.json"}` 相对引用(从本目录解析)。帧数/体积上限的唯一
+  执法者是 Python toolserver,本文件的限额数字须与其一致(pytest 守护)。
 - `config/submit_detection.schema.json`:`submit_detection` 参数的 JSON Schema
   (11 位事件编码 + 证据 + 报告的结构化契约),toolset.json 以 `$ref` 引用,
-  注册时内联。
+  注册时内联;event_id 枚举与编码位宽在加载时由 event_contract.json 注入
+  (文件中的静态值为文档参考,漂移由 vitest 守护)。

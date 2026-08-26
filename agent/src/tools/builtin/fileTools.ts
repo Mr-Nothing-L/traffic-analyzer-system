@@ -33,7 +33,7 @@ import {
   type ExecutableToolErrorResult,
   type ExecutableToolResult,
 } from '../contract';
-import type { ToolDescriptionLookup } from './videoTools';
+import type { ToolsetEntrySpec, ToolsetLookup } from './videoTools';
 import { invalidInputResult, truncateOutput } from './utils';
 
 const execFileAsync = promisify(execFile);
@@ -136,19 +136,12 @@ const runScriptInputSchema = z.strictObject({
 
 export function createReadFileTool(
   workspace: WorkspaceConfig,
-  description: string,
+  spec: ToolsetEntrySpec,
 ): ExecutableTool {
   return {
     name: 'read_file',
-    description,
-    parameters: {
-      type: 'object',
-      properties: {
-        path: { type: 'string', description: '文件路径(相对沙盒工作区,或其内的绝对路径)' },
-      },
-      required: ['path'],
-      additionalProperties: false,
-    },
+    description: spec.description,
+    parameters: spec.parameters,
     resolveExecution(rawInput: unknown) {
       const parsed = readFileInputSchema.safeParse(rawInput);
       if (!parsed.success) return invalidInputResult('read_file', parsed.error);
@@ -178,20 +171,12 @@ export function createReadFileTool(
 
 export function createWriteFileTool(
   workspace: WorkspaceConfig,
-  description: string,
+  spec: ToolsetEntrySpec,
 ): ExecutableTool {
   return {
     name: 'write_file',
-    description,
-    parameters: {
-      type: 'object',
-      properties: {
-        path: { type: 'string', description: '文件路径(相对沙盒工作区,或其内的绝对路径)' },
-        content: { type: 'string', description: '要写入的完整文本内容' },
-      },
-      required: ['path', 'content'],
-      additionalProperties: false,
-    },
+    description: spec.description,
+    parameters: spec.parameters,
     resolveExecution(rawInput: unknown) {
       const parsed = writeFileInputSchema.safeParse(rawInput);
       if (!parsed.success) return invalidInputResult('write_file', parsed.error);
@@ -225,32 +210,12 @@ export function createWriteFileTool(
 
 export function createRunScriptTool(
   workspace: WorkspaceConfig,
-  description: string,
+  spec: ToolsetEntrySpec,
 ): ExecutableTool {
   return {
     name: 'run_script',
-    description,
-    parameters: {
-      type: 'object',
-      properties: {
-        path: { type: 'string', description: '脚本文件路径(沙盒内,.sh 或 .py)' },
-        args: {
-          type: 'array',
-          items: { type: 'string' },
-          default: [],
-          description: '命令行参数列表',
-        },
-        timeout_sec: {
-          type: 'integer',
-          minimum: 1,
-          maximum: MAX_TIMEOUT_SEC,
-          default: DEFAULT_TIMEOUT_SEC,
-          description: `超时秒数,默认 ${DEFAULT_TIMEOUT_SEC},上限 ${MAX_TIMEOUT_SEC}`,
-        },
-      },
-      required: ['path'],
-      additionalProperties: false,
-    },
+    description: spec.description,
+    parameters: spec.parameters,
     resolveExecution(rawInput: unknown) {
       const parsed = runScriptInputSchema.safeParse(rawInput);
       if (!parsed.success) return invalidInputResult('run_script', parsed.error);
@@ -338,14 +303,14 @@ function scriptErrorResult(error: unknown, timeoutSec: number): ExecutableToolRe
   return { output: `脚本启动失败: ${failure.message}`, isError: true };
 }
 
-/** Create all three sandbox file tools; descriptions come from agent/config/toolset.json. */
+/** Create all three sandbox file tools; description/parameters come from agent/config/toolset.json. */
 export function createFileTools(
   workspace: WorkspaceConfig,
-  describe: ToolDescriptionLookup,
+  lookup: ToolsetLookup,
 ): ExecutableTool[] {
   return [
-    createReadFileTool(workspace, describe('read_file')),
-    createWriteFileTool(workspace, describe('write_file')),
-    createRunScriptTool(workspace, describe('run_script')),
+    createReadFileTool(workspace, lookup('read_file')),
+    createWriteFileTool(workspace, lookup('write_file')),
+    createRunScriptTool(workspace, lookup('run_script')),
   ];
 }

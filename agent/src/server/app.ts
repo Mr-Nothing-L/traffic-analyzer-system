@@ -81,7 +81,7 @@ import { compactMessagesWithSummary } from '../loop/summarize';
 import { CallbackApprovalService } from '../permissions/approval';
 import { PermissionGate } from '../permissions/gate';
 import type { PermissionMode, PermissionPolicyContext } from '../permissions/types';
-import { registerBuiltinTools, createSpawnSubagentTool, ToolserverClient } from '../tools/builtin';
+import { registerBuiltinTools, createSpawnSubagentTool, renderSystemPrompt, ToolserverClient } from '../tools/builtin';
 import type { DetectionPayload } from '../tools/builtin/submitDetection';
 import type { ToolAccesses } from '../tools/contract';
 import { ToolRegistry } from '../tools/registry';
@@ -100,7 +100,7 @@ export interface AgentServerOptions {
   readonly providerFactory?: () => ProviderHandle;
   /** 按 session 构造工具注册表;默认 registerBuiltinTools(workspaceDir)。 */
   readonly toolsFactory?: (session: Session) => ToolRegistry;
-  /** system prompt;默认读 agent/prompts/chat_system.md(缺失回退 detect_system.md)。 */
+  /** system prompt;默认读 agent/prompts/chat_system.md 并渲染事件契约占位符。 */
   readonly systemPrompt?: string;
   /** 审批挂起超时(ms),默认 5 分钟。 */
   readonly approvalTimeoutMs?: number;
@@ -143,17 +143,15 @@ interface SessionRuntime {
 }
 
 /**
- * 默认 system prompt:agent/prompts/chat_system.md(统一对话);文件不存在时
- * 回退 detect_system.md 并打警告(并行任务产出 chat_system.md 后即走主路径)。
+ * 默认 system prompt:agent/prompts/chat_system.md(统一对话)。文件缺失即
+ * 抛错(fail-fast,旧 detect_system.md 回退已删除);加载后用
+ * event_contract.json 渲染事件契约占位符({{EVENT_DEFINITIONS}} 等),
+ * 事件定义/裁决规则不再手抄在 prompt 里。
  */
 export function defaultSystemPrompt(promptsDir?: string): string {
   const dir = promptsDir ?? fileURLToPath(new URL('../../prompts', import.meta.url));
-  try {
-    return readFileSync(`${dir}/chat_system.md`, 'utf8');
-  } catch {
-    console.warn('[agent-server] chat_system.md 不存在,回退 detect_system.md');
-    return readFileSync(`${dir}/detect_system.md`, 'utf8');
-  }
+  const template = readFileSync(`${dir}/chat_system.md`, 'utf8');
+  return renderSystemPrompt(template);
 }
 
 /**

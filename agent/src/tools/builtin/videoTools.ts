@@ -2,11 +2,15 @@
  * Video tools backed by the Python toolserver over HTTP:
  * video_meta / extract_frames / draw_boxes.
  *
- * Parameter schemas mirror traffic_analyzer/toolserver/server.py. Frames and
- * annotated images come back as `jpeg_base64` and are converted to kosong
- * image ContentParts so the model can see them. `video_path` is validated
- * through the workspace sandbox (read operation); a sandbox violation is a
- * hard veto returned as an isError result.
+ * 模型可见的 description 与 parameters 均来自 agent/config/toolset.json(经
+ * ToolsetLookup 注入);帧数上限的唯一执法者是 toolserver
+ * (traffic_analyzer/toolserver/server.py 的 _DEFAULT/_HARD/_FPS_MODE 上限),
+ * TS 侧不做 clamp,请求参数原样透传,toolserver 的 truncated 标志转成
+ * 模型可见的截断提示。输入的 zod 运行时校验(与模型可见 schema 职责不同)
+ * 保留在本文件。Frames and annotated images come back as `jpeg_base64` and
+ * are converted to kosong image ContentParts so the model can see them.
+ * `video_path` is validated through the workspace sandbox (read operation);
+ * a sandbox violation is a hard veto returned as an isError result.
  */
 import { z } from 'zod';
 
@@ -24,12 +28,14 @@ import {
   toolserverErrorResult,
 } from './utils';
 
-const HARD_MAX_FRAMES = 8;
-const DEFAULT_MAX_FRAMES = 4;
-/** fps 模式(全片均匀采样)的帧数上限,与 toolserver 侧 _FPS_MODE_MAX_FRAMES 对齐。 */
-const FPS_MODE_MAX_FRAMES = 120;
+/** toolset.json 条目中工具消费的部分:description + 模型可见 parameters。 */
+export interface ToolsetEntrySpec {
+  readonly description: string;
+  readonly parameters: Record<string, unknown>;
+}
 
-export type ToolDescriptionLookup = (toolName: string) => string;
+/** 按工具名取 toolset.json 的 description 与 parameters(缺条目由实现方 fail-fast)。 */
+export type ToolsetLookup = (toolName: string) => ToolsetEntrySpec;
 
 interface VideoMetaResponse {
   duration_s: number | null;
@@ -94,19 +100,12 @@ function jpegImagePart(jpegBase64: string): ContentPart {
 export function createVideoMetaTool(
   client: ToolserverClient,
   workspace: WorkspaceConfig,
-  description: string,
+  spec: ToolsetEntrySpec,
 ): ExecutableTool {
   return {
     name: 'video_meta',
-    description,
-    parameters: {
-      type: 'object',
-      properties: {
-        video_path: { type: 'string', description: '视频文件路径(沙盒工作区内)' },
-      },
-      required: ['video_path'],
-      additionalProperties: false,
-    },
+    description: spec.description,
+    parameters: spec.parameters,
     resolveExecution(rawInput: unknown) {
       const parsed = videoMetaInputSchema.safeParse(rawInput);
       if (!parsed.success) return invalidInputResult('video_meta', parsed.error);
@@ -131,42 +130,12 @@ export function createVideoMetaTool(
 export function createExtractFramesTool(
   client: ToolserverClient,
   workspace: WorkspaceConfig,
-  description: string,
+  spec: ToolsetEntrySpec,
 ): ExecutableTool {
   return {
     name: 'extract_frames',
-    description,
-    parameters: {
-      type: 'object',
-      properties: {
-        video_path: { type: 'string', description: '视频文件路径(沙盒工作区内)' },
-        timestamps: {
-          type: 'array',
-          items: { type: 'number', minimum: 0 },
-          description: '指定抽帧时间点(秒);优先级最高,提供时忽略 fps/count',
-        },
-        fps: {
-          type: 'number',
-          minimum: 0.2,
-          maximum: 5,
-          description:
-            '全片均匀采样密度(帧/秒),正式检测默认 fps=1;优先级低于 timestamps、高于 count',
-        },
-        count: {
-          type: 'integer',
-          minimum: 1,
-          description: '未给 timestamps/fps 时,在整段视频上均匀抽取的帧数',
-        },
-        max_frames: {
-          type: 'integer',
-          minimum: 1,
-          maximum: FPS_MODE_MAX_FRAMES,
-          description: `单次最多返回帧数;timestamps/count 模式默认 ${DEFAULT_MAX_FRAMES}、上限 ${HARD_MAX_FRAMES},fps 模式上限 ${FPS_MODE_MAX_FRAMES}`,
-        },
-      },
-      required: ['video_path'],
-      additionalProperties: false,
-    },
+    description: spec.description,
+    parameters: spec.parameters,
     resolveExecution(rawInput: unknown) {
       const parsed = extractFramesInputSchema.safeParse(rawInput);
       if (!parsed.success) return invalidInputResult('extract_frames', parsed.error);
@@ -174,20 +143,17 @@ export function createExtractFramesTool(
       if (!resolved.ok) return resolved.result;
       const videoPath = resolved.path;
       const input = parsed.data;
-      const fpsMode = input.timestamps === undefined && input.fps !== undefined;
-      const cap = fpsMode ? FPS_MODE_MAX_FRAMES : HARD_MAX_FRAMES;
-      const maxFrames = Math.min(
-        cap,
-        Math.max(1, input.max_frames ?? (fpsMode ? FPS_MODE_MAX_FRAMES : DEFAULT_MAX_FRAMES)),
-      );
+      // 帧数上限的 clamp 只在 toolserver 执行;TS 侧透传请求参数,
+      // 未提供的字段不发(toolserver 按模式取默认值)。
       return {
         accesses: ToolAccesses.readFile(videoPath),
         approvalRule: `extract_frames(${videoPath})`,
         execute: async (): Promise<ExecutableToolResult> => {
-          const body: Record<string, unknown> = { video_path: videoPath, max_frames: maxFrames };
+          const body: Record<string, unknown> = { video_path: videoPath };
           if (input.timestamps !== undefined) body['timestamps'] = input.timestamps;
           if (input.fps !== undefined) body['fps'] = input.fps;
           if (input.count !== undefined) body['count'] = input.count;
+          if (input.max_frames !== undefined) body['max_frames'] = input.max_frames;
           const result = await client.post<ExtractFramesResponse>('/tools/extract_frames', body);
           if (!result.ok) return toolserverErrorResult(result.error);
           const frames = result.data.frames ?? [];
@@ -198,7 +164,7 @@ export function createExtractFramesTool(
           if (result.data.truncated) {
             parts.push({
               type: 'text',
-              text: `注意:请求帧数超过本次调用上限 ${maxFrames},已按上限截断(只覆盖视频前段);剩余时段请用 timestamps 对未覆盖时刻补抽。`,
+              text: '注意:请求帧数超过本次调用上限,已按上限截断(只覆盖视频前段);剩余时段请用 timestamps 对未覆盖时刻补抽。',
             });
           }
           for (const frame of frames) {
@@ -218,37 +184,12 @@ export function createExtractFramesTool(
 export function createDrawBoxesTool(
   client: ToolserverClient,
   workspace: WorkspaceConfig,
-  description: string,
+  spec: ToolsetEntrySpec,
 ): ExecutableTool {
   return {
     name: 'draw_boxes',
-    description,
-    parameters: {
-      type: 'object',
-      properties: {
-        video_path: { type: 'string', description: '视频文件路径(沙盒工作区内)' },
-        timestamp: { type: 'number', minimum: 0, description: '目标帧时间点(秒)' },
-        boxes: {
-          type: 'array',
-          minItems: 1,
-          description: '归一化 xyxy 框列表(0~1 浮点),可附标签',
-          items: {
-            type: 'object',
-            properties: {
-              x1: { type: 'number', minimum: 0, maximum: 1 },
-              y1: { type: 'number', minimum: 0, maximum: 1 },
-              x2: { type: 'number', minimum: 0, maximum: 1 },
-              y2: { type: 'number', minimum: 0, maximum: 1 },
-              label: { type: 'string' },
-            },
-            required: ['x1', 'y1', 'x2', 'y2'],
-            additionalProperties: false,
-          },
-        },
-      },
-      required: ['video_path', 'timestamp', 'boxes'],
-      additionalProperties: false,
-    },
+    description: spec.description,
+    parameters: spec.parameters,
     resolveExecution(rawInput: unknown) {
       const parsed = drawBoxesInputSchema.safeParse(rawInput);
       if (!parsed.success) return invalidInputResult('draw_boxes', parsed.error);
@@ -281,15 +222,15 @@ export function createDrawBoxesTool(
   };
 }
 
-/** Create all three video tools; descriptions come from agent/config/toolset.json. */
+/** Create all three video tools; description/parameters come from agent/config/toolset.json. */
 export function createVideoTools(
   client: ToolserverClient,
   workspace: WorkspaceConfig,
-  describe: ToolDescriptionLookup,
+  lookup: ToolsetLookup,
 ): ExecutableTool[] {
   return [
-    createVideoMetaTool(client, workspace, describe('video_meta')),
-    createExtractFramesTool(client, workspace, describe('extract_frames')),
-    createDrawBoxesTool(client, workspace, describe('draw_boxes')),
+    createVideoMetaTool(client, workspace, lookup('video_meta')),
+    createExtractFramesTool(client, workspace, lookup('extract_frames')),
+    createDrawBoxesTool(client, workspace, lookup('draw_boxes')),
   ];
 }

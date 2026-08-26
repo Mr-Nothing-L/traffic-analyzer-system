@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "toolset.json",
   "title": "检测场景工具清单",
-  "description": "交通事件检测 agent 的可用工具清单。每个工具含:给模型看的描述草案(description)、何时用(when_to_use)、参数 JSON Schema(parameters)、返回值(returns)、限制(limits)。视频类工具(video_meta/extract_frames/draw_boxes/load_video)由 TS 层经 HTTP 调用 Python 工具服务实现;submit_detection 为结构化输出契约;read_file/write_file/run_script 为沙盒内工具。",
+  "description": "交通事件检测 agent 的可用工具清单。description 与 parameters(模型可见 JSON Schema,registerBuiltinTools 启动时原样发给 provider)在本文件维护;parameters 支持 {\"$ref\": \"./xxx.json\"} 相对引用(从本目录解析,如 submit_detection);when_to_use/returns/limits 为设计文档。视频类工具(video_meta/extract_frames/draw_boxes/load_video)由 TS 层经 HTTP 调用 Python 工具服务实现,帧数/体积上限的唯一执法者是 toolserver;submit_detection 的活跃事件枚举由 event_contract.json 派生注入;read_file/write_file/run_script 为沙盒内工具。",
   "tools": [
     {
       "name": "video_meta",
@@ -13,7 +13,8 @@
         "properties": {
           "video_path": { "type": "string", "description": "视频文件绝对路径" }
         },
-        "required": ["video_path"]
+        "required": ["video_path"],
+        "additionalProperties": false
       },
       "returns": "{duration_s, fps, width, height, frame_count};失败时返回 {error: {code, message}}(403 path_outside_workspace / 404 video_not_found / 404 video_meta_unavailable)",
       "limits": [
@@ -61,7 +62,8 @@
         },
         "required": [
           "video_path"
-        ]
+        ],
+        "additionalProperties": false
       },
       "returns": "{frames: [{timestamp, jpeg_base64, width, height}], truncated};truncated=true 表示请求帧数超上限被截断(只覆盖视频前段),需用 timestamps 补抽剩余时段;失败时返回 {error: {code, message}}(403 path_outside_workspace / 404 video_not_found / 404 video_meta_unavailable)",
       "limits": [
@@ -93,11 +95,13 @@
                 "y2": { "type": "number", "minimum": 0, "maximum": 1 },
                 "label": { "type": "string", "description": "框标签(如 \"疑似行人\");框颜色由标签自动决定" }
               },
-              "required": ["x1", "y1", "x2", "y2"]
+              "required": ["x1", "y1", "x2", "y2"],
+              "additionalProperties": false
             }
           }
         },
-        "required": ["video_path", "timestamp", "boxes"]
+        "required": ["video_path", "timestamp", "boxes"],
+        "additionalProperties": false
       },
       "returns": "{jpeg_base64, width, height};失败时返回 {error: {code, message}}(403 path_outside_workspace / 404 video_not_found / 404 frame_unavailable)",
       "limits": [
@@ -114,9 +118,10 @@
         "type": "object",
         "properties": {
           "video_path": { "type": "string", "description": "视频文件路径(绝对路径或 workspace 相对路径)" },
-          "max_mb": { "type": "number", "description": "超过该大小(MB)时由服务端降帧/转码,默认 40", "exclusiveMinimum": 0, "default": 40 }
+          "max_mb": { "type": "number", "description": "超过该大小(MB)时由服务端降帧/转码,默认 40,上限 100", "exclusiveMinimum": 0, "maximum": 100, "default": 40 }
         },
-        "required": ["video_path"]
+        "required": ["video_path"],
+        "additionalProperties": false
       },
       "returns": "视频内容(整段 mp4)直接作为模型输入,附文本说明(时长/fps/大小/是否降帧);失败时返回 {error: {code, message}}(403 path_outside_workspace / 404 video_not_found 等)",
       "limits": [
@@ -149,7 +154,8 @@
         "properties": {
           "path": { "type": "string", "description": "文件路径(相对沙盒工作区,或其内的绝对路径)" }
         },
-        "required": ["path"]
+        "required": ["path"],
+        "additionalProperties": false
       },
       "returns": "{content} 或 {error}",
       "limits": [
@@ -168,7 +174,8 @@
           "path": { "type": "string", "description": "文件路径(相对沙盒工作区,或其内的绝对路径)" },
           "content": { "type": "string", "description": "要写入的完整文本内容" }
         },
-        "required": ["path", "content"]
+        "required": ["path", "content"],
+        "additionalProperties": false
       },
       "returns": "{path, bytes_written} 或 {error}",
       "limits": [
@@ -193,7 +200,8 @@
           },
           "timeout_sec": { "type": "integer", "description": "超时秒数,默认 60", "default": 60, "minimum": 1, "maximum": 300 }
         },
-        "required": ["path"]
+        "required": ["path"],
+        "additionalProperties": false
       },
       "returns": "{exit_code, stdout, stderr} 或 {error}",
       "limits": [

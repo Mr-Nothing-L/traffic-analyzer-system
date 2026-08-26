@@ -6,6 +6,7 @@
 import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { ContentPart } from '../../kosong/message';
@@ -19,8 +20,9 @@ import {
 } from '../contract';
 import { ToolRegistry } from '../registry';
 import { ToolserverClient } from './httpToolserver';
-import { registerBuiltinTools } from './index';
+import { registerBuiltinTools, expandToolsetParameters } from './index';
 import { createSubmitDetectionTool, loadSubmitDetectionSchema, type DetectionPayload } from './submitDetection';
+import { loadEventContract, type ToolsetEntrySpec } from './eventContract';
 import { createVideoTools } from './videoTools';
 import { createFileTools } from './fileTools';
 
@@ -74,15 +76,20 @@ async function execute(tool: ExecutableTool, input: unknown): Promise<Executable
   });
 }
 
+/** 直连工厂用的最小 toolset spec(description/parameters 占位,真实值由 toolset.json 提供)。 */
+function spec(name: string): ToolsetEntrySpec {
+  return { description: `desc:${name}`, parameters: { type: 'object', properties: {} } };
+}
+
 function videoTool(name: string): ExecutableTool {
-  const tools = createVideoTools(client, workspace, (n) => `desc:${n}`);
+  const tools = createVideoTools(client, workspace, (n) => spec(n));
   const tool = tools.find((t) => t.name === name);
   if (!tool) throw new Error(`tool ${name} not found`);
   return tool;
 }
 
 function fileTool(name: string): ExecutableTool {
-  const tools = createFileTools(workspace, (n) => `desc:${n}`);
+  const tools = createFileTools(workspace, (n) => spec(n));
   const tool = tools.find((t) => t.name === name);
   if (!tool) throw new Error(`tool ${name} not found`);
   return tool;
@@ -148,7 +155,7 @@ describe('video_meta', () => {
 });
 
 describe('extract_frames', () => {
-  it('sends clamped max_frames and converts jpeg_base64 frames to image parts', async () => {
+  it('passes timestamps and max_frames through verbatim (toolserver clamps)', async () => {
     mockToolserver({
       frames: [
         { timestamp: 0, jpeg_base64: FAKE_JPEG_BASE64, width: 640, height: 360 },
@@ -159,7 +166,7 @@ describe('extract_frames', () => {
     const result = await execute(videoTool('extract_frames'), {
       video_path: videoPath,
       timestamps: [0, 5],
-      max_frames: 99, // clamped to 8
+      max_frames: 99, // TS 不再 clamp,toolserver 按模式上限截断
     });
     expect(result.isError).toBeFalsy();
 
@@ -167,7 +174,7 @@ describe('extract_frames', () => {
     expect(JSON.parse(init.body as string)).toEqual({
       video_path: videoPath,
       timestamps: [0, 5],
-      max_frames: 8,
+      max_frames: 99,
     });
 
     const parts = result.output as ContentPart[];
@@ -188,7 +195,7 @@ describe('extract_frames', () => {
     expect(result.isError).toBe(true);
   });
 
-  it('passes fps through and applies the fps-mode frame cap', async () => {
+  it('passes fps and max_frames through without clamping (toolserver owns the cap)', async () => {
     mockToolserver({
       frames: [
         { timestamp: 0, jpeg_base64: FAKE_JPEG_BASE64, width: 640, height: 360 },
@@ -198,7 +205,7 @@ describe('extract_frames', () => {
     const result = await execute(videoTool('extract_frames'), {
       video_path: videoPath,
       fps: 1,
-      max_frames: 999, // clamped to 120 in fps mode
+      max_frames: 999, // toolserver 侧截到 fps 模式上限 120
     });
     expect(result.isError).toBeFalsy();
 
@@ -206,11 +213,11 @@ describe('extract_frames', () => {
     expect(JSON.parse(init.body as string)).toEqual({
       video_path: videoPath,
       fps: 1,
-      max_frames: 120,
+      max_frames: 999,
     });
   });
 
-  it('timestamps take priority over fps for the frame cap', async () => {
+  it('omits absent params; forwards provided mode params as-is (no default injection)', async () => {
     mockToolserver({ frames: [] });
     await execute(videoTool('extract_frames'), {
       video_path: path.join(workspaceDir, 'demo.mp4'),
@@ -218,11 +225,11 @@ describe('extract_frames', () => {
       fps: 1,
     });
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    // timestamps 模式仍按 8 帧上限(默认 4)
-    expect(JSON.parse(init.body as string)).toMatchObject({
+    // 未提供的 max_frames/count 不发送:模式默认值由 toolserver 决定
+    expect(JSON.parse(init.body as string)).toEqual({
+      video_path: path.join(workspaceDir, 'demo.mp4'),
       timestamps: [1, 2],
       fps: 1,
-      max_frames: 4,
     });
   });
 
@@ -955,5 +962,80 @@ describe('registerBuiltinTools', () => {
     registerBuiltinTools(registry, { workspaceDir });
     expect(registry.resolve('video_meta')?.description).toContain('元信息');
     expect(registry.resolve('submit_detection')?.description).toContain('提交');
+  });
+
+  it('feeds toolset.json parameters as the model-visible schema (verbatim)', () => {
+    const registry = new ToolRegistry();
+    registerBuiltinTools(registry, { workspaceDir });
+    const toolset = JSON.parse(
+      readFileSync(
+        fileURLToPath(new URL('../../../config/toolset.json', import.meta.url)),
+        'utf8',
+      ),
+    ) as { tools: Array<{ name: string; description: string; parameters: Record<string, unknown> }> };
+    for (const entry of toolset.tools) {
+      const tool = registry.resolve(entry.name);
+      expect(tool, entry.name).toBeDefined();
+      expect(tool?.description).toBe(entry.description);
+      if (entry.name === 'submit_detection') continue; // enum/pattern 由 event_contract 注入,单独断言
+      expect(tool?.parameters).toEqual(entry.parameters);
+    }
+  });
+
+  it('derives submit_detection event enum and encoding pattern from event_contract.json', () => {
+    const registry = new ToolRegistry();
+    registerBuiltinTools(registry, { workspaceDir });
+    const parameters = registry.resolve('submit_detection')?.parameters as Record<string, any>;
+    const contract = loadEventContract();
+    const eventId = parameters.properties.events.items.properties.event_id;
+    expect(eventId.enum).toEqual([...contract.active_event_ids]);
+    expect(parameters.properties.binary_encoding.pattern).toBe(
+      `^[01]${'_[01]'.repeat(contract.encoding_length - 1)}$`,
+    );
+    expect(parameters.properties.events.description).toContain(
+      `${contract.active_event_ids.length} 个活跃事件编号`,
+    );
+  });
+});
+
+describe('toolset / event contract drift guards', () => {
+  it('submit_detection.schema.json 静态枚举/位宽与 event_contract.json 一致(生成物派生,文件值防漂移)', () => {
+    const raw = JSON.parse(
+      readFileSync(
+        fileURLToPath(new URL('../../../config/submit_detection.schema.json', import.meta.url)),
+        'utf8',
+      ),
+    ) as Record<string, any>;
+    const contract = loadEventContract();
+    expect(raw.properties.events.items.properties.event_id.enum).toEqual([
+      ...contract.active_event_ids,
+    ]);
+    expect(raw.properties.binary_encoding.pattern).toBe(
+      `^[01]${'_[01]'.repeat(contract.encoding_length - 1)}$`,
+    );
+  });
+
+  it('expandToolsetParameters 解析任意 ./xxx.json 相对引用(相对 agent/config/)', () => {
+    const entry = {
+      name: 'submit_detection',
+      parameters: { $ref: './submit_detection.schema.json' },
+    };
+    const expanded = expandToolsetParameters(entry);
+    expect(expanded['$ref']).toBeUndefined();
+    expect(expanded['required']).toEqual(
+      expect.arrayContaining(['video_path', 'events', 'binary_encoding', 'normal', 'report_markdown']),
+    );
+  });
+
+  it('expandToolsetParameters 拒绝 config 目录之外的 $ref 形式', () => {
+    for (const ref of ['../secrets.json', '/etc/passwd', 'http://evil/x.json']) {
+      expect(() =>
+        expandToolsetParameters({ name: 'x', parameters: { $ref: ref } }),
+      ).toThrow(/\$ref/);
+    }
+  });
+
+  it('expandToolsetParameters 对缺失 parameters 的条目 fail-fast', () => {
+    expect(() => expandToolsetParameters({ name: 'broken_tool' })).toThrow(/parameters/);
   });
 });

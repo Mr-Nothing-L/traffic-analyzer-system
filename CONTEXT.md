@@ -7,7 +7,7 @@
 ### 事件定义
 
 **事件类别 (Event Category)**:
-一种可检测的交通事件类型,全局唯一编号。当前共 10 个活跃类别(编号 1-8, 10-11),覆盖违法停车、应急车道占用、交通事故、行人出现、摩托车出现、严重拥堵、道路施工、车辆逆行/倒车、抛洒物、实线变道。新增类别只需追加 YAML 配置,无需改代码。
+一种可检测的交通事件类型,全局唯一编号。当前共 10 个活跃类别(编号 1-8, 10-11),覆盖违法停车、应急车道占用、交通事故、行人出现、摩托车出现、严重拥堵、道路施工、车辆逆行/倒车、抛洒物、实线变道。新增类别只需追加 YAML 配置,无需改代码;agent 侧经 `agent/config/event_contract.json`(`scripts/gen_agent_event_contract.py` 从本文件与 annotation_spec.yaml 生成)消费,改 YAML 后须重跑生成脚本(pytest `--check` 用例守护同步)。
 _Avoid_: action, event type
 
 **事件编号 (Event ID)**:
@@ -83,11 +83,11 @@ Agent 运行时中执行视频检测的会话角色:按系统 prompt 编排 vide
 _Avoid_: expert agent(事件专家是批量流水线内角色,与检测 Agent 不同)
 
 **统一对话 (Unified Chat)**:
-Agent 运行时的唯一对话形态(系统 prompt 为 `agent/prompts/chat_system.md`):自由问答与正式事件检测双能力共用同一套工具,走哪条路由模型按用户意图判断;正式检测必须以 `submit_detection` 提交结构化结果收尾,问答一律直接文本回答。旧 Python「快速对话」(`web/chat/`)已删除。
+Agent 运行时的唯一对话形态(系统 prompt 为 `agent/prompts/chat_system.md`):自由问答与正式事件检测双能力共用同一套工具,走哪条路由模型按用户意图判断;正式检测必须以 `submit_detection` 提交结构化结果收尾,问答一律直接文本回答。prompt 中的事件定义摘要/裁决规则段由 `event_contract.json` 渲染占位符注入,不在 prompt 文件中手抄。旧 Python「快速对话」(`web/chat/`)已删除。
 _Avoid_: 快速对话, chatbot
 
 **工具 (Tool)**:
-Agent 运行时可调用的最小能力单元,声明 `{name, description, parameters}` 与资源访问(accesses);注册表管理,调度器按访问冲突并行执行同批调用。内置 7 个:video_meta / extract_frames / draw_boxes / read_file / write_file / run_script / submit_detection。
+Agent 运行时可调用的最小能力单元,声明 `{name, description, parameters}` 与资源访问(accesses);注册表管理,调度器按访问冲突并行执行同批调用。description 与 parameters(模型可见 JSON Schema)均以 `agent/config/toolset.json` 为单一来源,启动时加载(缺条目 fail-fast);帧数/体积上限的唯一执法者是 toolserver。内置 8 个:video_meta / extract_frames / draw_boxes / load_video / read_file / write_file / run_script / submit_detection,另有 spawn_subagent 由 server 组装时注入。
 _Avoid_: function call, action
 
 **权限模式 (Permission Mode)**:

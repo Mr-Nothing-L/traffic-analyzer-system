@@ -36,6 +36,7 @@ import {
 import { ToolRegistry } from '../registry';
 import { resolveWorkspacePath } from './fileTools';
 import type { ToolserverClient } from './httpToolserver';
+import { PREPARED_VIDEO_HARD_MAX_BYTES } from './loadVideo';
 import { invalidInputResult, toolserverErrorResult } from './utils';
 
 export const SPAWN_SUBAGENT_TOOL_NAME = 'spawn_subagent';
@@ -134,8 +135,7 @@ interface PrepareVideoResponse {
   transcoded: boolean;
 }
 
-/** 预处理后的硬上限:base64 在线传输膨胀约 33%,与 load_video 一致。 */
-const PREPARED_HARD_MAX_BYTES = 50 * 1024 * 1024;
+/** 预处理后的硬上限与 load_video 共用(loadVideo.ts 单一常量)。 */
 const PREPARED_READ_TIMEOUT_MS = 60_000;
 
 /**
@@ -149,16 +149,17 @@ async function buildVideoPart(
   let filePath = videoPath;
   let mime = videoMimeType(videoPath);
   if (deps.toolserverClient !== undefined) {
+    // max_mb 不发送:默认值(40MB)的单一权威在 toolserver(server.py)。
     const prepared = await deps.toolserverClient.post<PrepareVideoResponse>(
       '/tools/prepare_video',
-      { video_path: videoPath, max_mb: 40 },
+      { video_path: videoPath },
     );
     if (!prepared.ok) return toolserverErrorResult(prepared.error);
-    if (prepared.data.size_bytes > PREPARED_HARD_MAX_BYTES) {
+    if (prepared.data.size_bytes > PREPARED_VIDEO_HARD_MAX_BYTES) {
       return {
         output:
           `视频经降帧/转码后仍有 ${(prepared.data.size_bytes / (1024 * 1024)).toFixed(1)}MB,` +
-          '超过 50MB 上限,无法直传给子代理;请在 task 中让子代理改用 draw_boxes 对关键时刻逐帧核对。',
+          `超过 ${PREPARED_VIDEO_HARD_MAX_BYTES / (1024 * 1024)}MB 上限,无法直传给子代理;请在 task 中让子代理改用 draw_boxes 对关键时刻逐帧核对。`,
         isError: true,
       };
     }

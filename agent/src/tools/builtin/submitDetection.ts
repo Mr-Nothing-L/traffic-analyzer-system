@@ -2,7 +2,10 @@
  * submit_detection: the structured output contract for the detection agent.
  *
  * The model-facing parameter schema is agent/config/submit_detection.schema.json
- * (loaded and inlined by index.ts where toolset.json references it via $ref).
+ * (loaded and inlined by index.ts where toolset.json references it via $ref);
+ * 其中的 event_id 枚举与编码位宽在加载时由 applyEventContractToSubmitSchema
+ * 从 agent/config/event_contract.json(生成自 event_categories.yaml)注入。
+ * 运行时(zod)的活跃事件集合同样从 event_contract.json 派生(fail-fast)。
  * On top of the schema, this tool enforces the runtime cross-checks documented
  * in toolset.json `limits` (ADR-0001 semantics):
  *   - binary_encoding bit i (i in 1..8, 10, 11) must match events[event_id=i].detected
@@ -37,14 +40,22 @@ import {
   type ExecutableToolResult,
 } from '../contract';
 import { ToolserverClient } from './httpToolserver';
+import {
+  applyEventContractToSubmitSchema,
+  binaryEncodingPattern,
+  formatEventIdList,
+  loadEventContract,
+} from './eventContract';
 import { resolveWorkspacePath } from './fileTools';
 import { invalidInputResult } from './utils';
 
-const ACTIVE_EVENT_IDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 10, 11]);
+/** 活跃事件编号:从 event_contract.json 派生(权威源 event_categories.yaml)。 */
+const eventContract = loadEventContract();
+const ACTIVE_EVENT_IDS = new Set(eventContract.active_event_ids);
 /** Bit 9 carries no event category; it is the normal indicator (ADR-0001). */
-const NORMAL_BIT_INDEX = 9;
-const ENCODING_LENGTH = 11;
-const BINARY_ENCODING_PATTERN = /^[01]_[01]_[01]_[01]_[01]_[01]_[01]_[01]_[01]_[01]_[01]$/;
+const NORMAL_BIT_INDEX = eventContract.normal_bit_index;
+const ENCODING_LENGTH = eventContract.encoding_length;
+const BINARY_ENCODING_PATTERN = binaryEncodingPattern(ENCODING_LENGTH);
 
 const instanceSchema = z.strictObject({
   description: z.string(),
@@ -66,7 +77,7 @@ const eventSchema = z.strictObject({
     .number()
     .int()
     .refine((id) => ACTIVE_EVENT_IDS.has(id), {
-      message: 'event_id 必须是活跃事件编号之一:1-8、10、11(9 为正常指示位,不对应事件)',
+      message: `event_id 必须是活跃事件编号之一:${formatEventIdList(eventContract.active_event_ids)}(9 为正常指示位,不对应事件)`,
     }),
   detected: z.boolean(),
   confidence: z.number().min(0).max(1),
@@ -85,7 +96,7 @@ const submitDetectionInputSchema = z.strictObject({
   events: z.array(eventSchema).min(1),
   binary_encoding: z
     .string()
-    .regex(BINARY_ENCODING_PATTERN, '必须是 11 位 0/1,以下划线连接'),
+    .regex(BINARY_ENCODING_PATTERN, `必须是 ${ENCODING_LENGTH} 位 0/1,以下划线连接`),
   normal: z.boolean(),
   report_markdown: z.string().min(1),
 });
@@ -184,10 +195,16 @@ export function normalizeSubmitInput(rawInput: unknown): unknown {
   return obj;
 }
 
-/** Load the model-facing parameter schema (agent/config/submit_detection.schema.json). */
+/**
+ * Load the model-facing parameter schema (agent/config/submit_detection.schema.json)
+ * and inject the event contract (event_id 枚举、编码位宽及相关描述)——模型可见
+ * 的活跃事件集合永远与 event_contract.json 一致,schema 文件中的静态枚举仅为
+ * 文档参考(漂移由测试守护)。
+ */
 export function loadSubmitDetectionSchema(): Record<string, unknown> {
   const schemaUrl = new URL('../../../config/submit_detection.schema.json', import.meta.url);
-  return JSON.parse(readFileSync(fileURLToPath(schemaUrl), 'utf8')) as Record<string, unknown>;
+  const raw = JSON.parse(readFileSync(fileURLToPath(schemaUrl), 'utf8')) as Record<string, unknown>;
+  return applyEventContractToSubmitSchema(raw);
 }
 
 /** Runtime cross-checks beyond the JSON schema. Returns a list of violations. */

@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import type { Message, StreamedMessagePart, ToolCall } from '#/message';
 import type {
@@ -25,6 +25,7 @@ import type { ExecutableTool, ExecutableToolResult } from '../tools/contract';
 import { ToolRegistry } from '../tools/registry';
 
 import { createAgentServer, defaultSystemPrompt, type AgentServer } from './app';
+import { loadEventContract } from '../tools/builtin/eventContract';
 import { SUMMARY_PREFIX, SUMMARY_SYSTEM_PROMPT } from '../loop/summarize';
 import type { Session } from './session';
 import type { TimelineEntry } from './storage';
@@ -914,25 +915,59 @@ describe('agent server', () => {
     expect(sessions[0]).toMatchObject({ id: sessionId, mode: 'auto' });
   });
 
-  it('defaultSystemPrompt:chat_system.md 缺失时回退 detect_system.md 并打警告', () => {
+  it('defaultSystemPrompt:渲染事件契约占位符;chat_system.md 缺失即抛错(fail-fast)', () => {
     const promptsDir = mkdtempSync(path.join(tmpdir(), 'agent-prompts-test-'));
     try {
-      writeFileSync(path.join(promptsDir, 'detect_system.md'), 'DETECT-PROMPT');
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      try {
-        expect(defaultSystemPrompt(promptsDir)).toBe('DETECT-PROMPT');
-        expect(warnSpy).toHaveBeenCalledOnce();
+      // 缺失 → 启动即抛错(detect_system.md 回退已删除)
+      expect(() => defaultSystemPrompt(promptsDir)).toThrow(/chat_system\.md/);
 
-        warnSpy.mockClear();
-        writeFileSync(path.join(promptsDir, 'chat_system.md'), 'CHAT-PROMPT');
-        expect(defaultSystemPrompt(promptsDir)).toBe('CHAT-PROMPT');
-        expect(warnSpy).not.toHaveBeenCalled();
-      } finally {
-        warnSpy.mockRestore();
-      }
+      writeFileSync(
+        path.join(promptsDir, 'chat_system.md'),
+        '头部\n当前共 {{ACTIVE_EVENT_COUNT}} 个活跃类别,编号 {{ACTIVE_EVENT_ID_LIST}}。\n{{EVENT_DEFINITIONS}}\n{{ADJUDICATION_RULES}}\n',
+      );
+      const rendered = defaultSystemPrompt(promptsDir);
+      expect(rendered).not.toMatch(/\{\{[A-Z_]+\}\}/);
+      expect(rendered).toContain('共 10 个活跃类别,编号 1-8、10-11');
+      expect(rendered).toContain('违法停车');
+      expect(rendered).toContain('应急车道静止触发双事件');
     } finally {
       rmSync(promptsDir, { recursive: true, force: true });
     }
+  });
+
+  it('defaultSystemPrompt:模板缺少任一占位符或含未知占位符均抛错', () => {
+    const promptsDir = mkdtempSync(path.join(tmpdir(), 'agent-prompts-test-'));
+    try {
+      writeFileSync(
+        path.join(promptsDir, 'chat_system.md'),
+        '只有 {{ACTIVE_EVENT_COUNT}},缺其余占位符',
+      );
+      expect(() => defaultSystemPrompt(promptsDir)).toThrow(/占位符/);
+
+      writeFileSync(
+        path.join(promptsDir, 'chat_system.md'),
+        '{{EVENT_DEFINITIONS}}\n{{ADJUDICATION_RULES}}\n{{ACTIVE_EVENT_COUNT}} {{ACTIVE_EVENT_ID_LIST}}\n{{UNKNOWN_TOKEN}}',
+      );
+      expect(() => defaultSystemPrompt(promptsDir)).toThrow(/未知占位符/);
+    } finally {
+      rmSync(promptsDir, { recursive: true, force: true });
+    }
+  });
+
+  it('仓库 chat_system.md 渲染后覆盖全部活跃事件且无残留占位符', () => {
+    const rendered = defaultSystemPrompt();
+    const contract = loadEventContract();
+    for (const event of contract.events) {
+      expect(rendered).toContain(`**${event.name_zh}**`);
+      expect(rendered).toContain(event.definition.split('\n')[0] as string);
+      for (const condition of event.boundary_conditions) {
+        expect(rendered).toContain(condition);
+      }
+    }
+    for (const rule of contract.adjudication_rules) {
+      expect(rendered).toContain(rule.name);
+    }
+    expect(rendered).not.toMatch(/\{\{[A-Z_]+\}\}/);
   });
 });
 

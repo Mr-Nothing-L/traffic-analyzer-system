@@ -52,7 +52,10 @@ function mockPrepareVideo(payload: unknown, status = 200): void {
 }
 
 function tool() {
-  return createLoadVideoTool(client, workspace, 'desc:load_video');
+  return createLoadVideoTool(client, workspace, {
+    description: 'desc:load_video',
+    parameters: { type: 'object', properties: {} },
+  });
 }
 
 async function execute(input: unknown): Promise<ExecutableToolResult> {
@@ -78,7 +81,7 @@ function preparedPayload(overrides: Record<string, unknown> = {}) {
 }
 
 describe('load_video', () => {
-  it('posts video_path with the default max_mb and returns text + video parts', async () => {
+  it('posts video_path without max_mb (default lives in the toolserver) and returns text + video parts', async () => {
     const preparedPath = path.join(workspaceDir, 'prepared.mp4');
     writeFileSync(preparedPath, FAKE_MP4);
     mockPrepareVideo(preparedPayload());
@@ -90,7 +93,8 @@ describe('load_video', () => {
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe('http://127.0.0.1:8601/tools/prepare_video');
     expect(init.method).toBe('POST');
-    expect(JSON.parse(init.body as string)).toEqual({ video_path: videoPath, max_mb: 40 });
+    // max_mb 未提供时不发送:40MB 默认值的单一权威在 toolserver(server.py)
+    expect(JSON.parse(init.body as string)).toEqual({ video_path: videoPath });
 
     const parts = result.output as ContentPart[];
     expect(parts).toHaveLength(2);
