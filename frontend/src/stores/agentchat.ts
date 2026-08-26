@@ -594,7 +594,8 @@ export const useAgentChatStore = defineStore('agentchat', () => {
   }
 
   /** 删除会话:列表先移除(optimistic),失败回滚重拉并抛错;
-   * 删的是当前会话则切到最近会话,没有则新建。 */
+   * 删的是当前会话则优先切到当前工作区内最近的会话;只剩其他工作区的会话时走
+   * openSession(先 applyWorkspace 再选);没有任何会话才新建。 */
   async function deleteSession(id: string) {
     const wasCurrent = sessionId.value === id
     sessions.value = sessions.value.filter((s) => s.id !== id)
@@ -610,8 +611,13 @@ export const useAgentChatStore = defineStore('agentchat', () => {
       entries.value = []
       const latest = [...sessions.value].sort(
         (a, b) => (b.lastActiveAt ?? 0) - (a.lastActiveAt ?? 0),
-      )[0]
-      if (latest) await selectSession(latest.id)
+      )
+      // 与 openSession 同语义:无 workspaceDir 的旧会话视为当前工作区。其他
+      // 工作区的会话直接 selectSession 会绕过 applyWorkspace,时间线加载了
+      // 别的工作区的会话而 ws.path 仍是旧工作区,路径解析/视频预览全部错位。
+      const current = latest.find((s) => !s.workspaceDir || s.workspaceDir === wsStore.path)
+      if (current) await selectSession(current.id)
+      else if (latest[0]) await openSession(latest[0].id)
       else await createSession()
     }
   }

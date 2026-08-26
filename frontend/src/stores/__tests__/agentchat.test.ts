@@ -857,3 +857,84 @@ describe('openSession 跨工作区切换', () => {
     expect(ws.path).toBe('/ws/a');
   });
 });
+
+// deleteSession 跨工作区守卫回归测试:
+// 删除当前会话后从全部会话按 lastActiveAt 取最近直接 selectSession,若该会话
+// 属于其他工作区会绕过 openSession 的 applyWorkspace,时间线加载了别的工作区
+// 的会话但 ws.path 仍是旧工作区。期望:优先选当前工作区内最近的会话(不动
+// 工作区);只剩其他工作区的会话时走 openSession 先切工作区,ws.path 与新
+// 选中会话的工作区一致。
+describe('deleteSession 跨工作区守卫', () => {
+  function stubDeleteFetch(calls: Array<{ url: string; method: string }>) {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: unknown, init?: { method?: string }) => {
+        const url = String(input);
+        const method = init?.method ?? 'GET';
+        calls.push({ url, method });
+        if (url === '/api/workspace' && method === 'POST') {
+          return jsonResponse({ path: '/ws/b' });
+        }
+        if (url.endsWith('/history')) {
+          return historyResponse([{ kind: 'user', text: '历史会话', images: [], at: 1 }]);
+        }
+        if (url.includes('/events')) return jsonResponse({ events: [], inProgress: false });
+        if (url.endsWith('/api/agent/sessions')) {
+          return jsonResponse({
+            sessions: [
+              { id: 's2', workspaceDir: '/ws/b', lastActiveAt: 200 },
+              { id: 's3', workspaceDir: '/ws/a', lastActiveAt: 100 },
+            ],
+          });
+        }
+        // loadTree:/workspace/tree、/workspace/videos
+        return jsonResponse({ entries: [] });
+      }),
+    );
+  }
+
+  it('删除当前会话后只剩其他工作区会话:走 openSession 先切工作区,ws.path 与新会话工作区一致', async () => {
+    const { ws, agent } = await load();
+    ws.path = '/ws/a';
+    await nextTick();
+    agent.sessionId = 's1';
+    agent.sessions = [
+      { id: 's1', workspaceDir: '/ws/a', lastActiveAt: 300 },
+      { id: 's2', workspaceDir: '/ws/b', lastActiveAt: 200 },
+    ];
+    const calls: Array<{ url: string; method: string }> = [];
+    stubDeleteFetch(calls);
+
+    await agent.deleteSession('s1');
+    vi.unstubAllGlobals();
+
+    const wsIdx = calls.findIndex((c) => c.url === '/api/workspace' && c.method === 'POST');
+    const histIdx = calls.findIndex((c) => c.url === '/api/agent/sessions/s2/history');
+    expect(wsIdx).toBeGreaterThanOrEqual(0);
+    expect(histIdx).toBeGreaterThanOrEqual(0);
+    expect(wsIdx).toBeLessThan(histIdx); // 先切工作区,后选会话
+    expect(ws.path).toBe('/ws/b'); // 与新选中会话的 workspaceDir 一致
+    expect(agent.sessionId).toBe('s2');
+  });
+
+  it('当前工作区还有会话(即使更旧):留在当前工作区,不调 workspace API', async () => {
+    const { ws, agent } = await load();
+    ws.path = '/ws/a';
+    await nextTick();
+    agent.sessionId = 's1';
+    agent.sessions = [
+      { id: 's1', workspaceDir: '/ws/a', lastActiveAt: 300 },
+      { id: 's2', workspaceDir: '/ws/b', lastActiveAt: 200 },
+      { id: 's3', workspaceDir: '/ws/a', lastActiveAt: 100 },
+    ];
+    const calls: Array<{ url: string; method: string }> = [];
+    stubDeleteFetch(calls);
+
+    await agent.deleteSession('s1');
+    vi.unstubAllGlobals();
+
+    expect(calls.some((c) => c.url === '/api/workspace' && c.method === 'POST')).toBe(false);
+    expect(ws.path).toBe('/ws/a');
+    expect(agent.sessionId).toBe('s3'); // 当前工作区内最近的(虽然比 s2 旧)
+  });
+});
