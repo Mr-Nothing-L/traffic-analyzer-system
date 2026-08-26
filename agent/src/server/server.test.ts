@@ -126,7 +126,7 @@ function writeTool(): ExecutableTool {
   };
 }
 
-/** 模拟 submit_detection:stopTurn + note 携带结构化 JSON。 */
+/** 模拟 submit_detection:stopTurn + payload 携带结构化检测载荷。 */
 function submitTool(payload: unknown): ExecutableTool {
   return {
     name: 'submit_detection',
@@ -139,7 +139,7 @@ function submitTool(payload: unknown): ExecutableTool {
         Promise.resolve({
           output: '检测结果已提交',
           stopTurn: true,
-          note: JSON.stringify(payload),
+          payload,
         }),
     }),
   };
@@ -467,8 +467,14 @@ describe('agent server', () => {
     expect(json).toMatchObject({ error: { code: 'approval_not_found' } });
   });
 
-  it('submit_detection 的 stopTurn:先发 detection 事件再 done(stop_turn)', async () => {
-    const payload = { binary_encoding: '0_0_0_0_0_0_0_0_0_0_0', normal: true };
+  it('submit_detection 的 stopTurn:payload 全链路——detection 事件、tool 条目与 detection 条目落盘', async () => {
+    const payload = {
+      video_path: 'demo.mp4',
+      binary_encoding: '0_0_0_0_0_0_0_0_0_0_0',
+      normal: true,
+      events: [],
+      report_markdown: '# 报告',
+    };
     const provider = new ScriptedProvider([[toolCall('c1', 'submit_detection', {})]]);
     await startServer(provider, [submitTool(payload)]);
     const sessionId = await createSession('yolo');
@@ -485,8 +491,25 @@ describe('agent server', () => {
       'detection',
       'done',
     ]);
+    // tool_result 事件原样携带结构化 payload(不经字符串编解码)
+    expect(events[1]).toMatchObject({
+      type: 'tool_result',
+      result: { output: '检测结果已提交', payload },
+    });
     expect(events[3]).toMatchObject({ type: 'detection', data: payload });
     expect(events[4]).toMatchObject({ reason: 'stop_turn' });
+
+    // 落盘:tool 条目带 payload,detection 条目 data = 结构化载荷
+    const history = await getJson(`/sessions/${sessionId}/history`);
+    const entries = (history.json as { entries: TimelineEntry[] }).entries;
+    expect(entries.map((e) => e.kind)).toEqual(['user', 'tool', 'detection']);
+    const toolEntry = entries[1];
+    if (toolEntry?.kind !== 'tool') throw new Error('expected tool entry');
+    expect(toolEntry.name).toBe('submit_detection');
+    expect(toolEntry.payload).toEqual(payload);
+    const detectionEntry = entries[2];
+    if (detectionEntry?.kind !== 'detection') throw new Error('expected detection entry');
+    expect(detectionEntry.data).toEqual(payload);
   });
 
   it('同 session 的 /chat 互斥:进行中的轮次返回 409', async () => {

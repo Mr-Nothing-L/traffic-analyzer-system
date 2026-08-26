@@ -17,6 +17,13 @@ export interface ExecutableToolSuccessResult {
   readonly isError?: false;
   readonly stopTurn?: boolean;
   readonly note?: string;
+  /**
+   * 结构化附件:工具执行产物的数据通道(如 submit_detection 的检测结果
+   * DetectionPayload),随 tool_result 事件与持久化条目原样传输,消费方
+   * (server / spawn_subagent / 前端)直接读取,不做字符串编解码。note 仅
+   * 保留人读摘要,不再作为数据传输通道。
+   */
+  readonly payload?: unknown;
 }
 
 export interface ExecutableToolErrorResult {

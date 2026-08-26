@@ -150,7 +150,7 @@ function echoTool(name = 'echo'): ExecutableTool {
   };
 }
 
-/** 模拟 submit_detection:stopTurn + note 携带结构化 JSON。 */
+/** 模拟 submit_detection:stopTurn + payload 携带结构化检测载荷。 */
 function submitTool(payload: unknown): ExecutableTool {
   return {
     name: 'submit_detection',
@@ -160,7 +160,22 @@ function submitTool(payload: unknown): ExecutableTool {
       accesses: [],
       approvalRule: 'submit_detection',
       execute: (): Promise<ExecutableToolResult> =>
-        Promise.resolve({ output: '检测结果已提交', stopTurn: true, note: JSON.stringify(payload) }),
+        Promise.resolve({ output: '检测结果已提交', stopTurn: true, payload }),
+    }),
+  };
+}
+
+/** 模拟只 stopTurn 不带 payload 的退化 stop 工具(契约允许,但消费方应报缺)。 */
+function bareStopTool(): ExecutableTool {
+  return {
+    name: 'submit_detection',
+    description: 'fake bare stop tool',
+    parameters: { type: 'object' },
+    resolveExecution: () => ({
+      accesses: [],
+      approvalRule: 'submit_detection',
+      execute: (): Promise<ExecutableToolResult> =>
+        Promise.resolve({ output: '已停止', stopTurn: true }),
     }),
   };
 }
@@ -366,7 +381,7 @@ describe('spawn_subagent', () => {
     });
   });
 
-  it('子代理调用 submit_detection:output 明确告知编码与结论', async () => {
+  it('子代理调用 submit_detection:output 明确告知编码与结论(读 payload)', async () => {
     const payload = {
       events: [],
       binary_encoding: '1_0_0_0_0_0_0_0_0_0_0',
@@ -383,6 +398,16 @@ describe('spawn_subagent', () => {
     expect(String(result.output)).toContain('1_0_0_0_0_0_0_0_0_0_0');
     expect(String(result.output)).toContain('检测到抛洒物');
     expect(JSON.parse(result.note ?? '{}')).toMatchObject({ reason: 'stop_turn' });
+  });
+
+  it('stop_turn 缺 payload:明确报缺失,不再静默回退读 note', async () => {
+    const provider = new ScriptedProvider([[toolCall('s1', 'submit_detection', {})]]);
+    const { tool } = makeHarness(provider, [echoTool(), bareStopTool()]);
+
+    const result = await executeSpawn(tool, { task: '检测事件' });
+
+    expect(result.isError).toBeUndefined();
+    expect(String(result.output)).toContain('未携带结构化 payload');
   });
 
   it('video_path:读文件转 video_url dataURL 随首条 user 消息直传', async () => {

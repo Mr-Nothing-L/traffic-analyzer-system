@@ -20,7 +20,7 @@ import {
 import { ToolRegistry } from '../registry';
 import { ToolserverClient } from './httpToolserver';
 import { registerBuiltinTools } from './index';
-import { createSubmitDetectionTool, loadSubmitDetectionSchema } from './submitDetection';
+import { createSubmitDetectionTool, loadSubmitDetectionSchema, type DetectionPayload } from './submitDetection';
 import { createVideoTools } from './videoTools';
 import { createFileTools } from './fileTools';
 
@@ -479,10 +479,14 @@ describe('submit_detection', () => {
     expect(result.isError).toBeFalsy();
     expect(result.stopTurn).toBe(true);
     expect(result.output).toBe('检测结果已提交');
-    const payload = JSON.parse(result.note as string);
+    // 结构化载荷走 payload 一等字段,不再是 note JSON 字符串。
+    expect(result.note).toBeUndefined();
+    const payload = result.payload as DetectionPayload;
     expect(payload.binary_encoding).toBe('0_0_0_0_0_0_0_0_1_0_0');
+    expect(payload.normal).toBe(true);
     expect(payload.events).toHaveLength(10);
-    // 无检出事件时不产生 meta,note 载荷保持向后兼容。
+    expect(payload.events.every((event) => typeof event.event_id === 'number')).toBe(true);
+    // 无检出事件时不产生 meta。
     expect(payload.meta).toBeUndefined();
   });
 
@@ -507,7 +511,7 @@ describe('submit_detection', () => {
     });
     expect(result.isError).toBeFalsy();
     expect(result.stopTurn).toBe(true);
-    expect(JSON.parse(result.note as string).events[2].detected).toBe(true);
+    expect((result.payload as DetectionPayload).events[2]?.detected).toBe(true);
   });
 
   it('tolerates events passed as a JSON string (qwen3_xml quirk)', async () => {
@@ -532,8 +536,8 @@ describe('submit_detection', () => {
     });
     expect(result.isError).toBeFalsy();
     expect(result.stopTurn).toBe(true);
-    const payload = JSON.parse(result.note as string);
-    expect(payload.events[0].detected).toBe(true);
+    const payload = result.payload as DetectionPayload;
+    expect(payload.events[0]?.detected).toBe(true);
   });
 
   it('tolerates the whole input passed as a JSON string', async () => {
@@ -696,8 +700,8 @@ describe('submit_detection', () => {
         boxes,
       });
 
-      const payload = JSON.parse(result.note as string);
-      expect(payload.events[2].annotated_image).toBe(
+      const payload = result.payload as DetectionPayload;
+      expect(payload.events[2]?.annotated_image).toBe(
         `data:image/jpeg;base64,${FAKE_JPEG_BASE64}`,
       );
       expect(payload.meta).toBeUndefined();
@@ -750,9 +754,9 @@ describe('submit_detection', () => {
       });
       expect(result.isError).toBeFalsy();
       expect(result.stopTurn).toBe(true);
-      const payload = JSON.parse(result.note as string);
-      expect(payload.events[2].annotated_image).toBeUndefined();
-      expect(payload.meta.annotation_missing).toEqual([3]);
+      const payload = result.payload as DetectionPayload;
+      expect(payload.events[2]?.annotated_image).toBeUndefined();
+      expect(payload.meta?.annotation_missing).toEqual([3]);
     });
 
     it('degrades when the toolserver is unreachable', async () => {
@@ -768,8 +772,8 @@ describe('submit_detection', () => {
         report_markdown: '# 报告',
       });
       expect(result.isError).toBeFalsy();
-      const payload = JSON.parse(result.note as string);
-      expect(payload.meta.annotation_missing).toEqual([3]);
+      const payload = result.payload as DetectionPayload;
+      expect(payload.meta?.annotation_missing).toEqual([3]);
     });
 
     it('soft-records detected events without boxes/box_frame (no draw call, no rejection)', async () => {
@@ -783,9 +787,9 @@ describe('submit_detection', () => {
       expect(result.isError).toBeFalsy();
       expect(result.stopTurn).toBe(true);
       expect(fetchMock).not.toHaveBeenCalled();
-      const payload = JSON.parse(result.note as string);
-      expect(payload.events[2].annotated_image).toBeUndefined();
-      expect(payload.meta.annotation_not_provided).toEqual([3]);
+      const payload = result.payload as DetectionPayload;
+      expect(payload.events[2]?.annotated_image).toBeUndefined();
+      expect(payload.meta?.annotation_not_provided).toEqual([3]);
     });
   });
 });

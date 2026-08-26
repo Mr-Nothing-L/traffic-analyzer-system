@@ -82,6 +82,7 @@ import { CallbackApprovalService } from '../permissions/approval';
 import { PermissionGate } from '../permissions/gate';
 import type { PermissionMode, PermissionPolicyContext } from '../permissions/types';
 import { registerBuiltinTools, createSpawnSubagentTool, ToolserverClient } from '../tools/builtin';
+import type { DetectionPayload } from '../tools/builtin/submitDetection';
 import type { ToolAccesses } from '../tools/contract';
 import { ToolRegistry } from '../tools/registry';
 
@@ -821,6 +822,9 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
               // sqlite 都用裁剪版——video part 替换为占位文本;模型侧 messages
               // 不受影响(loop 内部仍持原始 output)。图片 part 保留(历史要渲染)。
               const safeOutput = sanitizeToolOutputForTransport(event.result.output);
+              // 成功结果的结构化附件(submit_detection 的检测载荷)原样进条目。
+              const resultPayload =
+                'payload' in event.result ? event.result.payload : undefined;
               turnEntries.push({
                 kind: 'tool',
                 toolCallId: event.toolCallId,
@@ -829,6 +833,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
                 output: safeOutput,
                 isError: event.isError,
                 ...(event.result.note !== undefined ? { note: event.result.note } : {}),
+                ...(resultPayload !== undefined ? { payload: resultPayload } : {}),
                 at: Date.now(),
               });
               emit({
@@ -841,19 +846,24 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
               flushAssistant();
               flushEntries();
               break;
-            case 'done':
+            case 'done': {
               dropUnconsumedSteers();
               flushAssistant();
               flushEntries();
-              if (event.reason === 'stop_turn' && event.stopResult?.note !== undefined) {
-                let data: unknown;
-                try {
-                  data = JSON.parse(event.stopResult.note);
-                } catch {
-                  data = event.stopResult.note;
-                }
-                emit({ type: 'detection', data });
-                turnEntries.push({ kind: 'detection', data, at: Date.now() });
+              // stop_turn 的结构化附件(submit_detection 的检测载荷)直接从
+              // payload 读取,合成 detection SSE 事件并落盘——不再有
+              // JSON.parse(note) 字符串编解码。
+              const stopPayload =
+                event.stopResult !== undefined && 'payload' in event.stopResult
+                  ? event.stopResult.payload
+                  : undefined;
+              if (event.reason === 'stop_turn' && stopPayload !== undefined) {
+                emit({ type: 'detection', data: stopPayload });
+                turnEntries.push({
+                  kind: 'detection',
+                  data: stopPayload as DetectionPayload,
+                  at: Date.now(),
+                });
               }
               emit({
                 type: 'done',
@@ -862,6 +872,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
                 ...(event.truncated === true ? { truncated: true } : {}),
               });
               return;
+            }
           }
           emit(event);
         },

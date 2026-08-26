@@ -415,17 +415,19 @@ describe('SSE 流式事件', () => {
     const { agent } = await load();
     agent.sessionId = 's1';
     const payload = {
+      video_path: 'demo.mp4',
       binary_encoding: '0_0_1_0_0_0_0_0_0_0_0',
       normal: false,
       events: [
         {
           event_id: 3,
           detected: true,
+          confidence: 0.9,
           reasoning: '追尾',
-          evidence_frames: ['f1'],
+          evidence_frames: [3.5],
           annotated_image: 'data:image/jpeg;base64,WFg=',
         },
-        { event_id: 5, detected: true, reasoning: '逆行', evidence_frames: ['f2'] },
+        { event_id: 5, detected: true, confidence: 0.8, reasoning: '逆行', evidence_frames: [8.2, 9.1] },
       ],
       meta: { annotation_not_provided: [5] },
       report_markdown: '## 报告',

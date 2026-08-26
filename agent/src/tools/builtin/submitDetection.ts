@@ -11,16 +11,17 @@
  *   - detected === true requires a non-empty evidence_frames
  * Violations are returned as isError results describing each inconsistency so
  * the model can fix and retry. A valid submission returns
- * `{output: '检测结果已提交', stopTurn: true}` with the structured detection
- * payload carried as a JSON string in `note` (the tool contract has no
- * dedicated field for structured attachments).
+ * `{output: '检测结果已提交', stopTurn: true, payload}` with the structured
+ * detection payload (DetectionPayload) carried in the result's `payload` field
+ * — the first-class data channel consumed by the server (detection SSE 事件
+ * 与落盘条目)and spawn_subagent, no string encoding involved.
  *
  * Per-event annotated images: during execution (after validation passes), each
  * detected event carrying both `boxes` and `box_frame` is annotated via the
  * toolserver POST /tools/draw_boxes ({video_path, timestamp: box_frame,
  * boxes}); the returned JPEG is embedded as a data URL in that event's
  * `annotated_image` field. Annotation failures degrade gracefully — the event
- * keeps no `annotated_image` and its id is listed in note meta
+ * keeps no `annotated_image` and its id is listed in payload meta
  * `annotation_missing`; detected events lacking boxes/box_frame are likewise
  * soft-recorded in meta `annotation_not_provided`. Neither blocks submission.
  */
@@ -89,6 +90,43 @@ const submitDetectionInputSchema = z.strictObject({
 });
 
 type SubmitDetectionInput = z.infer<typeof submitDetectionInputSchema>;
+
+/** 逐事件条目:zod 校验后的输入事件 + 标注成功时服务端补充的 annotated_image。 */
+export interface DetectionPayloadEvent {
+  event_id: number;
+  detected: boolean;
+  confidence: number;
+  instances: Array<{
+    description: string;
+    location: string;
+    start_sec: number;
+    end_sec: number;
+  }>;
+  reasoning: string;
+  /** 证据帧时间点(秒)。 */
+  evidence_frames: number[];
+  boxes?: Array<{ x1: number; y1: number; x2: number; y2: number; label?: string }>;
+  box_frame?: number;
+  /** 逐事件标注图(jpeg dataURL);无框/画框失败时缺省。 */
+  annotated_image?: string;
+}
+
+/**
+ * submit_detection 提交成功后的结构化检测载荷:随工具结果 payload 字段
+ * 全链路传输(server detection 事件/落盘条目、前端检测卡渲染)。
+ */
+export interface DetectionPayload {
+  video_path: string;
+  events: DetectionPayloadEvent[];
+  binary_encoding: string;
+  normal: boolean;
+  report_markdown: string;
+  /** 标注降级元信息;无降级时缺省。 */
+  meta?: {
+    annotation_missing?: number[];
+    annotation_not_provided?: number[];
+  };
+}
 
 interface DrawBoxesResponse {
   jpeg_base64: string;
@@ -207,7 +245,7 @@ export function crossValidateDetection(input: SubmitDetectionInput): string[] {
 
 /**
  * Soft check (never rejects): detected events lacking boxes and/or box_frame.
- * Their ids are recorded in note meta `annotation_not_provided` so the
+ * Their ids are recorded in payload meta `annotation_not_provided` so the
  * frontend can degrade to a no-image presentation.
  */
 export function findEventsWithoutBoxes(input: SubmitDetectionInput): number[] {
@@ -271,8 +309,8 @@ export function createSubmitDetectionTool(
         stopBatchAfterThis: true,
         execute: async (): Promise<ExecutableToolResult> => {
           const annotationMissing: number[] = [];
-          const events = input.events.map(async (event) => {
-            const annotated: Record<string, unknown> = { ...event };
+          const events = input.events.map(async (event): Promise<DetectionPayloadEvent> => {
+            const annotated: DetectionPayloadEvent = { ...event };
             const canAnnotate =
               event.detected &&
               event.boxes !== undefined &&
@@ -285,28 +323,23 @@ export function createSubmitDetectionTool(
               boxes: event.boxes,
             });
             if (result.ok) {
-              annotated['annotated_image'] = `data:image/jpeg;base64,${result.data.jpeg_base64}`;
+              annotated.annotated_image = `data:image/jpeg;base64,${result.data.jpeg_base64}`;
             } else {
               annotationMissing.push(event.event_id);
             }
             return annotated;
           });
-          const payload: Record<string, unknown> = {
-            ...input,
-            events: await Promise.all(events),
-          };
-          const meta: Record<string, unknown> = {};
-          if (annotationMissing.length > 0) meta['annotation_missing'] = annotationMissing;
+          const payload: DetectionPayload = { ...input, events: await Promise.all(events) };
+          const meta: NonNullable<DetectionPayload['meta']> = {};
+          if (annotationMissing.length > 0) meta.annotation_missing = annotationMissing;
           if (annotationNotProvided.length > 0) {
-            meta['annotation_not_provided'] = annotationNotProvided;
+            meta.annotation_not_provided = annotationNotProvided;
           }
-          if (Object.keys(meta).length > 0) payload['meta'] = meta;
+          if (Object.keys(meta).length > 0) payload.meta = meta;
           return {
             output: '检测结果已提交',
             stopTurn: true,
-            // The contract has no structured-attachment field; downstream
-            // consumers parse the detection payload from this JSON string.
-            note: JSON.stringify(payload),
+            payload,
           };
         },
       };

@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createUserMessage, extractText, type Message } from '#/message';
 
 import { SCHEMA_VERSION, SessionStorage, type TimelineEntry } from './storage';
+import type { DetectionPayload } from '../tools/builtin/submitDetection';
 
 let workspace: string;
 
@@ -95,6 +96,39 @@ describe('loadEntriesAfter', () => {
 
     expect(storage.loadEntriesAfter('s1', 1).map((r) => r.seq)).toEqual([2, 3]);
     expect(storage.loadEntriesAfter('s1', 3)).toEqual([]);
+    storage.close();
+  });
+});
+
+describe('detection 条目兼容读取(迁移)', () => {
+  it('旧字符串条目读取时一次性还原为对象;非 JSON 原文保持原样;新结构化条目不受影响', () => {
+    const storage = new SessionStorage(workspace);
+    const payload = {
+      video_path: 'demo.mp4',
+      binary_encoding: '0_0_0_0_0_0_0_0_1_0_0',
+      normal: true,
+      events: [],
+      report_markdown: '# 报告',
+    };
+    const entries: TimelineEntry[] = [
+      // 旧版本落盘形态:note 原文(JSON 字符串)
+      { kind: 'detection', data: JSON.stringify(payload), at: 1 },
+      // 旧版本解析失败落盘形态:非 JSON 原文
+      { kind: 'detection', data: '原始文本结论', at: 2 },
+      // 新形态:结构化载荷(payload 通道直接落盘)
+      { kind: 'detection', data: payload as DetectionPayload, at: 3 },
+    ];
+    storage.appendEntries('s1', entries);
+
+    const loaded = storage.loadEntries('s1');
+    expect(loaded[0]).toMatchObject({ kind: 'detection', data: payload });
+    expect(loaded[1]).toMatchObject({ kind: 'detection', data: '原始文本结论' });
+    expect(loaded[2]).toMatchObject({ kind: 'detection', data: payload });
+
+    // events 续传读取路径同样还原
+    const after = storage.loadEntriesAfter('s1', 0);
+    expect(after[0]?.entry).toMatchObject({ kind: 'detection', data: payload });
+    expect(after[1]?.entry).toMatchObject({ kind: 'detection', data: '原始文本结论' });
     storage.close();
   });
 });

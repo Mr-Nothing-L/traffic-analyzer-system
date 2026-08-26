@@ -21,6 +21,7 @@ import { DatabaseSync } from 'node:sqlite';
 import type { Message } from '#/message';
 
 import type { PermissionMode } from '../permissions/types';
+import type { DetectionPayload } from '../tools/builtin/submitDetection';
 import type { ExecutableToolOutput } from '../tools/contract';
 
 /** 时间线条目:/chat 的 SSE 流累积而成,GET /sessions/{id}/history 原样返回。 */
@@ -59,6 +60,8 @@ export type TimelineEntry =
       isError: boolean;
       /** 工具附带的结构化备注(如 spawn_subagent 的 {reason,steps} 调试 JSON)。 */
       note?: string;
+      /** 成功结果的结构化附件(如 submit_detection 的检测载荷),原样落盘。 */
+      payload?: unknown;
       at: number;
     }
   | {
@@ -71,7 +74,17 @@ export type TimelineEntry =
       decision?: 'approved' | 'rejected' | 'cancelled';
       at: number;
     }
-  | { kind: 'detection'; data: unknown; at: number };
+  | {
+      kind: 'detection';
+      /**
+       * submit_detection 的结构化检测载荷,由 stop_turn 结果的 payload 直接
+       * 落盘。仅迁移兼容场景为字符串:payload 通道落地之前的旧版本在
+       * JSON.parse(note) 失败时会把 note 原文存进 data,读取路径已做一次性
+       * 还原(见 reviveLegacyDetectionEntry)。
+       */
+      data: DetectionPayload | string;
+      at: number;
+    };
 
 export interface StoredSession {
   readonly id: string;
@@ -108,6 +121,20 @@ CREATE TABLE IF NOT EXISTS messages (
 
 /** 当前 schema 版本:建库时写入 PRAGMA user_version,打开已有库时校验/迁移。 */
 export const SCHEMA_VERSION = 2;
+
+/**
+ * 迁移兼容(仅读取路径):payload 通道落地前,旧版本在 note 不是合法 JSON 时
+ * 会把原文字符串存进 detection 条目的 data;这里一次性尝试还原成对象,还原
+ * 不了保持原样(前端按 detection-raw 降级渲染)。新条目一律是结构化载荷。
+ */
+function reviveLegacyDetectionEntry(entry: TimelineEntry): TimelineEntry {
+  if (entry.kind !== 'detection' || typeof entry.data !== 'string') return entry;
+  try {
+    return { ...entry, data: JSON.parse(entry.data) as DetectionPayload };
+  } catch {
+    return entry;
+  }
+}
 
 export class SessionStorage {
   readonly dbPath: string;
@@ -207,7 +234,7 @@ export class SessionStorage {
     return this.db
       .prepare('SELECT entry_json FROM entries WHERE session_id = ? ORDER BY seq ASC')
       .all(sessionId)
-      .map((row) => JSON.parse(String(row.entry_json)) as TimelineEntry);
+      .map((row) => reviveLegacyDetectionEntry(JSON.parse(String(row.entry_json)) as TimelineEntry));
   }
 
   /** events 续传:返回 seq > fromSeq 的条目,每条带落盘 seq(前端据以推进水位)。 */
@@ -222,7 +249,7 @@ export class SessionStorage {
       .all(sessionId, fromSeq)
       .map((row) => ({
         seq: Number(row.seq),
-        entry: JSON.parse(String(row.entry_json)) as TimelineEntry,
+        entry: reviveLegacyDetectionEntry(JSON.parse(String(row.entry_json)) as TimelineEntry),
       }));
   }
 

@@ -123,15 +123,29 @@ export interface AgentApprovalEntry {
   stale?: boolean
 }
 
-/** detection 事件的 data:submit_detection 的结构化 payload(解析失败时为原始字符串)。 */
+/** detection 事件的 data:submit_detection 提交的结构化检测载荷(以 agent 端
+ * submitDetection.ts 的 zod schema 为权威对齐);仅迁移前的旧落盘条目可能是
+ * 未解析成功的字符串,ChatView 按 detection-raw 降级渲染。 */
 export interface DetectionPayload {
+  video_path?: string
   binary_encoding?: string
   normal?: boolean
   events?: Array<{
     event_id: number
     detected: boolean
+    confidence?: number
+    instances?: Array<{
+      description: string
+      location: string
+      start_sec: number
+      end_sec: number
+    }>
     reasoning: string
-    evidence_frames: string[]
+    /** 证据帧时间点(秒)。 */
+    evidence_frames: number[]
+    /** 可选定位框(归一化 xyxy)及其所属帧;用于服务端渲染标注图。 */
+    boxes?: Array<{ x1: number; y1: number; x2: number; y2: number; label?: string }>
+    box_frame?: number
     /** 逐事件标注图(jpeg dataURL,submit_detection 服务端生成;无框/画框失败时缺省)。 */
     annotated_image?: string
   }>

@@ -13,7 +13,7 @@
  * - 视频:video_path 经沙盒校验后在 execute 时读文件转成 video_url
  *   dataURL ContentPart,随子代理首条 user 消息直传模型。
  * - 结果:completed → 最后一条 assistant 文本;stop_turn(submit_detection)
- *   → 从 stopResult.note 提取编码与结论;max_steps / error / cancelled →
+ *   → 从 stopResult.payload 提取编码与结论;max_steps / error / cancelled →
  *   说明原因。note 统一为 JSON {reason, steps} 供调试。
  */
 import { readFile } from 'node:fs/promises';
@@ -209,31 +209,36 @@ function lastAssistantText(result: AgentLoopResult): string {
   return '';
 }
 
-/** stop_turn(submit_detection):从 stopResult.note(JSON)提取编码与结论。 */
+/** stop_turn(submit_detection):从 stopResult.payload 提取编码与结论;
+ * payload 缺失/形态异常时明确报缺失,不做静默降级。 */
 function describeStopResult(result: AgentLoopResult): string {
-  const raw = result.stopResult?.note;
-  if (raw === undefined) return '子代理已提交结构化结果(stop_turn)。';
-  try {
-    const data = JSON.parse(raw) as Record<string, unknown>;
-    const parts: string[] = [];
-    if (typeof data['binary_encoding'] === 'string') {
-      parts.push(`编码 ${data['binary_encoding']}`);
-    }
-    if (typeof data['normal'] === 'boolean') {
-      parts.push(data['normal'] ? '判定正常' : '判定异常');
-    }
-    const report = data['report_markdown'];
-    if (typeof report === 'string' && report.trim() !== '') {
-      const excerpt = report.trim().slice(0, 500);
-      parts.push(`结论:${excerpt}${report.trim().length > 500 ? '…' : ''}`);
-    }
-    return (
-      '子代理已通过 submit_detection 提交结构化检测结果。' +
-      (parts.length > 0 ? parts.join(';') : `原始 note:${raw.slice(0, 500)}`)
-    );
-  } catch {
-    return `子代理已提交结构化结果(stop_turn),note:${raw.slice(0, 500)}`;
+  const payload =
+    result.stopResult !== undefined && 'payload' in result.stopResult
+      ? result.stopResult.payload
+      : undefined;
+  if (payload === undefined) {
+    return '子代理以 stop_turn 停止,但结果未携带结构化 payload(submit_detection 应附带检测载荷)。';
   }
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
+    return `子代理以 stop_turn 停止,但 payload 形态异常(期望对象):${JSON.stringify(payload).slice(0, 200)}`;
+  }
+  const data = payload as Record<string, unknown>;
+  const parts: string[] = [];
+  if (typeof data['binary_encoding'] === 'string') {
+    parts.push(`编码 ${data['binary_encoding']}`);
+  }
+  if (typeof data['normal'] === 'boolean') {
+    parts.push(data['normal'] ? '判定正常' : '判定异常');
+  }
+  const report = data['report_markdown'];
+  if (typeof report === 'string' && report.trim() !== '') {
+    const excerpt = report.trim().slice(0, 500);
+    parts.push(`结论:${excerpt}${report.trim().length > 500 ? '…' : ''}`);
+  }
+  return (
+    '子代理已通过 submit_detection 提交结构化检测结果。' +
+    (parts.length > 0 ? parts.join(';') : 'payload 缺少 binary_encoding/normal/report_markdown 字段')
+  );
 }
 
 function toToolResult(result: AgentLoopResult): ExecutableToolResult {
