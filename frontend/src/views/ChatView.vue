@@ -40,13 +40,16 @@ import { useAgentChatStore } from '../stores/agentchat'
 import type { AgentAccess, AgentApprovalEntry, AgentMode, AgentSessionInfo, AgentUserEntry, DetectionPayload } from '../stores/agentchat'
 import { useWorkspaceStore } from '../stores/workspace'
 import { ApiError } from '../api/client'
-import { mdToHtml } from '../utils/markdown'
 import { groupSessionsByWorkspace } from '../utils/sessionGroups'
-import { copyText, detectionEventNote, shouldSendOnEnter, toolErrorSummary, toolLabel, workspaceVideoSrc } from '../utils/chatDisplay'
+import { copyText, shouldSendOnEnter, toolLabel, workspaceVideoSrc } from '../utils/chatDisplay'
 import UiIcon from '../components/UiIcon.vue'
 import ContextRing from '../components/chat/ContextRing.vue'
-import MdStream from '../components/chat/MdStream.vue'
-import ThinkLine from '../components/chat/ThinkLine.vue'
+import ChatEntryUser from '../components/chat/ChatEntryUser.vue'
+import ChatEntryAssistant from '../components/chat/ChatEntryAssistant.vue'
+import ChatEntryTool from '../components/chat/ChatEntryTool.vue'
+import ChatEntryApproval from '../components/chat/ChatEntryApproval.vue'
+import ChatEntrySystem from '../components/chat/ChatEntrySystem.vue'
+import ChatEntryDetection from '../components/chat/ChatEntryDetection.vue'
 
 const agent = useAgentChatStore()
 const ws = useWorkspaceStore()
@@ -191,22 +194,7 @@ const streamingEntry = computed(() => {
   const last = agent.entries[agent.entries.length - 1]
   return last?.kind === 'assistant' ? last : null
 })
-const isStreamingEntry = (e: { id: string }) => streamingEntry.value?.id === e.id
-const isThinkLive = (e: AgentAssistantEntry) => streamingEntry.value?.id === e.id && !e.text
 
-/* ---- 工具参数摘要:JSON 解析成 k=v 串,超长截断;非 JSON 原文截断 ---- */
-function argsSummary(args: string): string {
-  const cut = (s: string) => (s.length > 120 ? `${s.slice(0, 120)}…` : s)
-  try {
-    const obj = JSON.parse(args) as Record<string, unknown>
-    const parts = Object.entries(obj).map(
-      ([k, v]) => `${k}=${typeof v === 'string' ? v : JSON.stringify(v)}`,
-    )
-    return cut(parts.join(', ') || '(无参数)')
-  } catch {
-    return cut(args)
-  }
-}
 
 /* ---- 审批卡:accesses 资源访问摘要(中文操作词) ---- */
 const OP_LABEL: Record<string, string> = {
@@ -221,12 +209,6 @@ function accessLabel(a: AgentAccess): string {
   return `${op} ${a.path ?? ''}${a.recursive ? '(递归)' : ''}`.trim()
 }
 
-const DECISION_LABEL: Record<string, string> = {
-  approved: '已批准',
-  rejected: '已拒绝',
-  approved_session: '本会话已批准',
-  cancelled: '已取消',
-}
 
 async function onApprove(requestId: string, decision: 'approved' | 'rejected', scope?: 'session') {
   try {
@@ -251,7 +233,6 @@ const pendingApproval = computed<AgentApprovalEntry | null>(() => {
 function asPayload(data: unknown): DetectionPayload | null {
   return data && typeof data === 'object' ? (data as DetectionPayload) : null
 }
-const encodingBits = (enc: string) => enc.split('_')
 
 /* ---- 附件:图片(≤4 张)暂存本地,发送时 FileReader 转 dataURL 随消息上传;
  * 视频(同一时刻最多一个)粘贴/选择/拖拽后先 POST /api/agent/uploads 落盘,
@@ -483,8 +464,6 @@ function onComposerEnter(ev: KeyboardEvent) {
 
 /** user 气泡视频地址:当次上传附件用 src;工作区视频由 path 确定性推流地址
  * (历史重载同路径同源);推不出(工作区外绝对路径)回退路径 chip。 */
-const bubbleVideoSrc = (e: AgentUserEntry) =>
-  workspaceVideoSrc(e.videoPath, e.videoSrc, ws.path)
 
 async function onSend() {
   const q = question.value.trim()
@@ -706,240 +685,43 @@ onUnmounted(() => {
             输入问题或检测指令,如:检测这段视频的交通事件
           </div>
           <template v-for="e in agent.entries" :key="e.id">
-            <!-- user 气泡(右):图片附件 + 视频预览(或路径 chip)+ 指令文本;
-                 底部行:HH:MM + hover 显现的复制/撤回 -->
-            <div v-if="e.kind === 'user'" class="row user">
-              <div class="msg-col">
-                <div class="bubble">
-                  <div v-if="e.images?.length" class="img-group">
-                    <img
-                      v-for="(u, j) in e.images"
-                      :key="`${e.id}:${j}`"
-                      :src="u"
-                      alt=""
-                      loading="lazy"
-                      @click="openPreview(u)"
-                    />
-                  </div>
-                  <video
-                    v-if="bubbleVideoSrc(e)"
-                    class="bubble-video"
-                    :src="bubbleVideoSrc(e)!"
-                    controls
-                    preload="metadata"
-                  />
-                  <div v-else-if="e.videoPath" class="video-chip" :title="e.videoPath">
-                    <UiIcon name="video" :size="12" />
-                    <span class="video-chip-name">{{ e.videoPath }}</span>
-                  </div>
-                  <div class="bubble-text">{{ e.text }}</div>
-                </div>
-                <div class="msg-meta">
-                  <span class="msg-time">{{ fmtTime(e.at) }}</span>
-                  <span v-if="e.steered" class="steer-tag">已插话</span>
-                  <span class="msg-actions">
-                    <button class="msg-act" title="复制" @click="onCopy(e.id, e.text)">
-                      <UiIcon :name="copiedKey === e.id ? 'check' : 'copy'" :size="12" />
-                    </button>
-                    <button
-                      class="msg-act"
-                      title="撤回此条及之后的消息"
-                      :disabled="busy"
-                      @click="onRecall(e)"
-                    >
-                      <UiIcon name="undo" :size="12" />
-                    </button>
-                  </span>
-                </div>
-              </div>
-            </div>
-
-            <!-- assistant 气泡(左):思考折叠 + markdown 正文;底部行:HH:MM + 复制 -->
-            <div v-else-if="e.kind === 'assistant'" class="row assistant">
-              <div class="avatar"><UiIcon name="chip" :size="18" /></div>
-              <div class="msg-col">
-                <div class="bubble">
-                  <div v-if="e.think" class="think">
-                    <button class="think-head" @click="toggle(thinkOpen, e.id)">
-                      <UiIcon
-                        name="up"
-                        :size="10"
-                        class="think-caret"
-                        :class="{ open: thinkOpen.has(e.id) }"
-                      />
-                      <span>思考过程</span>
-                    </button>
-                    <div v-if="thinkOpen.has(e.id)" class="think-text">{{ e.think }}</div>
-                    <!-- 折叠态摘要:运行中(思考仍在流入)显示末行并横向跟随滚动,结束后显示首行 -->
-                    <ThinkLine v-else :think="e.think" :live="isThinkLive(e)" />
-                  </div>
-                  <!-- 正文:流式期间增量渲染(冻结已完成块),定格后一次性完整渲染 -->
-                  <MdStream v-if="e.text" :text="e.text" :streaming="isStreamingEntry(e)" />
-                </div>
-                <div class="msg-meta">
-                  <span class="msg-time">{{ fmtTime(e.at) }}</span>
-                  <span class="msg-actions">
-                    <button class="msg-act" title="复制" @click="onCopy(e.id, e.text)">
-                      <UiIcon :name="copiedKey === e.id ? 'check' : 'copy'" :size="12" />
-                    </button>
-                  </span>
-                </div>
-              </div>
-            </div>
-
-            <!-- 工具条目:思考过程同款弱化样式(无卡片边框/底色,小字 muted,工具名走
-                 中文映射);整行点击展开结果(文本 + 图片缩略图,进画廊);
-                 失败时折叠态单行直接显示错误内容首行(红色) -->
-            <div v-else-if="e.kind === 'tool'" class="tool">
-              <button class="tool-head" @click="toggle(toolOpen, e.id)">
-                <UiIcon
-                  name="up"
-                  :size="10"
-                  class="think-caret"
-                  :class="{ open: toolOpen.has(e.id) }"
-                />
-                <span class="tool-title">工具调用:{{ toolLabel(e.name) }}</span>
-                <span class="tool-args">{{ argsSummary(e.args) }}</span>
-                <span v-if="!e.done" class="tool-state">执行中…</span>
-                <span
-                  v-else-if="e.isError"
-                  class="tool-state err tool-err-text"
-                  :title="e.result"
-                >{{ toolErrorSummary(e.result) }}</span>
-                <span v-else class="tool-state ok">完成</span>
-              </button>
-              <div v-if="toolOpen.has(e.id) && (e.done || e.children.length)" class="tool-result">
-                <!-- 子代理迷你时间线(spawn_subagent:think/text 聚合块 + 子工具一行小字) -->
-                <template v-for="(c, j) in e.children" :key="`${e.id}:${j}`">
-                  <div v-if="c.kind === 'think'" class="sub-think">
-                    <button class="think-head" @click="toggle(subThinkOpen, `${e.id}:${j}`)">
-                      <UiIcon
-                        name="up"
-                        :size="10"
-                        class="think-caret"
-                        :class="{ open: subThinkOpen.has(`${e.id}:${j}`) }"
-                      />
-                      <span>子代理思考</span>
-                    </button>
-                    <div v-if="subThinkOpen.has(`${e.id}:${j}`)" class="think-text">{{ c.text }}</div>
-                  </div>
-                  <div v-else-if="c.kind === 'text'" class="sub-text">{{ c.text }}</div>
-                  <div v-else class="sub-tool">
-                    工具调用:{{ toolLabel(c.name) }}
-                    <span class="tool-args">{{ argsSummary(c.args) }}</span>
-                    <span v-if="!c.done" class="tool-state">执行中…</span>
-                  </div>
-                </template>
-                <div v-if="e.result" class="tool-result-text">{{ e.result }}</div>
-                <div v-else-if="e.done && !e.images.length" class="tool-result-text">(无输出)</div>
-                <!-- load_video:视频 part 体积巨大,只显示静态提示,不做播放器 -->
-                <div v-if="e.hasVideo" class="tool-video-note">
-                  <UiIcon name="video" :size="12" />
-                  <span>已加载完整视频(降帧)</span>
-                </div>
-                <div v-if="e.images.length" class="tool-imgs">
-                  <img
-                    v-for="(u, j) in e.images"
-                    :key="`${e.id}:${j}`"
-                    :src="u"
-                    alt=""
-                    loading="lazy"
-                    @click="openPreview(u)"
-                  />
-                </div>
-              </div>
-            </div>
-
-            <!-- 审批卡片(只读留档):工具名 + 规则 + 资源访问 + 结果;
-                 未决时操作在 composer 审批面板进行,这里只显示状态;历史未决显示「已失效」 -->
-            <div v-else-if="e.kind === 'approval'" class="approval">
-              <div class="approval-head">
-                <span class="approval-title">审批请求</span>
-                <span class="tool-name">{{ e.toolName }}</span>
-              </div>
-              <div class="approval-rule">{{ e.approvalRule }}</div>
-              <div v-if="e.description" class="approval-desc">{{ e.description }}</div>
-              <div v-if="e.accesses.length" class="approval-accesses">
-                <div v-for="(a, j) in e.accesses" :key="j" class="approval-access">
-                  {{ accessLabel(a) }}
-                </div>
-              </div>
-              <div v-if="!e.decision && !e.stale" class="approval-decided">
-                等待审批(请在下方输入区处理)
-              </div>
-              <div v-else-if="e.decision" class="approval-decided">
-                {{ DECISION_LABEL[e.decision] ?? e.decision }}
-              </div>
-              <div v-else class="approval-decided">已失效</div>
-            </div>
-
-            <!-- 系统提示(自动压缩/截断警示等,仅流式期间插入,不进历史;warn 用警示色系) -->
-            <div
-              v-else-if="e.kind === 'system'"
-              class="system-note"
-              :class="{ warn: e.tone === 'warn' }"
-            >
-              {{ e.text }}
-            </div>
-
-            <!-- 检测结果卡:11 位编码等宽高亮 + 检出事件 + markdown 报告 -->
-            <div v-else-if="e.kind === 'detection'" class="detection">
-              <template v-if="asPayload(e.data)">
-                <div class="detection-head">
-                  <span class="detection-title">检测结果</span>
-                  <span
-                    v-if="asPayload(e.data)!.normal === true"
-                    class="detection-badge normal"
-                  >正常</span>
-                  <span
-                    v-else-if="asPayload(e.data)!.normal === false"
-                    class="detection-badge abnormal"
-                  >检出事件</span>
-                </div>
-                <div v-if="asPayload(e.data)!.binary_encoding" class="detection-encoding">
-                  <template
-                    v-for="(bit, j) in encodingBits(asPayload(e.data)!.binary_encoding!)"
-                    :key="j"
-                  >
-                    <span class="bit" :class="{ on: bit === '1' }">{{ bit }}</span>
-                    <span v-if="j < 10" class="bit-sep">_</span>
-                  </template>
-                </div>
-                <div
-                  v-if="asPayload(e.data)!.events?.some((ev) => ev.detected)"
-                  class="detection-events"
-                >
-                  <div
-                    v-for="ev in asPayload(e.data)!.events!.filter((ev) => ev.detected)"
-                    :key="ev.event_id"
-                    class="detection-event-item"
-                  >
-                    <span class="detection-event" :title="ev.reasoning">
-                      事件 {{ ev.event_id }}
-                    </span>
-                    <!-- 逐事件标注图(点击进画廊);无图时按 meta 降级小字 -->
-                    <img
-                      v-if="ev.annotated_image"
-                      class="detection-event-img"
-                      :src="ev.annotated_image"
-                      :alt="`事件 ${ev.event_id} 标注图`"
-                      loading="lazy"
-                      @click="openPreview(ev.annotated_image!)"
-                    />
-                    <span
-                      v-else-if="detectionEventNote(asPayload(e.data)!.meta, ev.event_id)"
-                      class="detection-event-note"
-                    >{{ detectionEventNote(asPayload(e.data)!.meta, ev.event_id) }}</span>
-                  </div>
-                </div>
-                <div
-                  v-if="asPayload(e.data)!.report_markdown"
-                  class="detection-report bubble-md"
-                  v-html="mdToHtml(asPayload(e.data)!.report_markdown!)"
-                />
-              </template>
-              <pre v-else class="detection-raw">{{ String(e.data ?? '') }}</pre>
-            </div>
+            <ChatEntryUser
+              v-if="e.kind === 'user'"
+              :entry="e"
+              :copied="copiedKey === e.id"
+              :busy="busy"
+              :video-src="workspaceVideoSrc(e.videoPath, e.videoSrc, ws.path)"
+              :time="fmtTime(e.at)"
+              @copy="onCopy(e.id, $event)"
+              @recall="onRecall(e)"
+              @preview="openPreview"
+            />
+            <ChatEntryAssistant
+              v-else-if="e.kind === 'assistant'"
+              :entry="e"
+              :copied="copiedKey === e.id"
+              :streaming="streamingEntry?.id === e.id"
+              :think-open="thinkOpen.has(e.id)"
+              :time="fmtTime(e.at)"
+              @copy="onCopy(e.id, $event)"
+              @toggle-think="toggle(thinkOpen, e.id)"
+            />
+            <ChatEntryTool
+              v-else-if="e.kind === 'tool'"
+              :entry="e"
+              :tool-open="toolOpen.has(e.id)"
+              :sub-think-open="subThinkOpen"
+              @toggle-tool="toggle(toolOpen, e.id)"
+              @toggle-sub-think="toggle(subThinkOpen, $event)"
+              @preview="openPreview"
+            />
+            <ChatEntryApproval v-else-if="e.kind === 'approval'" :entry="e" />
+            <ChatEntrySystem v-else-if="e.kind === 'system'" :entry="e" />
+            <ChatEntryDetection
+              v-else-if="e.kind === 'detection'"
+              :entry="e"
+              @preview="openPreview"
+            />
           </template>
           <!-- Turn 级 loading:对话进行中常驻一行,超过 15s 追加秒表(仅 status 驱动,step 间不闪烁) -->
           <div v-if="turnActive" class="turn-loading">
@@ -1446,286 +1228,8 @@ onUnmounted(() => {
   font-size: var(--text-md);
 }
 
-.row {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-sm);
-  margin: var(--space-sm) 0;
-}
 
-.row.user {
-  justify-content: flex-end;
-}
 
-.avatar {
-  width: 36px;
-  height: 36px;
-  flex: 0 0 36px;
-  border-radius: 50%;
-  border: 1px solid var(--color-border);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--color-accent-soft);
-  color: var(--color-accent);
-}
-
-.bubble {
-  max-width: 65%;
-  padding: var(--space-sm) var(--space-md);
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--color-border);
-  background: var(--color-surface-2);
-}
-
-.row.user .bubble {
-  background: var(--color-accent-soft);
-  border-color: var(--color-accent-deep);
-}
-
-.bubble-text {
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-size: var(--text-md);
-  line-height: 1.6;
-}
-
-.video-chip {
-  display: flex;
-  align-items: center;
-  gap: var(--space-xs);
-  max-width: 320px;
-  margin-bottom: var(--space-xs);
-  color: var(--color-text2);
-  font-size: var(--text-xs);
-}
-
-.video-chip-name {
-  font-family: var(--font-mono);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* ---- user 气泡内的图片附件(文字上方,点击进画廊) ---- */
-.img-group {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-sm);
-  margin-bottom: var(--space-sm);
-}
-
-.img-group img {
-  width: 160px;
-  height: 107px;
-  object-fit: cover;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--color-border);
-  cursor: zoom-in;
-}
-
-/* ---- 思考过程折叠 ---- */
-.think {
-  margin-bottom: var(--space-xs);
-}
-
-.think-head {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-xs);
-  padding: 0;
-  border: none;
-  background: none;
-  color: var(--color-text2);
-  font-size: var(--text-sm);
-  cursor: pointer;
-}
-
-.think-head:hover {
-  color: var(--color-accent);
-}
-
-.think-caret {
-  transform: rotate(180deg); /* 收起:向下 */
-  transition: transform 0.15s ease;
-}
-
-.think-caret.open {
-  transform: rotate(0deg); /* 展开:向上 */
-}
-
-.think-text {
-  white-space: pre-wrap;
-  word-break: break-word;
-  color: var(--color-text2);
-  font-size: var(--text-sm);
-  line-height: 1.6;
-}
-
-/* ---- 工具条目(弱化:无卡片边框/底色,小字 muted,与思考过程同款) ---- */
-.tool {
-  margin: var(--space-xs) 0;
-}
-
-.tool-head {
-  display: flex;
-  align-items: center;
-  gap: var(--space-xs);
-  width: 100%;
-  padding: 0;
-  border: none;
-  background: none;
-  color: var(--color-text2);
-  font-size: var(--text-sm);
-  cursor: pointer;
-  text-align: left;
-}
-
-.tool-head:hover {
-  color: var(--color-accent);
-}
-
-/* 工具名:正文 sans 小字,不突出;中文映射由 toolLabel 给出 */
-.tool-title {
-  flex: 0 0 auto;
-}
-
-/* 审批卡里的工具名仍用等宽强调(与审批规则同风格) */
-.tool-name {
-  font-family: var(--font-mono);
-  font-weight: 600;
-  color: var(--color-text);
-}
-
-.tool-args {
-  flex: 1;
-  min-width: 0;
-  font-size: var(--text-xs);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tool-state {
-  flex: 0 0 auto;
-  font-size: var(--text-xs);
-  color: var(--color-blue);
-}
-
-.tool-state.ok {
-  color: var(--color-sage);
-}
-
-.tool-state.err {
-  color: var(--color-red);
-}
-
-/* 失败摘要:直接显示错误内容首行(红色),占满剩余宽度并省略截断 */
-.tool-err-text {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  text-align: left;
-}
-
-.tool-result {
-  padding: 2px 0 var(--space-xs) calc(10px + var(--space-xs));
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  line-height: 1.6;
-  color: var(--color-text2);
-  max-height: 240px;
-  overflow-y: auto;
-}
-
-/* 工具结果图片行(extract_frames/draw_boxes 抽帧/标注图,点击进画廊) */
-.tool-imgs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-xs);
-}
-
-.tool-result-text + .tool-imgs {
-  margin-top: var(--space-xs);
-}
-
-.tool-imgs img {
-  width: 160px;
-  height: 120px;
-  object-fit: cover;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--color-border);
-  cursor: zoom-in;
-}
-
-/* ---- 子代理迷你时间线(spawn_subagent 展开区内,同工具结果弱化风格) ---- */
-.sub-think {
-  margin: 2px 0;
-}
-
-.sub-text {
-  margin: 2px 0;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.sub-tool {
-  margin: 2px 0;
-  display: flex;
-  align-items: baseline;
-  gap: var(--space-xs);
-  min-width: 0;
-}
-
-/* load_video:视频 part 不做播放器,仅静态提示行 */
-.tool-video-note {
-  display: flex;
-  align-items: center;
-  gap: var(--space-xs);
-  margin-top: var(--space-xs);
-  color: var(--color-text2);
-  font-family: var(--font-sans);
-  font-size: var(--text-xs);
-}
-
-/* ---- 审批卡片 ---- */
-.approval {
-  margin: var(--space-sm) 0;
-  padding: var(--space-sm) var(--space-md);
-  border: 1px solid var(--color-gold);
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--color-gold) 10%, var(--color-card));
-}
-
-.approval-head {
-  display: flex;
-  align-items: center;
-  gap: var(--space-sm);
-}
-
-.approval-title {
-  font-size: var(--text-sm);
-  font-weight: 600;
-  color: var(--color-gold);
-}
-
-.approval-rule {
-  margin-top: var(--space-xs);
-  font-family: var(--font-mono);
-  font-size: var(--text-sm);
-  color: var(--color-text);
-  word-break: break-all;
-}
-
-.approval-desc {
-  margin-top: var(--space-xs);
-  font-size: var(--text-sm);
-  color: var(--color-text2);
-}
 
 .approval-accesses {
   margin-top: var(--space-xs);
@@ -1739,13 +1243,6 @@ onUnmounted(() => {
   font-size: var(--text-xs);
   color: var(--color-text2);
   word-break: break-all;
-}
-
-.approval-decided {
-  margin-top: var(--space-sm);
-  font-size: var(--text-sm);
-  font-weight: 600;
-  color: var(--color-text2);
 }
 
 /* ---- composer 审批面板(等待审批时接管输入区;警示色顶条) ---- */
@@ -1831,199 +1328,7 @@ onUnmounted(() => {
   font-size: var(--text-xs);
 }
 
-/* ---- 检测结果卡 ---- */
-.detection {
-  margin: var(--space-sm) 0;
-  padding: var(--space-sm) var(--space-md);
-  border: 1px solid var(--color-accent);
-  border-radius: var(--radius-sm);
-  background: var(--color-card);
-  box-shadow: var(--shadow);
-}
 
-.detection-head {
-  display: flex;
-  align-items: center;
-  gap: var(--space-sm);
-}
-
-.detection-title {
-  font-size: var(--text-md);
-  font-weight: 600;
-  color: var(--color-accent);
-}
-
-.detection-badge {
-  padding: 2px var(--space-sm);
-  border-radius: var(--radius-sm);
-  font-size: var(--text-xs);
-  font-weight: 600;
-}
-
-.detection-badge.normal {
-  background: var(--color-sage-soft);
-  color: var(--color-sage);
-}
-
-.detection-badge.abnormal {
-  background: var(--color-accent-soft);
-  color: var(--color-accent);
-}
-
-/* 11 位编码:等宽字体,置位高亮 accent */
-.detection-encoding {
-  margin-top: var(--space-sm);
-  font-family: var(--font-mono);
-  font-size: var(--text-xl);
-  letter-spacing: 0.06em;
-  color: var(--color-text2);
-  overflow-wrap: anywhere;
-}
-
-.detection-encoding .bit.on {
-  color: var(--color-accent);
-  font-weight: 700;
-  background: var(--color-accent-soft);
-  border-radius: 4px;
-  padding: 0 2px;
-}
-
-.detection-encoding .bit-sep {
-  color: var(--color-dot-muted);
-}
-
-.detection-events {
-  margin-top: var(--space-sm);
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-sm);
-}
-
-/* 检出事件单元:chip + 标注图(或降级小字)纵向排列 */
-.detection-event-item {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: var(--space-xs);
-}
-
-.detection-event {
-  padding: 2px var(--space-sm);
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--color-accent);
-  background: var(--color-accent-soft);
-  color: var(--color-accent);
-  font-size: var(--text-xs);
-  font-weight: 600;
-}
-
-/* 逐事件标注图(submit_detection 服务端生成,点击进画廊) */
-.detection-event-img {
-  width: 200px;
-  height: 130px;
-  object-fit: cover;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--color-border);
-  cursor: zoom-in;
-}
-
-/* 标注降级小字(无定位框 / 标注图生成失败) */
-.detection-event-note {
-  font-size: var(--text-xs);
-  color: var(--color-text2);
-}
-
-.detection-report {
-  margin-top: var(--space-sm);
-  font-size: var(--text-md);
-  line-height: 1.6;
-}
-
-.detection-raw {
-  margin: var(--space-xs) 0 0;
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-family: var(--font-mono);
-  font-size: var(--text-sm);
-  color: var(--color-text2);
-}
-
-/* ---- markdown 正文(mdToHtml 输出的 .md 容器) ---- */
-.bubble-md {
-  white-space: normal;
-}
-
-.bubble-md :deep(.md) > :first-child {
-  margin-top: 0;
-}
-
-.bubble-md :deep(.md) > :last-child {
-  margin-bottom: 0;
-}
-
-.bubble-md :deep(.md p),
-.bubble-md :deep(.md ul),
-.bubble-md :deep(.md ol),
-.bubble-md :deep(.md blockquote),
-.bubble-md :deep(.md pre),
-.bubble-md :deep(.md table) {
-  margin: var(--space-xs) 0;
-}
-
-.bubble-md :deep(.md h1),
-.bubble-md :deep(.md h2),
-.bubble-md :deep(.md h3),
-.bubble-md :deep(.md h4) {
-  margin: var(--space-sm) 0 var(--space-xs);
-  font-size: var(--text-md);
-}
-
-.bubble-md :deep(.md ul),
-.bubble-md :deep(.md ol) {
-  padding-left: var(--space-lg);
-}
-
-.bubble-md :deep(.md code) {
-  padding: 0 4px;
-  border-radius: var(--radius-sm);
-  background: var(--color-surface-2);
-  border: 1px solid var(--color-border);
-  font-size: var(--text-sm);
-}
-
-.bubble-md :deep(.md pre) {
-  padding: var(--space-sm);
-  border-radius: var(--radius-sm);
-  background: var(--color-surface-2);
-  border: 1px solid var(--color-border);
-  overflow-x: auto;
-}
-
-.bubble-md :deep(.md pre code) {
-  padding: 0;
-  border: none;
-  background: none;
-}
-
-.bubble-md :deep(.md a) {
-  color: var(--color-accent);
-}
-
-.bubble-md :deep(.md blockquote) {
-  padding-left: var(--space-sm);
-  border-left: 2px solid var(--color-border);
-  color: var(--color-text2);
-}
-
-.bubble-md :deep(.md table) {
-  border-collapse: collapse;
-}
-
-.bubble-md :deep(.md th),
-.bubble-md :deep(.md td) {
-  padding: 2px var(--space-sm);
-  border: 1px solid var(--color-border);
-}
 
 /* ---- 恢复条(断连恢复:服务端轮次仍在跑,轮询补齐) ---- */
 .resume-bar {
@@ -2042,14 +1347,6 @@ onUnmounted(() => {
   color: var(--color-blue);
 }
 
-/* 「已插话」小标记(steer 注入的 user 气泡,仅本地流式期间存在) */
-.steer-tag {
-  font-size: var(--text-xs);
-  color: var(--color-blue);
-  background: var(--color-blue-soft);
-  border-radius: var(--radius-sm);
-  padding: 0 var(--space-xs);
-}
 
 /* ---- 失败条 ---- */
 .fail-bar {
@@ -2299,102 +1596,7 @@ onUnmounted(() => {
   cursor: default;
 }
 
-/* ---- 系统提示条目(自动压缩等) ---- */
-.system-note {
-  margin: var(--space-sm) 0;
-  text-align: center;
-  font-size: var(--text-xs);
-  color: var(--color-text2);
-}
 
-/* 警示级系统提示(输出截断等):gold 警示色系 */
-.system-note.warn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-xs);
-  padding: var(--space-xs) var(--space-sm);
-  border: 1px solid var(--color-gold);
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--color-gold) 10%, var(--color-card));
-  color: var(--color-gold);
-}
-
-/* ---- 消息底部行:HH:MM + hover 显现的操作按钮组(参考 kimi-code) ---- */
-.msg-col {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  max-width: 65%;
-}
-
-.row.user .msg-col {
-  align-items: flex-end;
-}
-
-.msg-col .bubble {
-  max-width: 100%;
-}
-
-.msg-meta {
-  display: flex;
-  align-items: center;
-  gap: var(--space-sm);
-  padding: 2px var(--space-xs) 0;
-}
-
-.msg-time {
-  font-size: var(--text-xs);
-  color: var(--color-text2);
-}
-
-.msg-actions {
-  display: inline-flex;
-  gap: 2px;
-  opacity: 0;
-  transition: opacity var(--dur-fast) var(--ease-out);
-}
-
-.msg-col:hover .msg-actions,
-.msg-col:focus-within .msg-actions {
-  opacity: 1;
-}
-
-.msg-act {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 20px;
-  height: 20px;
-  padding: 0;
-  border: none;
-  border-radius: var(--radius-sm);
-  background: none;
-  color: var(--color-text2);
-  cursor: pointer;
-  transition:
-    color var(--dur-fast) var(--ease-out),
-    background var(--dur-fast) var(--ease-out);
-}
-
-.msg-act:hover:not(:disabled) {
-  color: var(--color-accent);
-  background: var(--color-hover-bg);
-}
-
-.msg-act:active:not(:disabled) {
-  background: var(--color-accent-soft);
-}
-
-.msg-act:focus-visible {
-  outline: 2px solid var(--color-accent);
-  outline-offset: 1px;
-}
-
-.msg-act:disabled {
-  opacity: 0.4;
-  cursor: default;
-}
 
 /* ---- 暂存附件区 ---- */
 .attach-list {
@@ -2460,16 +1662,6 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 
-/* ---- user 气泡内视频小播放器(上传附件,src=/api/agent/uploads/{name}) ---- */
-.bubble-video {
-  display: block;
-  width: min(320px, 100%);
-  max-height: 180px;
-  margin-bottom: var(--space-sm);
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--color-border);
-  background: var(--color-stage-bg);
-}
 
 .attach-remove {
   position: absolute;
