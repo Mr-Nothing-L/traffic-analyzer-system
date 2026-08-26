@@ -20,7 +20,7 @@
  * 必须以一条 user 消息开头(即切点落在上一轮完整交互结束之后、下一条
  * user 消息之前),保证当前进行中的 user 轮次永远不会被切进压缩区。
  */
-import type { Message } from '#/message';
+import type { Message } from '../llm/kosong';
 
 /** 压缩触发参数(默认值对齐 vendor DEFAULT_COMPACTION_CONFIG)。 */
 export interface CompactionConfig {

@@ -12,7 +12,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { createAssistantMessage, createUserMessage, type Message } from '#/message';
+import { createAssistantMessage, createUserMessage, type Message } from '../llm/kosong';
 
 import { SessionManager } from './session';
 import type { TimelineEntry } from './storage';

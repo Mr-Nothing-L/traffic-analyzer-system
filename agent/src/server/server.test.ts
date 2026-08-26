@@ -11,93 +11,25 @@ import { DatabaseSync } from 'node:sqlite';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import type { Message, StreamedMessagePart, ToolCall } from '#/message';
-import type {
-  ChatProvider,
-  GenerateOptions,
-  StreamedMessage,
-  ThinkingEffort,
-} from '#/provider';
-import type { Tool } from '#/tool';
-import type { TokenUsage } from '#/usage';
+import {
+  ScriptedProvider,
+  streamOf,
+  text,
+  toolCall,
+} from '../testkit/scriptedProvider';
 
 import type { ExecutableTool, ExecutableToolResult } from '../tools/contract';
 import { ToolRegistry } from '../tools/registry';
 
 import { createAgentServer, defaultSystemPrompt, type AgentServer } from './app';
 import { loadEventContract } from '../tools/builtin/eventContract';
-import { SUMMARY_PREFIX, SUMMARY_SYSTEM_PROMPT } from '../loop/summarize';
+import { SUMMARY_PREFIX } from '../loop/summarize';
 import type { Session } from './session';
 import type { TimelineEntry } from './storage';
 
 // ---------------------------------------------------------------------------
 // 假 provider / 假工具
 // ---------------------------------------------------------------------------
-
-class ScriptedProvider implements ChatProvider {
-  readonly name = 'scripted';
-  readonly modelName = 'scripted-model';
-  readonly thinkingEffort = null;
-  readonly histories: Message[][] = [];
-  private readonly script: StreamedMessagePart[][];
-  /** 与 script 逐步对应的 usage(缺省 null = provider 不上报)。 */
-  private readonly usages: (TokenUsage | null)[];
-  /** 摘要调用的应答队列;Error = 摘要失败(测回退);队列空 = 默认失败。 */
-  private readonly summaries: (StreamedMessagePart[] | Error)[];
-
-  constructor(
-    script: StreamedMessagePart[][],
-    usages: (TokenUsage | null)[] = [],
-    summaries: (StreamedMessagePart[] | Error)[] = [],
-  ) {
-    this.script = [...script];
-    this.usages = [...usages];
-    this.summaries = [...summaries];
-  }
-
-  generate(
-    systemPrompt: string,
-    _tools: Tool[],
-    history: Message[],
-    _options?: GenerateOptions,
-  ): Promise<StreamedMessage> {
-    // 按调用内容分场景:摘要调用(system prompt 为摘要指令)走 summaries 队列。
-    if (systemPrompt === SUMMARY_SYSTEM_PROMPT) {
-      const summary = this.summaries.shift();
-      if (summary === undefined) return Promise.reject(new Error('summary not scripted'));
-      if (summary instanceof Error) return Promise.reject(summary);
-      return Promise.resolve(streamOf(summary));
-    }
-    this.histories.push(history.map((m) => m));
-    const parts = this.script.shift();
-    if (parts === undefined) return Promise.reject(new Error('script exhausted'));
-    return Promise.resolve(streamOf(parts, this.usages.shift() ?? null));
-  }
-
-  withThinking(_effort: ThinkingEffort): ChatProvider {
-    return this;
-  }
-}
-
-function streamOf(parts: StreamedMessagePart[], usage: TokenUsage | null = null): StreamedMessage {
-  return {
-    async *[Symbol.asyncIterator]() {
-      for (const part of parts) yield part;
-    },
-    id: null,
-    usage,
-    finishReason: 'completed',
-    rawFinishReason: 'stop',
-  };
-}
-
-function toolCall(id: string, name: string, args: unknown): ToolCall {
-  return { type: 'function', id, name, arguments: JSON.stringify(args) };
-}
-
-function text(text: string): StreamedMessagePart {
-  return { type: 'text', text };
-}
 
 /** 只读假工具(accesses 为空,manual 模式下 default-readonly-approve 直接放行)。 */
 function echoTool(): ExecutableTool {
@@ -312,14 +244,14 @@ afterEach(async () => {
 
 describe('agent server', () => {
   it('GET /health → {status:"ok"}', async () => {
-    await startServer(new ScriptedProvider([]), [echoTool()]);
+    await startServer(new ScriptedProvider({ script: [] }), [echoTool()]);
     const res = await fetch(`${baseUrl}/health`);
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ status: 'ok' });
   });
 
   it('POST /sessions:workspaceDir 必须是已存在目录;mode 默认 manual', async () => {
-    await startServer(new ScriptedProvider([]), [echoTool()]);
+    await startServer(new ScriptedProvider({ script: [] }), [echoTool()]);
 
     const bad = await postJson('/sessions', { workspaceDir: path.join(workspace, 'nope') });
     expect(bad.status).toBe(400);
@@ -335,17 +267,17 @@ describe('agent server', () => {
   });
 
   it('POST /chat 未知 session → 404 {error:{code,message}}', async () => {
-    await startServer(new ScriptedProvider([]), [echoTool()]);
+    await startServer(new ScriptedProvider({ script: [] }), [echoTool()]);
     const { status, json } = await postJson('/chat', { sessionId: 'ghost', input: 'hi' });
     expect(status).toBe(404);
     expect(json).toMatchObject({ error: { code: 'session_not_found' } });
   });
 
   it('POST /chat:工具轮 → 文本轮 → done 的 SSE 事件序列', async () => {
-    const provider = new ScriptedProvider([
+    const provider = new ScriptedProvider({ script: [
       [toolCall('c1', 'echo', { a: 1 })],
       [text('最终回答')],
-    ]);
+    ] });
     await startServer(provider, [echoTool()]);
     const sessionId = await createSession('yolo');
 
@@ -384,10 +316,10 @@ describe('agent server', () => {
   });
 
   it('POST /chat:subagent_event 透传 SSE 且不落盘;tool 条目带 note 结论', async () => {
-    const provider = new ScriptedProvider([
+    const provider = new ScriptedProvider({ script: [
       [toolCall('c1', 'sub_emit', { task: '分析视频' })],
       [text('总结')],
-    ]);
+    ] });
     await startServer(provider, [
       subEmitTool(
         [{ type: 'text_delta', text: '子代理思考中' }],
@@ -421,10 +353,10 @@ describe('agent server', () => {
   });
 
   it('approval 往返:manual 模式收到 approval_request,POST /approval approved 后继续', async () => {
-    const provider = new ScriptedProvider([
+    const provider = new ScriptedProvider({ script: [
       [toolCall('c1', 'write_file', { path: '/tmp/x' })],
       [text('写完了')],
-    ]);
+    ] });
     await startServer(provider, [writeTool()]);
     const sessionId = await createSession('manual');
 
@@ -466,7 +398,7 @@ describe('agent server', () => {
   });
 
   it('POST /approval 未知 requestId → 404', async () => {
-    await startServer(new ScriptedProvider([]), [echoTool()]);
+    await startServer(new ScriptedProvider({ script: [] }), [echoTool()]);
     const { status, json } = await postJson('/approval', {
       requestId: 'ghost',
       decision: 'approved',
@@ -483,7 +415,7 @@ describe('agent server', () => {
       events: [],
       report_markdown: '# 报告',
     };
-    const provider = new ScriptedProvider([[toolCall('c1', 'submit_detection', {})]]);
+    const provider = new ScriptedProvider({ script: [[toolCall('c1', 'submit_detection', {})]] });
     await startServer(provider, [submitTool(payload)]);
     const sessionId = await createSession('yolo');
 
@@ -522,10 +454,10 @@ describe('agent server', () => {
 
   it('同 session 的 /chat 互斥:进行中的轮次返回 409', async () => {
     // provider 第一轮发起需要审批的写操作并挂起,期间第二个 /chat 应 409。
-    const provider = new ScriptedProvider([
+    const provider = new ScriptedProvider({ script: [
       [toolCall('c1', 'write_file', {})],
       [text('ok')],
-    ]);
+    ] });
     await startServer(provider, [writeTool()]);
     const sessionId = await createSession('manual');
 
@@ -554,7 +486,7 @@ describe('agent server', () => {
   });
 
   it('持久化往返:重建 server 后 history 完整、kosong messages 恢复供续跑', async () => {
-    const provider = new ScriptedProvider([[text('第一轮回答')], [text('第二轮回答')]]);
+    const provider = new ScriptedProvider({ script: [[text('第一轮回答')], [text('第二轮回答')]] });
     await startServer(provider, [echoTool()]);
     const sessionId = await createSession('yolo');
 
@@ -591,7 +523,7 @@ describe('agent server', () => {
   });
 
   it('GET /sessions:列表字段齐全,title 取首轮用户输入前 30 字', async () => {
-    const provider = new ScriptedProvider([[text('ok')]]);
+    const provider = new ScriptedProvider({ script: [[text('ok')]] });
     await startServer(provider, [echoTool()]);
     const sessionId = await createSession('yolo');
     const longInput = '一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十';
@@ -615,7 +547,7 @@ describe('agent server', () => {
   });
 
   it('DELETE /sessions/{id}:清理内存与磁盘;未知 id → 404', async () => {
-    const provider = new ScriptedProvider([[text('ok')]]);
+    const provider = new ScriptedProvider({ script: [[text('ok')]] });
     await startServer(provider, [echoTool()]);
     const sessionId = await createSession('yolo');
 
@@ -641,7 +573,7 @@ describe('agent server', () => {
   });
 
   it('images 附件:转成 image ContentPart 进入 user message,上限 4 张', async () => {
-    const provider = new ScriptedProvider([[text('看到了')]]);
+    const provider = new ScriptedProvider({ script: [[text('看到了')]] });
     await startServer(provider, [echoTool()]);
     const sessionId = await createSession('yolo');
 
@@ -675,10 +607,10 @@ describe('agent server', () => {
   });
 
   it('approval 条目:request 与回执 decision 都进历史', async () => {
-    const provider = new ScriptedProvider([
+    const provider = new ScriptedProvider({ script: [
       [toolCall('c1', 'write_file', { path: '/tmp/x' })],
       [text('写完了')],
-    ]);
+    ] });
     await startServer(provider, [writeTool()]);
     const sessionId = await createSession('manual');
 
@@ -710,10 +642,7 @@ describe('agent server', () => {
   });
 
   it('context_usage:SSE 透传真实用量,GET /sessions 摘要带 usedTokens', async () => {
-    const provider = new ScriptedProvider(
-      [[text('回答')]],
-      [{ inputOther: 500, inputCacheRead: 60, inputCacheCreation: 7, output: 40 }],
-    );
+    const provider = new ScriptedProvider({ script: [[text('回答')]], usages: [{ inputOther: 500, inputCacheRead: 60, inputCacheCreation: 7, output: 40 }] });
     await startServer(provider, [echoTool()], { contextTokens: 8000 });
     const sessionId = await createSession('yolo');
 
@@ -743,16 +672,12 @@ describe('agent server', () => {
       }),
     };
     const summaryText = '视频 演示区/v1.mp4;事件 2 检出,证据帧 f3,置信度中;结论尚未提交';
-    const provider = new ScriptedProvider(
-      [
+    const provider = new ScriptedProvider({ script: [
         [toolCall('c1', 'echo', {})],
         [text('第一轮完')],
         [toolCall('c2', 'echo', {})],
         [text('第二轮完')],
-      ],
-      [],
-      [[text(summaryText)]],
-    );
+      ], usages: [], summaries: [[text(summaryText)]] });
     await startServer(provider, [bigEcho]);
     const sessionId = await createSession('yolo');
 
@@ -799,7 +724,7 @@ describe('agent server', () => {
   });
 
   it('POST /sessions/{id}/compact:单轮会话无可压缩内容 → noop(compacted=false)', async () => {
-    const provider = new ScriptedProvider([[text('ok')]]);
+    const provider = new ScriptedProvider({ script: [[text('ok')]] });
     await startServer(provider, [echoTool()]);
     const sessionId = await createSession('yolo');
 
@@ -813,10 +738,10 @@ describe('agent server', () => {
   });
 
   it('POST /sessions/{id}/compact:未知 session → 404;进行中 → 409', async () => {
-    const provider = new ScriptedProvider([
+    const provider = new ScriptedProvider({ script: [
       [toolCall('c1', 'write_file', {})],
       [text('ok')],
-    ]);
+    ] });
     await startServer(provider, [writeTool()]);
     const sessionId = await createSession('manual');
 
@@ -849,7 +774,7 @@ describe('agent server', () => {
   });
 
   it('POST /sessions/{id}/mode:切换模式并持久化;非法 mode → 400;未知 session → 404', async () => {
-    await startServer(new ScriptedProvider([]), [echoTool()]);
+    await startServer(new ScriptedProvider({ script: [] }), [echoTool()]);
     const sessionId = await createSession();
 
     const ok = await postJson(`/sessions/${sessionId}/mode`, { mode: 'auto' });
@@ -868,12 +793,12 @@ describe('agent server', () => {
   });
 
   it('POST /sessions/{id}/mode:切换后下一轮裁决生效(manual → yolo 后写工具直接放行)', async () => {
-    const provider = new ScriptedProvider([
+    const provider = new ScriptedProvider({ script: [
       [toolCall('c1', 'write_file', {})],
       [text('第一轮完')],
       [toolCall('c2', 'write_file', {})],
       [text('第二轮完')],
-    ]);
+    ] });
     await startServer(provider, [writeTool()]);
     const sessionId = await createSession('manual');
 
@@ -907,7 +832,7 @@ describe('agent server', () => {
   });
 
   it('POST /sessions/{id}/mode:重启恢复后 mode 保持', async () => {
-    const provider = new ScriptedProvider([]);
+    const provider = new ScriptedProvider({ script: [] });
     await startServer(provider, [echoTool()]);
     const sessionId = await createSession();
 
@@ -985,7 +910,7 @@ describe('agent server', () => {
 
 describe('POST /workspaces/restore', () => {
   it('chat 后重启 → GET /sessions 为空 → restore 后历史可见(含 history)', async () => {
-    const provider = new ScriptedProvider([[text('检测完成')]]);
+    const provider = new ScriptedProvider({ script: [[text('检测完成')]] });
     await startServer(provider, [echoTool()]);
     const sessionId = await createSession();
 
@@ -995,7 +920,7 @@ describe('POST /workspaces/restore', () => {
 
     // 重启:新 server 不传 restoreWorkspaceDirs,内存索引为空。
     await agentServer?.close();
-    await startServer(new ScriptedProvider([]), [echoTool()]);
+    await startServer(new ScriptedProvider({ script: [] }), [echoTool()]);
 
     const before = await getJson('/sessions');
     expect((before.json as { sessions: unknown[] }).sessions).toEqual([]);
@@ -1019,7 +944,7 @@ describe('POST /workspaces/restore', () => {
   });
 
   it('幂等:重复调用不报错不重复,第二次 restored:0', async () => {
-    await startServer(new ScriptedProvider([]), [echoTool()]);
+    await startServer(new ScriptedProvider({ script: [] }), [echoTool()]);
     const sessionId = await createSession();
     // 模拟「代理层重复调用」:同一会话已在内存,restore 不得覆盖/重复。
     const first = await postJson('/workspaces/restore', { workspaceDir: workspace });
@@ -1033,7 +958,7 @@ describe('POST /workspaces/restore', () => {
   });
 
   it('workspaceDir 不是已存在目录 → 400 invalid_workspace;缺字段 → 400', async () => {
-    await startServer(new ScriptedProvider([]), [echoTool()]);
+    await startServer(new ScriptedProvider({ script: [] }), [echoTool()]);
 
     const bad = await postJson('/workspaces/restore', {
       workspaceDir: path.join(workspace, 'nope'),
@@ -1047,7 +972,7 @@ describe('POST /workspaces/restore', () => {
   });
 
   it('sessions.db 不存在 → restored:0,且不在磁盘上创建 .agent 目录', async () => {
-    await startServer(new ScriptedProvider([]), [echoTool()]);
+    await startServer(new ScriptedProvider({ script: [] }), [echoTool()]);
     const empty = mkdtempSync(path.join(tmpdir(), 'agent-restore-empty-'));
     try {
       const res = await postJson('/workspaces/restore', { workspaceDir: empty });
@@ -1069,7 +994,7 @@ describe('POST /workspaces/restore', () => {
 
 describe('history/restore 只读 entries(不解析 messages)', () => {
   it('messages 行损坏时:启动恢复、列表、history 仍正常', async () => {
-    const provider = new ScriptedProvider([[text('检测完成')]]);
+    const provider = new ScriptedProvider({ script: [[text('检测完成')]] });
     await startServer(provider, [echoTool()]);
     const sessionId = await createSession();
 
@@ -1084,7 +1009,7 @@ describe('history/restore 只读 entries(不解析 messages)', () => {
     db.close();
 
     // 重启并经启动路径恢复(构造器 workspaces):只开库,不物化。
-    await startServer(new ScriptedProvider([]), [echoTool()], {
+    await startServer(new ScriptedProvider({ script: [] }), [echoTool()], {
       restoreWorkspaceDirs: [workspace],
     });
 
@@ -1113,7 +1038,7 @@ describe('history/restore 只读 entries(不解析 messages)', () => {
 
 describe('workspace registry self-restore', () => {
   it('GET /sessions 按登记表自动恢复尚未打开的工作区', async () => {
-    const provider = new ScriptedProvider([[text('检测完成')]]);
+    const provider = new ScriptedProvider({ script: [[text('检测完成')]] });
     await startServer(provider, [echoTool()]);
     const sessionId = await createSession();
     const res = await startChat(sessionId, '检测这个视频');
@@ -1126,7 +1051,7 @@ describe('workspace registry self-restore', () => {
     writeFileSync(registryPath, JSON.stringify([workspace]), 'utf8');
 
     try {
-      await startServer(new ScriptedProvider([]), [echoTool()], {
+      await startServer(new ScriptedProvider({ script: [] }), [echoTool()], {
         workspaceRegistryPath: registryPath,
       });
 
@@ -1141,7 +1066,7 @@ describe('workspace registry self-restore', () => {
   });
 
   it('登记表损坏/缺失时 GET /sessions 不炸、返回已有会话', async () => {
-    await startServer(new ScriptedProvider([]), [echoTool()]);
+    await startServer(new ScriptedProvider({ script: [] }), [echoTool()]);
     const sessionId = await createSession();
 
     const registryPath = path.join(tmpdir(), `agent-registry-bad-${Date.now()}.json`);
@@ -1159,7 +1084,7 @@ describe('workspace registry self-restore', () => {
   });
 
   it('已打开的工作区在登记表中只恢复一次(幂等)', async () => {
-    const provider = new ScriptedProvider([[text('检测完成')]]);
+    const provider = new ScriptedProvider({ script: [[text('检测完成')]] });
     await startServer(provider, [echoTool()]);
     const sessionId = await createSession();
     const res = await startChat(sessionId, '检测这个视频');

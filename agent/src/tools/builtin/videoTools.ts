@@ -14,7 +14,7 @@
  */
 import { z } from 'zod';
 
-import type { ContentPart } from '../../kosong/message';
+import type { ContentPart } from '../../llm/kosong';
 import type { WorkspaceConfig } from '../../sandbox/path-access';
 import {
   ToolAccesses,

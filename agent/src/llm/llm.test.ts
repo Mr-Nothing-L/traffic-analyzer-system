@@ -12,17 +12,17 @@ import { join } from 'node:path';
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { generate } from '#/generate';
 import {
+  generate,
   createAssistantMessage,
   createToolMessage,
   createUserMessage,
   extractText,
+  OpenAILegacyChatProvider,
   type Message,
   type ToolCall,
-} from '#/message';
-import { OpenAILegacyChatProvider } from '#/providers/openai-legacy';
-import type { Tool } from '#/tool';
+  type Tool,
+} from './kosong';
 
 import { createCompactionConfig } from '../loop/compaction';
 import { compactMessagesWithSummary } from '../loop/summarize';

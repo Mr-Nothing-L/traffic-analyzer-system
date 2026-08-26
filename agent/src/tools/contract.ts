@@ -5,10 +5,9 @@
  * Ported from MoonshotAI/kimi-code (MIT) packages/agent-core-v2/src/tool/toolContract.ts,
  * trimmed to what this runtime needs (no DI, no delivery/display metadata).
  */
-import type { ContentPart } from '../kosong/message';
-import type { Tool } from '../kosong/tool';
+import type { ContentPart, Tool } from '../llm/kosong';
 
-export type { Tool } from '../kosong/tool';
+export type { Tool } from '../llm/kosong';
 
 export type ExecutableToolOutput = string | ContentPart[];
 
@@ -61,9 +60,11 @@ export interface RunnableToolExecution {
   /**
    * Stable string identifying "what is being done" for approval UX and
    * session-scope approval memory, e.g. `write_file(/abs/path)`.
+   * The rule should be `tool_name(normalized_key_params)` so that different
+   * targets (different files, different subagent tasks, different videos)
+   * get distinct rules and session-scope approvals do not over-apply.
    */
   readonly approvalRule: string;
-  readonly matchesRule?: (ruleArgs: string) => boolean;
   /**
    * 单次执行超时(ms);缺省用 loop 级 toolTimeoutMs。长任务工具
    * (如 spawn_subagent,600s)在此抬高自己的上限。

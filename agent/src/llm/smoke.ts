@@ -10,9 +10,14 @@
  */
 import { pathToFileURL } from 'node:url';
 
-import { generate } from '#/generate';
-import { createToolMessage, createUserMessage, extractText, type Message } from '#/message';
-import type { Tool } from '#/tool';
+import {
+  generate,
+  createToolMessage,
+  createUserMessage,
+  extractText,
+  type Message,
+  type Tool,
+} from './kosong';
 
 import { defaultEnvPath } from './env.ts';
 import { createProviderFromEnv } from './provider.ts';

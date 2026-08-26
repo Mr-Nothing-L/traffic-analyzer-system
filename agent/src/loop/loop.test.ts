@@ -10,18 +10,17 @@ import {
   createUserMessage,
   extractText,
   type Message,
-  type StreamedMessagePart,
   type ToolCall,
-} from '#/message';
-import type {
-  ChatProvider,
-  FinishReason,
-  GenerateOptions,
-  StreamedMessage,
-  ThinkingEffort,
-} from '#/provider';
-import type { Tool } from '#/tool';
-import type { TokenUsage } from '#/usage';
+  type FinishReason,
+  type TokenUsage,
+} from '../llm/kosong';
+import {
+  ScriptedProvider,
+  streamOf,
+  text,
+  toolCall,
+  type ScriptedProviderOptions,
+} from '../testkit/scriptedProvider';
 
 import { CallbackApprovalService } from '../permissions/approval';
 import { PermissionGate } from '../permissions/gate';
@@ -38,95 +37,7 @@ import {
   type StepPersistUpdate,
 } from './agentLoop';
 import { compactMessages, createCompactionConfig, isOverContextByUsage } from './compaction';
-import { SUMMARY_PREFIX, SUMMARY_SYSTEM_PROMPT } from './summarize';
-
-// ---------------------------------------------------------------------------
-// 假 provider:按脚本逐轮返回 parts
-// ---------------------------------------------------------------------------
-
-class ScriptedProvider implements ChatProvider {
-  readonly name = 'scripted';
-  readonly modelName = 'scripted-model';
-  readonly thinkingEffort = null;
-  /** 每次 generate 调用收到的历史快照(不含摘要调用)。 */
-  readonly histories: Message[][] = [];
-  /** 摘要调用收到的 tools(用于断言不传 tools)。 */
-  readonly summaryTools: Tool[][] = [];
-  /** withThinking 收到的 effort(摘要关思考回退路径断言用)。 */
-  readonly thinkingEfforts: ThinkingEffort[] = [];
-  private readonly script: StreamedMessagePart[][];
-  /** 与 script 逐步对应的 usage(缺省 null = provider 不上报)。 */
-  private readonly usages: (TokenUsage | null)[];
-  /** 与 script 逐步对应的 finishReason(缺省 'completed')。 */
-  private readonly finishReasons: (FinishReason | null)[];
-  /** 摘要调用的应答队列;Error = 摘要失败(测回退);队列空 = 默认失败。 */
-  private readonly summaries: (StreamedMessagePart[] | Error)[];
-
-  constructor(
-    script: StreamedMessagePart[][],
-    usages: (TokenUsage | null)[] = [],
-    summaries: (StreamedMessagePart[] | Error)[] = [],
-    finishReasons: (FinishReason | null)[] = [],
-  ) {
-    this.script = [...script];
-    this.usages = [...usages];
-    this.summaries = [...summaries];
-    this.finishReasons = [...finishReasons];
-  }
-
-  generate(
-    systemPrompt: string,
-    tools: Tool[],
-    history: Message[],
-    _options?: GenerateOptions,
-  ): Promise<StreamedMessage> {
-    // 按调用内容分场景:摘要调用(system prompt 为摘要指令)走 summaries 队列。
-    if (systemPrompt === SUMMARY_SYSTEM_PROMPT) {
-      this.summaryTools.push(tools);
-      const summary = this.summaries.shift();
-      if (summary === undefined) return Promise.reject(new Error('summary not scripted'));
-      if (summary instanceof Error) return Promise.reject(summary);
-      return Promise.resolve(streamOf(summary));
-    }
-    this.histories.push(history.map((m) => m));
-    const parts = this.script.shift();
-    if (parts === undefined) {
-      return Promise.reject(new Error('script exhausted'));
-    }
-    return Promise.resolve(
-      streamOf(parts, this.usages.shift() ?? null, this.finishReasons.shift() ?? 'completed'),
-    );
-  }
-
-  withThinking(effort: ThinkingEffort): ChatProvider {
-    this.thinkingEfforts.push(effort);
-    return this;
-  }
-}
-
-function streamOf(
-  parts: StreamedMessagePart[],
-  usage: TokenUsage | null = null,
-  finishReason: FinishReason | null = 'completed',
-): StreamedMessage {
-  return {
-    async *[Symbol.asyncIterator]() {
-      for (const part of parts) yield part;
-    },
-    id: null,
-    usage,
-    finishReason,
-    rawFinishReason: finishReason === 'truncated' ? 'length' : 'stop',
-  };
-}
-
-function toolCall(id: string, name: string, args: unknown): ToolCall {
-  return { type: 'function', id, name, arguments: JSON.stringify(args) };
-}
-
-function text(text: string): StreamedMessagePart {
-  return { type: 'text', text };
-}
+import { SUMMARY_PREFIX } from './summarize';
 
 // ---------------------------------------------------------------------------
 // 假工具 / gate / 选项组装
@@ -173,7 +84,7 @@ function harness(
 ): Harness {
   const registry = new ToolRegistry();
   for (const tool of tools) registry.register(tool);
-  const provider = new ScriptedProvider(script, usages, summaries, finishReasons);
+  const provider = new ScriptedProvider({ script, usages, summaries, finishReasons });
   const events: AgentLoopEvent[] = [];
   return {
     provider,

@@ -7,10 +7,14 @@
  * 上限与真实 usage 触发压缩(compaction.ts 的 isOverContextByUsage,
  * 触发判定单轨,不再回退字符估算)。
  */
-import { isAbortError } from '#/errors';
-import { generate } from '#/generate';
-import { createToolMessage, type Message, type ToolCall } from '#/message';
-import type { ChatProvider } from '#/provider';
+import {
+  isAbortError,
+  generate,
+  createToolMessage,
+  type Message,
+  type ToolCall,
+  type ChatProvider,
+} from '../llm/kosong';
 
 import type { PermissionGate } from '../permissions/gate';
 import {

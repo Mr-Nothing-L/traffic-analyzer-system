@@ -325,7 +325,9 @@ export function createSubmitDetectionTool(
           deps.workspace !== undefined
             ? ToolAccesses.readFile(videoPath)
             : ToolAccesses.none(),
-        approvalRule: 'submit_detection',
+        // 正式检测提交按 video_path 区分规则:不同视频独立确认,
+        // 相同视频在 session 内可复用(避免重复审批)。
+        approvalRule: `submit_detection(${videoPath})`,
         stopBatchAfterThis: true,
         execute: async (): Promise<ExecutableToolResult> => {
           const annotationMissing: number[] = [];

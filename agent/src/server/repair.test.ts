@@ -9,7 +9,7 @@ import path from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { createToolMessage, createUserMessage, type Message, type ToolCall } from '#/message';
+import { createToolMessage, createUserMessage, type Message, type ToolCall } from '../llm/kosong';
 
 import { INTERRUPTED_TOOL_MESSAGE, repairTailMessages } from './repair';
 import { SessionManager } from './session';

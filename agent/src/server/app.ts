@@ -74,8 +74,7 @@ import { readFileSync, statSync } from 'node:fs';
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { fileURLToPath } from 'node:url';
 
-import type { ContentPart, Message } from '#/message';
-import type { ChatProvider } from '#/provider';
+import type { ContentPart, Message, ChatProvider } from '../llm/kosong';
 
 import { createProviderFromEnv } from '../llm/provider';
 import { runAgentLoop, type AgentLoopEvent } from '../loop/agentLoop';

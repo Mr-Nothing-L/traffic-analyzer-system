@@ -10,7 +10,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { createUserMessage, extractText, type Message } from '#/message';
+import { createUserMessage, extractText, type Message } from '../llm/kosong';
 
 import { SCHEMA_VERSION, SessionStorage, type TimelineEntry } from './storage';
 import type { DetectionPayload } from '../tools/builtin/submitDetection';

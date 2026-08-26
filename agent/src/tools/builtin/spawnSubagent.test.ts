@@ -13,15 +13,23 @@ import path from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import type { Message, StreamedMessagePart, ToolCall } from '../../kosong/message';
 import type {
+  Message,
+  StreamedMessagePart,
+  ToolCall,
   ChatProvider,
   GenerateOptions,
   StreamedMessage,
   ThinkingEffort,
-} from '../../kosong/provider';
-import type { Tool } from '../../kosong/tool';
-import type { TokenUsage } from '../../kosong/usage';
+  Tool,
+  TokenUsage,
+} from '../../llm/kosong';
+import {
+  ScriptedProvider,
+  streamOf,
+  text,
+  toolCall,
+} from '../../testkit/scriptedProvider';
 import type { AgentLoopEvent } from '../../loop/agentLoop';
 import { CallbackApprovalService } from '../../permissions/approval';
 import { PermissionGate } from '../../permissions/gate';
@@ -45,42 +53,6 @@ import {
 // ---------------------------------------------------------------------------
 // 假 provider:按脚本逐轮返回 parts;记录每次 generate 的 tools/history
 // ---------------------------------------------------------------------------
-
-class ScriptedProvider implements ChatProvider {
-  readonly name = 'scripted';
-  readonly modelName = 'scripted-model';
-  readonly thinkingEffort = null;
-  readonly histories: Message[][] = [];
-  readonly toolsPerCall: Tool[][] = [];
-  private readonly script: (StreamedMessagePart[] | Error)[];
-  private readonly usages: (TokenUsage | null)[];
-
-  constructor(
-    script: (StreamedMessagePart[] | Error)[],
-    usages: (TokenUsage | null)[] = [],
-  ) {
-    this.script = [...script];
-    this.usages = [...usages];
-  }
-
-  generate(
-    _systemPrompt: string,
-    tools: Tool[],
-    history: Message[],
-    _options?: GenerateOptions,
-  ): Promise<StreamedMessage> {
-    this.histories.push(history.map((m) => m));
-    this.toolsPerCall.push(tools);
-    const parts = this.script.shift();
-    if (parts === undefined) return Promise.reject(new Error('script exhausted'));
-    if (parts instanceof Error) return Promise.reject(parts);
-    return Promise.resolve(streamOf(parts, this.usages.shift() ?? null));
-  }
-
-  withThinking(_effort: ThinkingEffort): ChatProvider {
-    return this;
-  }
-}
 
 /** 阻塞型 provider:每次 generate 计数并挂起,直到 release()。 */
 class BlockingProvider implements ChatProvider {
@@ -261,7 +233,7 @@ function resolveSpawn(tool: ExecutableTool, input: unknown): RunnableToolExecuti
 
 describe('spawn_subagent', () => {
   it('执行子 loop 并回传最终文本结论;note 记录 reason/steps', async () => {
-    const provider = new ScriptedProvider([[text('子代理结论:视频正常')]]);
+    const provider = new ScriptedProvider({ script: [[text('子代理结论:视频正常')]] });
     const { tool } = makeHarness(provider, [echoTool()]);
 
     const result = await executeSpawn(tool, { task: '分析这段视频' });
@@ -277,7 +249,7 @@ describe('spawn_subagent', () => {
   });
 
   it('resolveExecution 声明 600s 超时;参数不合法返回 isError', () => {
-    const provider = new ScriptedProvider([]);
+    const provider = new ScriptedProvider({ script: [] });
     const { tool } = makeHarness(provider, [echoTool()]);
 
     expect(resolveSpawn(tool, { task: 't' }).timeoutMs).toBe(SUBAGENT_TIMEOUT_MS);
@@ -291,7 +263,7 @@ describe('spawn_subagent', () => {
   });
 
   it('禁递归:子 loop 的工具集不含 spawn_subagent', async () => {
-    const provider = new ScriptedProvider([[text('done')]]);
+    const provider = new ScriptedProvider({ script: [[text('done')]] });
     const { tool } = makeHarness(provider, [echoTool()]);
 
     await executeSpawn(tool, { task: 't' });
@@ -303,7 +275,7 @@ describe('spawn_subagent', () => {
 
   it('子 loop 事件经 ctx.onSubagentEvent 转发,过滤 context_usage', async () => {
     const usage: TokenUsage = { inputOther: 100, output: 10, inputCacheRead: 0, inputCacheCreation: 0 };
-    const provider = new ScriptedProvider([[text('结论')]], [usage]);
+    const provider = new ScriptedProvider({ script: [[text('结论')]], usages: [usage] });
     const { tool } = makeHarness(provider, [echoTool()], { contextTokens: 100_000 });
 
     const forwarded: AgentLoopEvent[] = [];
@@ -353,7 +325,7 @@ describe('spawn_subagent', () => {
   });
 
   it('子 loop 失败容错:provider 异常 → isError 结果说明原因,不抛出', async () => {
-    const provider = new ScriptedProvider([new Error('LLM boom')]);
+    const provider = new ScriptedProvider({ script: [new Error('LLM boom')] });
     const { tool } = makeHarness(provider, [echoTool()]);
 
     const result = await executeSpawn(tool, { task: 't' });
@@ -366,9 +338,7 @@ describe('spawn_subagent', () => {
 
   it('子 loop 达到步数上限:output 说明原因,不视为工具错误', async () => {
     // 子代理每轮都调 echo,永不收敛 → max_steps(12)
-    const provider = new ScriptedProvider(
-      Array.from({ length: SUBAGENT_MAX_STEPS }, (_, i) => [toolCall(`c${i}`, 'echo', {})]),
-    );
+    const provider = new ScriptedProvider({ script: Array.from({ length: SUBAGENT_MAX_STEPS }, (_, i) => [toolCall(`c${i}`, 'echo', {})]) });
     const { tool } = makeHarness(provider, [echoTool()]);
 
     const result = await executeSpawn(tool, { task: 't' });
@@ -388,7 +358,7 @@ describe('spawn_subagent', () => {
       normal: false,
       report_markdown: '检测到抛洒物,位置在车道中央。',
     };
-    const provider = new ScriptedProvider([[toolCall('s1', 'submit_detection', {})]]);
+    const provider = new ScriptedProvider({ script: [[toolCall('s1', 'submit_detection', {})]] });
     const { tool } = makeHarness(provider, [echoTool(), submitTool(payload)]);
 
     const result = await executeSpawn(tool, { task: '检测事件' });
@@ -401,7 +371,7 @@ describe('spawn_subagent', () => {
   });
 
   it('stop_turn 缺 payload:明确报缺失,不再静默回退读 note', async () => {
-    const provider = new ScriptedProvider([[toolCall('s1', 'submit_detection', {})]]);
+    const provider = new ScriptedProvider({ script: [[toolCall('s1', 'submit_detection', {})]] });
     const { tool } = makeHarness(provider, [echoTool(), bareStopTool()]);
 
     const result = await executeSpawn(tool, { task: '检测事件' });
@@ -413,7 +383,7 @@ describe('spawn_subagent', () => {
   it('video_path:读文件转 video_url dataURL 随首条 user 消息直传', async () => {
     const videoBytes = Buffer.from('fake-video-bytes');
     writeFileSync(path.join(workspaceDir, 'clip.mp4'), videoBytes);
-    const provider = new ScriptedProvider([[text('ok')]]);
+    const provider = new ScriptedProvider({ script: [[text('ok')]] });
     const { tool } = makeHarness(provider, [echoTool()]);
 
     const result = await executeSpawn(tool, {
@@ -433,7 +403,7 @@ describe('spawn_subagent', () => {
   });
 
   it('video_path 越出沙盒:resolveExecution 硬否决为 isError', () => {
-    const provider = new ScriptedProvider([]);
+    const provider = new ScriptedProvider({ script: [] });
     const { tool } = makeHarness(provider, [echoTool()]);
 
     const execution = resolveExecutionSync(tool, { task: 't', video_path: '/etc/passwd' });

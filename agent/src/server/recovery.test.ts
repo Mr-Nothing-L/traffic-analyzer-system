@@ -14,14 +14,16 @@ import { DatabaseSync } from 'node:sqlite';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import type { Message, StreamedMessagePart, ToolCall } from '#/message';
 import type {
+  Message,
+  StreamedMessagePart,
+  ToolCall,
   ChatProvider,
   GenerateOptions,
   StreamedMessage,
   ThinkingEffort,
-} from '#/provider';
-import type { Tool } from '#/tool';
+} from '../llm/kosong';
+import { ScriptedProvider, streamOf, text, toolCall } from '../testkit/scriptedProvider';
 
 import type { ExecutableTool } from '../tools/contract';
 import { ToolRegistry } from '../tools/registry';
@@ -33,52 +35,6 @@ import type { TimelineEntry } from './storage';
 // ---------------------------------------------------------------------------
 // 假 provider / 假工具(与 server.test.ts 同一模式)
 // ---------------------------------------------------------------------------
-
-class ScriptedProvider implements ChatProvider {
-  readonly name = 'scripted';
-  readonly modelName = 'scripted-model';
-  readonly thinkingEffort = null;
-  private readonly script: StreamedMessagePart[][];
-
-  constructor(script: StreamedMessagePart[][]) {
-    this.script = [...script];
-  }
-
-  generate(
-    _systemPrompt: string,
-    _tools: Tool[],
-    _history: Message[],
-    _options?: GenerateOptions,
-  ): Promise<StreamedMessage> {
-    const parts = this.script.shift();
-    if (parts === undefined) return Promise.reject(new Error('script exhausted'));
-    return Promise.resolve(streamOf(parts));
-  }
-
-  withThinking(_effort: ThinkingEffort): ChatProvider {
-    return this;
-  }
-}
-
-function streamOf(parts: StreamedMessagePart[]): StreamedMessage {
-  return {
-    async *[Symbol.asyncIterator]() {
-      for (const part of parts) yield part;
-    },
-    id: null,
-    usage: null,
-    finishReason: 'completed',
-    rawFinishReason: 'stop',
-  };
-}
-
-function toolCall(id: string, name: string, args: unknown): ToolCall {
-  return { type: 'function', id, name, arguments: JSON.stringify(args) };
-}
-
-function text(text: string): StreamedMessagePart {
-  return { type: 'text', text };
-}
 
 /** 只读假工具(accesses 为空,任何模式直接放行)。 */
 function echoTool(): ExecutableTool {
@@ -273,10 +229,10 @@ afterEach(async () => {
 
 describe('断连恢复与增量落盘', () => {
   it('SSE 断连不杀轮次:挂起审批以 cancelled 落定,loop 跑完并落盘,busy 释放', async () => {
-    const provider = new ScriptedProvider([
+    const provider = new ScriptedProvider({ script: [
       [toolCall('c1', 'write_file', {})],
       [text('写完了')],
-    ]);
+    ] });
     await startServer(provider, [writeTool()]);
     const sessionId = await createSession('manual');
 
@@ -316,10 +272,10 @@ describe('断连恢复与增量落盘', () => {
   });
 
   it('按步增量落盘:轮次进行中磁盘已可见 user 条目与 user 消息', async () => {
-    const provider = new ScriptedProvider([
+    const provider = new ScriptedProvider({ script: [
       [toolCall('c1', 'write_file', {})],
       [text('写完了')],
-    ]);
+    ] });
     await startServer(provider, [writeTool()]);
     const sessionId = await createSession('manual');
 
@@ -352,12 +308,12 @@ describe('断连恢复与增量落盘', () => {
   });
 
   it('GET /sessions/{id}/events:fromSeq 过滤、inProgress、404/400', async () => {
-    const provider = new ScriptedProvider([
+    const provider = new ScriptedProvider({ script: [
       [toolCall('c1', 'echo', {})],
       [text('回答')],
       [toolCall('c2', 'write_file', {})],
       [text('ok')],
-    ]);
+    ] });
     await startServer(provider, [echoTool(), writeTool()]);
     const sessionId = await createSession('yolo');
 
@@ -402,10 +358,10 @@ describe('断连恢复与增量落盘', () => {
   });
 
   it('SSE 事件带 seq(已落盘水位):单调不减,done 时等于条目总数', async () => {
-    const provider = new ScriptedProvider([
+    const provider = new ScriptedProvider({ script: [
       [toolCall('c1', 'echo', {})],
       [text('回答')],
-    ]);
+    ] });
     await startServer(provider, [echoTool()]);
     const sessionId = await createSession('yolo');
 

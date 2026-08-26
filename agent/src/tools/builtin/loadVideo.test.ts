@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { ContentPart, VideoURLPart } from '../../kosong/message';
+import type { ContentPart, VideoURLPart } from '../../llm/kosong';
 import type { WorkspaceConfig } from '../../sandbox/path-access';
 import {
   isRunnableToolExecution,

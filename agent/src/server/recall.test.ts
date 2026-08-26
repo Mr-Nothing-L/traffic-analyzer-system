@@ -10,14 +10,16 @@ import path from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import type { Message, StreamedMessagePart, ToolCall } from '#/message';
 import type {
+  Message,
+  StreamedMessagePart,
+  ToolCall,
   ChatProvider,
   GenerateOptions,
   StreamedMessage,
   ThinkingEffort,
-} from '#/provider';
-import type { Tool } from '#/tool';
+} from '../llm/kosong';
+import { ScriptedProvider, streamOf, text, toolCall } from '../testkit/scriptedProvider';
 
 import type { ExecutableTool } from '../tools/contract';
 import { ToolRegistry } from '../tools/registry';
@@ -29,54 +31,6 @@ import type { TimelineEntry } from './storage';
 // ---------------------------------------------------------------------------
 // 假 provider / 假工具(与 server.test.ts 同一模式)
 // ---------------------------------------------------------------------------
-
-class ScriptedProvider implements ChatProvider {
-  readonly name = 'scripted';
-  readonly modelName = 'scripted-model';
-  readonly thinkingEffort = null;
-  readonly histories: Message[][] = [];
-  private readonly script: StreamedMessagePart[][];
-
-  constructor(script: StreamedMessagePart[][]) {
-    this.script = [...script];
-  }
-
-  generate(
-    _systemPrompt: string,
-    _tools: Tool[],
-    history: Message[],
-    _options?: GenerateOptions,
-  ): Promise<StreamedMessage> {
-    this.histories.push(history.map((m) => m));
-    const parts = this.script.shift();
-    if (parts === undefined) return Promise.reject(new Error('script exhausted'));
-    return Promise.resolve(streamOf(parts));
-  }
-
-  withThinking(_effort: ThinkingEffort): ChatProvider {
-    return this;
-  }
-}
-
-function streamOf(parts: StreamedMessagePart[]): StreamedMessage {
-  return {
-    async *[Symbol.asyncIterator]() {
-      for (const part of parts) yield part;
-    },
-    id: null,
-    usage: null,
-    finishReason: 'completed',
-    rawFinishReason: 'stop',
-  };
-}
-
-function toolCall(id: string, name: string, args: unknown): ToolCall {
-  return { type: 'function', id, name, arguments: JSON.stringify(args) };
-}
-
-function text(text: string): StreamedMessagePart {
-  return { type: 'text', text };
-}
 
 /** 只读假工具(accesses 为空,manual 模式下直接放行)。 */
 function echoTool(): ExecutableTool {
@@ -234,13 +188,13 @@ describe('POST /sessions/{id}/recall', () => {
   it('撤回第二轮:entries 与 messages 同步截断,续跑 /chat 历史正确', async () => {
     // 每轮:工具调用 + 文本 → entries [user, tool, assistant],
     // messages 追加 [user, assistant, tool, assistant]。
-    const provider = new ScriptedProvider([
+    const provider = new ScriptedProvider({ script: [
       [toolCall('c1', 'echo', {})],
       [text('第一轮回答')],
       [toolCall('c2', 'echo', {})],
       [text('第二轮回答')],
       [text('第三轮回答')],
-    ]);
+    ] });
     await startServer(provider, [echoTool()]);
     const sessionId = await createSession();
 
@@ -285,11 +239,11 @@ describe('POST /sessions/{id}/recall', () => {
   });
 
   it('撤回后持久化与内存一致:重建 server 恢复的是截断后的历史', async () => {
-    const provider = new ScriptedProvider([
+    const provider = new ScriptedProvider({ script: [
       [text('第一轮回答')],
       [text('第二轮回答')],
       [text('第三轮回答')],
-    ]);
+    ] });
     await startServer(provider, [echoTool()]);
     const sessionId = await createSession();
 
@@ -317,7 +271,7 @@ describe('POST /sessions/{id}/recall', () => {
   });
 
   it('撤回首轮 user 条目(index 0):清空全部历史与标题', async () => {
-    const provider = new ScriptedProvider([[text('回答')], [text('第二轮回答')]]);
+    const provider = new ScriptedProvider({ script: [[text('回答')], [text('第二轮回答')]] });
     await startServer(provider, [echoTool()]);
     const sessionId = await createSession();
     await runChatTurn(sessionId, '唯一的一轮');
@@ -337,7 +291,7 @@ describe('POST /sessions/{id}/recall', () => {
   });
 
   it('未知 session → 404;entryIndex 越界/非 user/非法 → 400', async () => {
-    const provider = new ScriptedProvider([[text('回答')]]);
+    const provider = new ScriptedProvider({ script: [[text('回答')]] });
     await startServer(provider, [echoTool()]);
     const sessionId = await createSession();
     await runChatTurn(sessionId, 'hi');
@@ -367,10 +321,10 @@ describe('POST /sessions/{id}/recall', () => {
   });
 
   it('chat 进行中 → 409 chat_in_progress', async () => {
-    const provider = new ScriptedProvider([
+    const provider = new ScriptedProvider({ script: [
       [toolCall('c1', 'write_file', {})],
       [text('ok')],
-    ]);
+    ] });
     await startServer(provider, [writeTool()]);
     const sessionId = await createSession('manual');
 

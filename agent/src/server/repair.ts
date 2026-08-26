@@ -8,7 +8,7 @@
  * isError 工具消息(文本说明中断原因),保证历史 provider-valid。
  * 尾部结构异常(assistant 后混有 user/assistant)不在简化版范围内,原样返回。
  */
-import { createToolMessage, type Message } from '#/message';
+import { createToolMessage, type Message } from '../llm/kosong';
 
 /** 合成工具消息的文本:告知模型该调用未执行,由其决定是否重试。 */
 export const INTERRUPTED_TOOL_MESSAGE = '该工具调用因服务重启中断,未执行';

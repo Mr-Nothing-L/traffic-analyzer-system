@@ -9,7 +9,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { ContentPart } from '../../kosong/message';
+import type { ContentPart } from '../../llm/kosong';
 import type { WorkspaceConfig } from '../../sandbox/path-access';
 import {
   isRunnableToolExecution,

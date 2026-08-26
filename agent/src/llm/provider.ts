@@ -6,8 +6,7 @@
  * `OpenAILegacyChatProvider`(chat-completions 流式)接入。本地 vLLM
  * endpoint 同样走该路径。anthropic/google 等原生协议尚未接入,会抛错。
  */
-import type { ChatProvider } from '#/provider';
-import { OpenAILegacyChatProvider } from '#/providers/openai-legacy';
+import { OpenAILegacyChatProvider, type ChatProvider } from './kosong';
 
 import {
   defaultEnvPath,

@@ -15,7 +15,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 
-import type { Message } from '#/message';
+import type { Message } from '../llm/kosong';
 
 import type { PermissionMode } from '../permissions/types';
 

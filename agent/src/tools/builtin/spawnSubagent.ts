@@ -21,8 +21,12 @@ import path from 'node:path';
 
 import { z } from 'zod';
 
-import { extractText, type ContentPart, type Message } from '../../kosong/message';
-import type { ChatProvider } from '../../kosong/provider';
+import {
+  extractText,
+  type ContentPart,
+  type Message,
+  type ChatProvider,
+} from '../../llm/kosong';
 import { runAgentLoop, type AgentLoopResult } from '../../loop/agentLoop';
 import type { PermissionGate } from '../../permissions/gate';
 import type { WorkspaceConfig } from '../../sandbox/path-access';
@@ -126,6 +130,16 @@ const VIDEO_MIME_BY_EXT: Record<string, string> = {
 
 function videoMimeType(videoPath: string): string {
   return VIDEO_MIME_BY_EXT[path.extname(videoPath).toLowerCase()] ?? 'video/mp4';
+}
+
+/**
+ * 把任务文本整理成稳定的 approvalRule 片段:trim、折叠连续空白,
+ * 超长时截断并加省略号,避免规则集合无限膨胀。
+ */
+function normalizeApprovalRuleTask(task: string): string {
+  const normalized = task.trim().replace(/\s+/g, ' ');
+  const maxLen = 50;
+  return normalized.length <= maxLen ? normalized : `${normalized.slice(0, maxLen)}…`;
 }
 
 /** prepare_video 响应(与 load_video 共用 toolserver 契约)。 */
@@ -349,7 +363,11 @@ export function createSpawnSubagentTool(deps: SpawnSubagentDeps): ExecutableTool
       return {
         accesses:
           videoPath === undefined ? ToolAccesses.none() : ToolAccesses.readFile(videoPath),
-        approvalRule: `spawn_subagent(${input.task.slice(0, 50)})`,
+        // approvalRule 包含规范化任务文本:不同任务得到不同规则,避免
+        // "session 范围一次批准、后续任意子代理全放行";相同任务在 session
+        // 内可复用(减少重复审批)。截断 50 字控制规则长度,若任务关键差异
+        // 在尾部可改用完整文本或哈希。
+        approvalRule: `spawn_subagent(${normalizeApprovalRuleTask(input.task)})`,
         timeoutMs: SUBAGENT_TIMEOUT_MS,
         execute: async (ctx: ExecutableToolContext): Promise<ExecutableToolResult> => {
           await acquireSubagentSlot(ctx.signal);

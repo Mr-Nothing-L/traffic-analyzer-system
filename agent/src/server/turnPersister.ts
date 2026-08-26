@@ -16,7 +16,7 @@
  *  - 轮末 finalize 兜底:done / 异常 / 取消路径都把剩余条目与消息补齐,
  *    崩溃不丢半截轮次(半截 tool calls 悬挂由恢复时的 repair.ts 修复)。
  */
-import type { Message } from '#/message';
+import type { Message } from '../llm/kosong';
 
 import type { StepPersistUpdate } from '../loop/agentLoop';
 import type { SessionManager } from './session';

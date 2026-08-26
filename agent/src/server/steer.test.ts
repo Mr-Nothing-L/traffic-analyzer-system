@@ -18,14 +18,16 @@ import { DatabaseSync } from 'node:sqlite';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import type { Message, StreamedMessagePart, ToolCall } from '#/message';
 import type {
+  Message,
+  StreamedMessagePart,
+  ToolCall,
   ChatProvider,
   GenerateOptions,
   StreamedMessage,
   ThinkingEffort,
-} from '#/provider';
-import type { Tool } from '#/tool';
+} from '../llm/kosong';
+import { ScriptedProvider, streamOf, text, toolCall } from '../testkit/scriptedProvider';
 
 import type { ExecutableTool } from '../tools/contract';
 import { ToolRegistry } from '../tools/registry';
@@ -36,47 +38,6 @@ import type { Session } from './session';
 // ---------------------------------------------------------------------------
 // 假 provider / 假工具(与 recovery.test.ts 同一模式)
 // ---------------------------------------------------------------------------
-
-/** 记录每次 generate 收到的 history,便于断言 steer 注入。 */
-class ScriptedProvider implements ChatProvider {
-  readonly name = 'scripted';
-  readonly modelName = 'scripted-model';
-  readonly thinkingEffort = null;
-  readonly histories: Message[][] = [];
-  private readonly script: StreamedMessagePart[][];
-
-  constructor(script: StreamedMessagePart[][]) {
-    this.script = [...script];
-  }
-
-  generate(
-    _systemPrompt: string,
-    _tools: Tool[],
-    history: Message[],
-    _options?: GenerateOptions,
-  ): Promise<StreamedMessage> {
-    this.histories.push(history.map((m) => m));
-    const parts = this.script.shift();
-    if (parts === undefined) return Promise.reject(new Error('script exhausted'));
-    return Promise.resolve(streamOf(parts));
-  }
-
-  withThinking(_effort: ThinkingEffort): ChatProvider {
-    return this;
-  }
-}
-
-function streamOf(parts: StreamedMessagePart[]): StreamedMessage {
-  return {
-    async *[Symbol.asyncIterator]() {
-      for (const part of parts) yield part;
-    },
-    id: null,
-    usage: null,
-    finishReason: 'completed',
-    rawFinishReason: 'stop',
-  };
-}
 
 /** 手动放行的 provider:holdNextGenerate() 后的下一次 generate 挂起,直到
  *  返回的 release 被调用——制造「steer 在最终 generate 期间到达」的确定性
@@ -120,14 +81,6 @@ class HoldableProvider implements ChatProvider {
   withThinking(_effort: ThinkingEffort): ChatProvider {
     return this;
   }
-}
-
-function toolCall(id: string, name: string, args: unknown): ToolCall {
-  return { type: 'function', id, name, arguments: JSON.stringify(args) };
-}
-
-function text(text: string): StreamedMessagePart {
-  return { type: 'text', text };
 }
 
 /** 闸门工具:execute 开始后可等待,release() 后返回成功。 */
@@ -353,7 +306,7 @@ afterEach(async () => {
 
 describe('POST /sessions/{id}/cancel', () => {
   it('取消进行中轮次:loop 以 cancelled 收尾,已完成部分落盘完整', async () => {
-    const provider = new ScriptedProvider([[toolCall('c1', 'abortable', {})]]);
+    const provider = new ScriptedProvider({ script: [[toolCall('c1', 'abortable', {})]] });
     const { tool, started } = abortableTool();
     await startServer(provider, [tool]);
     const sessionId = await createSession();
@@ -384,10 +337,10 @@ describe('POST /sessions/{id}/cancel', () => {
 
   it('审批挂起期间 cancel:挂起审批立即以 cancelled 落定,轮次立即收尾', async () => {
     // approvalTimeoutMs 拉大:若 cancel 打不断审批挂起,本用例会拖满超时。
-    const provider = new ScriptedProvider([
+    const provider = new ScriptedProvider({ script: [
       [toolCall('c1', 'write_file', {})],
       [text('不会到达')], // 脚本富余:cancel 后不应再 generate
-    ]);
+    ] });
     await startServer(provider, [writeTool()], { approvalTimeoutMs: 60_000 });
     const sessionId = await createSession('manual');
 
@@ -438,7 +391,7 @@ describe('POST /sessions/{id}/cancel', () => {
   });
 
   it('无进行中轮次 → 409 no_active_turn;未知 session → 404', async () => {
-    const provider = new ScriptedProvider([]);
+    const provider = new ScriptedProvider({ script: [] });
     await startServer(provider, []);
     const sessionId = await createSession();
 
@@ -454,10 +407,10 @@ describe('POST /sessions/{id}/cancel', () => {
 
 describe('POST /sessions/{id}/steer', () => {
   it('注入后下一步 generate 的 history 含新 user 消息,条目/消息增量落盘', async () => {
-    const provider = new ScriptedProvider([
+    const provider = new ScriptedProvider({ script: [
       [toolCall('c1', 'gated', {})],
       [text('收到,换方向')],
-    ]);
+    ] });
     const { tool, started, release } = gatedTool();
     await startServer(provider, [tool]);
     const sessionId = await createSession();
@@ -507,10 +460,10 @@ describe('POST /sessions/{id}/steer', () => {
   });
 
   it('轮末(cancel)未消费的 steer:丢弃并发 steer_dropped,不进入下一轮 messages', async () => {
-    const provider = new ScriptedProvider([
+    const provider = new ScriptedProvider({ script: [
       [toolCall('c1', 'abortable', {})],
       [text('第二轮回答')],
-    ]);
+    ] });
     const { tool, started } = abortableTool();
     await startServer(provider, [tool]);
     const sessionId = await createSession();
@@ -570,7 +523,7 @@ describe('POST /sessions/{id}/steer', () => {
   });
 
   it('无进行中轮次 → 409 no_active_turn;未知 session → 404;空 input → 400', async () => {
-    const provider = new ScriptedProvider([]);
+    const provider = new ScriptedProvider({ script: [] });
     await startServer(provider, []);
     const sessionId = await createSession();
 
@@ -588,10 +541,10 @@ describe('POST /sessions/{id}/steer', () => {
   });
 
   it('断连(无活跃流)时 steer 仍落盘,轮次继续跑完', async () => {
-    const provider = new ScriptedProvider([
+    const provider = new ScriptedProvider({ script: [
       [toolCall('c1', 'gated', {})],
       [text('完成了')],
-    ]);
+    ] });
     const { tool, started, release } = gatedTool();
     await startServer(provider, [tool]);
     const sessionId = await createSession();

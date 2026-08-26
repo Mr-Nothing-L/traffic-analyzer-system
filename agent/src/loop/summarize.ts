@@ -15,10 +15,14 @@
  * 防递归:摘要走 kosong generate() 直调 provider,不经过 runAgentLoop,
  * 摘要请求自身永远不会再触发压缩。
  */
-import { isAbortError } from '#/errors';
-import { generate } from '#/generate';
-import { createUserMessage, extractText, type Message } from '#/message';
-import type { ChatProvider } from '#/provider';
+import {
+  isAbortError,
+  generate,
+  createUserMessage,
+  extractText,
+  type Message,
+  type ChatProvider,
+} from '../llm/kosong';
 
 import { withThinkingDisabled } from '../llm/provider';
 

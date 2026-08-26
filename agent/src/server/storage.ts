@@ -18,7 +18,7 @@ import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-import type { Message } from '#/message';
+import type { Message } from '../llm/kosong';
 
 import type { PermissionMode } from '../permissions/types';
 import type { DetectionPayload } from '../tools/builtin/submitDetection';
