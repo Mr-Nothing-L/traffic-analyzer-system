@@ -272,7 +272,7 @@ afterEach(async () => {
 // ---------------------------------------------------------------------------
 
 describe('断连恢复与增量落盘', () => {
-  it('SSE 断连不杀轮次:审批放行后 loop 跑完并落盘,busy 释放', async () => {
+  it('SSE 断连不杀轮次:挂起审批以 cancelled 落定,loop 跑完并落盘,busy 释放', async () => {
     const provider = new ScriptedProvider([
       [toolCall('c1', 'write_file', {})],
       [text('写完了')],
@@ -286,11 +286,12 @@ describe('断连恢复与增量落盘', () => {
     controller.abort();
     await sleep(50); // 等服务端感知 close
 
-    // 轮次仍活着:审批请求还可回执;放行后轮次继续跑完。
+    // 断连后挂起审批无人能回执(requestId 只经活跃流下发),立即以
+    // cancelled 落定:事后回执 → 404,轮次不拖满审批超时。
     const approval = await postJson('/approval', { requestId, decision: 'approved' });
-    expect(approval.status).toBe(200);
+    expect(approval.status).toBe(404);
 
-    // 轮询 events 端点直到轮次结束。
+    // 轮询 events 端点直到轮次结束(断连不 abort:loop 继续跑完)。
     let body = await getEvents(sessionId);
     for (let i = 0; i < 100 && body.inProgress; i += 1) {
       await sleep(20);
@@ -298,12 +299,13 @@ describe('断连恢复与增量落盘', () => {
     }
     expect(body.inProgress).toBe(false);
 
-    // 完整落盘:entries 与 messages 与正常一轮无异。
+    // 完整落盘:审批条目 decision=cancelled,工具被拒合成 isError 结果,
+    // 模型继续走完第二步给出回答。
     const history = await getJson(`/sessions/${sessionId}/history`);
     const entries = (history.json as { entries: TimelineEntry[] }).entries;
     expect(entries.map((e) => e.kind)).toEqual(['user', 'approval', 'tool', 'assistant']);
-    expect(entries[1]).toMatchObject({ kind: 'approval', decision: 'approved' });
-    expect(entries[2]).toMatchObject({ kind: 'tool', name: 'write_file', isError: false });
+    expect(entries[1]).toMatchObject({ kind: 'approval', decision: 'cancelled' });
+    expect(entries[2]).toMatchObject({ kind: 'tool', name: 'write_file', isError: true });
     expect(entries[3]).toMatchObject({ kind: 'assistant', text: '写完了' });
     expect(agentServer?.sessions.get(sessionId)?.messages.map((m) => m.role)).toEqual([
       'user',

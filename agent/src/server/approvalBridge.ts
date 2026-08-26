@@ -1,7 +1,8 @@
 /**
  * 审批桥:把 ApprovalService 的 requestToolApproval 桥接到当前 /chat 的
  * SSE 流。挂起时发出 {type:'approval_request', ...} 事件并暂存 resolve;
- * POST /approval 到达时 resolve;超时(默认 5 分钟)自动 cancelled。
+ * POST /approval 到达时 resolve;超时(默认 5 分钟)或 cancelAll(reason)
+ * (cancel / 客户端断连 / 轮末兜底)以 cancelled 语义落定。
  *
  * 桥本身不认识 HTTP/SSE,emit 回调由 app 层在 /chat 开始/结束时绑定。
  */
@@ -107,10 +108,15 @@ export class ApprovalBridge {
     return this.pending.has(requestId);
   }
 
-  /** 会话结束/过期时取消所有挂起的审批。 */
-  cancelAll(): void {
+  /** 会话结束/过期/cancel/断连时,把全部挂起审批以 cancelled 语义落定
+   *  (reason 进 feedback,随拒绝结果回灌给模型;审批不受 abort 信号影响,
+   *  不主动落定会拖满审批超时)。 */
+  cancelAll(reason?: string): void {
     for (const requestId of [...this.pending.keys()]) {
-      this.settle(requestId, { decision: 'cancelled' });
+      this.settle(requestId, {
+        decision: 'cancelled',
+        ...(reason !== undefined ? { feedback: reason } : {}),
+      });
     }
   }
 

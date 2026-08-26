@@ -20,15 +20,20 @@
  *                                      manual|auto|yolo,内存+磁盘同步,进行中的
  *                                      轮次下一轮生效;非法 mode → 400)
  *   POST   /sessions/{id}/cancel   → {status:'ok'}(显式终止该 session 进行中
- *                                      的轮次:触发其 AbortController,已完成部分
- *                                      照常增量落盘,loop 以 cancelled 收尾;无
- *                                      进行中轮次 → 409 no_active_turn)
+ *                                      的轮次:触发其 AbortController 并把挂起
+ *                                      审批以 cancelled 落定——审批 promise 不受
+ *                                      abort 信号影响,不取消会拖满审批超时;
+ *                                      已完成部分照常增量落盘,loop 以 cancelled
+ *                                      收尾;无进行中轮次 → 409 no_active_turn)
  *   POST   /sessions/{id}/steer    {input,videoPath?,images?}
  *                                    → {status:'ok',queued:true}(轮次进行中注入
  *                                      一条 user 消息,下一个 step 边界生效:注入时
  *                                      增量落盘(条目+消息)并经该 session 活跃流发
- *                                      SSE steer 事件(客户端已断则只落盘);无进行
- *                                      中轮次 → 409 no_active_turn,前端应改发 /chat)
+ *                                      SSE steer 事件(客户端已断则只落盘);轮次结束
+ *                                      时仍未消费的 steer 丢弃并发 steer_dropped
+ *                                      事件,不带入下一轮(否则会注入在下一轮新
+ *                                      用户消息之后,时序颠倒);无进行中轮次 → 409
+ *                                      no_active_turn,前端应改发 /chat)
  *   POST   /workspaces/restore     {workspaceDir} → {status:'ok',restored:n}
  *                                      (打开该 workspace 的 sessions.db 存储:列表
  *                                       以磁盘为准,会话内容按需懒恢复;幂等,
@@ -131,7 +136,8 @@ interface SessionRuntime {
   busy: boolean;
   /** 进行中轮次的 AbortController(/cancel 触发;轮次结束清空)。 */
   controller: AbortController | null;
-  /** steer 排队的 user 消息(注入后清空;轮次结束时未消费的留给下一轮)。 */
+  /** steer 排队的 user 消息(注入后清空;轮次结束时未消费的丢弃并发
+   *  steer_dropped 事件,不带入下一轮,避免插话注入在新用户消息之后)。 */
   readonly steerQueue: QueuedSteer[];
 }
 
@@ -505,8 +511,10 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
     sendJson(res, 200, { status: 'ok', mode: body.mode });
   };
 
-  /** 显式终止进行中的轮次:abort 其 controller,loop 以 cancelled 收尾,
-   * 已完成部分由 P1 的增量落盘保留;无进行中轮次 → 409 no_active_turn。 */
+  /** 显式终止进行中的轮次:abort 其 controller,并把挂起审批以 cancelled
+   * 落定(审批 promise 不受 abort 信号影响,不取消会拖满审批超时),loop 以
+   * cancelled 收尾,已完成部分由 P1 的增量落盘保留;无进行中轮次 → 409
+   * no_active_turn。 */
   const handleCancel = (res: ServerResponse, sessionId: string): void => {
     const session = sessions.get(sessionId);
     if (session === undefined) {
@@ -519,6 +527,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       return;
     }
     runtime.controller.abort();
+    runtime.bridge.cancelAll('用户已取消本轮对话');
     sendJson(res, 200, { status: 'ok' });
   };
 
@@ -584,7 +593,6 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
   };
 
   const handleChat = async (
-    req: IncomingMessage,
     res: ServerResponse,
     body: unknown,
   ): Promise<void> => {
@@ -620,12 +628,22 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       'Cache-Control': 'no-cache',
       Connection: 'keep-alive',
     });
+    // writeHead 只排队不发送:不显式 flush,客户端要等第一个事件(可能
+    // 是首个 token / 工具结果)才收到响应头,长首包时误判超时。
+    res.flushHeaders();
 
-    // 断连不杀轮次:req close 只标记客户端断开,loop 继续跑完并落盘
-    // (maxSteps 兜底);SSE 写出错同样只标记断开,不再抛出。
+    // 断连不杀轮次:只标记客户端断开,loop 继续跑完并落盘(maxSteps 兜底);
+    // SSE 写出错同样只标记断开,不再抛出。断连后挂起的审批无人能回执
+    // (requestId 只经活跃流下发),立即以 cancelled 落定;仅在本轮仍进行
+    // 中时处理(res 'close' 在正常结束时也会触发,此时 controller 已清空),
+    // 防止误伤后续轮次的新审批。注:请求体在路由分发时已被 readJsonBody
+    // 读完,req 的 'close' 早已发出、此后监听不到;感知断连用 res 的
+    // 'close'(连接被提前断开或响应完成时触发)。
     let clientDisconnected = false;
-    req.on('close', () => {
+    res.on('close', () => {
+      if (runtime.controller !== controller) return;
       clientDisconnected = true;
+      runtime.bridge.cancelAll('客户端已断开连接');
     });
 
     // SSE 事件带 seq:发出时已落盘 entries 的水位(= 当前最大落盘 seq),
@@ -689,6 +707,20 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
         }
       }
     });
+
+    /** 轮末未消费的 steer:丢弃并经 SSE 告知「插话未生效」,不带入下一轮
+     *  (否则会注入在下一轮新用户消息之后,模型看到时间倒置的指令)。 */
+    const dropUnconsumedSteers = (): void => {
+      if (runtime.steerQueue.length === 0) return;
+      for (const item of runtime.steerQueue.splice(0, runtime.steerQueue.length)) {
+        emit({
+          type: 'steer_dropped',
+          text: item.text,
+          images: item.images,
+          ...(item.videoPath !== undefined ? { videoPath: item.videoPath } : {}),
+        });
+      }
+    };
 
     const userText =
       videoPath === undefined ? body.input : `视频路径:${videoPath}\n\n${body.input}`;
@@ -810,6 +842,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
               flushEntries();
               break;
             case 'done':
+              dropUnconsumedSteers();
               flushAssistant();
               flushEntries();
               if (event.reason === 'stop_turn' && event.stopResult?.note !== undefined) {
@@ -848,6 +881,10 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
     } finally {
       flushAssistant();
       flushEntries(); // 失败/中断的轮次也把剩余条目落盘,保证不丢。
+      dropUnconsumedSteers(); // done 未经过 onEvent(异常路径)或竞态到达时兜底。
+      // 轮末兜底:强制 settle 本轮残留的挂起审批,防止悬挂(settleHook 仍
+      // 绑定,审批条目的 decision 一并落定为 cancelled)。
+      runtime.bridge.cancelAll('轮次已结束');
       runtime.bridge.unbindSettleHook();
       runtime.bridge.unbindEmitter();
       runtime.controller = null;
@@ -965,7 +1002,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
           return;
         }
         if (req.method === 'POST' && url.pathname === '/chat') {
-          await handleChat(req, res, await readJsonBody(req));
+          await handleChat(res, await readJsonBody(req));
           return;
         }
         sendError(res, 404, 'not_found', `${req.method ?? ''} ${url.pathname}`);

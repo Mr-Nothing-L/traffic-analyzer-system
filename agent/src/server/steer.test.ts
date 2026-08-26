@@ -2,9 +2,12 @@
  * steer / cancel(P2)集成测试:假 ChatProvider + 可控假工具,起真实
  * node:http 服务(随机端口),覆盖:
  *   - POST /sessions/{id}/cancel:进行中轮次 → loop 以 cancelled 收尾且
- *     已完成部分落盘完整;无进行中轮次 → 409 no_active_turn;未知 session 404;
+ *     已完成部分落盘完整;审批挂起期间 cancel → 挂起审批立即以 cancelled
+ *     落定、轮次立即收尾(不拖满审批超时);无进行中轮次 → 409
+ *     no_active_turn;未知 session 404;
  *   - POST /sessions/{id}/steer:注入后下一步 generate 的 history 含新 user
- *     消息,SSE 有 steer 事件,条目/消息增量落盘;无进行中轮次 → 409;
+ *     消息,SSE 有 steer 事件,条目/消息增量落盘;轮末仍未消费的 steer 被
+ *     丢弃并发 steer_dropped 事件,不进入下一轮 messages;无进行中轮次 → 409;
  *     断连(无活跃流)时仍落盘。
  * 不打真实模型 API。
  */
@@ -73,6 +76,50 @@ function streamOf(parts: StreamedMessagePart[]): StreamedMessage {
     finishReason: 'completed',
     rawFinishReason: 'stop',
   };
+}
+
+/** 手动放行的 provider:holdNextGenerate() 后的下一次 generate 挂起,直到
+ *  返回的 release 被调用——制造「steer 在最终 generate 期间到达」的确定性
+ *  窗口(此后本轮不会再有 shouldSteer 消费点)。 */
+class HoldableProvider implements ChatProvider {
+  readonly name = 'holdable';
+  readonly modelName = 'holdable-model';
+  readonly thinkingEffort = null;
+  readonly histories: Message[][] = [];
+  private readonly script: StreamedMessagePart[][];
+  private gate: Promise<void> = Promise.resolve();
+
+  constructor(script: StreamedMessagePart[][]) {
+    this.script = [...script];
+  }
+
+  holdNextGenerate(): () => void {
+    let release!: () => void;
+    this.gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return release;
+  }
+
+  generate(
+    _systemPrompt: string,
+    _tools: Tool[],
+    history: Message[],
+    _options?: GenerateOptions,
+  ): Promise<StreamedMessage> {
+    this.histories.push(history.map((m) => m));
+    const gate = this.gate;
+    this.gate = Promise.resolve();
+    return gate.then(() => {
+      const parts = this.script.shift();
+      if (parts === undefined) return Promise.reject(new Error('script exhausted'));
+      return streamOf(parts);
+    });
+  }
+
+  withThinking(_effort: ThinkingEffort): ChatProvider {
+    return this;
+  }
 }
 
 function toolCall(id: string, name: string, args: unknown): ToolCall {
@@ -144,6 +191,20 @@ function abortableTool(): { tool: ExecutableTool; started: Promise<void> } {
   };
 }
 
+/** 写文件假工具(manual 模式下触发审批挂起,与 server.test.ts 同款)。 */
+function writeTool(): ExecutableTool {
+  return {
+    name: 'write_file',
+    description: 'fake write tool',
+    parameters: { type: 'object' },
+    resolveExecution: () => ({
+      accesses: [{ kind: 'file' as const, operation: 'write' as const, path: '/tmp/x' }],
+      approvalRule: 'write_file(/tmp/x)',
+      execute: () => Promise.resolve({ output: 'write-ok' }),
+    }),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // HTTP / SSE 测试辅助
 // ---------------------------------------------------------------------------
@@ -198,8 +259,9 @@ let agentServer: AgentServer | undefined;
 let baseUrl: string;
 
 async function startServer(
-  provider: ScriptedProvider,
+  provider: ChatProvider,
   tools: ExecutableTool[],
+  extra?: { approvalTimeoutMs?: number },
 ): Promise<void> {
   const created = createAgentServer({
     providerFactory: () => ({ provider, model: provider.modelName }),
@@ -209,6 +271,9 @@ async function startServer(
       return registry;
     },
     systemPrompt: 'sys',
+    ...(extra?.approvalTimeoutMs !== undefined
+      ? { approvalTimeoutMs: extra.approvalTimeoutMs }
+      : {}),
   });
   agentServer = created;
   await new Promise<void>((resolve) => {
@@ -317,6 +382,61 @@ describe('POST /sessions/{id}/cancel', () => {
     expect((events2.json as { inProgress: boolean }).inProgress).toBe(false);
   });
 
+  it('审批挂起期间 cancel:挂起审批立即以 cancelled 落定,轮次立即收尾', async () => {
+    // approvalTimeoutMs 拉大:若 cancel 打不断审批挂起,本用例会拖满超时。
+    const provider = new ScriptedProvider([
+      [toolCall('c1', 'write_file', {})],
+      [text('不会到达')], // 脚本富余:cancel 后不应再 generate
+    ]);
+    await startServer(provider, [writeTool()], { approvalTimeoutMs: 60_000 });
+    const sessionId = await createSession('manual');
+
+    const next = await startChat(sessionId, '写个文件');
+    let requestId = '';
+    for (;;) {
+      const event = await next();
+      if (event === null) throw new Error('stream ended before approval_request');
+      if (event.type === 'approval_request') {
+        requestId = (event as unknown as { requestId: string }).requestId;
+        break;
+      }
+    }
+
+    const cancel = await postJson(`/sessions/${sessionId}/cancel`, {});
+    expect(cancel.status).toBe(200);
+    expect(cancel.json).toEqual({ status: 'ok' });
+
+    const events = await readUntilDone(next);
+    expect(events.at(-1)).toMatchObject({ type: 'done', reason: 'cancelled' });
+    // 审批被取消语义落定后工具合成拒绝结果回灌,轮次在下一步边界收尾,
+    // 不再发起第二次 generate。
+    expect(provider.histories).toHaveLength(1);
+
+    // 审批条目以 cancelled 落定;工具条目 isError;messages 半截不悬挂。
+    expect(diskRows(sessionId, 'entries').map((e) => e.kind)).toEqual([
+      'user',
+      'approval',
+      'tool',
+    ]);
+    expect(diskRows(sessionId, 'entries')[1]).toMatchObject({
+      kind: 'approval',
+      requestId,
+      decision: 'cancelled',
+    });
+    expect(diskRows(sessionId, 'entries')[2]).toMatchObject({ kind: 'tool', isError: true });
+    expect(diskRows(sessionId, 'messages').map((m) => m.role)).toEqual([
+      'user',
+      'assistant',
+      'tool',
+    ]);
+
+    // 事后回执已落定的审批 → 404;busy 已释放。
+    const late = await postJson('/approval', { requestId, decision: 'approved' });
+    expect(late.status).toBe(404);
+    const events2 = await getJson(`/sessions/${sessionId}/events`);
+    expect((events2.json as { inProgress: boolean }).inProgress).toBe(false);
+  });
+
   it('无进行中轮次 → 409 no_active_turn;未知 session → 404', async () => {
     const provider = new ScriptedProvider([]);
     await startServer(provider, []);
@@ -384,6 +504,69 @@ describe('POST /sessions/{id}/steer', () => {
       'user',
       'assistant',
     ]);
+  });
+
+  it('轮末(cancel)未消费的 steer:丢弃并发 steer_dropped,不进入下一轮 messages', async () => {
+    const provider = new ScriptedProvider([
+      [toolCall('c1', 'abortable', {})],
+      [text('第二轮回答')],
+    ]);
+    const { tool, started } = abortableTool();
+    await startServer(provider, [tool]);
+    const sessionId = await createSession();
+
+    const next = await startChat(sessionId, '跑任务');
+    await started; // 工具执行中:steer 排队,但 cancel 后不会再有消费点
+    const steer = await postJson(`/sessions/${sessionId}/steer`, { input: '换方向' });
+    expect(steer.status).toBe(200);
+    const cancel = await postJson(`/sessions/${sessionId}/cancel`, {});
+    expect(cancel.status).toBe(200);
+
+    const events = await readUntilDone(next);
+    expect(events.at(-1)).toMatchObject({ type: 'done', reason: 'cancelled' });
+    // 插话未生效:丢弃并经 SSE 告知(steer_dropped 先于 done)。
+    expect(events.some((e) => e.type === 'steer_dropped' && e.text === '换方向')).toBe(true);
+    // steer 的 user 消息未注入、未落盘。
+    expect(diskRows(sessionId, 'messages').map((m) => m.role)).toEqual([
+      'user',
+      'assistant',
+      'tool',
+    ]);
+
+    // 下一轮:新 user 消息直接跟在上一轮 tool 之后,不含被丢弃的插话。
+    const next2 = await startChat(sessionId, '第二轮');
+    await readUntilDone(next2);
+    expect(provider.histories).toHaveLength(2);
+    const second = provider.histories[1] ?? [];
+    expect(second.map((m) => m.role)).toEqual(['user', 'assistant', 'tool', 'user']);
+    expect(JSON.stringify(second)).not.toContain('换方向');
+  });
+
+  it('轮次正常结束:最终 generate 期间到达的 steer 丢弃并发 steer_dropped,不进入下一轮', async () => {
+    // 单步轮次:唯一一次 generate 挂起期间 steer 到达,此后不再有 shouldSteer
+    // 消费点,轮末必须丢弃(旧行为会留给下一轮、注入在新消息之后)。
+    const provider = new HoldableProvider([[text('第一轮完')], [text('第二轮完')]]);
+    await startServer(provider, []);
+    const sessionId = await createSession();
+
+    const release = provider.holdNextGenerate();
+    const next = await startChat(sessionId, '第一轮');
+    const steer = await postJson(`/sessions/${sessionId}/steer`, { input: '插话太晚了' });
+    expect(steer.status).toBe(200);
+    expect(steer.json).toEqual({ status: 'ok', queued: true });
+    release();
+
+    const events = await readUntilDone(next);
+    expect(events.at(-1)).toMatchObject({ type: 'done', reason: 'completed' });
+    expect(events.some((e) => e.type === 'steer_dropped' && e.text === '插话太晚了')).toBe(true);
+    expect(diskRows(sessionId, 'messages').map((m) => m.role)).toEqual(['user', 'assistant']);
+
+    // 下一轮 messages:上一轮 user/assistant + 新 user,没有插话。
+    const next2 = await startChat(sessionId, '第二轮');
+    await readUntilDone(next2);
+    const second = provider.histories[1] ?? [];
+    expect(second.map((m) => m.role)).toEqual(['user', 'assistant', 'user']);
+    expect(JSON.stringify(second)).not.toContain('插话太晚了');
   });
 
   it('无进行中轮次 → 409 no_active_turn;未知 session → 404;空 input → 400', async () => {
