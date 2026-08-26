@@ -4,7 +4,8 @@
  * 把已有的 kosong(LLM 抽象)、tools(契约/注册表/调度器)与
  * permissions(权限门)串成 docs/agent_refactor_plan.md 描述的
  * 简化版 Turn/Step:`while (tool_calls) { ... }`,带 maxStepsPerTurn
- * 上限与比率触发压缩(compaction.ts)。
+ * 上限与真实 usage 触发压缩(compaction.ts 的 isOverContextByUsage,
+ * 触发判定单轨,不再回退字符估算)。
  */
 import { isAbortError } from '#/errors';
 import { generate } from '#/generate';
@@ -22,6 +23,7 @@ import { ToolScheduler, type ToolCallTask } from '../tools/scheduler';
 
 import {
   createCompactionConfig,
+  isOverContextByUsage,
   type CompactionConfig,
   type CompactionOverrides,
 } from './compaction';
@@ -104,8 +106,6 @@ export type AgentLoopEvent =
 export interface AgentLoopOptions {
   /** kosong chat provider(由 llm/provider.ts 的 createProviderFromEnv 构造)。 */
   readonly provider: ChatProvider;
-  /** 模型名(冗余于 provider.modelName,供调用方日志/事件使用)。 */
-  readonly model: string;
   readonly systemPrompt: string;
   readonly registry: ToolRegistry;
   readonly gate: PermissionGate;
@@ -122,29 +122,28 @@ export interface AgentLoopOptions {
   readonly signal?: AbortSignal;
   readonly onEvent?: (event: AgentLoopEvent) => void | Promise<void>;
   /**
-   * steer 注入回调(可选):每个 step 的 generate 之前调用一次,返回本轮
-   * 进行中被排队(POST /sessions/{id}/steer)的 user 消息;非空则按序追加
-   * 进 messages 并立即经 onStepPersist 落盘,再继续 generate——模型在下一次
-   * 调用时看到新指示。返回 null/空数组表示无排队输入。注入后即视为消费,
-   * 回调方负责清空队列(参考 deepseek-harness 的 inbox next-step 语义)。
+   * steer 注入回调(可选):每个 step 的 generate 之前,loop 反复调用直到
+   * 返回 null,逐条取走排队中的 user 消息(取走即消费——回调只需实现单条
+   * 出队,如 queue.shift(),清队列责任由 loop 的逐条取走语义承担);取到的
+   * 消息按序追加进 messages 并立即经 onStepPersist 落盘,再继续 generate
+   * ——模型在下一次调用时看到新指示。
    */
-  readonly shouldSteer?: () => readonly Message[] | null;
+  readonly nextSteer?: () => Message | null;
   /**
-   * 按步持久化回调(可选):每个 step 结束(step_done 事件发出)前调用,
-   * 参数为上一步以来回灌进 messages 的增量(assistant / tool 消息),
-   * 供 server 同步落盘——崩溃时半截轮次不丢。压缩发生时历史被整体折叠,
-   * 增量水位随之重置(压缩后的整体回写由调用方负责)。
+   * 按步持久化回调(可选):loop 在每条消息确定回灌时就调用——appended 为
+   * 增量(steer user / assistant / tool 消息,落盘方按序 append 即可);
+   * compacted 为轮内压缩后的整体折叠(调用方应立即整体重写,水位重置到
+   * 压缩后长度),压缩成果即时落盘、中途崩溃不回退未压缩历史。
+   * 与 step_done 事件的分工:本回调是唯一的持久化信号,step_done 仅供
+   * 展示(SSE 进度)。
    */
-  readonly onStepPersist?: (appended: readonly Message[]) => void | Promise<void>;
-  /**
-   * 子代理事件回调:设置后接管子代理事件的投递(不再自动包装成
-   * 'subagent_event' 进入 onEvent 流);缺省时 loop 自动包装转发。
-   */
-  readonly onSubagentEvent?: (
-    parentToolCallId: string,
-    event: AgentLoopEvent,
-  ) => void | Promise<void>;
+  readonly onStepPersist?: (update: StepPersistUpdate) => void | Promise<void>;
 }
+
+/** onStepPersist 的更新:增量回灌或压缩整体折叠。 */
+export type StepPersistUpdate =
+  | { readonly kind: 'appended'; readonly messages: readonly Message[] }
+  | { readonly kind: 'compacted'; readonly messages: readonly Message[] };
 
 export interface AgentLoopResult {
   readonly reason: AgentLoopDoneReason;
@@ -184,23 +183,15 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   const emit = async (event: AgentLoopEvent): Promise<void> => {
     await options.onEvent?.(event);
   };
-  /** 已通知调用方持久化的 messages 水位(下标);压缩整体折叠后重置。 */
-  let persistedLength = messages.length;
-  const flushStepMessages = async (): Promise<void> => {
-    if (messages.length <= persistedLength) return;
-    const appended = messages.slice(persistedLength);
-    persistedLength = messages.length;
-    await options.onStepPersist?.(appended);
+  /** 增量回灌即时通知落盘:调用点即消息确定点,loop 不持有水位。 */
+  const persistAppended = async (appended: readonly Message[]): Promise<void> => {
+    if (appended.length === 0) return;
+    await options.onStepPersist?.({ kind: 'appended', messages: appended });
   };
-  /** 工具上报的子代理事件:options.onSubagentEvent 设置时交给它接管,
-   * 否则包装成 'subagent_event' 进入本 loop 的事件流(server 透传 SSE)。 */
+  /** 工具上报的子代理事件:包装成 'subagent_event' 进入本 loop 的事件流
+   * (server 原样透传 SSE,前端按 toolCallId 归属到对应工具)。 */
   const forwardSubagentEvent = async (toolCallId: string, event: unknown): Promise<void> => {
-    const childEvent = event as AgentLoopEvent;
-    if (options.onSubagentEvent !== undefined) {
-      await options.onSubagentEvent(toolCallId, childEvent);
-      return;
-    }
-    await emit({ type: 'subagent_event', toolCallId, event: childEvent });
+    await emit({ type: 'subagent_event', toolCallId, event: event as AgentLoopEvent });
   };
   // 经函数读取以避免 TS 对可选链的窄化在 await 后残留(abort 随时可能发生)。
   const isAborted = (): boolean => options.signal?.aborted === true;
@@ -289,25 +280,22 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   for (;;) {
     if (isAborted()) return finish('cancelled');
     if (steps >= maxSteps) return finish('max_steps');
-    if (compaction !== undefined) {
-      // 触发判断优先真实 usage(≥ maxTokens × triggerRatio 即视为要爆了),
-      // 不可用(force=false)时回退 token 估算 heuristic;压缩内容优先 LLM
-      // 摘要,摘要失败回退占位替换(见 summarize.ts)。
-      const overByUsage =
-        lastUsedTokens !== undefined &&
-        lastUsedTokens >= compaction.maxContextTokens * compaction.triggerRatio;
+    // 触发判定单轨:只用上一步 generate 的真实 usage(isOverContextByUsage,
+    // usage 不可用则不压缩);压缩内容优先 LLM 摘要,摘要失败回退占位替换
+    // (见 summarize.ts)。
+    if (compaction !== undefined && isOverContextByUsage(lastUsedTokens, compaction)) {
       try {
         const outcome = await compactMessagesWithSummary(
           messages,
           compaction,
           options.provider,
-          overByUsage,
           options.signal,
         );
         if (outcome.compacted) {
           messages = outcome.messages;
-          // 历史被整体折叠:增量水位重置,压缩前的增量由调用方整体回写覆盖。
-          persistedLength = messages.length;
+          // 历史被整体折叠:先通知调用方整体重写落盘(压缩成果即时持久化,
+          // 中途崩溃不回退未压缩历史),再发事件供展示。
+          await options.onStepPersist?.({ kind: 'compacted', messages });
           await emit({
             type: 'compaction',
             compactedToolResults: outcome.compactedToolResults,
@@ -316,7 +304,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
             afterTokens: outcome.afterTokens,
           });
         } else if (outcome.abandoned) {
-          // 摘要不短于压缩区:放弃压缩,消息不变(不重置水位、不整体回写)。
+          // 摘要不短于压缩区:放弃压缩,消息不变(无落盘动作)。
           await emit({
             type: 'compaction_abandoned',
             zoneTokens: outcome.zoneTokens ?? 0,
@@ -331,13 +319,17 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     }
     steps += 1;
 
-    // steer:每个 step 的 generate 之前检查排队注入;有则按序追加进
-    // messages 并立即落盘(flushStepMessages → onStepPersist),模型本次
-    // 调用即可看到新指示。
-    const steered = options.shouldSteer?.();
-    if (steered != null && steered.length > 0) {
-      messages = [...messages, ...steered];
-      await flushStepMessages();
+    // steer:每个 step 的 generate 之前逐条取回排队注入(取走即消费),
+    // 每条立即追加进 messages 并落盘(persistAppended)——下一条取走时
+    // 落盘水位已推进,回调里算 messageIndex 无需偏移;模型本次调用即可
+    // 看到新指示。
+    if (options.nextSteer !== undefined) {
+      for (;;) {
+        const steered = options.nextSteer();
+        if (steered == null) break;
+        messages = [...messages, steered];
+        await persistAppended([steered]);
+      }
     }
 
     let assistant: Message;
@@ -385,7 +377,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     messages = [...messages, assistant];
 
     if (assistant.toolCalls.length === 0) {
-      await flushStepMessages();
+      await persistAppended([assistant]);
       await emit({ type: 'step_done', step: steps });
       return finish('completed');
     }
@@ -407,6 +399,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     const results = await scheduler.runBatch(tasks);
 
     let stopResult: ExecutableToolResult | undefined;
+    const stepToolMessages: Message[] = [];
     for (const [index, result] of results.entries()) {
       const call = assistant.toolCalls[index];
       if (call === undefined) continue;
@@ -417,7 +410,9 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         result,
         isError: result.isError === true,
       });
-      messages.push(createToolMessage(call.id, result.output));
+      const toolMessage = createToolMessage(call.id, result.output);
+      messages.push(toolMessage);
+      stepToolMessages.push(toolMessage);
       if (result.isError === true) {
         errorStreak =
           errorStreak.name === call.name
@@ -430,7 +425,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         stopResult = result;
       }
     }
-    await flushStepMessages();
+    // 本步的 assistant 消息与 tool 消息都已确定:立即落盘再报 step_done。
+    await persistAppended([assistant, ...stepToolMessages]);
     await emit({ type: 'step_done', step: steps });
     if (stopResult !== undefined) return finish('stop_turn', { stopResult });
     // 熔断:同一工具连续失败达到上限,终止循环防止无效重试烧 token

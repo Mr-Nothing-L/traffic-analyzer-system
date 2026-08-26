@@ -1,8 +1,9 @@
 /**
  * LLM 摘要压缩(参考 vendor/kimi-code fullCompaction:总结中段、保留最近消息)。
  *
- * 触发判定与切点安全边界完全复用 compaction.ts(只在 user 消息前切,
- * tool_call/tool 配对完整);本模块替换的是压缩内容本身:
+ * 切点安全边界完全复用 compaction.ts(只在 user 消息前切,
+ * tool_call/tool 配对完整);触发判定在调用方(loop 以真实 usage 判定,
+ * 手动 /compact 无条件)。本模块替换的是压缩内容本身:
  * 把压缩区(安全边界之前的历史)序列化后交给同一个 ChatProvider 做一次
  * 摘要调用(不传 tools、关思考 chat_template_kwargs、独立 60s 超时、
  * maxCompletionTokens 2048 上限),
@@ -25,8 +26,8 @@ import {
   compactMessages,
   estimateMessageTokens,
   estimateMessagesTokens,
-  shouldCompact,
   splitForCompaction,
+  unchangedOutcome,
   type CompactionConfig,
   type CompactionOutcome,
 } from './compaction';
@@ -73,27 +74,24 @@ export interface SummarizedCompactionOutcome extends CompactionOutcome {
 
 /**
  * 压缩入口(loop 自动触发与手动 /compact 共用):
- * 先按 force/阈值判断是否需要压缩,再切出压缩区做 LLM 摘要;
- * 摘要不可用时回退占位替换。父级 signal 取消时向上抛 AbortError。
+ * 先切出压缩区做 LLM 摘要,摘要不可用时回退占位替换。触发判定不在本模块
+ * (loop 自动路径以真实 usage 经 isOverContextByUsage 判定,手动 /compact
+ * 无条件)——入参即视为已决定压缩。父级 signal 取消时向上抛 AbortError。
  */
 export async function compactMessagesWithSummary(
   messages: Message[],
   config: CompactionConfig,
   provider: ChatProvider,
-  force: boolean,
   signal?: AbortSignal,
 ): Promise<SummarizedCompactionOutcome> {
   const beforeTokens = estimateMessagesTokens(messages);
   const unchanged: SummarizedCompactionOutcome = {
-    messages,
-    compacted: false,
-    compactedToolResults: 0,
+    ...unchangedOutcome(messages),
     summarized: false,
     abandoned: false,
     beforeTokens,
     afterTokens: beforeTokens,
   };
-  if (!force && !shouldCompact(messages, config)) return unchanged;
 
   const split = splitForCompaction(messages, config);
   if (split === undefined) return unchanged;
@@ -126,7 +124,7 @@ export async function compactMessagesWithSummary(
   }
 
   // 回退:占位替换(compactMessages 内部仍做空区间/幂等保护)
-  const fallback = compactMessages(messages, config, true);
+  const fallback = compactMessages(messages, config);
   return {
     ...fallback,
     summarized: false,

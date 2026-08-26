@@ -45,19 +45,22 @@
  *
  * 上下文窗口:AGENT_CONTEXT_TOKENS(默认 262144 = 256k)。/chat 每步 generate
  * 后按真实 usage 透传 context_usage 事件并记录 session.lastKnownUsage(GET
- * /sessions 摘要带 usedTokens);上一步用量 ≥ 窗口 × 0.85 时,下一步 generate
- * 前自动压缩(优先 LLM 摘要替换压缩区,失败回退占位替换,压缩后整体落盘)
- * 并透传 compaction 事件(带 summarized/beforeTokens/afterTokens)。
+ * /sessions 摘要带 usedTokens);上一步用量 ≥ 窗口 × 0.85 时(单轨判定,见
+ * compaction.ts 的 isOverContextByUsage),下一步 generate 前自动压缩(优先
+ * LLM 摘要替换压缩区,失败回退占位替换)并透传 compaction 事件(带
+ * summarized/beforeTokens/afterTokens);手动 /compact 与自动触发共用
+ * compactMessagesWithSummary 同一路径。
  *
  * 错误统一 {error:{code,message}};未知 session → 404。同 session 的 /chat
  * 用简单互斥串行,不同 session 并行。provider / tools 均可注入以便测试。
  *
  * 持久化:SessionManager 委托 node:sqlite(<workspaceDir>/.agent/sessions.db);
  * /chat 的 SSE 事件流在转发的同时累积 TimelineEntry(user/assistant/tool/
- * approval/detection),按步增量落盘:user 条目立即落盘,之后每个 step_done
- * 把累计条目与 loop 回灌的增量 messages(onStepPersist)同步 append,finally
- * 兜底落盘剩余条目——崩溃/断连不丢半截轮次;轮内发生自动压缩时 messages 仍
- * 在轮末整体重写(replaceMessages)。SSE 断连不 abort 轮次:loop 跑完照常
+ * approval/detection),落盘水位与消息水位统一由 TurnPersister 持有
+ * (turnPersister.ts):user 条目立即落盘,之后每个 step_done 把累计条目
+ * 与 loop 回灌的增量消息同步 append;轮内发生自动压缩时消息立即整体重写
+ * (replaceMessages),压缩成果不等轮末——中途崩溃不回退未压缩历史;
+ * finalize 兜底落盘剩余条目。SSE 断连不 abort 轮次:loop 跑完照常
  * 落盘,写出错只标记客户端断开;恢复续跑时 SessionManager 对悬挂 tool calls
  * 做尾部修复(见 repair.ts)。POST /chat 支持可选 images(最多
  * 4 张,base64 或 dataURL),转成 kosong image ContentPart 附在该轮 user message。
@@ -89,6 +92,7 @@ import { ToolRegistry } from '../tools/registry';
 import { ApprovalBridge, type ApprovalDecisionInput } from './approvalBridge';
 import { SessionManager, type Session } from './session';
 import type { TimelineEntry } from './storage';
+import { TurnPersister } from './turnPersister';
 
 export interface ProviderHandle {
   readonly provider: ChatProvider;
@@ -121,7 +125,7 @@ export interface AgentServer {
 }
 
 /** steer 排队项:handleSteer 入队(消息按 /chat 同一规则构建),
- * 进行中轮次的下一个 step 边界由 handleChat 的 shouldSteer 回调消费。 */
+ * 进行中轮次的下一个 step 边界由 handleChat 的 nextSteer 回调逐条取走。 */
 interface QueuedSteer {
   readonly text: string;
   readonly videoPath?: string;
@@ -425,9 +429,9 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
     sendJson(res, 200, { status: 'ok' });
   };
 
-  /** 手动压缩:立即对该 session 的 messages 做 LLM 摘要压缩(强制触发,
-   * 不走过阈判断;摘要失败回退占位替换;无可压缩内容时 noop),压缩后
-   * messages 整体重写落盘。进行中的轮次返回 409。 */
+  /** 手动压缩:立即对该 session 的 messages 做 LLM 摘要压缩(无条件触发,
+   * 与 loop 自动路径共用 compactMessagesWithSummary;摘要失败回退占位替换;
+   * 无可压缩内容时 noop),压缩后 messages 整体重写落盘。进行中的轮次返回 409。 */
   const handleCompact = async (res: ServerResponse, sessionId: string): Promise<void> => {
     const session = sessions.get(sessionId);
     if (session === undefined) {
@@ -444,7 +448,6 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       session.messages,
       createCompactionConfig(contextTokens),
       provider,
-      true,
     );
     if (outcome.compacted) sessions.replaceMessages(session.id, outcome.messages);
     sendJson(res, 200, {
@@ -531,7 +534,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
   };
 
   /** steer:轮次进行中排队一条 user 消息,下一个 step 边界注入(见
-   * handleChat 的 shouldSteer 回调);无进行中轮次 → 409 no_active_turn
+   * handleChat 的 nextSteer 回调);无进行中轮次 → 409 no_active_turn
    * (前端应改为直接发 /chat)。 */
   const handleSteer = (res: ServerResponse, sessionId: string, body: unknown): void => {
     if (!isRecord(body) || typeof body.input !== 'string' || body.input === '') {
@@ -657,8 +660,12 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       }
     };
 
-    // ---- 时间线条目累积:按步增量落盘(finally 兜底剩余),不再等轮末批量 ----
-    const turnEntries: TimelineEntry[] = [];
+    // ---- 轮次持久化:条目/消息双水位与压缩回写统一由 TurnPersister 持有 ----
+    const persister = new TurnPersister({
+      sessions,
+      sessionId: session.id,
+      baseMessageCount: session.messages.length,
+    });
     const userEntry: TimelineEntry = {
       kind: 'user',
       text: body.input,
@@ -666,20 +673,13 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       ...(videoPath !== undefined ? { videoPath } : {}),
       at: Date.now(),
     };
-    turnEntries.push(userEntry);
-    /** 已落盘的 turnEntries 水位;flushEntries 把新增部分同步 append。 */
-    let persistedEntries = 0;
-    const flushEntries = (): void => {
-      if (persistedEntries >= turnEntries.length) return;
-      sessions.appendEntries(session.id, turnEntries.slice(persistedEntries));
-      persistedEntries = turnEntries.length;
-    };
+    persister.pushEntry(userEntry);
 
     let assistantText = '';
     let assistantThink = '';
     const flushAssistant = (): void => {
       if (assistantText === '' && assistantThink === '') return;
-      turnEntries.push({ kind: 'assistant', text: assistantText, think: assistantThink, at: Date.now() });
+      persister.pushEntry({ kind: 'assistant', text: assistantText, think: assistantThink, at: Date.now() });
       assistantText = '';
       assistantThink = '';
     };
@@ -688,7 +688,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
 
     runtime.bridge.bindEmitter((event) => {
       emit(event);
-      turnEntries.push({
+      persister.pushEntry({
         kind: 'approval',
         requestId: event.requestId,
         toolName: event.toolName,
@@ -698,13 +698,8 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       });
     });
     runtime.bridge.bindSettleHook((requestId, response) => {
-      for (let i = turnEntries.length - 1; i >= 0; i -= 1) {
-        const entry = turnEntries[i];
-        if (entry !== undefined && entry.kind === 'approval' && entry.requestId === requestId) {
-          entry.decision = response.decision;
-          break;
-        }
-      }
+      // 审批条目的 decision 回填:在落盘前的 step_done 批量落盘时一并序列化。
+      persister.settleApproval(requestId, response.decision);
     });
 
     /** 轮末未消费的 steer:丢弃并经 SSE 告知「插话未生效」,不带入下一轮
@@ -728,69 +723,59 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       userContent.push({ type: 'image_url', imageUrl: { url } });
     }
     const userMessage: Message = { role: 'user', content: userContent, toolCalls: [] };
-    const baseLength = session.messages.length;
+    // loop 的初始历史必须在 appendMessages 推进 session.messages 之前快照,
+    // 否则 user 消息会重复一份。
+    const turnMessages: Message[] = [...session.messages, userMessage];
     // entry ↔ message 映射:记录本轮 user 消息写入前的 messages 长度,
     // recall 该 user 条目时按此值截断 messages(见 storage.ts messageIndex)。
-    userEntry.messageIndex = baseLength;
-    const messages = [...session.messages, userMessage];
+    userEntry.messageIndex = session.messages.length;
     sessions.appendMessages(session.id, [userMessage]);
-    flushEntries(); // user 条目立即落盘:崩溃也至少保留用户输入。
+    persister.markUserMessagePersisted();
+    persister.flushEntries(); // user 条目立即落盘:崩溃也至少保留用户输入。
 
-    const { provider, model } = providerFactory();
-    /** 本轮是否发生过自动压缩:发生后 messages 已被整体折叠,结束时需整体
-     * 回写(replaceMessages)而非增量 append。 */
-    let compactedInTurn = false;
-    /** 已增量落盘的 messages 水位:user 已落,之后按步(onStepPersist)推进;
-     * 轮末把剩余部分(如 max_steps/cancelled 末步)兜底补齐。 */
-    let persistedMessages = baseLength + 1;
+    const { provider } = providerFactory();
 
     try {
       const result = await runAgentLoop({
         provider,
-        model,
         systemPrompt,
         registry: runtime.registry,
         gate: runtime.gate,
-        messages,
+        messages: turnMessages,
         signal: controller.signal,
-        // steer:每个 step 的 generate 之前由 loop 回调;取走全部排队项,
-        // 逐条构建 user 条目并立即落盘(复用本轮增量落盘路径),经活跃流发
-        // SSE steer 事件(客户端已断则 emit 为空操作,只落盘),消息体交给
-        // loop 追加进 messages 并由其 flushStepMessages 落盘。
-        shouldSteer: () => {
-          if (runtime.steerQueue.length === 0) return null;
-          const queued = runtime.steerQueue.splice(0, runtime.steerQueue.length);
-          const injected: Message[] = [];
-          for (const item of queued) {
-            const entry: TimelineEntry = {
-              kind: 'user',
-              text: item.text,
-              images: item.images,
-              ...(item.videoPath !== undefined ? { videoPath: item.videoPath } : {}),
-              // 与 /chat 的 user 条目同一映射:注入点即该消息在 messages 中的下标。
-              messageIndex: session.messages.length + injected.length,
-              at: Date.now(),
-            };
-            turnEntries.push(entry);
-            injected.push(item.message);
-          }
-          flushEntries(); // steer 条目立即落盘(seq 水位先于 SSE 事件推进)。
-          for (const item of queued) {
-            emit({
-              type: 'steer',
-              text: item.text,
-              images: item.images,
-              ...(item.videoPath !== undefined ? { videoPath: item.videoPath } : {}),
-            });
-          }
-          return injected;
+        // steer:每个 step 的 generate 之前由 loop 逐条取回(取走即消费);
+        // 每条立即构建 user 条目并落盘(TurnPersister),经活跃流发 SSE steer
+        // 事件(客户端已断则 emit 为空操作,只落盘),消息体交给 loop 追加
+        // 并即时落盘。
+        nextSteer: () => {
+          const item = runtime.steerQueue.shift();
+          if (item === undefined) return null;
+          // 与 /chat 的 user 条目同一映射:注入点即该消息在 messages 中的下标
+          // (loop 逐条取走、取走即落盘,session.messages 已推进)。
+          const entry: TimelineEntry = {
+            kind: 'user',
+            text: item.text,
+            images: item.images,
+            ...(item.videoPath !== undefined ? { videoPath: item.videoPath } : {}),
+            messageIndex: session.messages.length,
+            at: Date.now(),
+          };
+          persister.pushEntry(entry);
+          persister.flushEntries(); // steer 条目立即落盘(seq 水位先于 SSE 事件推进)。
+          emit({
+            type: 'steer',
+            text: item.text,
+            images: item.images,
+            ...(item.videoPath !== undefined ? { videoPath: item.videoPath } : {}),
+          });
+          return item.message;
         },
         compaction: { maxContextTokens: contextTokens },
-        onStepPersist: (appended) => {
-          // loop 按步回灌的 assistant / tool 消息同步落盘(sqlite 同步写,
-          // 在 onEvent 同一调用栈内完成,不引入异步积压)。
-          sessions.appendMessages(session.id, appended);
-          persistedMessages += appended.length;
+        onStepPersist: (update) => {
+          // loop 按消息确定点即时回灌(steer user / assistant / tool 增量,
+          // 或压缩后的整体折叠),TurnPersister 统一决定 append 还是重写
+          // (sqlite 同步写,在 onEvent 同一调用栈内完成,不引入异步积压)。
+          persister.onStepPersist(update);
         },
         onEvent: (event: AgentLoopEvent) => {
           switch (event.type) {
@@ -802,9 +787,6 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
               break;
             case 'context_usage':
               sessions.setLastKnownUsage(session.id, event.usedTokens);
-              break;
-            case 'compaction':
-              compactedInTurn = true;
               break;
             case 'tool_call_start':
               flushAssistant();
@@ -823,7 +805,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
               // 成功结果的结构化附件(submit_detection 的检测载荷)原样进条目。
               const resultPayload =
                 'payload' in event.result ? event.result.payload : undefined;
-              turnEntries.push({
+              persister.pushEntry({
                 kind: 'tool',
                 toolCallId: event.toolCallId,
                 name: event.name,
@@ -842,12 +824,11 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
             }
             case 'step_done':
               flushAssistant();
-              flushEntries();
+              persister.flushEntries();
               break;
             case 'done': {
               dropUnconsumedSteers();
               flushAssistant();
-              flushEntries();
               // stop_turn 的结构化附件(submit_detection 的检测载荷)直接从
               // payload 读取,合成 detection SSE 事件并落盘——不再有
               // JSON.parse(note) 字符串编解码。
@@ -857,7 +838,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
                   : undefined;
               if (event.reason === 'stop_turn' && stopPayload !== undefined) {
                 emit({ type: 'detection', data: stopPayload });
-                turnEntries.push({
+                persister.pushEntry({
                   kind: 'detection',
                   data: stopPayload as DetectionPayload,
                   at: Date.now(),
@@ -875,12 +856,9 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
           emit(event);
         },
       });
-      // 回灌后的增量消息(assistant / tool)并入会话历史(user 已在上面追加,
-      // 各步增量已由 onStepPersist 落盘,这里只兜底剩余部分——如 max_steps /
-      // cancelled 时未发 step_done 的末步);本轮发生过自动压缩时历史已被折叠,
-      // 整体重写(内存 + 磁盘)而非增量 append。
-      if (compactedInTurn) sessions.replaceMessages(session.id, result.messages);
-      else sessions.appendMessages(session.id, result.messages.slice(persistedMessages));
+      // 轮末兜底:正常路径各消息已即时落盘,这里只补齐理论不可达的余量
+      // (水位与返回值脱节的回归安全网)与剩余条目;幂等。
+      persister.finalize(result.messages);
     } catch (error) {
       emit({
         type: 'done',
@@ -889,7 +867,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       });
     } finally {
       flushAssistant();
-      flushEntries(); // 失败/中断的轮次也把剩余条目落盘,保证不丢。
+      persister.finalize(undefined); // 失败/中断的轮次也把剩余条目落盘,保证不丢。
       dropUnconsumedSteers(); // done 未经过 onEvent(异常路径)或竞态到达时兜底。
       // 轮末兜底:强制 settle 本轮残留的挂起审批,防止悬挂(settleHook 仍
       // 绑定,审批条目的 decision 一并落定为 cancelled)。

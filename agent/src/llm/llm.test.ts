@@ -405,7 +405,7 @@ describe('generate() over mock OpenAI SSE server', () => {
     const config = createCompactionConfig(1_000_000, { maxRecentMessages: 2 });
     responseChunks = [sseChunk({ content: '摘要内容' }, 'stop'), USAGE_CHUNK];
 
-    const outcome = await compactMessagesWithSummary(messages, config, makeProvider(), true);
+    const outcome = await compactMessagesWithSummary(messages, config, makeProvider());
 
     expect(outcome.summarized).toBe(true);
     expect(captured[0]?.body['chat_template_kwargs']).toEqual({ enable_thinking: false });

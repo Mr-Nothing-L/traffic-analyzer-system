@@ -35,12 +35,9 @@ import {
   runAgentLoop,
   type AgentLoopEvent,
   type AgentLoopOptions,
+  type StepPersistUpdate,
 } from './agentLoop';
-import {
-  compactMessages,
-  createCompactionConfig,
-  shouldCompact,
-} from './compaction';
+import { compactMessages, createCompactionConfig, isOverContextByUsage } from './compaction';
 import { SUMMARY_PREFIX, SUMMARY_SYSTEM_PROMPT } from './summarize';
 
 // ---------------------------------------------------------------------------
@@ -184,7 +181,6 @@ function harness(
     run: (overrides = {}) =>
       runAgentLoop({
         provider,
-        model: provider.modelName,
         systemPrompt: 'sys',
         registry,
         gate,
@@ -439,7 +435,7 @@ describe('runAgentLoop', () => {
     expect(toolResult).toMatchObject({ isError: true });
   });
 
-  it('压缩触发:超阈后最老的工具结果在下一轮历史中被替换为占位', async () => {
+  it('压缩触发(真实 usage 超阈):最老的工具结果在下一轮历史中被替换为占位', async () => {
     const initialMessages: Message[] = [
       createUserMessage('第一轮'),
       createAssistantMessage([{ type: 'text', text: '先看元数据' }], [
@@ -452,6 +448,9 @@ describe('runAgentLoop', () => {
     const h = harness(
       [[toolCall('c1', 'echo', {})], [text('结束')]],
       [echoTool(() => Promise.resolve({ output: 'small-ok' }))],
+      yoloGate(),
+      // 第一步真实 usage 900 ≥ 1000 × 0.85 → 第二步前触发压缩
+      [{ inputOther: 900, inputCacheRead: 0, inputCacheCreation: 0, output: 0 }],
     );
 
     const result = await h.run({
@@ -487,13 +486,32 @@ describe('runAgentLoop', () => {
     expect(usage).toEqual({ type: 'context_usage', usedTokens: 150, maxTokens: 1000 });
   });
 
-  it('usage 不可用时(usage=null)不发 context_usage,压缩回退 heuristic', async () => {
+  it('usage 不可用时(usage=null)不发 context_usage,也不压缩(触发单轨:不回退字符 heuristic)', async () => {
+    // 历史含 20k 字符大工具结果:字符 heuristic 必然超阈,但无真实 usage
+    // 就不压缩——「要不要压」只由真实 usage 回答。
+    const initialMessages: Message[] = [
+      createUserMessage('第一轮'),
+      createAssistantMessage([{ type: 'text', text: '先看元数据' }], [
+        toolCall('old-1', 'echo', {}),
+      ]),
+      createToolMessage('old-1', 'x'.repeat(20_000)),
+      createAssistantMessage([{ type: 'text', text: '看完了' }]),
+      createUserMessage('继续'),
+    ];
     const h = harness([[text('回答')]], [echoTool()]);
 
-    await h.run({ compaction: { maxContextTokens: 1000 } });
+    const result = await h.run({
+      messages: initialMessages,
+      compaction: { maxContextTokens: 1000 },
+    });
 
+    expect(result.reason).toBe('completed');
     expect(h.events.some((e) => e.type === 'context_usage')).toBe(false);
     expect(h.events.some((e) => e.type === 'compaction')).toBe(false);
+    // 历史原样:大工具结果未被替换
+    expect(extractText(result.messages.find((m) => m.toolCallId === 'old-1') ?? createUserMessage(''))).toBe(
+      'x'.repeat(20_000),
+    );
   });
 
   it('真实 usage 超阈(≥ maxTokens × 0.85)时下一步前自动压缩:LLM 摘要替换压缩区', async () => {
@@ -740,17 +758,27 @@ describe('compaction', () => {
     createToolMessage(id, 'y'.repeat(size)),
   ];
 
-  it('未超阈时不压缩', () => {
-    const messages = [createUserMessage('hi'), ...bigToolExchange('t1', 100)];
+  it('触发判定单轨 isOverContextByUsage:只用真实 usage,消息内容不参与', () => {
     const config = createCompactionConfig(1_000_000);
-
-    expect(shouldCompact(messages, config)).toBe(false);
-    const outcome = compactMessages(messages, config);
-    expect(outcome.compacted).toBe(false);
-    expect(outcome.messages).toBe(messages);
+    expect(isOverContextByUsage(1_000_000 * 0.85, config)).toBe(true);
+    expect(isOverContextByUsage(1_000_000 * 0.85 - 1, config)).toBe(false);
+    // usage 不可用 → 一律不触发(宁可错过也不用第二把尺子猜)。
+    expect(isOverContextByUsage(undefined, config)).toBe(false);
+    // maxContextTokens <= 0 → 永不压缩。
+    expect(isOverContextByUsage(Number.MAX_SAFE_INTEGER, createCompactionConfig(0))).toBe(false);
   });
 
-  it('超阈时替换压缩区工具结果,保留区以 user 消息开头', () => {
+  it('预留输出空间同样触发:used + reserved >= max', () => {
+    const config = createCompactionConfig(10_000, { reservedContextSize: 2_000 });
+    expect(isOverContextByUsage(8_000, config)).toBe(true); // 8000 + 2000 >= 10000
+    expect(isOverContextByUsage(7_999, config)).toBe(false); // 7999 + 2000 < 10000,且未过 0.85 线
+    // reserved >= max(预留比窗口还大)不参与触发,与 vendor 语义一致。
+    const whole = createCompactionConfig(10_000, { reservedContextSize: 10_000 });
+    expect(isOverContextByUsage(9_500, whole)).toBe(true); // 9500 ≥ 8500 过 triggerRatio
+    expect(isOverContextByUsage(8_400, whole)).toBe(false);
+  });
+
+  it('压缩执行:替换压缩区工具结果,保留区以 user 消息开头', () => {
     const messages: Message[] = [
       createUserMessage('u1'),
       ...bigToolExchange('t1', 40_000),
@@ -763,7 +791,6 @@ describe('compaction', () => {
     ];
     const config = createCompactionConfig(1000, { maxRecentMessages: 4 });
 
-    expect(shouldCompact(messages, config)).toBe(true);
     const outcome = compactMessages(messages, config);
 
     expect(outcome.compacted).toBe(true);
@@ -779,7 +806,7 @@ describe('compaction', () => {
   });
 
   it('保留区边界:切点落在最近 user 消息之前,进行中的轮次不被压缩', () => {
-    // 只有一个 user 轮次:即使超阈,压缩区为空,不做任何替换。
+    // 只有一个 user 轮次:压缩区为空,不做任何替换。
     const messages: Message[] = [
       createUserMessage('u1'),
       ...bigToolExchange('t1', 40_000),
@@ -787,28 +814,9 @@ describe('compaction', () => {
     ];
     const config = createCompactionConfig(1000, { maxRecentMessages: 4 });
 
-    expect(shouldCompact(messages, config)).toBe(true);
     const outcome = compactMessages(messages, config);
     expect(outcome.compacted).toBe(false);
     expect(outcome.messages).toBe(messages);
-  });
-
-  it('force=true 时跳过阈值判断:未超阈也执行压缩(手动/真实 usage 触发)', () => {
-    const messages: Message[] = [
-      createUserMessage('u1'),
-      ...bigToolExchange('t1', 100),
-      createAssistantMessage([{ type: 'text', text: 'a1' }]),
-      createUserMessage('u2'),
-      createAssistantMessage([{ type: 'text', text: 'a2' }]),
-    ];
-    const config = createCompactionConfig(1_000_000, { maxRecentMessages: 2 });
-
-    expect(shouldCompact(messages, config)).toBe(false);
-    const outcome = compactMessages(messages, config, true);
-    expect(outcome.compacted).toBe(true);
-    expect(outcome.compactedToolResults).toBe(1);
-    const t1 = outcome.messages.find((m) => m.toolCallId === 't1');
-    expect(extractText(t1 ?? createUserMessage(''))).toBe('[已压缩]');
   });
 
   it('保留区按 retainTokens 从尾部向前累计:预算越大保留越多(仍以 user 为安全边界)', () => {
@@ -826,7 +834,6 @@ describe('compaction', () => {
     const tight = compactMessages(
       messages,
       createCompactionConfig(1_000_000, { maxRecentMessages: 2, retainTokens: 10 }),
-      true,
     );
     expect(tight.compactedToolResults).toBe(2);
 
@@ -834,7 +841,6 @@ describe('compaction', () => {
     const loose = compactMessages(
       messages,
       createCompactionConfig(1_000_000, { maxRecentMessages: 2, retainTokens: 1000 }),
-      true,
     );
     expect(loose.compactedToolResults).toBe(1);
     const t1 = loose.messages.find((m) => m.toolCallId === 't1');
@@ -858,7 +864,6 @@ describe('compaction', () => {
     const outcome = compactMessages(
       messages,
       createCompactionConfig(1_000_000, { maxRecentMessages: 2, retainTokens: 1000 }),
-      true,
     );
     expect(outcome.compactedToolResults).toBe(2);
     const t3 = outcome.messages.find((m) => m.toolCallId === 't3');
@@ -901,23 +906,77 @@ describe('子代理事件转发(subagent_event)', () => {
     });
   });
 
-  it('options.onSubagentEvent 设置时接管投递(不再进入 onEvent 流)', async () => {
+  it('onSubagentEvent 已删除:子代理事件统一走 subagent_event 事件流(唯一投递通道)', async () => {
+    // 曾有 options.onSubagentEvent 接管投递的旁路,生产无人使用,D5 删除;
+    // 这里锁定唯一通道行为——所有子事件都包装成 subagent_event 进 onEvent 流。
     const h = harness(
-      [[toolCall('c1', 'sub_emit', {})], [text('结束')]],
-      [subEmitTool([{ type: 'text_delta', text: 'x' }])],
+      [
+        [toolCall('c1', 'sub_emit', {})],
+        [toolCall('c2', 'sub_emit', {})],
+        [text('结束')],
+      ],
+      [subEmitTool([{ type: 'text_delta', text: 'x' }, { type: 'text_delta', text: 'y' }])],
     );
-    const received: Array<{ id: string; ev: AgentLoopEvent }> = [];
+
+    const result = await h.run();
+
+    expect(result.reason).toBe('completed');
+    const nested = h.events.filter((e) => e.type === 'subagent_event');
+    // 两次工具调用 × 每次 2 条子事件,全部经唯一通道到达。
+    expect(nested).toHaveLength(4);
+    expect(nested[0]).toMatchObject({ toolCallId: 'c1' });
+    expect(nested[2]).toMatchObject({ toolCallId: 'c2' });
+  });
+
+  it('onStepPersist 更新:appended 按消息确定点即时到达,compacted 在压缩发生时整体重写', async () => {
+    const initialMessages: Message[] = [
+      createUserMessage('第一轮'),
+      createAssistantMessage([{ type: 'text', text: '先看元数据' }], [
+        toolCall('old-1', 'echo', {}),
+      ]),
+      createToolMessage('old-1', '老工具结果'),
+      createAssistantMessage([{ type: 'text', text: '看完了' }]),
+      createUserMessage('继续'),
+    ];
+    const summaryText = '视频 演示区/v1.mp4;事件 1 检出,证据帧 f1/f2;结论尚未提交';
+    const h = harness(
+      [[toolCall('c1', 'echo', {})], [text('结束')]],
+      [echoTool(() => Promise.resolve({ output: 'small-ok' }))],
+      yoloGate(),
+      [
+        { inputOther: 8600, inputCacheRead: 0, inputCacheCreation: 0, output: 100 },
+        null,
+      ],
+      [[text(summaryText)]],
+    );
+    const updates: StepPersistUpdate[] = [];
 
     const result = await h.run({
-      onSubagentEvent: (id, ev) => {
-        received.push({ id, ev });
+      messages: initialMessages,
+      compaction: { maxContextTokens: 10_000, reservedContextSize: 0, maxRecentMessages: 2 },
+      onStepPersist: (update) => {
+        updates.push(update);
       },
     });
 
     expect(result.reason).toBe('completed');
-    expect(received).toHaveLength(1);
-    expect(received[0]).toMatchObject({ id: 'c1', ev: { type: 'text_delta', text: 'x' } });
-    expect(h.events.some((e) => e.type === 'subagent_event')).toBe(false);
+    // 步骤一:assistant(toolCalls)与 tool 消息同批即时落盘
+    expect(updates[0]).toMatchObject({ kind: 'appended' });
+    if (updates[0]?.kind === 'appended') {
+      expect(updates[0].messages.map((m) => m.role)).toEqual(['assistant', 'tool']);
+    }
+    // 压缩:整体折叠,一次 compacted 更新携带压缩后的完整消息
+    // (摘要 user + 保留区,后续步骤在其基础上继续追加)
+    const compacted = updates.find((u) => u.kind === 'compacted');
+    expect(compacted).toBeDefined();
+    if (compacted?.kind === 'compacted') {
+      expect(compacted.messages.length).toBe(result.messages.length - 1);
+    }
+    // 步骤二:最终 assistant 文本
+    expect(updates.at(-1)).toMatchObject({ kind: 'appended' });
+    if (updates.at(-1)?.kind === 'appended') {
+      expect(updates.at(-1)?.messages.map((m) => m.role)).toEqual(['assistant']);
+    }
   });
 
   it('execution.timeoutMs 覆盖 loop 级 toolTimeoutMs(长任务不被 120s 截断)', async () => {

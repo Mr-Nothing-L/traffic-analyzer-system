@@ -12,8 +12,10 @@
  * 摘要失败时回退到本模块的占位替换。消息骨架(含 assistant.toolCalls 与
  * tool 消息的配对)完整保留——OpenAI 兼容 API 要求 tool 消息与 tool call
  * 严格配对,直接丢消息会破坏请求合法性。
- * token 估算用简单 heuristic(字符数 / 4 + 图片/音视频固定高估),不引入
- * tokenizer 依赖。
+ * 触发判定单轨:「要不要压」只由 isOverContextByUsage 以 generate 返回的
+ * 真实 usage 回答(见 agentLoop.ts);本模块的字符 token 估算
+ * (estimateMessageTokens)只用于展示/比较(compaction 事件的
+ * beforeTokens/afterTokens、摘要与压缩区的长短比较),不参与触发决策。
  * 切点安全规则(splitForCompaction)与 vendor canSplitAfter 同义:保留区
  * 必须以一条 user 消息开头(即切点落在上一轮完整交互结束之后、下一条
  * user 消息之前),保证当前进行中的 user 轮次永远不会被切进压缩区。
@@ -119,20 +121,28 @@ export function estimateMessagesTokens(messages: readonly Message[]): number {
 // 触发与压缩
 // ---------------------------------------------------------------------------
 
-/** 与 vendor DefaultCompactionStrategy.shouldCompact 同义。 */
-export function shouldCompact(
-  messages: readonly Message[],
+/**
+ * 单轨触发判定:以 generate 返回的真实 usage 为准(与 vendor
+ * DefaultCompactionStrategy.shouldCompact 同义,把字符估算换成真实值)。
+ * usage 不可用(undefined)一律不触发——宁可错过压缩也不用第二把尺子猜。
+ */
+export function isOverContextByUsage(
+  usedTokens: number | undefined,
   config: CompactionConfig,
 ): boolean {
-  if (config.maxContextTokens <= 0) return false;
-  const used = estimateMessagesTokens(messages);
-  if (used >= config.maxContextTokens * config.triggerRatio) return true;
+  if (usedTokens === undefined || config.maxContextTokens <= 0) return false;
+  if (usedTokens >= config.maxContextTokens * config.triggerRatio) return true;
   const reserved = config.reservedContextSize;
   return (
     reserved > 0 &&
     reserved < config.maxContextTokens &&
-    used + reserved >= config.maxContextTokens
+    usedTokens + reserved >= config.maxContextTokens
   );
+}
+
+/** 未触发/无可压时的公共 unchanged outcome(compaction 与 summarize 共用)。 */
+export function unchangedOutcome(messages: Message[]): CompactionOutcome {
+  return { messages, compacted: false, compactedToolResults: 0 };
 }
 
 export interface CompactionOutcome {
@@ -195,25 +205,18 @@ export function splitForCompaction(
 }
 
 /**
- * 超阈时把压缩区内的工具结果输出替换为占位文本。
+ * 把压缩区内的工具结果输出替换为占位文本(切点规则见 splitForCompaction);
+ * 找不到 user 边界时放弃压缩(宁愿不压也不切坏进行中的交互)。
  *
- * 保留区 = 最近的 user 轮次(切点规则见 splitForCompaction);找不到 user
- * 边界时放弃压缩(宁愿不压也不切坏进行中的交互)。
- *
- * force = true 时跳过 shouldCompact 的 heuristic 阈值判断(调用方已用真实
- * usage 判定超阈,或是用户手动触发);安全边界与幂等规则不受影响。
+ * 「要不要压」由调用方判定(loop 自动路径用 isOverContextByUsage 的真实
+ * usage,手动 /compact 无条件):本函数只负责机械替换,入参即视为已决定
+ * 压缩;安全边界与幂等规则不受影响。
  */
 export function compactMessages(
   messages: Message[],
   config: CompactionConfig,
-  force = false,
 ): CompactionOutcome {
-  const unchanged: CompactionOutcome = {
-    messages,
-    compacted: false,
-    compactedToolResults: 0,
-  };
-  if (!force && !shouldCompact(messages, config)) return unchanged;
+  const unchanged = unchangedOutcome(messages);
 
   const split = splitForCompaction(messages, config);
   if (split === undefined) return unchanged;

@@ -280,7 +280,7 @@ async function runSubagent(
   videoPath: string | undefined,
   ctx: ExecutableToolContext,
 ): Promise<ExecutableToolResult> {
-  const { provider, model } = deps.providerFactory();
+  const { provider } = deps.providerFactory();
 
   // 禁递归:子 registry 复制父级工具,去掉 spawn_subagent。
   const childRegistry = new ToolRegistry();
@@ -293,7 +293,6 @@ async function runSubagent(
 
   const result = await runAgentLoop({
     provider,
-    model,
     systemPrompt: deps.systemPrompt,
     registry: childRegistry,
     gate: deps.gate,
