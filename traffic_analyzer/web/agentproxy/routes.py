@@ -22,6 +22,9 @@
   StreamingResponse 逐块转发(不缓冲);客户端断连时在 generator finally
   里 aclose 下游响应与 client,取消下游请求。
 - POST /approval  透传(状态码与 body 原样返回)。
+普通透传端点由 _PASS_THROUGH_ROUTES 声明表统一注册;新增 agent 端点通常只需
+在表中加一行(配置 method/path/body 策略/是否注入 workspaceDir 等)。
+特殊端点(health、uploads、SSE chat)保持手写。
 错误契约统一 {error:{code,message}}:下游错误 body 原样透传;连接失败
 (ConnectError 等)→ 503 agent_unavailable。
 测试可 monkeypatch 本模块的 AsyncClient(注入 MockTransport),不起真实
@@ -33,9 +36,11 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
-from typing import Any, Dict, Optional, Tuple
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 
 import httpx
 from fastapi import APIRouter, Request
@@ -121,196 +126,188 @@ async def agent_health(request: Request) -> Dict[str, Any]:
     }
 
 
-async def _simple_passthrough(
-    runtime: AgentRuntimeManager, method: str, path: str
-) -> JSONResponse:
-    """无 body 的 JSON 透传(GET/DELETE):下游错误原样,连接失败 503。"""
-    try:
-        async with AsyncClient(base_url=runtime.agent_url, timeout=_JSON_TIMEOUT) as client:
-            resp = await client.request(method, path)
-    except httpx.HTTPError as exc:
-        logger.warning("agent %s %s unreachable: %s", method, path, exc)
-        return _unavailable(f"agent server unreachable: {exc}")
-    return _passthrough_error(resp.status_code, resp.content)
+# ---------------------------------------------------------------------------
+# 普通透传端点的声明表与统一实现
+# ---------------------------------------------------------------------------
+
+_PassThroughBody = Literal["none", "raw", "json"]
 
 
-@router.post("/sessions")
-async def create_session(request: Request) -> JSONResponse:
-    """透传 POST /sessions;body 缺 workspaceDir 时注入当前工作区路径。"""
-    runtime = _runtime(request)
-    if runtime is None or not runtime.enabled:
-        return _unavailable()
-    try:
-        payload: Dict[str, Any] = await request.json()
-    except (json.JSONDecodeError, ValueError):
-        return _error(400, "bad_request", "request body must be a JSON object")
-    if not isinstance(payload, dict):
-        return _error(400, "bad_request", "request body must be a JSON object")
-    if not payload.get("workspaceDir"):
-        workspace = request.app.state.workspace.get()
-        if workspace is None:
-            return _error(400, "no_workspace", "No workspace selected")
-        payload["workspaceDir"] = str(workspace)
-    try:
-        async with AsyncClient(base_url=runtime.agent_url, timeout=_JSON_TIMEOUT) as client:
-            resp = await client.post("/sessions", json=payload)
-    except httpx.HTTPError as exc:
-        logger.warning("agent /sessions unreachable: %s", exc)
-        return _unavailable(f"agent server unreachable: {exc}")
-    return _passthrough_error(resp.status_code, resp.content)
+@dataclass(frozen=True)
+class _PassThroughRoute:
+    """一条普通透传路由的声明。
 
-
-@router.get("/sessions")
-async def list_sessions(request: Request) -> JSONResponse:
-    """透传 GET /sessions(session 列表)。
-
-    agent server 已自行保证工作区库恢复(启动/列表时读登记表),代理层不再
-    在列表前做 restore 写副作用。
+    - methods: FastAPI 方法列表,普通透传均为单方法。
+    - path:    代理层与下游使用相同的路径模板(不含 /api/agent 前缀)。
+    - body:    "none" 无 body 转发(GET/DELETE/无 body POST);
+               "raw"  原样转发 request.body() 字节;
+               "json" 解析 JSON 对象后转发(可配合 inject_workspace_dir)。
+    - inject_workspace_dir: 仅对 body="json" 生效;body 中缺 workspaceDir 时
+               注入当前工作区路径,未选工作区 → 400 no_workspace。
+    - description: 端点 docstring。
     """
-    runtime = _runtime(request)
-    if runtime is None or not runtime.enabled:
-        return _unavailable()
-    return await _simple_passthrough(runtime, "GET", "/sessions")
+
+    methods: Tuple[str, ...]
+    path: str
+    body: _PassThroughBody = "none"
+    inject_workspace_dir: bool = False
+    description: str = ""
 
 
-@router.get("/sessions/{session_id}/history")
-async def session_history(session_id: str, request: Request) -> JSONResponse:
-    """透传 GET /sessions/{id}/history(entries 时间线)。"""
-    runtime = _runtime(request)
-    if runtime is None or not runtime.enabled:
-        return _unavailable()
-    return await _simple_passthrough(
-        runtime, "GET", f"/sessions/{session_id}/history"
+_PASS_THROUGH_ROUTES: List[_PassThroughRoute] = [
+    _PassThroughRoute(
+        ("POST",),
+        "/sessions",
+        body="json",
+        inject_workspace_dir=True,
+        description="透传 POST /sessions;body 缺 workspaceDir 时注入当前工作区路径。",
+    ),
+    _PassThroughRoute(
+        ("GET",),
+        "/sessions",
+        description="透传 GET /sessions(session 列表)。agent server 已自行保证工作区库恢复,代理层不再在列表前做 restore 写副作用。",
+    ),
+    _PassThroughRoute(
+        ("GET",),
+        "/sessions/{session_id}/history",
+        description="透传 GET /sessions/{id}/history(entries 时间线)。",
+    ),
+    _PassThroughRoute(
+        ("DELETE",),
+        "/sessions/{session_id}",
+        description="透传 DELETE /sessions/{id}(删除 session)。",
+    ),
+    _PassThroughRoute(
+        ("POST",),
+        "/sessions/{session_id}/compact",
+        description="透传 POST /sessions/{id}/compact(手动压缩上下文,无 body)。",
+    ),
+    _PassThroughRoute(
+        ("POST",),
+        "/sessions/{session_id}/recall",
+        body="raw",
+        description="透传 POST /sessions/{id}/recall(撤回某条用户消息及其后内容)。",
+    ),
+    _PassThroughRoute(
+        ("POST",),
+        "/sessions/{session_id}/mode",
+        body="raw",
+        description="透传 POST /sessions/{id}/mode(切换会话权限模式)。",
+    ),
+    _PassThroughRoute(
+        ("GET",),
+        "/sessions/{session_id}/events",
+        description="透传 GET /sessions/{id}/events?fromSeq=N(断连/刷新后补齐条目 + inProgress)。",
+    ),
+    _PassThroughRoute(
+        ("POST",),
+        "/sessions/{session_id}/cancel",
+        description="透传 POST /sessions/{id}/cancel(显式终止进行中轮次,无 body)。",
+    ),
+    _PassThroughRoute(
+        ("POST",),
+        "/sessions/{session_id}/steer",
+        body="raw",
+        description="透传 POST /sessions/{id}/steer(轮次进行中注入用户消息,下一 step 边界生效)。",
+    ),
+    _PassThroughRoute(
+        ("POST",),
+        "/approval",
+        body="raw",
+        description="透传 POST /approval(审批回执)。",
+    ),
+]
+
+
+def _extract_path_params(path: str) -> List[str]:
+    return [seg[1:-1] for seg in path.split("/") if seg.startswith("{") and seg.endswith("}")]
+
+
+async def _proxy_passthrough(
+    request: Request,
+    runtime: AgentRuntimeManager,
+    method: str,
+    downstream_path: str,
+    body: _PassThroughBody,
+    inject_workspace_dir: bool,
+) -> JSONResponse:
+    """统一普通透传实现:下游错误原样,连接失败 503。"""
+    try:
+        async with AsyncClient(base_url=runtime.agent_url, timeout=_JSON_TIMEOUT) as client:
+            if body == "none":
+                resp = await client.request(method, downstream_path)
+            elif body == "raw":
+                content = await request.body()
+                resp = await client.request(
+                    method,
+                    downstream_path,
+                    content=content,
+                    headers={"Content-Type": "application/json"},
+                )
+            else:  # "json"
+                try:
+                    payload = json.loads(await request.body())
+                except (json.JSONDecodeError, ValueError):
+                    return _error(400, "bad_request", "request body must be a JSON object")
+                if not isinstance(payload, dict):
+                    return _error(400, "bad_request", "request body must be a JSON object")
+                if inject_workspace_dir and not payload.get("workspaceDir"):
+                    workspace = request.app.state.workspace.get()
+                    if workspace is None:
+                        return _error(400, "no_workspace", "No workspace selected")
+                    payload["workspaceDir"] = str(workspace)
+                resp = await client.request(method, downstream_path, json=payload)
+    except httpx.HTTPError as exc:
+        logger.warning("agent %s %s unreachable: %s", method, downstream_path, exc)
+        return _unavailable(f"agent server unreachable: {exc}")
+    return _passthrough_error(resp.status_code, resp.content)
+
+
+def _build_passthrough_handler(route: _PassThroughRoute) -> Callable[..., Any]:
+    """根据声明表条目生成 FastAPI endpoint 函数。"""
+    path_params = _extract_path_params(route.path)
+    method = route.methods[0]
+
+    async def endpoint(request: Request, **kwargs: str) -> JSONResponse:
+        runtime = _runtime(request)
+        if runtime is None or not runtime.enabled:
+            return _unavailable()
+        downstream_path = route.path.format(**kwargs) if kwargs else route.path
+        query = f"?{request.url.query}" if request.url.query else ""
+        return await _proxy_passthrough(
+            request,
+            runtime,
+            method,
+            f"{downstream_path}{query}",
+            route.body,
+            route.inject_workspace_dir,
+        )
+
+    sig_params = [inspect.Parameter("request", inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=Request)]
+    for param_name in path_params:
+        sig_params.append(
+            inspect.Parameter(param_name, inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=str)
+        )
+    endpoint.__signature__ = inspect.Signature(sig_params)  # type: ignore[attr-defined]
+    endpoint.__name__ = (
+        "pt_" + route.path.strip("/").replace("/", "_").replace("{", "").replace("}", "")
+    )
+    endpoint.__doc__ = route.description
+    return endpoint
+
+
+for _route in _PASS_THROUGH_ROUTES:
+    router.add_api_route(
+        _route.path,
+        _build_passthrough_handler(_route),
+        methods=list(_route.methods),
+        summary=_route.description.split("。")[0] if _route.description else "",
     )
 
 
-@router.delete("/sessions/{session_id}")
-async def delete_session(session_id: str, request: Request) -> JSONResponse:
-    """透传 DELETE /sessions/{id}(删除 session)。"""
-    runtime = _runtime(request)
-    if runtime is None or not runtime.enabled:
-        return _unavailable()
-    return await _simple_passthrough(runtime, "DELETE", f"/sessions/{session_id}")
-
-
-@router.post("/sessions/{session_id}/compact")
-async def compact_session(session_id: str, request: Request) -> JSONResponse:
-    """透传 POST /sessions/{id}/compact(手动压缩上下文,无 body)。"""
-    runtime = _runtime(request)
-    if runtime is None or not runtime.enabled:
-        return _unavailable()
-    try:
-        async with AsyncClient(base_url=runtime.agent_url, timeout=_JSON_TIMEOUT) as client:
-            resp = await client.post(f"/sessions/{session_id}/compact")
-    except httpx.HTTPError as exc:
-        logger.warning("agent /sessions/%s/compact unreachable: %s", session_id, exc)
-        return _unavailable(f"agent server unreachable: {exc}")
-    return _passthrough_error(resp.status_code, resp.content)
-
-
-@router.post("/sessions/{session_id}/recall")
-async def recall_session(session_id: str, request: Request) -> JSONResponse:
-    """透传 POST /sessions/{id}/recall(撤回某条用户消息及其后内容)。"""
-    runtime = _runtime(request)
-    if runtime is None or not runtime.enabled:
-        return _unavailable()
-    body = await request.body()
-    try:
-        async with AsyncClient(base_url=runtime.agent_url, timeout=_JSON_TIMEOUT) as client:
-            resp = await client.post(
-                f"/sessions/{session_id}/recall",
-                content=body,
-                headers={"Content-Type": "application/json"},
-            )
-    except httpx.HTTPError as exc:
-        logger.warning("agent /sessions/%s/recall unreachable: %s", session_id, exc)
-        return _unavailable(f"agent server unreachable: {exc}")
-    return _passthrough_error(resp.status_code, resp.content)
-
-
-@router.post("/sessions/{session_id}/mode")
-async def set_session_mode(session_id: str, request: Request) -> JSONResponse:
-    """透传 POST /sessions/{id}/mode(切换会话权限模式)。"""
-    runtime = _runtime(request)
-    if runtime is None or not runtime.enabled:
-        return _unavailable()
-    body = await request.body()
-    try:
-        async with AsyncClient(base_url=runtime.agent_url, timeout=_JSON_TIMEOUT) as client:
-            resp = await client.post(
-                f"/sessions/{session_id}/mode",
-                content=body,
-                headers={"Content-Type": "application/json"},
-            )
-    except httpx.HTTPError as exc:
-        logger.warning("agent /sessions/%s/mode unreachable: %s", session_id, exc)
-        return _unavailable(f"agent server unreachable: {exc}")
-    return _passthrough_error(resp.status_code, resp.content)
-
-
-@router.get("/sessions/{session_id}/events")
-async def session_events(session_id: str, request: Request) -> JSONResponse:
-    """透传 GET /sessions/{id}/events?fromSeq=N(断连/刷新后补齐条目 + inProgress)。"""
-    runtime = _runtime(request)
-    if runtime is None or not runtime.enabled:
-        return _unavailable()
-    query = f"?{request.url.query}" if request.url.query else ""
-    return await _simple_passthrough(
-        runtime, "GET", f"/sessions/{session_id}/events{query}"
-    )
-
-
-@router.post("/sessions/{session_id}/cancel")
-async def cancel_session_turn(session_id: str, request: Request) -> JSONResponse:
-    """透传 POST /sessions/{id}/cancel(显式终止进行中轮次,无 body)。"""
-    runtime = _runtime(request)
-    if runtime is None or not runtime.enabled:
-        return _unavailable()
-    try:
-        async with AsyncClient(base_url=runtime.agent_url, timeout=_JSON_TIMEOUT) as client:
-            resp = await client.post(f"/sessions/{session_id}/cancel")
-    except httpx.HTTPError as exc:
-        logger.warning("agent /sessions/%s/cancel unreachable: %s", session_id, exc)
-        return _unavailable(f"agent server unreachable: {exc}")
-    return _passthrough_error(resp.status_code, resp.content)
-
-
-@router.post("/sessions/{session_id}/steer")
-async def steer_session(session_id: str, request: Request) -> JSONResponse:
-    """透传 POST /sessions/{id}/steer(轮次进行中注入用户消息,下一 step 边界生效)。"""
-    runtime = _runtime(request)
-    if runtime is None or not runtime.enabled:
-        return _unavailable()
-    body = await request.body()
-    try:
-        async with AsyncClient(base_url=runtime.agent_url, timeout=_JSON_TIMEOUT) as client:
-            resp = await client.post(
-                f"/sessions/{session_id}/steer",
-                content=body,
-                headers={"Content-Type": "application/json"},
-            )
-    except httpx.HTTPError as exc:
-        logger.warning("agent /sessions/%s/steer unreachable: %s", session_id, exc)
-        return _unavailable(f"agent server unreachable: {exc}")
-    return _passthrough_error(resp.status_code, resp.content)
-
-
-@router.post("/approval")
-async def approval(request: Request) -> JSONResponse:
-    """透传 POST /approval(审批回执)。"""
-    runtime = _runtime(request)
-    if runtime is None or not runtime.enabled:
-        return _unavailable()
-    body = await request.body()
-    try:
-        async with AsyncClient(base_url=runtime.agent_url, timeout=_JSON_TIMEOUT) as client:
-            resp = await client.post(
-                "/approval", content=body, headers={"Content-Type": "application/json"}
-            )
-    except httpx.HTTPError as exc:
-        logger.warning("agent /approval unreachable: %s", exc)
-        return _unavailable(f"agent server unreachable: {exc}")
-    return _passthrough_error(resp.status_code, resp.content)
+# ---------------------------------------------------------------------------
+# SSE chat 透传(特殊:流式转发 + 断连取消)
+# ---------------------------------------------------------------------------
 
 
 @router.post("/chat")

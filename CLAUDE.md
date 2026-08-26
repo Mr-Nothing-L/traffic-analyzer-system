@@ -18,7 +18,7 @@
 
 ### event_id 全局编号（= 标注文档 v4.5 的 action 编号）
 
-event_id 全局采用 v4.5 的 action 编号，不再做 0-based 映射；action 9 = 正常占位，不对应任何事件。
+event_id 全局采用 v4.5 的 action 编号，不再做 0-based 映射；action 9 = 正常指示位(ADR-0001:已分析且无事件时位 9=1)，不对应任何事件。
 
 | event_id | 名称 | 检测模式 | 备注 |
 |---|---|---|---|
