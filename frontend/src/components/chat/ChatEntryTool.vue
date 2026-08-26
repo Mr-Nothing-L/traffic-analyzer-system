@@ -1,5 +1,6 @@
 <script setup lang="ts">
 /** 工具条目:参数摘要 + 结果折叠(文本/图片/子代理),失败红字。 */
+import { computed } from 'vue'
 import type { AgentEntry } from '../../stores/agentchat'
 import type { AgentToolEntry } from '../../stores/agentchat'
 import UiIcon from '../UiIcon.vue'
