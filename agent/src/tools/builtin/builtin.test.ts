@@ -3,7 +3,7 @@
  * (stubbed global fetch); file/script tools run against a tmp workspace.
  * No real model API or toolserver process is touched.
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -386,6 +386,71 @@ describe('read_file / write_file', () => {
     expect(result.output).toContain('PATH_SENSITIVE');
   });
 
+  it('hard-vetoes a workspace symlink whose target is outside the workspace', async () => {
+    const outsideDir = mkdtempSync(path.join(os.tmpdir(), 'symlink-target-'));
+    try {
+      const secretFile = path.join(outsideDir, 'secret.txt');
+      writeFileSync(secretFile, 'secret');
+      symlinkSync(secretFile, path.join(workspaceDir, 'leak.txt'));
+
+      const read = await execute(fileTool('read_file'), { path: 'leak.txt' });
+      expect(read.isError).toBe(true);
+      expect(read.output).toContain('PATH_OUTSIDE_WORKSPACE');
+      expect(read.output).toContain('resolves through symlinks');
+
+      const evilScript = path.join(outsideDir, 'evil.sh');
+      writeFileSync(evilScript, 'echo pwned\n');
+      symlinkSync(evilScript, path.join(workspaceDir, 'evil.sh'));
+      const script = await execute(fileTool('run_script'), { path: 'evil.sh' });
+      expect(script.isError).toBe(true);
+      expect(script.output).toContain('PATH_OUTSIDE_WORKSPACE');
+    } finally {
+      rmSync(outsideDir, { recursive: true, force: true });
+    }
+  });
+
+  it('allows a symlink whose physical target stays inside additionalDirs', async () => {
+    const extraDir = mkdtempSync(path.join(os.tmpdir(), 'extra-symlink-'));
+    try {
+      const target = path.join(extraDir, 'note.txt');
+      writeFileSync(target, 'via symlink');
+      symlinkSync(target, path.join(workspaceDir, 'alias.txt'));
+
+      const extraWorkspace: WorkspaceConfig = { workspaceDir, additionalDirs: [extraDir] };
+      const read = createFileTools(extraWorkspace, (n) => `desc:${n}`).find(
+        (t) => t.name === 'read_file',
+      );
+      if (!read) throw new Error('read_file not found');
+
+      const result = await execute(read, { path: 'alias.txt' });
+      expect(result.isError).toBeFalsy();
+      expect(JSON.parse(result.output as string).content).toBe('via symlink');
+    } finally {
+      rmSync(extraDir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps working when the workspace directory itself is behind a symlink', async () => {
+    const realDir = mkdtempSync(path.join(os.tmpdir(), 'real-ws-'));
+    const linkDir = path.join(os.tmpdir(), `link-ws-${process.pid}-${Date.now()}`);
+    symlinkSync(realDir, linkDir);
+    try {
+      writeFileSync(path.join(realDir, 'a.txt'), 'ok');
+      const linkedWorkspace: WorkspaceConfig = { workspaceDir: linkDir, additionalDirs: [] };
+      const read = createFileTools(linkedWorkspace, (n) => `desc:${n}`).find(
+        (t) => t.name === 'read_file',
+      );
+      if (!read) throw new Error('read_file not found');
+
+      const result = await execute(read, { path: 'a.txt' });
+      expect(result.isError).toBeFalsy();
+      expect(JSON.parse(result.output as string).content).toBe('ok');
+    } finally {
+      rmSync(realDir, { recursive: true, force: true });
+      rmSync(linkDir, { force: true });
+    }
+  });
+
   it('returns isError when reading a missing file', async () => {
     const result = await execute(fileTool('read_file'), { path: 'missing.txt' });
     expect(result.isError).toBe(true);
@@ -740,6 +805,27 @@ describe('submit_detection', () => {
       expect(fetchMock).not.toHaveBeenCalled();
     });
 
+    it('hard-vetoes an ABSOLUTE video_path outside the workspace (previously allowed)', async () => {
+      const outsideDir = mkdtempSync(path.join(os.tmpdir(), 'submit-outside-'));
+      try {
+        const result = await execute(annotatingTool(), {
+          video_path: path.join(outsideDir, 'elsewhere.mp4'),
+          events: eventsWithDetected({
+            boxes: [{ x1: 0.1, y1: 0.1, x2: 0.2, y2: 0.2 }],
+            box_frame: 3.0,
+          }),
+          binary_encoding: '0_0_1_0_0_0_0_0_0_0_0',
+          normal: false,
+          report_markdown: '# 报告',
+        });
+        expect(result.isError).toBe(true);
+        expect(result.output).toContain('PATH_OUTSIDE_WORKSPACE');
+        expect(fetchMock).not.toHaveBeenCalled();
+      } finally {
+        rmSync(outsideDir, { recursive: true, force: true });
+      }
+    });
+
     it('degrades when draw_boxes fails: submission stands, meta.annotation_missing records the event', async () => {
       mockToolserver({ error: { code: 'frame_unavailable', message: 'no frame at 3s' } }, 404);
       const result = await execute(annotatingTool(), {
@@ -790,6 +876,57 @@ describe('submit_detection', () => {
       const payload = result.payload as DetectionPayload;
       expect(payload.events[2]?.annotated_image).toBeUndefined();
       expect(payload.meta?.annotation_not_provided).toEqual([3]);
+    });
+  });
+
+  describe('resolver convergence (single strict boundary)', () => {
+    interface Verdict {
+      readonly runnable: boolean;
+      readonly code?: string;
+    }
+
+    function verdict(tool: ExecutableTool, input: unknown): Verdict {
+      const execution = (tool.resolveExecution as (i: unknown) => unknown)(input);
+      if (isRunnableToolExecution(execution as never)) return { runnable: true };
+      const output = (execution as ExecutableToolErrorResult).output;
+      const match = typeof output === 'string' ? /\[(PATH_[A-Z_]+)\]/.exec(output) : undefined;
+      return { runnable: false, code: match?.[1] };
+    }
+
+    function submitInput(videoPath: string): Record<string, unknown> {
+      return {
+        video_path: videoPath,
+        events: baseEvents(),
+        binary_encoding: '0_0_0_0_0_0_0_0_1_0_0',
+        normal: true,
+        report_markdown: '# 报告',
+      };
+    }
+
+    it('the same path yields the same verdict across read_file / video_meta / submit_detection', () => {
+      const submitTool = createSubmitDetectionTool('提交检测结果', loadSubmitDetectionSchema(), {
+        client,
+        workspace,
+      });
+      const cases: ReadonlyArray<{ path: string; expected: Verdict }> = [
+        { path: path.join(workspaceDir, 'demo.mp4'), expected: { runnable: true } },
+        {
+          path: path.join(os.tmpdir(), 'elsewhere', 'x.mp4'),
+          expected: { runnable: false, code: 'PATH_OUTSIDE_WORKSPACE' },
+        },
+        {
+          path: '../outside.mp4',
+          expected: { runnable: false, code: 'PATH_OUTSIDE_WORKSPACE' },
+        },
+        { path: '.env', expected: { runnable: false, code: 'PATH_SENSITIVE' } },
+        { path: '', expected: { runnable: false, code: 'PATH_INVALID' } },
+      ];
+
+      for (const { path: rawPath, expected } of cases) {
+        expect(verdict(fileTool('read_file'), { path: rawPath })).toEqual(expected);
+        expect(verdict(videoTool('video_meta'), { video_path: rawPath })).toEqual(expected);
+        expect(verdict(submitTool, submitInput(rawPath))).toEqual(expected);
+      }
     });
   });
 });

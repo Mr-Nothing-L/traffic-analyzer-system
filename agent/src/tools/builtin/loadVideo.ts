@@ -4,9 +4,10 @@
  *
  * Flow: sandbox-validate `video_path` (read) → POST /tools/prepare_video on
  * the Python toolserver (transcodes / downsamples when over `max_mb`,
- * default 40) → read the prepared file back and inline it as a base64 data
- * URL. If the prepared file still exceeds 50MB the base64 payload would be
- * too large for the chat request, so the call fails with an isError result
+ * default 40) → sandbox-validate the returned prepared path (same strict
+ * workspace resolver) → read the prepared file back and inline it as a base64
+ * data URL. If the prepared file still exceeds 50MB the base64 payload would
+ * be too large for the chat request, so the call fails with an isError result
  * telling the model to inspect key moments with draw_boxes / extract_frames
  * instead.
  */
@@ -85,6 +86,14 @@ export function createLoadVideoTool(
           });
           if (!result.ok) return toolserverErrorResult(result.error);
           const prepared = result.data;
+
+          // Defense in depth: the toolserver resolves paths against its own
+          // allowed roots, but before node:fs touches the returned path it must
+          // also pass the same strict workspace resolver (transcoded artifacts
+          // land under <allowed root>/.agent/transcoded/, i.e. inside the
+          // workspace; anything else is rejected instead of read).
+          const preparedResolved = resolveWorkspacePath(prepared.path, workspace, 'read');
+          if (!preparedResolved.ok) return preparedResolved.result;
 
           if (prepared.size_bytes > HARD_MAX_BYTES) {
             const sizeMb = (prepared.size_bytes / (1024 * 1024)).toFixed(1);

@@ -11,8 +11,8 @@
  * the scheduler never runs it in parallel with other tools.
  */
 import { execFile } from 'node:child_process';
+import { realpathSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
@@ -20,9 +20,10 @@ import { z } from 'zod';
 
 import {
   PathSecurityError,
-  canonicalizePath,
-  isSensitiveFile,
+  STRICT_WORKSPACE_ACCESS_POLICY,
+  isWithinDirectory,
   isWithinWorkspace,
+  resolvePathAccess,
   type PathAccessOperation,
   type WorkspaceConfig,
 } from '../../sandbox/path-access';
@@ -52,28 +53,39 @@ export type WorkspacePathResolution =
   | { readonly ok: false; readonly result: ExecutableToolErrorResult };
 
 /**
- * Strict workspace confinement for builtin tools. Unlike resolvePathAccess's
- * default `absolute-outside-allowed` guard mode, ANY path resolving outside
- * the workspace (absolute or relative) is a hard veto → isError
- * (PATH_OUTSIDE_WORKSPACE); paths inside additionalDirs still pass. Sensitive
- * files are vetoed as PATH_SENSITIVE. Built from the sandbox module's
- * canonicalizePath/isWithinWorkspace/isSensitiveFile primitives (the sandbox
- * module itself is not modified).
+ * Strict workspace confinement — the single path boundary for builtin tools.
+ * Delegates to resolvePathAccess with STRICT_WORKSPACE_ACCESS_POLICY: ANY path
+ * resolving outside the workspace (absolute or relative) is a hard veto →
+ * isError (PATH_OUTSIDE_WORKSPACE); paths inside additionalDirs still pass;
+ * sensitive files are vetoed as PATH_SENSITIVE. On top of the sandbox module's
+ * purely lexical canonicalization, existing files are resolved through
+ * fs.realpathSync and re-checked, so a workspace symlink pointing outside
+ * (e.g. at /etc) cannot leak node:fs reads/writes. Write targets that do not
+ * exist yet keep the lexical verdict (realpath cannot resolve them), so
+ * symlinks in their not-yet-existing parent directories are not covered.
+ * Allowed roots are matched both lexically and physically so a workspace
+ * reached through a symlinked directory still works.
  */
 export function resolveWorkspacePath(
   rawPath: string,
   workspace: WorkspaceConfig,
   operation: PathAccessOperation,
 ): WorkspacePathResolution {
-  let canonical: string;
   try {
-    const expanded =
-      rawPath === '~'
-        ? os.homedir()
-        : rawPath.startsWith('~/')
-          ? path.join(os.homedir(), rawPath.slice(2))
-          : rawPath;
-    canonical = canonicalizePath(expanded, workspace.workspaceDir);
+    const access = resolvePathAccess(rawPath, workspace.workspaceDir, workspace, {
+      operation,
+      policy: STRICT_WORKSPACE_ACCESS_POLICY,
+    });
+    const physical = realpathIfResolvable(access.path);
+    if (physical !== undefined && !isWithinAnyRoot(physical, workspace)) {
+      throw new PathSecurityError(
+        'PATH_OUTSIDE_WORKSPACE',
+        rawPath,
+        physical,
+        `"${rawPath}" resolves through symlinks to "${physical}", which is outside the workspace.`,
+      );
+    }
+    return { ok: true, path: access.path };
   } catch (error) {
     if (error instanceof PathSecurityError) {
       return {
@@ -86,33 +98,25 @@ export function resolveWorkspacePath(
     }
     throw error;
   }
+}
 
-  if (isSensitiveFile(canonical)) {
-    return {
-      ok: false,
-      result: {
-        output:
-          `路径访问被沙盒硬性拒绝 [PATH_SENSITIVE]: "${rawPath}" 命中敏感文件模式` +
-          `(env / 私钥 / credentials),已阻止访问以保护密钥。`,
-        isError: true,
-      },
-    };
+/** realpathSync that yields undefined when the path does not exist (yet). */
+function realpathIfResolvable(filePath: string): string | undefined {
+  try {
+    return realpathSync(filePath);
+  } catch {
+    return undefined;
   }
+}
 
-  if (!isWithinWorkspace(canonical, workspace)) {
-    const verb = operation === 'write' ? '写入' : operation === 'search' ? '搜索' : '读取';
-    return {
-      ok: false,
-      result: {
-        output:
-          `路径访问被沙盒硬性拒绝 [PATH_OUTSIDE_WORKSPACE]: "${rawPath}" 解析为 ` +
-          `"${canonical}",位于工作区之外;${verb}操作仅限工作区(及附加目录)内。`,
-        isError: true,
-      },
-    };
+/** Containment against every allowed root, lexically and physically resolved. */
+function isWithinAnyRoot(candidate: string, workspace: WorkspaceConfig): boolean {
+  if (isWithinWorkspace(candidate, workspace)) return true;
+  for (const root of [workspace.workspaceDir, ...workspace.additionalDirs]) {
+    const physicalRoot = realpathIfResolvable(root);
+    if (physicalRoot !== undefined && isWithinDirectory(candidate, physicalRoot)) return true;
   }
-
-  return { ok: true, path: canonical };
+  return false;
 }
 
 const readFileInputSchema = z.strictObject({

@@ -180,6 +180,21 @@ describe('load_video', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('refuses to read a toolserver-returned prepared path outside the workspace', async () => {
+    const outsideDir = mkdtempSync(path.join(os.tmpdir(), 'prepared-outside-'));
+    try {
+      const outsidePath = path.join(outsideDir, 'prepared.mp4');
+      writeFileSync(outsidePath, FAKE_MP4);
+      mockPrepareVideo(preparedPayload({ path: outsidePath }));
+
+      const result = await execute({ video_path: path.join(workspaceDir, 'demo.mp4') });
+      expect(result.isError).toBe(true);
+      expect(result.output).toContain('PATH_OUTSIDE_WORKSPACE');
+    } finally {
+      rmSync(outsideDir, { recursive: true, force: true });
+    }
+  });
+
   it('rejects invalid input (non-positive max_mb)', async () => {
     const result = await execute({ video_path: path.join(workspaceDir, 'demo.mp4'), max_mb: -1 });
     expect(result.isError).toBe(true);

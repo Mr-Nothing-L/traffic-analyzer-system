@@ -72,7 +72,15 @@ export function isSensitiveFile(filePath: string): boolean {
 
 export type PathSecurityCode = 'PATH_OUTSIDE_WORKSPACE' | 'PATH_SENSITIVE' | 'PATH_INVALID';
 export type PathAccessOperation = 'read' | 'write' | 'search';
-export type WorkspaceGuardMode = 'absolute-outside-allowed' | 'disabled';
+/**
+ * - 'strict': any resolved path outside workspace + additionalDirs is rejected
+ *   (relative or absolute) — the single boundary builtin tools enforce.
+ * - 'absolute-outside-allowed': outside paths are allowed if the raw input was
+ *   absolute (default policy; escape-by-relative-path is still rejected).
+ * - 'disabled': no workspace confinement. Currently exercised only by this
+ *   module's own unit tests; kept for parity with upstream kimi-code.
+ */
+export type WorkspaceGuardMode = 'strict' | 'absolute-outside-allowed' | 'disabled';
 
 export interface WorkspaceAccessPolicy {
   readonly guardMode: WorkspaceGuardMode;
@@ -81,6 +89,12 @@ export interface WorkspaceAccessPolicy {
 
 export const DEFAULT_WORKSPACE_ACCESS_POLICY: WorkspaceAccessPolicy = {
   guardMode: 'absolute-outside-allowed',
+  checkSensitive: true,
+};
+
+/** Strict confinement policy shared by all builtin tools (single boundary). */
+export const STRICT_WORKSPACE_ACCESS_POLICY: WorkspaceAccessPolicy = {
+  guardMode: 'strict',
   checkSensitive: true,
 };
 
@@ -103,7 +117,7 @@ export class PathSecurityError extends Error {
   }
 }
 
-function expandUserPath(filePath: string, homeDir: string | undefined): string {
+export function expandUserPath(filePath: string, homeDir: string | undefined): string {
   if (homeDir === undefined) return filePath;
   if (filePath === '~') return homeDir;
   if (filePath.startsWith('~/')) {
@@ -163,10 +177,28 @@ function relativeOutsideMessage(filePath: string, operation: PathAccessOperation
   );
 }
 
+function strictOutsideMessage(
+  filePath: string,
+  canonical: string,
+  operation: PathAccessOperation,
+): string {
+  const verb =
+    operation === 'write'
+      ? 'write or edit a file'
+      : operation === 'search'
+        ? 'search'
+        : 'read a file';
+  return (
+    `"${filePath}" resolves to "${canonical}", which is outside the workspace ` +
+    `(workspace dir + additional dirs). Only paths inside the workspace may be used to ${verb}.`
+  );
+}
+
 /**
  * Resolve `filePath` against `cwd` and enforce the workspace access policy.
  * Throws PathSecurityError on sensitive files (when policy.checkSensitive) and
- * on workspace escapes not permitted by policy.guardMode.
+ * on workspace escapes not permitted by policy.guardMode ('strict' rejects any
+ * escape, relative or absolute).
  */
 export function resolvePathAccess(
   filePath: string,
@@ -192,6 +224,13 @@ export function resolvePathAccess(
 
   if (outsideWorkspace) {
     switch (policy.guardMode) {
+      case 'strict':
+        throw new PathSecurityError(
+          'PATH_OUTSIDE_WORKSPACE',
+          filePath,
+          canonical,
+          strictOutsideMessage(filePath, canonical, options.operation),
+        );
       case 'absolute-outside-allowed':
         if (!rawIsAbsolute) {
           throw new PathSecurityError(
@@ -203,6 +242,7 @@ export function resolvePathAccess(
         }
         break;
       case 'disabled':
+        // No confinement; see WorkspaceGuardMode doc for why this stays.
         break;
     }
   }

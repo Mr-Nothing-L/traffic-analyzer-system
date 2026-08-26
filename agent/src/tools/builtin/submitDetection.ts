@@ -37,7 +37,8 @@ import {
   type ExecutableToolResult,
 } from '../contract';
 import { ToolserverClient } from './httpToolserver';
-import { invalidInputResult, resolveSandboxPath } from './utils';
+import { resolveWorkspacePath } from './fileTools';
+import { invalidInputResult } from './utils';
 
 const ACTIVE_EVENT_IDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 10, 11]);
 /** Bit 9 carries no event category; it is the normal indicator (ADR-0001). */
@@ -280,10 +281,12 @@ export function createSubmitDetectionTool(
       const input = parsed.data;
 
       // Sandbox read-check the video used for annotation (hard veto) when a
-      // workspace is available; otherwise the toolserver enforces its roots.
+      // workspace is available — same strict boundary as every other tool, so
+      // an absolute path outside the workspace is also rejected; without a
+      // workspace the toolserver's own path allowlist is the only enforcement.
       let videoPath = input.video_path;
       if (deps.workspace !== undefined) {
-        const resolved = resolveSandboxPath(input.video_path, deps.workspace, 'read');
+        const resolved = resolveWorkspacePath(input.video_path, deps.workspace, 'read');
         if (!resolved.ok) return resolved.result;
         videoPath = resolved.path;
       }

@@ -2,11 +2,13 @@ import { describe, expect, it } from 'vitest';
 
 import {
   canonicalizePath,
+  expandUserPath,
   isSensitiveFile,
   isWithinDirectory,
   isWithinWorkspace,
   PathSecurityError,
   resolvePathAccess,
+  STRICT_WORKSPACE_ACCESS_POLICY,
   type WorkspaceConfig,
 } from './path-access';
 
@@ -82,6 +84,47 @@ describe('resolvePathAccess', () => {
     expect(access.outsideWorkspace).toBe(true);
   });
 
+  it('strict guardMode rejects absolute paths outside the workspace', () => {
+    try {
+      resolvePathAccess('/tmp/scratch.txt', '/ws/app', WORKSPACE, {
+        operation: 'read',
+        policy: STRICT_WORKSPACE_ACCESS_POLICY,
+      });
+      expect.unreachable();
+    } catch (error) {
+      expect(error).toBeInstanceOf(PathSecurityError);
+      expect((error as PathSecurityError).code).toBe('PATH_OUTSIDE_WORKSPACE');
+      expect((error as PathSecurityError).canonicalPath).toBe('/tmp/scratch.txt');
+    }
+  });
+
+  it('strict guardMode rejects relative paths escaping the workspace', () => {
+    try {
+      resolvePathAccess('../outside.txt', '/ws/app', WORKSPACE, {
+        operation: 'write',
+        policy: STRICT_WORKSPACE_ACCESS_POLICY,
+      });
+      expect.unreachable();
+    } catch (error) {
+      expect((error as PathSecurityError).code).toBe('PATH_OUTSIDE_WORKSPACE');
+    }
+  });
+
+  it('strict guardMode accepts paths inside the workspace and additionalDirs', () => {
+    expect(
+      resolvePathAccess('sub/f.txt', '/ws/app', WORKSPACE, {
+        operation: 'read',
+        policy: STRICT_WORKSPACE_ACCESS_POLICY,
+      }),
+    ).toEqual({ path: '/ws/app/sub/f.txt', outsideWorkspace: false });
+    expect(
+      resolvePathAccess('/shared/data/f.bin', '/ws/app', WORKSPACE, {
+        operation: 'read',
+        policy: STRICT_WORKSPACE_ACCESS_POLICY,
+      }).outsideWorkspace,
+    ).toBe(false);
+  });
+
   it('blocks sensitive files with PATH_SENSITIVE even inside the workspace', () => {
     try {
       resolvePathAccess('.env', '/ws/app', WORKSPACE, { operation: 'read' });
@@ -106,6 +149,15 @@ describe('resolvePathAccess', () => {
       homeDir: '/ws/app',
     });
     expect(access.path).toBe('/ws/app/notes.txt');
+  });
+});
+
+describe('expandUserPath', () => {
+  it('expands ~ and ~/ against homeDir, leaves other paths untouched', () => {
+    expect(expandUserPath('~', '/home/u')).toBe('/home/u');
+    expect(expandUserPath('~/notes', '/home/u')).toBe('/home/u/notes');
+    expect(expandUserPath('/abs/x', '/home/u')).toBe('/abs/x');
+    expect(expandUserPath('rel', undefined)).toBe('rel');
   });
 });
 
