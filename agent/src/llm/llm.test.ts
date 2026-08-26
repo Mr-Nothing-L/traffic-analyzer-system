@@ -10,7 +10,7 @@ import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { generate } from '#/generate';
 import {
@@ -27,7 +27,12 @@ import type { Tool } from '#/tool';
 import { createCompactionConfig } from '../loop/compaction';
 import { compactMessagesWithSummary } from '../loop/summarize';
 
-import { buildProviderConfig, loadEnvLLMProviders, parseDotenv } from './env.ts';
+import {
+  buildProviderConfig,
+  loadEnvLLMProviders,
+  mergeDotenvIntoProcessEnv,
+  parseDotenv,
+} from './env.ts';
 import { createProviderFromEnv, withThinkingDisabled } from './provider.ts';
 
 // ---------------------------------------------------------------------------
@@ -117,36 +122,83 @@ describe('loadEnvLLMProviders', () => {
     expect(providers[0]?.provider).toBe('aliyun');
   });
 
-  it('primary 永远保留;候选按 _ENABLED 过滤(含跳号)', () => {
+  it('按实际 index 顺序解析全部 provider(跳号不补空;TS 侧只消费 configs[0])', () => {
     const path = writeEnv(
       [
         'LLM_PROVIDER_0_PROVIDER=aliyun',
-        'LLM_PROVIDER_0_ENABLED=0', // primary 即使显式禁用也保留
         'LLM_PROVIDER_1_PROVIDER=openai',
-        'LLM_PROVIDER_1_ENABLED=0',
         'LLM_PROVIDER_3_PROVIDER=vllm', // 跳号 index 2
-        'LLM_PROVIDER_3_ENABLED=1',
       ].join('\n'),
     );
     const providers = loadEnvLLMProviders(path);
-    expect(providers.map((p) => p.provider)).toEqual(['aliyun', 'vllm']);
+    expect(providers.map((p) => p.provider)).toEqual(['aliyun', 'openai', 'vllm']);
   });
 
-  it('LLM_AUTO_SWITCH=0 时只保留第一个 provider', () => {
+  it('TS 侧不处理 LLM_AUTO_SWITCH / _ENABLED 过滤语义', () => {
     const path = writeEnv(
       [
         'LLM_PROVIDER_0_PROVIDER=aliyun',
+        'LLM_PROVIDER_0_ENABLED=0',
         'LLM_PROVIDER_1_PROVIDER=openai',
+        'LLM_PROVIDER_1_ENABLED=0',
         'LLM_AUTO_SWITCH=0',
       ].join('\n'),
     );
-    expect(loadEnvLLMProviders(path).map((p) => p.provider)).toEqual(['aliyun']);
+    expect(loadEnvLLMProviders(path).map((p) => p.provider)).toEqual([
+      'aliyun',
+      'openai',
+    ]);
   });
 
   it('.env 缺失时返回默认配置单元素列表', () => {
     const providers = loadEnvLLMProviders(join(dir, 'does-not-exist.env'));
     expect(providers).toHaveLength(1);
     expect(providers[0]?.provider).toBe('anthropic');
+  });
+});
+
+describe('mergeDotenvIntoProcessEnv', () => {
+  let dir: string;
+  const writeEnv = (content: string): string => {
+    const path = join(dir, '.env');
+    writeFileSync(path, content);
+    return path;
+  };
+
+  beforeAll(() => {
+    dir = mkdtempSync(join(tmpdir(), 'llm-merge-env-'));
+  });
+  afterAll(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('把 .env 变量补进 process.env,不覆盖已存在的 shell 变量', () => {
+    const path = writeEnv(
+      [
+        'AGENT_PORT=9999',
+        'AGENT_HOST=0.0.0.0',
+        'AGENT_ENABLE_THINKING=false',
+        'AGENT_MAX_TOKENS=8192',
+      ].join('\n'),
+    );
+    const prevPort = process.env.AGENT_PORT;
+    process.env.AGENT_PORT = '8602'; // 模拟 shell 导出,应保持不变
+    try {
+      mergeDotenvIntoProcessEnv(path);
+      expect(process.env.AGENT_PORT).toBe('8602');
+      expect(process.env.AGENT_HOST).toBe('0.0.0.0');
+      expect(process.env.AGENT_ENABLE_THINKING).toBe('false');
+      expect(process.env.AGENT_MAX_TOKENS).toBe('8192');
+    } finally {
+      delete process.env.AGENT_HOST;
+      delete process.env.AGENT_ENABLE_THINKING;
+      delete process.env.AGENT_MAX_TOKENS;
+      if (prevPort === undefined) {
+        delete process.env.AGENT_PORT;
+      } else {
+        process.env.AGENT_PORT = prevPort;
+      }
+    }
   });
 });
 
@@ -182,6 +234,30 @@ describe('createProviderFromEnv', () => {
     const path = join(dir, '.env');
     writeFileSync(path, 'LLM_PROVIDER_0_PROVIDER=anthropic\nLLM_PROVIDER_0_API_KEY=k\n');
     expect(() => createProviderFromEnv(path)).toThrow(/not OpenAI-compatible/);
+  });
+
+  it('LLM_MAX_TOKENS 低于 16384 且未显式设 AGENT_MAX_TOKENS 时打 warning 并兜底', () => {
+    const path = join(dir, '.env');
+    writeFileSync(
+      path,
+      [
+        'LLM_PROVIDER_0_PROVIDER=aliyun',
+        'LLM_PROVIDER_0_API_KEY=test-key',
+        'LLM_PROVIDER_0_MODEL=qwen3.8-27b-fp8',
+        'LLM_PROVIDER_0_BASE_URL=http://10.103.0.6:8003/v1',
+        'LLM_PROVIDER_0_MAX_TOKENS=8192',
+      ].join('\n'),
+    );
+    delete process.env.AGENT_MAX_TOKENS;
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      createProviderFromEnv(path);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringMatching(/LLM_MAX_TOKENS=8192 below agent floor 16384/),
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 });
 

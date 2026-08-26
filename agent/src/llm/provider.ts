@@ -6,13 +6,14 @@
  * `OpenAILegacyChatProvider`(chat-completions 流式)接入。本地 vLLM
  * endpoint 同样走该路径。anthropic/google 等原生协议尚未接入,会抛错。
  */
-import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
-
 import type { ChatProvider } from '#/provider';
 import { OpenAILegacyChatProvider } from '#/providers/openai-legacy';
 
-import { loadEnvLLMProviders, type EnvLLMProviderConfig } from './env.ts';
+import {
+  defaultEnvPath,
+  loadEnvLLMProviders,
+  type EnvLLMProviderConfig,
+} from './env.ts';
 
 /** 视为「关闭思考」的 AGENT_ENABLE_THINKING 取值(小写比较)。 */
 const THINKING_OFF_VALUES: ReadonlySet<string> = new Set(['0', 'false', 'no', 'off']);
@@ -59,17 +60,9 @@ export interface ProviderFromEnv {
   config: EnvLLMProviderConfig;
 }
 
-/** 默认 `.env` 路径:仓库根的 traffic_analyzer/config/.env。 */
-export function defaultEnvPath(): string {
-  return resolve(
-    dirname(fileURLToPath(import.meta.url)),
-    '../../../traffic_analyzer/config/.env',
-  );
-}
-
 /**
  * 读取 `envPath` 的 `LLM_PROVIDER_*` 配置,取 primary(第 0 个)构造 provider。
- * failover 候选的调度不在本层,由上层 loop 自行遍历 `loadEnvLLMProviders`。
+ * TS agent 运行时不实现 failover 调度,只消费 configs[0]。
  */
 export function createProviderFromEnv(envPath: string = defaultEnvPath()): ProviderFromEnv {
   const configs = loadEnvLLMProviders(envPath);
@@ -87,9 +80,19 @@ export function createProviderFromEnv(envPath: string = defaultEnvPath()): Provi
   // 长思考 + 大型结构化输出(submit_detection 参数),4096 会把 tool call
   // arguments 截断。AGENT_MAX_TOKENS 显式覆盖;否则在 .env 配置值上兜底 16384。
   const envOverride = Number.parseInt(process.env.AGENT_MAX_TOKENS ?? '', 10);
-  const maxTokens = Number.isFinite(envOverride)
-    ? envOverride
-    : Math.max(config.maxTokens, 16384);
+  const AGENT_MAX_TOKENS_FLOOR = 16384;
+  let maxTokens: number;
+  if (Number.isFinite(envOverride)) {
+    maxTokens = envOverride;
+  } else {
+    maxTokens = Math.max(config.maxTokens, AGENT_MAX_TOKENS_FLOOR);
+    if (maxTokens !== config.maxTokens) {
+      console.warn(
+        `[llm] LLM_MAX_TOKENS=${config.maxTokens} below agent floor ${AGENT_MAX_TOKENS_FLOOR}; ` +
+          `raising maxTokens to ${AGENT_MAX_TOKENS_FLOOR}. Set AGENT_MAX_TOKENS to override explicitly.`,
+      );
+    }
+  }
   const provider = new OpenAILegacyChatProvider({
     // 本地 vLLM 不校验 key,但 openai SDK 要求非空;缺省时用占位值
     apiKey: config.apiKey === '' ? 'EMPTY' : config.apiKey,

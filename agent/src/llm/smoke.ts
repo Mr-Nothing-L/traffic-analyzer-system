@@ -14,7 +14,8 @@ import { generate } from '#/generate';
 import { createToolMessage, createUserMessage, extractText, type Message } from '#/message';
 import type { Tool } from '#/tool';
 
-import { createProviderFromEnv, defaultEnvPath } from './provider.ts';
+import { defaultEnvPath } from './env.ts';
+import { createProviderFromEnv } from './provider.ts';
 
 const GET_CURRENT_TIME: Tool = {
   name: 'get_current_time',

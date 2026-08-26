@@ -83,10 +83,34 @@ npm run serve        # tsx src/server/main.ts,默认 http://127.0.0.1:8602
    agent 经 `TOOLSERVER_URL`(默认 `http://127.0.0.1:8601`)访问;端口不一致
    时设 `TOOLSERVER_URL` 指向实际地址。
 
-常用环境变量(默认值与完整清单见 `traffic_analyzer/config/.env.example`):
-`AGENT_PORT`(8602)、`AGENT_HOST`(127.0.0.1)、`AGENT_CONTEXT_TOKENS`
-(262144)、`AGENT_MAX_TOKENS`(兜底 16384)、`AGENT_RESTORE_WORKSPACES`
-(逗号分隔的工作区目录,启动时恢复磁盘历史会话)。
+### 常用环境变量
+
+`agent/src/server/main.ts` 启动最早处会把 `traffic_analyzer/config/.env` 合并进
+`process.env`(只补缺,不覆盖 shell 导出),因此下表变量在独立运行、web 拉起、shell
+导出三条路径下行为一致。完整清单与示例见 `traffic_analyzer/config/.env.example`。
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `AGENT_PORT` | `8602` | TS agent server 监听端口。web 拉起时由 `AGENT_RUNTIME_AGENT_PORT` 注入覆盖。 |
+| `AGENT_HOST` | `127.0.0.1` | TS agent server 监听地址,仅回环。 |
+| `AGENT_CONTEXT_TOKENS` | `262144`(256k) | 上下文窗口 token 数,用量达 85% 自动摘要压缩。 |
+| `AGENT_MAX_TOKENS` | 未设 | 单次 LLM 调用 max_tokens 上限。未设且 `.env` 的 `LLM_MAX_TOKENS` 低于 `16384` 时,会打印 warning 并兜底到 `16384`;需严格使用较小值时请显式设置。 |
+| `AGENT_ENABLE_THINKING` | `true` | qwen3 类 thinking 模型思考开关;`0`/`false`/`no`/`off` 关闭。 |
+| `AGENT_RESTORE_WORKSPACES` | 空 | 逗号分隔的 workspace 目录,启动时从各目录 `.agent/sessions.db` 恢复历史会话。 |
+| `AGENT_UPLOAD_MAX_MB` | `500` | `/api/agent/uploads` 对话附件大小上限(MB,可小数),web 代理校验。 |
+| `TOOLSERVER_URL` | `http://127.0.0.1:8601` | TS agent 访问 Python 工具服务的地址。 |
+
+### 本地端口角色
+
+标准本地开发时各服务默认端口如下,注意避免把 frontend dev 代理指向 toolserver 的
+`8601`:
+
+| 服务 | 默认端口 | 说明 |
+| --- | --- | --- |
+| FastAPI web | `8600` | 前端 `/api` 的最终反向代理目标;`python3 -m traffic_analyzer web --port 8600`。 |
+| Python toolserver | `8601` | 视频工具服务;agent 通过 `TOOLSERVER_URL` 访问,勿直接作为前端代理目标。 |
+| TS agent server | `8602` | 对话与检测运行时;由 web 层 `/api/agent/*` 反向代理。 |
+| 前端 preview / e2e | `8608` | 构建产物验证与端到端冒烟常用端口。 |
 
 ## 与 web 层的关系
 
