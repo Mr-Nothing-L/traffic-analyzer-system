@@ -116,6 +116,11 @@ export interface AgentServerOptions {
   readonly sweepIntervalMs?: number;
   /** 启动时从这些 workspace 的 .agent/sessions.db 恢复历史 session。 */
   readonly restoreWorkspaceDirs?: readonly string[];
+  /**
+   * 工作区登记表路径;若提供,SessionManager 在 list() 前自查恢复其中尚未
+   * 打开的工作区。缺省时读环境变量 AGENT_WORKSPACE_REGISTRY_PATH。
+   */
+  readonly workspaceRegistryPath?: string;
 }
 
 export interface AgentServer {
@@ -278,6 +283,9 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       : {}),
     ...(options.restoreWorkspaceDirs !== undefined
       ? { workspaces: options.restoreWorkspaceDirs }
+      : {}),
+    ...(options.workspaceRegistryPath !== undefined
+      ? { workspaceRegistryPath: options.workspaceRegistryPath }
       : {}),
     onExpire: (session) => {
       runtimes.get(session.id)?.bridge.cancelAll();

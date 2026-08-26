@@ -226,6 +226,40 @@ def test_add_root_rejects_non_directory(tmp_client: TestClient, tmp_path: Path) 
         assert resp.json()["error"]["code"] == "invalid_root"
 
 
+def test_add_root_requires_token_when_configured(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """配置 TOOLSERVER_ADMIN_TOKEN 后,/config/roots 必须校验 X-Token。"""
+    monkeypatch.setenv("TOOLSERVER_ADMIN_TOKEN", "secret-token")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    extra = tmp_path / "extra"
+    extra.mkdir()
+    tc = TestClient(create_app(workspace))
+
+    # 无 token → 401
+    resp = tc.post("/config/roots", json={"path": str(extra)})
+    assert resp.status_code == 401, resp.text
+    assert resp.json()["error"]["code"] == "unauthorized"
+
+    # 错误 token → 401
+    resp = tc.post(
+        "/config/roots",
+        json={"path": str(extra)},
+        headers={"X-Token": "wrong"},
+    )
+    assert resp.status_code == 401, resp.text
+
+    # 正确 token → 注册成功
+    resp = tc.post(
+        "/config/roots",
+        json={"path": str(extra)},
+        headers={"X-Token": "secret-token"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert str(extra.resolve()) in resp.json()["roots"]
+
+
 def test_registered_root_grants_access(
     tmp_client: TestClient, tmp_path: Path
 ) -> None:

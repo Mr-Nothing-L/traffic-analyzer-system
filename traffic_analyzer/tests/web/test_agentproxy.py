@@ -12,6 +12,7 @@ import asyncio
 import io
 import json
 import logging
+import shutil
 import signal
 import subprocess
 import threading
@@ -1185,12 +1186,40 @@ class TestAddWorkspaceRoot:
         monkeypatch.setattr(
             runtime_mod, "_post_workspace_root", _REAL_POST_WORKSPACE_ROOT
         )
+        monkeypatch.delenv(runtime_mod.ADMIN_TOKEN_ENV_VAR, raising=False)
         runtime_mod._post_workspace_root("http://127.0.0.1:8601", tmp_path)
         assert calls == [
             (
                 ("http://127.0.0.1:8601/config/roots",),
                 {"json": {"path": str(tmp_path)},
+                 "headers": None,
                  "timeout": runtime_mod._REGISTER_ROOT_TIMEOUT},
+            )
+        ]
+
+    def test_post_workspace_root_sends_token_when_configured(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """配置 TOOLSERVER_ADMIN_TOKEN 时,_post_workspace_root 带 X-Token 头。"""
+        calls: List[Any] = []
+        monkeypatch.setattr(
+            runtime_mod,
+            "httpx",
+            SimpleNamespace(post=lambda *a, **k: calls.append((a, k))),
+        )
+        monkeypatch.setattr(
+            runtime_mod, "_post_workspace_root", _REAL_POST_WORKSPACE_ROOT
+        )
+        monkeypatch.setenv(runtime_mod.ADMIN_TOKEN_ENV_VAR, "admin-token")
+        runtime_mod._post_workspace_root("http://127.0.0.1:8601", tmp_path)
+        assert calls == [
+            (
+                ("http://127.0.0.1:8601/config/roots",),
+                {
+                    "json": {"path": str(tmp_path)},
+                    "headers": {"X-Token": "admin-token"},
+                    "timeout": runtime_mod._REGISTER_ROOT_TIMEOUT,
+                },
             )
         ]
 
@@ -1374,6 +1403,29 @@ class TestRestoreWorkspace:
         mgr.restore_workspace(tmp_path)
         assert restore_posts == []
 
+    def test_restore_removes_missing_workspace_from_registry(
+        self,
+        restore_posts: List[Any],
+        registry_file: Path,
+        caplog: Any,
+        tmp_path: Path,
+    ) -> None:
+        """restore_workspace 发现目录已不存在时,从登记表清理并跳过 HTTP。"""
+        ws = (tmp_path / "ws").resolve()
+        ws.mkdir()
+        mgr = AgentRuntimeManager(enabled=True)
+        mgr.add_workspace_root(ws)
+        assert runtime_mod.registered_workspaces() == [str(ws)]
+
+        shutil.rmtree(ws)
+        with caplog.at_level(
+            logging.WARNING, logger="traffic_analyzer.web.agentproxy.runtime"
+        ):
+            mgr.restore_workspace(ws)
+        assert restore_posts == []  # 目录已删,不发 HTTP
+        assert runtime_mod.registered_workspaces() == []
+        assert "no longer exists" in caplog.text
+
     def test_start_spawns_agent_with_restore_env(
         self, restore_posts: List[Any], tmp_path: Path
     ) -> None:
@@ -1481,25 +1533,23 @@ class TestWorkspaceRegistry:
         assert runtime_mod.registered_workspaces() == []
 
 
-class TestListSessionsAggregation:
-    def _seed_registry(self, registry_file: Path, entries: List[str]) -> None:
-        registry_file.parent.mkdir(parents=True, exist_ok=True)
-        registry_file.write_text(json.dumps(entries), encoding="utf-8")
+class TestListSessionsPassthrough:
+    """GET /api/agent/sessions 变为纯透传,不再先做 restore 写副作用。"""
 
-    def test_restores_each_registered_workspace(
+    def test_passthrough_no_restore_side_effect(
         self,
         proxy_app: Any,
         monkeypatch: pytest.MonkeyPatch,
         registry_file: Path,
     ) -> None:
-        self._seed_registry(registry_file, ["/ws/a", "/ws/b"])
+        registry_file.parent.mkdir(parents=True, exist_ok=True)
+        registry_file.write_text(
+            json.dumps(["/ws/a", "/ws/b"]), encoding="utf-8"
+        )
         calls: List[Any] = []
 
         def handler(request: httpx.Request) -> httpx.Response:
-            body = request.content.decode() if request.content else ""
-            calls.append((request.method, request.url.path, body))
-            if request.url.path == "/workspaces/restore":
-                return httpx.Response(200, json={"restored": 0})
+            calls.append((request.method, request.url.path))
             if request.url.path == "/sessions":
                 return httpx.Response(200, json={"sessions": [{"id": "s-1"}]})
             return httpx.Response(404)
@@ -1508,94 +1558,5 @@ class TestListSessionsAggregation:
         resp = TestClient(proxy_app).get("/api/agent/sessions")
         assert resp.status_code == 200
         assert resp.json() == {"sessions": [{"id": "s-1"}]}
-        restored = sorted(
-            json.loads(c[2])["workspaceDir"]
-            for c in calls
-            if c[1] == "/workspaces/restore"
-        )
-        assert restored == ["/ws/a", "/ws/b"]
-        # restore 全部完成后才透传 GET /sessions。
-        assert calls[-1][:2] == ("GET", "/sessions")
-
-    def test_restore_failure_does_not_break_listing(
-        self,
-        proxy_app: Any,
-        monkeypatch: pytest.MonkeyPatch,
-        registry_file: Path,
-        caplog: Any,
-    ) -> None:
-        self._seed_registry(registry_file, ["/ws/gone", "/ws/ok"])
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            if request.url.path == "/workspaces/restore":
-                if "gone" in request.content.decode():
-                    # 目录已删:下游 400,仅 warning 跳过。
-                    return httpx.Response(400, json={"error": "no such workspace"})
-                return httpx.Response(200, json={"restored": 0})
-            if request.url.path == "/sessions":
-                return httpx.Response(200, json={"sessions": []})
-            return httpx.Response(404)
-
-        _patch_downstream(monkeypatch, handler)
-        with caplog.at_level(
-            logging.WARNING, logger="traffic_analyzer.web.agentproxy.routes"
-        ):
-            resp = TestClient(proxy_app).get("/api/agent/sessions")
-        assert resp.status_code == 200
-        assert resp.json() == {"sessions": []}
-        assert "skipped" in caplog.text
-
-    def test_restore_unreachable_does_not_break_listing(
-        self,
-        proxy_app: Any,
-        monkeypatch: pytest.MonkeyPatch,
-        registry_file: Path,
-    ) -> None:
-        self._seed_registry(registry_file, ["/ws/a"])
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            if request.url.path == "/workspaces/restore":
-                raise httpx.ConnectError("connection refused", request=request)
-            return httpx.Response(200, json={"sessions": []})
-
-        _patch_downstream(monkeypatch, handler)
-        resp = TestClient(proxy_app).get("/api/agent/sessions")
-        assert resp.status_code == 200
-        assert resp.json() == {"sessions": []}
-
-    def test_only_recent_limit_restored(
-        self,
-        proxy_app: Any,
-        monkeypatch: pytest.MonkeyPatch,
-        registry_file: Path,
-    ) -> None:
-        entries = [f"/ws/ws-{i:02d}" for i in range(25)]
-        self._seed_registry(registry_file, entries)
-        restored: List[str] = []
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            if request.url.path == "/workspaces/restore":
-                restored.append(json.loads(request.content.decode())["workspaceDir"])
-                return httpx.Response(200, json={"restored": 0})
-            return httpx.Response(200, json={"sessions": []})
-
-        _patch_downstream(monkeypatch, handler)
-        resp = TestClient(proxy_app).get("/api/agent/sessions")
-        assert resp.status_code == 200
-        assert sorted(restored) == sorted(
-            entries[-routes_mod._RESTORE_RECENT_LIMIT:]
-        )
-
-    def test_empty_registry_skips_restore(
-        self, proxy_app: Any, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        paths: List[str] = []
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            paths.append(request.url.path)
-            return httpx.Response(200, json={"sessions": []})
-
-        _patch_downstream(monkeypatch, handler)
-        resp = TestClient(proxy_app).get("/api/agent/sessions")
-        assert resp.status_code == 200
-        assert paths == ["/sessions"]
+        # 代理层只发了一个 GET /sessions,没有 /workspaces/restore。
+        assert calls == [("GET", "/sessions")]

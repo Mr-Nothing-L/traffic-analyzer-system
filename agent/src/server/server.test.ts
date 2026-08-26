@@ -216,7 +216,11 @@ let baseUrl: string;
 async function startServer(
   provider: ScriptedProvider,
   tools: ExecutableTool[],
-  extra?: { restoreWorkspaceDirs?: string[]; contextTokens?: number },
+  extra?: {
+    restoreWorkspaceDirs?: string[];
+    contextTokens?: number;
+    workspaceRegistryPath?: string;
+  },
 ): Promise<void> {
   const created = createAgentServer({
     providerFactory: () => ({ provider, model: provider.modelName }),
@@ -230,6 +234,9 @@ async function startServer(
       ? { restoreWorkspaceDirs: extra.restoreWorkspaceDirs }
       : {}),
     ...(extra?.contextTokens !== undefined ? { contextTokens: extra.contextTokens } : {}),
+    ...(extra?.workspaceRegistryPath !== undefined
+      ? { workspaceRegistryPath: extra.workspaceRegistryPath }
+      : {}),
   });
   agentServer = created;
   await new Promise<void>((resolve) => {
@@ -1096,5 +1103,82 @@ describe('history/restore 只读 entries(不解析 messages)', () => {
     // POST /workspaces/restore 运行时路径:storage 已开 → 幂等 0,不炸。
     const restored = await postJson('/workspaces/restore', { workspaceDir: workspace });
     expect(restored.json).toEqual({ status: 'ok', restored: 0 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 工作区登记表自查恢复:agent server 自己保证 GET /sessions 前库已打开,
+// 代理层 routes.py 不再做 restore-before-list 副作用。
+// ---------------------------------------------------------------------------
+
+describe('workspace registry self-restore', () => {
+  it('GET /sessions 按登记表自动恢复尚未打开的工作区', async () => {
+    const provider = new ScriptedProvider([[text('检测完成')]]);
+    await startServer(provider, [echoTool()]);
+    const sessionId = await createSession();
+    const res = await startChat(sessionId, '检测这个视频');
+    if (res.body === null) throw new Error('no body');
+    await readUntilDone(sseReader(res.body));
+    await agentServer?.close();
+
+    // 登记表指向已落盘的 workspace,新 server 启动时不传 restoreWorkspaceDirs。
+    const registryPath = path.join(tmpdir(), `agent-registry-${Date.now()}.json`);
+    writeFileSync(registryPath, JSON.stringify([workspace]), 'utf8');
+
+    try {
+      await startServer(new ScriptedProvider([]), [echoTool()], {
+        workspaceRegistryPath: registryPath,
+      });
+
+      // GET /sessions 应触发自查恢复,无需代理层先调 /workspaces/restore。
+      const list = await getJson('/sessions');
+      expect(list.status).toBe(200);
+      const sessions = (list.json as { sessions: { id: string }[] }).sessions;
+      expect(sessions.map((s) => s.id)).toEqual([sessionId]);
+    } finally {
+      rmSync(registryPath, { force: true });
+    }
+  });
+
+  it('登记表损坏/缺失时 GET /sessions 不炸、返回已有会话', async () => {
+    await startServer(new ScriptedProvider([]), [echoTool()]);
+    const sessionId = await createSession();
+
+    const registryPath = path.join(tmpdir(), `agent-registry-bad-${Date.now()}.json`);
+    writeFileSync(registryPath, '{not json', 'utf8');
+
+    try {
+      agentServer?.sessions.restoreFromRegistry();
+      const list = await getJson('/sessions');
+      expect(list.status).toBe(200);
+      const sessions = (list.json as { sessions: { id: string }[] }).sessions;
+      expect(sessions.map((s) => s.id)).toEqual([sessionId]);
+    } finally {
+      rmSync(registryPath, { force: true });
+    }
+  });
+
+  it('已打开的工作区在登记表中只恢复一次(幂等)', async () => {
+    const provider = new ScriptedProvider([[text('检测完成')]]);
+    await startServer(provider, [echoTool()]);
+    const sessionId = await createSession();
+    const res = await startChat(sessionId, '检测这个视频');
+    if (res.body === null) throw new Error('no body');
+    await readUntilDone(sseReader(res.body));
+
+    const registryPath = path.join(tmpdir(), `agent-registry-dup-${Date.now()}.json`);
+    writeFileSync(registryPath, JSON.stringify([workspace]), 'utf8');
+
+    try {
+      // workspace 已在启动时打开,restoreFromRegistry 应幂等。
+      agentServer?.sessions.restoreFromRegistry();
+      agentServer?.sessions.restoreFromRegistry();
+      const list = await getJson('/sessions');
+      expect(list.status).toBe(200);
+      const sessions = (list.json as { sessions: { id: string }[] }).sessions;
+      expect(sessions).toHaveLength(1);
+    } finally {
+      rmSync(registryPath, { force: true });
+    }
   });
 });

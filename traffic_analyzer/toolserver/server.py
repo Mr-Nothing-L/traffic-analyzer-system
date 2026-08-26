@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import base64
 import io
+import logging
+import os
 import shutil
 import subprocess
 import zlib
@@ -39,6 +41,8 @@ from traffic_analyzer.utils.image_drawing import (
     load_image,
 )
 from traffic_analyzer.web.frames import read_frame_jpeg, read_video_meta
+
+logger = logging.getLogger(__name__)
 
 # Frame extraction limits.
 _DEFAULT_MAX_FRAMES = 4
@@ -205,6 +209,12 @@ def create_app(workspace: Path | str) -> FastAPI:
     app.state.workspace = root
     # 路径安全根集合:初始根 + 运行期经 /config/roots 热注册的工作区。
     app.state.allowed_roots = [root]
+    # /config/roots 的共享管理 token:未配置时保持开放(本地开发兼容),但打 warning。
+    app.state.admin_token = os.environ.get("TOOLSERVER_ADMIN_TOKEN")
+    if app.state.admin_token is None:
+        logger.warning(
+            "toolserver: TOOLSERVER_ADMIN_TOKEN not set; /config/roots is open to local processes"
+        )
 
     @app.exception_handler(StarletteHTTPException)
     async def _http_error_handler(
@@ -239,7 +249,19 @@ def create_app(workspace: Path | str) -> FastAPI:
 
     @app.post("/config/roots")
     def add_root(body: AddRootRequest, request: Request) -> Dict[str, Any]:
-        """热注册一个允许根(须为已存在目录);幂等,返回当前根列表。"""
+        """热注册一个允许根(须为已存在目录);幂等,返回当前根列表。
+
+        若配置了 TOOLSERVER_ADMIN_TOKEN,请求头须带 ``X-Token`` 且值匹配,
+        否则返回 401;未配置时保持开放(本地开发兼容)。
+        """
+        admin_token: Optional[str] = request.app.state.admin_token
+        if admin_token is not None:
+            if request.headers.get("X-Token") != admin_token:
+                raise _error(
+                    401,
+                    "unauthorized",
+                    "Missing or invalid X-Token header for /config/roots",
+                )
         new_root = Path(body.path).expanduser().resolve()
         if not new_root.is_dir():
             raise _error(400, "invalid_root", f"Not a directory: {body.path}")

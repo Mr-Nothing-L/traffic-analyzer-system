@@ -21,6 +21,7 @@ import type { PermissionMode } from '../permissions/types';
 
 import { repairTailMessages } from './repair';
 import { SessionStorage, type StoredSession, type TimelineEntry } from './storage';
+import { readWorkspaceRegistry } from './workspaceRegistry';
 
 export interface Session {
   readonly id: string;
@@ -58,6 +59,11 @@ export interface SessionManagerOptions {
   readonly onExpire?: (session: Session) => void;
   /** 启动时从这些 workspace 的 .agent/sessions.db 加载全部历史 session。 */
   readonly workspaces?: readonly string[];
+  /**
+   * 工作区登记表路径(web 层写入的 JSON 数组)。若提供,list() 前会自查恢复
+   * 其中尚未打开的工作区;缺省时读环境变量 AGENT_WORKSPACE_REGISTRY_PATH。
+   */
+  readonly workspaceRegistryPath?: string;
 }
 
 export const DEFAULT_SESSION_IDLE_MS = 2 * 60 * 60 * 1000;
@@ -73,11 +79,14 @@ export class SessionManager {
   private readonly storages = new Map<string, SessionStorage>();
   private readonly idleMs: number;
   private readonly onExpire: ((session: Session) => void) | undefined;
+  private readonly registryPath: string | undefined;
   private readonly sweeper: ReturnType<typeof setInterval>;
 
   constructor(options: SessionManagerOptions = {}) {
     this.idleMs = options.idleMs ?? DEFAULT_SESSION_IDLE_MS;
     this.onExpire = options.onExpire;
+    this.registryPath =
+      options.workspaceRegistryPath ?? process.env.AGENT_WORKSPACE_REGISTRY_PATH;
     for (const workspaceDir of options.workspaces ?? []) {
       // 只打开 storage:磁盘行由 list()/get() 按需读取,启动不做全量加载。
       this.storageFor(workspaceDir);
@@ -150,8 +159,13 @@ export class SessionManager {
     return undefined;
   }
 
-  /** 所有已知 session 的摘要:磁盘为准,内存中的活跃时间/标题更新。 */
+  /** 所有已知 session 的摘要:磁盘为准,内存中的活跃时间/标题更新。
+   *
+   * 若配置了工作区登记表,先自查恢复其中尚未打开的工作区,让 agent server
+   * 自行保证列表能看到全部历史会话(代理层不再在列表前做 restore 副作用)。
+   */
   list(): SessionSummary[] {
+    this.restoreFromRegistry();
     const byId = new Map<string, SessionSummary>();
     for (const storage of this.storages.values()) {
       for (const row of storage.listSessions()) {
@@ -162,6 +176,18 @@ export class SessionManager {
       byId.set(session.id, summaryOf(session));
     }
     return [...byId.values()].sort((a, b) => a.createdAt - b.createdAt);
+  }
+
+  /**
+   * 按工作区登记表自查恢复:只恢复尚未打开的 workspace,幂等。
+   * 登记表路径未配置、不存在或损坏时 noop。
+   */
+  restoreFromRegistry(): void {
+    if (this.registryPath === undefined) return;
+    for (const workspaceDir of readWorkspaceRegistry(this.registryPath)) {
+      if (this.storages.has(workspaceDir)) continue;
+      this.restoreWorkspace(workspaceDir);
+    }
   }
 
   /**

@@ -58,6 +58,7 @@ logger = logging.getLogger(__name__)
 ENABLE_ENV_VAR = "AGENT_RUNTIME_ENABLE"
 AGENT_PORT_ENV_VAR = "AGENT_RUNTIME_AGENT_PORT"
 TOOLSERVER_PORT_ENV_VAR = "AGENT_RUNTIME_TOOLSERVER_PORT"
+ADMIN_TOKEN_ENV_VAR = "TOOLSERVER_ADMIN_TOKEN"
 DEFAULT_TOOLSERVER_PORT = 8601
 DEFAULT_AGENT_PORT = 8602
 
@@ -99,9 +100,14 @@ def _port_in_use(port: int, host: str = "127.0.0.1", timeout: float = 0.5) -> bo
 
 def _post_workspace_root(toolserver_url: str, path: Path) -> None:
     """POST /config/roots 的实际 HTTP 调用(独立出来便于测试替换)。"""
+    headers: Optional[Dict[str, str]] = None
+    token = os.environ.get(ADMIN_TOKEN_ENV_VAR)
+    if token is not None:
+        headers = {"X-Token": token}
     httpx.post(
         f"{toolserver_url}/config/roots",
         json={"path": str(path)},
+        headers=headers,
         timeout=_REGISTER_ROOT_TIMEOUT,
     )
 
@@ -158,6 +164,31 @@ def _record_workspace(path: Path) -> None:
         except OSError as exc:
             logger.warning(
                 "agent runtime: failed to record workspace %s: %s", resolved, exc
+            )
+
+
+def _remove_workspace(path: Path) -> None:
+    """从登记表移除规范化工作区路径(不存在时 noop)。
+
+    用于 restore 流程发现历史工作区目录已被删除时清理登记表,避免登记
+    表单调增长。
+    """
+    resolved = str(Path(path).expanduser().resolve())
+    with _registry_lock:
+        try:
+            entries = registered_workspaces()
+            if resolved not in entries:
+                return
+            entries.remove(resolved)
+            REGISTRY_PATH.parent.mkdir(parents=True, exist_ok=True)
+            REGISTRY_PATH.write_text(
+                json.dumps(entries, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            logger.warning(
+                "agent runtime: failed to remove workspace %s from registry: %s",
+                resolved, exc
             )
 
 
@@ -329,7 +360,18 @@ class AgentRuntimeManager:
         (见 start());本方法用于外部已运行实例(端口占用)与工作区切换。
         与 add_workspace_root 同为旁路调用:失败(agent 未就绪、旧版本无此
         端点、超时等)仅记 warning,不影响调用方。
+
+        若目标目录已不存在(历史工作区被删除),则从登记表清理该路径,避免
+        登记表单调增长,并跳过 HTTP 恢复。
         """
+        resolved = Path(path).expanduser().resolve()
+        if not resolved.is_dir():
+            logger.warning(
+                "agent runtime: workspace %s no longer exists, removing from registry",
+                path,
+            )
+            _remove_workspace(path)
+            return
         _record_workspace(path)
         if not self._enabled:
             return
