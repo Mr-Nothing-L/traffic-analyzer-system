@@ -25,6 +25,8 @@ analysis_dir 等辅助函数。
 from __future__ import annotations
 
 import copy as copy_module
+import json
+import logging
 import os
 import sys
 import threading
@@ -34,6 +36,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -48,6 +52,36 @@ VIDEO_EXTENSIONS = (".mp4", ".avi", ".mov", ".mkv", ".wmv")
 PRUNED_DIR_NAMES = frozenset({"analysis", "tmp_img", "output", "__pycache__"})
 
 WORKSPACE_DIRS_ENV_VAR = "TRAFFIC_ANALYZER_WORKSPACE_DIRS"
+
+# 上次工作区记忆:web 启动时无显式 preset(--workspace / env)则回退到它,
+# 都没有再回落到演示区。读取必须经 _pkg_var,测试 monkeypatch 包属性才生效。
+LAST_WORKSPACE_PATH = (
+    Path(__file__).resolve().parents[1] / "config" / "last_workspace.json"
+)
+DEFAULT_DEMO_WORKSPACE = Path(__file__).resolve().parents[2] / "演示区"
+
+
+def read_last_workspace() -> Optional[Path]:
+    """读取上次使用的工作区;文件缺失/损坏返回 None。"""
+    state_path = _pkg_var("LAST_WORKSPACE_PATH", LAST_WORKSPACE_PATH)
+    try:
+        data = json.loads(state_path.read_text(encoding="utf-8"))
+        raw = data.get("path")
+        return Path(raw) if isinstance(raw, str) and raw else None
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return None
+
+
+def record_last_workspace(path: Path) -> None:
+    """把当前工作区写入状态文件;失败仅记日志,不影响主流程。"""
+    state_path = _pkg_var("LAST_WORKSPACE_PATH", LAST_WORKSPACE_PATH)
+    try:
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(
+            json.dumps({"path": str(path)}, ensure_ascii=False), encoding="utf-8"
+        )
+    except OSError as exc:
+        logger.warning("record last workspace failed: %s", exc)
 
 
 def _pkg_var(name: str, default: Any) -> Any:
@@ -294,6 +328,7 @@ def set_workspace(body: WorkspaceSetRequest, request: Request) -> Dict[str, Any]
     if allowed and not _within_allowed(path, allowed):
         raise HTTPException(status_code=403, detail="workspace not in allowed list")
     request.app.state.workspace.set(path)
+    record_last_workspace(path)  # 刷新/重启后回退到该工作区(见 app.py 启动链)
     invalidate_caches()  # 工作区变更:旧 key 的缓存一并清掉(防内存堆积/串数据)
     # 把新工作区热注册进 toolserver 允许根(免重启);运行时不存在或注册
     # 失败都不影响切换本身。鸭子类型取用,避免 workspace → agentproxy 依赖。

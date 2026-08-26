@@ -35,7 +35,8 @@ const RECENT_WS_MAX = 8
 
 export const useWorkspaceStore = defineStore('workspace', () => {
   const path = ref<string | null>(null) // 当前工作区绝对路径(未设置为 null)
-  const loaded = ref(false) // 树是否已由用户显式加载(刷新后不自动加载,同 legacy)
+  const loaded = ref(false) // 树是否已加载(刷新后由 TreeView 自动恢复加载)
+  const treeLoading = ref(false) // loadTree 进行中(欢迎卡据此显示加载态)
   const root = ref<TreeEntry[]>([])
   // 浅响应式:条目对象不做深代理,数据变更一律整体替换(大工作区显著降开销)
   const children = shallowReactive<Record<string, TreeEntry[]>>({}) // dir rel → 子层(懒加载缓存)
@@ -73,34 +74,39 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   /** 加载文件树;preserve 时保留已展开目录并逐层重拉。 */
   async function loadTree(preserve = false) {
     const prevExpanded = preserve ? Array.from(expanded) : []
+    treeLoading.value = true
     loaded.value = false
     Object.keys(children).forEach((k) => delete children[k])
     expanded.clear()
     prevExpanded.forEach((r) => expanded.add(r))
     try {
-      const data = await apiFetch<{ entries: TreeEntry[] }>('/workspace/tree')
-      root.value = data.entries || []
-    } catch {
-      root.value = []
+      try {
+        const data = await apiFetch<{ entries: TreeEntry[] }>('/workspace/tree')
+        root.value = data.entries || []
+      } catch {
+        root.value = []
+      }
+      try {
+        videos.value = (await apiFetch<VideoInfo[]>('/workspace/videos')) || []
+      } catch {
+        videos.value = []
+      }
+      await Promise.all(
+        prevExpanded.map(async (rel) => {
+          try {
+            const data = await apiFetch<{ entries: TreeEntry[] }>(
+              `/workspace/tree?path=${encodeURIComponent(rel)}`,
+            )
+            children[rel] = data.entries || []
+          } catch {
+            expanded.delete(rel) // 目录已消失:放弃展开
+          }
+        }),
+      )
+      loaded.value = true
+    } finally {
+      treeLoading.value = false
     }
-    try {
-      videos.value = (await apiFetch<VideoInfo[]>('/workspace/videos')) || []
-    } catch {
-      videos.value = []
-    }
-    await Promise.all(
-      prevExpanded.map(async (rel) => {
-        try {
-          const data = await apiFetch<{ entries: TreeEntry[] }>(
-            `/workspace/tree?path=${encodeURIComponent(rel)}`,
-          )
-          children[rel] = data.entries || []
-        } catch {
-          expanded.delete(rel) // 目录已消失:放弃展开
-        }
-      }),
-    )
-    loaded.value = true
   }
 
   /** 展开/收起目录;首次展开懒加载子层。失败回滚并抛错(调用方提示)。 */
@@ -242,7 +248,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   return {
-    path, loaded, root, children, expanded, videos, checked, currentRel,
+    path, loaded, treeLoading, root, children, expanded, videos, checked, currentRel,
     filter, sort, hasWorkspace, videoByRel, allChecked, someChecked,
     fetchWorkspace, loadTree, refreshTree, toggleDir, applyWorkspace,
     setFilter, setSort, setChecked, setAllChecked, loadRecent, pushRecent,

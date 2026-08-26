@@ -30,7 +30,12 @@ subscribe('presence', (d) => presence.setRoster(d))
 
 onMounted(async () => {
   await ws.fetchWorkspace()
-  if (ws.hasWorkspace) await jobs.pollJobs() // 很轻,照常启动以恢复任务进度(同 legacy)
+  if (ws.hasWorkspace) {
+    // 刷新/重开后自动恢复文件树,不再要手动点「加载工作区」;
+    // 大工作区加载久的体验由现有 loading 态承载。
+    if (!ws.loaded) void ws.loadTree()
+    await jobs.pollJobs() // 很轻,照常启动以恢复任务进度(同 legacy)
+  }
   // 心跳上报 viewing(当前选中视频);名册由 SSE presence 事件推送
   presence.startHeartbeat(() => ws.currentRel)
 })

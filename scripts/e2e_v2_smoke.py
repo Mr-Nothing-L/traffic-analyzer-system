@@ -107,10 +107,13 @@ def run_smoke(base: str, video_fragment: str, headless: bool) -> None:
                 record("登录", False, str(e))
                 raise  # 登录失败后续步骤无意义
 
-            # 3. 加载工作区(欢迎卡显式按钮,同 legacy)
+            # 3. 加载工作区(现在刷新后自动加载;按钮只在未触发/失败时出现,作兜底)
             try:
-                page.click("button:has-text('加载工作区')")
-                page.wait_for_selector(".video-list .video-item")
+                try:
+                    page.wait_for_selector(".video-list .video-item", timeout=8000)
+                except Exception:
+                    page.click("button:has-text('加载工作区')")
+                    page.wait_for_selector(".video-list .video-item")
                 page.screenshot(path=str(SHOT_DIR / "v2_smoke_workspace.png"))
                 record("加载工作区", True)
             except Exception as e:

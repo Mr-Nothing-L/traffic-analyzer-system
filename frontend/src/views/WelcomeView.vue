@@ -12,14 +12,15 @@ const ws = useWorkspaceStore()
     <template #header><span class="card-head">高速交通事件分析台</span></template>
     <p>请先点击顶部「选择工作区…」按钮,选择包含视频文件的目录。</p>
   </n-card>
-  <!-- 已选择但未加载:显式「加载工作区」(大工作区加载 >10s,同 legacy) -->
+  <!-- 已选择但未加载:自动加载中显示加载态;失败/未触发时可手动点 -->
   <n-card v-else-if="!ws.loaded" class="welcome-card">
     <template #header><span class="card-head">高速交通事件分析台</span></template>
     <p>当前工作区:<span class="hint-kbd">{{ ws.path }}</span></p>
-    <p>
+    <p v-if="ws.treeLoading" class="welcome-hint">正在加载工作区,请稍候…</p>
+    <p v-else>
       <n-button type="primary" class="hero-cta" @click="ws.loadTree()">加载工作区</n-button>
     </p>
-    <p class="welcome-hint">大工作区加载需要一些时间,请稍候。</p>
+    <p class="welcome-hint">大工作区加载需要一些时间。</p>
   </n-card>
   <!-- 已加载:真实计数 + 操作提示 -->
   <n-card v-else class="welcome-card">

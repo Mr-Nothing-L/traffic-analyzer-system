@@ -114,10 +114,21 @@ def create_app(workspace: Optional[str] = None) -> FastAPI:
     atexit.register(job_manager.shutdown)
 
     preset = workspace or os.environ.get(WORKSPACE_ENV_VAR)
+    if not preset:
+        # 无显式 preset:回退到上次使用的工作区,仍无则回落演示区(若存在)。
+        last = workspace_mod.read_last_workspace()
+        if last is not None and last.is_dir():
+            preset = str(last)
+    if not preset:
+        demo = workspace_mod.DEFAULT_DEMO_WORKSPACE
+        if demo.is_dir():
+            preset = str(demo)
     if preset:
         path = Path(preset).expanduser().resolve()
         if path.is_dir():
             app.state.workspace.set(path)
+            # preset 也记入状态文件:下次无参启动沿用(经 _pkg_var 可被测试隔离)
+            workspace_mod.record_last_workspace(path)
         else:
             logger.warning("Preset workspace is not a directory, ignored: %s", preset)
 

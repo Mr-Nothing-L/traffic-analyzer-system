@@ -34,6 +34,54 @@ class TestWorkspace:
         resp = client.post("/api/workspace", json={"path": str(tmp_path / "nope")})
         assert resp.status_code == 400
 
+    def test_set_workspace_records_last(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """切换工作区写入状态文件;下次 create_app 无 preset 时回退到它。"""
+        from traffic_analyzer.web import workspace as workspace_mod
+
+        state_file = tmp_path / "state" / "last_workspace.json"
+        monkeypatch.setattr(workspace_mod, "LAST_WORKSPACE_PATH", state_file)
+        client = TestClient(create_app())
+        resp = client.post("/api/workspace", json={"path": str(tmp_path)})
+        assert resp.status_code == 200
+        assert workspace_mod.read_last_workspace() == tmp_path
+        # 新进程(新 app)无 preset → 回退到上次工作区
+        client2 = TestClient(create_app())
+        assert client2.get("/api/workspace").json() == {"path": str(tmp_path)}
+
+    def test_preset_wins_over_last(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """显式 preset(--workspace/env)优先于上次记忆。"""
+        from traffic_analyzer.web import workspace as workspace_mod
+
+        state_file = tmp_path / "state" / "last_workspace.json"
+        monkeypatch.setattr(workspace_mod, "LAST_WORKSPACE_PATH", state_file)
+        remembered = tmp_path / "remembered"
+        remembered.mkdir()
+        client = TestClient(create_app())
+        client.post("/api/workspace", json={"path": str(remembered)})
+        explicit = tmp_path / "explicit"
+        explicit.mkdir()
+        client2 = TestClient(create_app(workspace=str(explicit)))
+        assert client2.get("/api/workspace").json() == {"path": str(explicit)}
+
+    def test_demo_fallback_when_no_last(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """无 preset 且无记忆 → 回落演示区(存在时)。"""
+        from traffic_analyzer.web import workspace as workspace_mod
+
+        monkeypatch.setattr(
+            workspace_mod, "LAST_WORKSPACE_PATH", tmp_path / "nope" / "missing.json"
+        )
+        demo = tmp_path / "演示区"
+        demo.mkdir()
+        monkeypatch.setattr(workspace_mod, "DEFAULT_DEMO_WORKSPACE", demo)
+        client = TestClient(create_app())
+        assert client.get("/api/workspace").json() == {"path": str(demo)}
+
     def test_set_workspace_not_a_directory(self, tmp_path: Path) -> None:
         file_path = tmp_path / "file.txt"
         file_path.write_text("x", encoding="utf-8")

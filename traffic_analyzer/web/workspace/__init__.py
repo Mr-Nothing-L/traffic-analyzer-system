@@ -28,6 +28,8 @@ analysis_dir 等辅助函数。
 from __future__ import annotations
 
 from traffic_analyzer.web.workspace.core import (
+    DEFAULT_DEMO_WORKSPACE,
+    LAST_WORKSPACE_PATH,
     PRUNED_DIR_NAMES,
     VIDEO_EXTENSIONS,
     WORKSPACE_DIRS_ENV_VAR,
@@ -46,6 +48,8 @@ from traffic_analyzer.web.workspace.core import (
     get_workspace,
     has_results,
     invalidate_caches,
+    read_last_workspace,
+    record_last_workspace,
     register_cache,
     require_workspace,
     resolve_tree_dir,
@@ -64,6 +68,8 @@ from traffic_analyzer.web.workspace.videos import (
 )
 
 __all__ = [
+    "DEFAULT_DEMO_WORKSPACE",
+    "LAST_WORKSPACE_PATH",
     "PRUNED_DIR_NAMES",
     "VIDEO_EXTENSIONS",
     "WORKSPACE_DIRS_ENV_VAR",
@@ -80,6 +86,8 @@ __all__ = [
     "list_tree",
     "list_videos",
     "list_videos_cached",
+    "read_last_workspace",
+    "record_last_workspace",
     "register_cache",
     "require_workspace",
     "resolve_tree_dir",

@@ -281,6 +281,13 @@ def _isolate_env_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     # users.db 放进点目录:不污染 workspace tree/videos 列表(点目录会被跳过)。
     monkeypatch.setattr(_user_store, "DB_PATH", tmp_path / ".auth" / "users.db")
     monkeypatch.setattr(_workspace, "_CONFIG_ENV_PATH", tmp_path / ".env.nonexistent")
+    # 上次工作区记忆与演示区回落隔离:否则 create_app() 会选中真实演示区。
+    monkeypatch.setattr(
+        _workspace, "LAST_WORKSPACE_PATH", tmp_path / ".auth" / "last_workspace.json"
+    )
+    monkeypatch.setattr(
+        _workspace, "DEFAULT_DEMO_WORKSPACE", tmp_path / ".auth" / "no-demo"
+    )
     # agent 工作区登记表同样隔离:进 lifespan 的用例会触发 runtime.start() 登记。
     monkeypatch.setattr(
         _agent_runtime, "REGISTRY_PATH", tmp_path / ".auth" / "agent_workspaces.json"
