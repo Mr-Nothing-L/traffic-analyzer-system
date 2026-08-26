@@ -582,6 +582,17 @@ export const useAgentChatStore = defineStore('agentchat', () => {
     }
   }
 
+  /** 会话栏点击入口:会话绑其他工作区(workspaceDir 与当前不同)时先切工作区
+   * (applyWorkspace → POST /api/workspace,等它返回——path 变更触发的上方 watch
+   * 会在其 resolve 前清空会话态),成功后再 selectSession,避免选上的会话被清掉;
+   * 切换失败(400 目录不存在/403 不在白名单)抛错,由调用方提示「工作区不可用」,
+   * 不切换会话。当前工作区/无 workspaceDir 的旧会话直接 selectSession。 */
+  async function openSession(id: string) {
+    const dir = sessions.value.find((s) => s.id === id)?.workspaceDir
+    if (dir && dir !== wsStore.path) await wsStore.applyWorkspace(dir)
+    await selectSession(id)
+  }
+
   /** 删除会话:列表先移除(optimistic),失败回滚重拉并抛错;
    * 删的是当前会话则切到最近会话,没有则新建。 */
   async function deleteSession(id: string) {
@@ -1015,6 +1026,7 @@ export const useAgentChatStore = defineStore('agentchat', () => {
     fetchSessions,
     createSession,
     selectSession,
+    openSession,
     deleteSession,
     setMode,
     newSession,

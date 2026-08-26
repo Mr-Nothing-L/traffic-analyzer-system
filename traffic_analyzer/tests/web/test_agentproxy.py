@@ -112,6 +112,18 @@ def restore_posts(monkeypatch: pytest.MonkeyPatch) -> List[Any]:
     return posts
 
 
+@pytest.fixture(autouse=True)
+def registry_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """把登记表重定向到 tmp config 目录(不触碰真实 config/agent_workspaces.json)。
+
+    autouse:add_workspace_root/restore_workspace 现在都会写登记表,既有用例
+    (start、工作区切换等)也得隔离。
+    """
+    path = tmp_path / "config" / "agent_workspaces.json"
+    monkeypatch.setattr(runtime_mod, "REGISTRY_PATH", path)
+    return path
+
+
 # ---------------------------------------------------------------------------
 # GET /api/agent/health
 # ---------------------------------------------------------------------------
@@ -1393,3 +1405,197 @@ class TestRestoreWorkspace:
         )
         mgr.start()
         assert restore_posts == [("http://127.0.0.1:8602", str(ws))]
+
+
+# ---------------------------------------------------------------------------
+# 工作区登记表:add_workspace_root/restore_workspace 追加登记,GET /sessions 聚合
+# ---------------------------------------------------------------------------
+
+
+class TestWorkspaceRegistry:
+    def test_missing_file_returns_empty(self, registry_file: Path) -> None:
+        assert runtime_mod.registered_workspaces() == []
+
+    def test_append_and_dedup(
+        self,
+        registry_file: Path,
+        root_posts: List[Any],
+        restore_posts: List[Any],
+        tmp_path: Path,
+    ) -> None:
+        ws_a = (tmp_path / "ws-a").resolve()
+        ws_b = (tmp_path / "ws-b").resolve()
+        ws_a.mkdir()
+        ws_b.mkdir()
+        mgr = AgentRuntimeManager(enabled=True)
+        mgr.add_workspace_root(ws_a)
+        mgr.restore_workspace(ws_b)
+        # 重复登记(含不同写法的同一路径):去重,不追加。
+        mgr.add_workspace_root(ws_a)
+        mgr.restore_workspace(ws_a / ".." / "ws-a")
+        assert runtime_mod.registered_workspaces() == [str(ws_a), str(ws_b)]
+        # 落盘内容:JSON 数组,追加序。
+        assert json.loads(registry_file.read_text(encoding="utf-8")) == [
+            str(ws_a),
+            str(ws_b),
+        ]
+
+    def test_disabled_runtime_still_records(
+        self, registry_file: Path, tmp_path: Path
+    ) -> None:
+        """登记表与下游 HTTP 解耦:runtime 禁用时不发请求,但仍登记。"""
+        mgr = AgentRuntimeManager(enabled=False)
+        mgr.restore_workspace(tmp_path)
+        assert runtime_mod.registered_workspaces() == [str(tmp_path.resolve())]
+
+    def test_write_failure_only_warns(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: Any,
+        root_posts: List[Any],
+        tmp_path: Path,
+    ) -> None:
+        # REGISTRY_PATH 指向一个目录:read_text/write_text 均 OSError。
+        monkeypatch.setattr(runtime_mod, "REGISTRY_PATH", tmp_path)
+        mgr = AgentRuntimeManager(enabled=True)
+        with caplog.at_level(
+            logging.WARNING, logger="traffic_analyzer.web.agentproxy.runtime"
+        ):
+            mgr.add_workspace_root(tmp_path / "ws")  # 不抛异常
+        assert "failed to record workspace" in caplog.text
+
+    def test_corrupt_file_returns_empty(
+        self, registry_file: Path, caplog: Any
+    ) -> None:
+        registry_file.parent.mkdir(parents=True, exist_ok=True)
+        registry_file.write_text("{not json", encoding="utf-8")
+        with caplog.at_level(
+            logging.WARNING, logger="traffic_analyzer.web.agentproxy.runtime"
+        ):
+            assert runtime_mod.registered_workspaces() == []
+        assert "workspace registry unreadable" in caplog.text
+
+    def test_non_list_file_returns_empty(self, registry_file: Path) -> None:
+        registry_file.parent.mkdir(parents=True, exist_ok=True)
+        registry_file.write_text('{"ws": "/a"}', encoding="utf-8")
+        assert runtime_mod.registered_workspaces() == []
+
+
+class TestListSessionsAggregation:
+    def _seed_registry(self, registry_file: Path, entries: List[str]) -> None:
+        registry_file.parent.mkdir(parents=True, exist_ok=True)
+        registry_file.write_text(json.dumps(entries), encoding="utf-8")
+
+    def test_restores_each_registered_workspace(
+        self,
+        proxy_app: Any,
+        monkeypatch: pytest.MonkeyPatch,
+        registry_file: Path,
+    ) -> None:
+        self._seed_registry(registry_file, ["/ws/a", "/ws/b"])
+        calls: List[Any] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = request.content.decode() if request.content else ""
+            calls.append((request.method, request.url.path, body))
+            if request.url.path == "/workspaces/restore":
+                return httpx.Response(200, json={"restored": 0})
+            if request.url.path == "/sessions":
+                return httpx.Response(200, json={"sessions": [{"id": "s-1"}]})
+            return httpx.Response(404)
+
+        _patch_downstream(monkeypatch, handler)
+        resp = TestClient(proxy_app).get("/api/agent/sessions")
+        assert resp.status_code == 200
+        assert resp.json() == {"sessions": [{"id": "s-1"}]}
+        restored = sorted(
+            json.loads(c[2])["workspaceDir"]
+            for c in calls
+            if c[1] == "/workspaces/restore"
+        )
+        assert restored == ["/ws/a", "/ws/b"]
+        # restore 全部完成后才透传 GET /sessions。
+        assert calls[-1][:2] == ("GET", "/sessions")
+
+    def test_restore_failure_does_not_break_listing(
+        self,
+        proxy_app: Any,
+        monkeypatch: pytest.MonkeyPatch,
+        registry_file: Path,
+        caplog: Any,
+    ) -> None:
+        self._seed_registry(registry_file, ["/ws/gone", "/ws/ok"])
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/workspaces/restore":
+                if "gone" in request.content.decode():
+                    # 目录已删:下游 400,仅 warning 跳过。
+                    return httpx.Response(400, json={"error": "no such workspace"})
+                return httpx.Response(200, json={"restored": 0})
+            if request.url.path == "/sessions":
+                return httpx.Response(200, json={"sessions": []})
+            return httpx.Response(404)
+
+        _patch_downstream(monkeypatch, handler)
+        with caplog.at_level(
+            logging.WARNING, logger="traffic_analyzer.web.agentproxy.routes"
+        ):
+            resp = TestClient(proxy_app).get("/api/agent/sessions")
+        assert resp.status_code == 200
+        assert resp.json() == {"sessions": []}
+        assert "skipped" in caplog.text
+
+    def test_restore_unreachable_does_not_break_listing(
+        self,
+        proxy_app: Any,
+        monkeypatch: pytest.MonkeyPatch,
+        registry_file: Path,
+    ) -> None:
+        self._seed_registry(registry_file, ["/ws/a"])
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/workspaces/restore":
+                raise httpx.ConnectError("connection refused", request=request)
+            return httpx.Response(200, json={"sessions": []})
+
+        _patch_downstream(monkeypatch, handler)
+        resp = TestClient(proxy_app).get("/api/agent/sessions")
+        assert resp.status_code == 200
+        assert resp.json() == {"sessions": []}
+
+    def test_only_recent_limit_restored(
+        self,
+        proxy_app: Any,
+        monkeypatch: pytest.MonkeyPatch,
+        registry_file: Path,
+    ) -> None:
+        entries = [f"/ws/ws-{i:02d}" for i in range(25)]
+        self._seed_registry(registry_file, entries)
+        restored: List[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/workspaces/restore":
+                restored.append(json.loads(request.content.decode())["workspaceDir"])
+                return httpx.Response(200, json={"restored": 0})
+            return httpx.Response(200, json={"sessions": []})
+
+        _patch_downstream(monkeypatch, handler)
+        resp = TestClient(proxy_app).get("/api/agent/sessions")
+        assert resp.status_code == 200
+        assert sorted(restored) == sorted(
+            entries[-routes_mod._RESTORE_RECENT_LIMIT:]
+        )
+
+    def test_empty_registry_skips_restore(
+        self, proxy_app: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        paths: List[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            paths.append(request.url.path)
+            return httpx.Response(200, json={"sessions": []})
+
+        _patch_downstream(monkeypatch, handler)
+        resp = TestClient(proxy_app).get("/api/agent/sessions")
+        assert resp.status_code == 200
+        assert paths == ["/sessions"]

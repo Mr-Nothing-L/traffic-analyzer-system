@@ -23,6 +23,12 @@ AGENT_RUNTIME_ENABLE(默认 true)可整体关闭;AGENT_RUNTIME_AGENT_PORT /
 AGENT_RUNTIME_TOOLSERVER_PORT 可覆盖默认端口(多实例并存时避免降级到
 外部旧实例)。子进程 stdout 由守护线程逐行 drain 进 logger,避免管道写满
 阻塞子进程。
+工作区登记表:add_workspace_root()/restore_workspace() 被调用时把规范化
+路径追加登记进 config/agent_workspaces.json(JSON 数组,追加序即时间序;
+去重、文件不存在自动建、写失败仅 warning),registered_workspaces() 读取
+(文件缺失/损坏返回 [] 不炸);routes.py 的 GET /sessions 据此逐个 restore,
+聚合全部工作区的历史会话。登记表是与工作区无关的全局状态,定位方式与
+config/users.db 一致(包目录推导)。
 上游:web/agentproxy/__init__.py(聚合导出);web/app.py(lifespan 调
 start/stop);web/agentproxy/routes.py(读取 agent_url/toolserver_url 与
 enabled)。
@@ -32,6 +38,7 @@ agent/src/server/main.ts。
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import signal
@@ -106,6 +113,52 @@ def _post_workspace_restore(agent_url: str, path: Path) -> None:
         json={"workspaceDir": str(path)},
         timeout=_REGISTER_ROOT_TIMEOUT,
     )
+
+
+# 工作区登记表:与工作区无关的全局状态,定位方式同 config/users.db。
+# JSON 数组,元素为规范化后的工作区绝对路径,追加序即时间序。
+REGISTRY_PATH = (
+    Path(__file__).resolve().parents[2] / "config" / "agent_workspaces.json"
+)
+_registry_lock = threading.Lock()
+
+
+def registered_workspaces() -> List[str]:
+    """读取登记表(规范化工作区路径列表);文件缺失/损坏返回 [],不抛异常。"""
+    try:
+        data = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError) as exc:
+        logger.warning("agent runtime: workspace registry unreadable: %s", exc)
+        return []
+    if not isinstance(data, list):
+        logger.warning("agent runtime: workspace registry is not a list, ignoring")
+        return []
+    return [p for p in data if isinstance(p, str)]
+
+
+def _record_workspace(path: Path) -> None:
+    """把规范化工作区路径追加进登记表(去重、文件不存在自动建)。
+
+    与下游 HTTP 调用一样是旁路动作:写失败仅记 warning,不影响调用方。
+    """
+    resolved = str(Path(path).expanduser().resolve())
+    with _registry_lock:
+        try:
+            entries = registered_workspaces()
+            if resolved in entries:
+                return
+            entries.append(resolved)
+            REGISTRY_PATH.parent.mkdir(parents=True, exist_ok=True)
+            REGISTRY_PATH.write_text(
+                json.dumps(entries, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            logger.warning(
+                "agent runtime: failed to record workspace %s: %s", resolved, exc
+            )
 
 
 def _drain_stdout(proc: subprocess.Popen, name: str) -> None:
@@ -258,6 +311,7 @@ class AgentRuntimeManager:
         失败(toolserver 未就绪、旧版本无 /config/roots、超时等)仅记
         warning:注册是旁路优化,不影响工作区切换本身。
         """
+        _record_workspace(path)
         if not self._enabled:
             return
         try:
@@ -276,6 +330,7 @@ class AgentRuntimeManager:
         与 add_workspace_root 同为旁路调用:失败(agent 未就绪、旧版本无此
         端点、超时等)仅记 warning,不影响调用方。
         """
+        _record_workspace(path)
         if not self._enabled:
             return
         try:

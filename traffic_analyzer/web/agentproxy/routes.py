@@ -8,7 +8,10 @@
   附带 AgentRuntimeManager.snapshot() 进程状态)。
 - POST /sessions  透传;body 缺 workspaceDir 时注入 web 层当前工作区路径
   (未选工作区 → 400)。
-- GET  /sessions                  透传(session 列表)。
+- GET  /sessions                  透传(session 列表);转发前对登记表
+                                  (runtime.registered_workspaces)里每个工作区并发
+                                  POST /workspaces/restore(幂等,已打开是快路径),
+                                  聚合全部工作区的历史会话;单个失败仅 warning 跳过。
 - GET  /sessions/{id}/history     透传(entries 时间线)。
 - POST /sessions/{id}/compact     透传(手动压缩上下文;进行中 → 409)。
 - POST /sessions/{id}/recall      透传(撤回某条用户消息及其后内容)。
@@ -41,13 +44,20 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from httpx import AsyncClient
 
-from traffic_analyzer.web.agentproxy.runtime import AgentRuntimeManager
+from traffic_analyzer.web.agentproxy.runtime import (
+    AgentRuntimeManager,
+    registered_workspaces,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/agent")
 
 _HEALTH_TIMEOUT = 2.0
+# 逐工作区 restore 的超时:已打开的工作区是快路径,收紧避免拖慢列表。
+_RESTORE_TIMEOUT = httpx.Timeout(2.0, connect=2.0)
+# 登记表追加序即时间序;很大时只恢复最近 N 个,保持列表延迟可接受。
+_RESTORE_RECENT_LIMIT = 20
 # /chat 轮次可能很长:总超时放开,仅保留连接超时。
 _CHAT_TIMEOUT = httpx.Timeout(None, connect=10.0)
 _JSON_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
@@ -159,12 +169,43 @@ async def create_session(request: Request) -> JSONResponse:
     return _passthrough_error(resp.status_code, resp.content)
 
 
+async def _restore_registered_workspaces(runtime: AgentRuntimeManager) -> None:
+    """对登记表里每个工作区调 agent /workspaces/restore(幂等,已打开即返回)。
+
+    并发 gather;单个失败或下游 4xx/5xx(如目录已删)仅 warning 跳过,
+    不影响会话列表透传。登记表很大时只处理最近 _RESTORE_RECENT_LIMIT 个。
+    """
+    entries = registered_workspaces()[-_RESTORE_RECENT_LIMIT:]
+    if not entries:
+        return
+
+    async def _restore_one(path: str) -> None:
+        try:
+            async with AsyncClient(
+                base_url=runtime.agent_url, timeout=_RESTORE_TIMEOUT
+            ) as client:
+                resp = await client.post(
+                    "/workspaces/restore", json={"workspaceDir": path}
+                )
+            if resp.status_code >= 400:
+                logger.warning(
+                    "agent restore workspace %s -> %s, skipped",
+                    path, resp.status_code,
+                )
+        except httpx.HTTPError as exc:
+            logger.warning("agent restore workspace %s failed: %s", path, exc)
+
+    await asyncio.gather(*(_restore_one(p) for p in entries))
+
+
 @router.get("/sessions")
 async def list_sessions(request: Request) -> JSONResponse:
-    """透传 GET /sessions(session 列表)。"""
+    """透传 GET /sessions(session 列表);先逐个 restore 登记表工作区,
+    让 agent server 把全部工作区的磁盘历史会话加载进内存索引。"""
     runtime = _runtime(request)
     if runtime is None or not runtime.enabled:
         return _unavailable()
+    await _restore_registered_workspaces(runtime)
     return await _simple_passthrough(runtime, "GET", "/sessions")
 
 

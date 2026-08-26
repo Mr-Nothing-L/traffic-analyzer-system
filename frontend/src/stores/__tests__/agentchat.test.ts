@@ -743,3 +743,117 @@ describe('cancel 显式终止', () => {
     vi.useRealTimers();
   });
 });
+
+// openSession 跨工作区切换测试(会话栏点击入口):
+// 会话 workspaceDir 与当前工作区不同时,先 POST /api/workspace 切工作区
+// (等它返回——path 变更触发的 watch 在其 resolve 前清空会话态),成功后再
+// selectSession;切换失败(400/403)抛错且不选会话。当前工作区会话直接选择。
+describe('openSession 跨工作区切换', () => {
+  function stubWorkspaceFetch(calls: Array<{ url: string; method: string }>) {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: unknown, init?: { method?: string }) => {
+        const url = String(input);
+        const method = init?.method ?? 'GET';
+        calls.push({ url, method });
+        if (url === '/api/workspace' && method === 'POST') {
+          return jsonResponse({ path: '/ws/b' });
+        }
+        if (url.endsWith('/history')) {
+          return historyResponse([{ kind: 'user', text: 'B 工作区会话', images: [], at: 1 }]);
+        }
+        if (url.includes('/events')) return jsonResponse({ events: [], inProgress: false });
+        if (url.endsWith('/api/agent/sessions')) {
+          return jsonResponse({
+            sessions: [
+              { id: 's1', workspaceDir: '/ws/a' },
+              { id: 's2', workspaceDir: '/ws/b', title: 'B 会话' },
+            ],
+          });
+        }
+        // loadTree:/workspace/tree、/workspace/videos
+        return jsonResponse({ entries: [] });
+      }),
+    );
+  }
+
+  it('点击其他工作区会话:先 POST /api/workspace,成功后再 selectSession', async () => {
+    const { ws, agent } = await load();
+    ws.path = '/ws/a';
+    await nextTick();
+    agent.sessionId = 's1';
+    agent.entries = [{ kind: 'user', text: 'hi' }];
+    agent.sessions = [
+      { id: 's1', workspaceDir: '/ws/a' },
+      { id: 's2', workspaceDir: '/ws/b', title: 'B 会话' },
+    ];
+    const calls: Array<{ url: string; method: string }> = [];
+    stubWorkspaceFetch(calls);
+
+    await agent.openSession('s2');
+    vi.unstubAllGlobals();
+
+    const wsIdx = calls.findIndex((c) => c.url === '/api/workspace' && c.method === 'POST');
+    const histIdx = calls.findIndex((c) => c.url === '/api/agent/sessions/s2/history');
+    expect(wsIdx).toBeGreaterThanOrEqual(0);
+    expect(histIdx).toBeGreaterThanOrEqual(0);
+    expect(wsIdx).toBeLessThan(histIdx); // 先切工作区,后选会话
+    expect(ws.path).toBe('/ws/b');
+    expect(agent.sessionId).toBe('s2');
+    expect(agent.entries).toHaveLength(1);
+    expect(agent.entries[0]).toMatchObject({ kind: 'user', text: 'B 工作区会话' });
+  });
+
+  it('工作区切换失败(400 目录不存在):抛错,不选会话,当前会话态保持', async () => {
+    const { ws, agent } = await load();
+    ws.path = '/ws/a';
+    await nextTick();
+    agent.sessionId = 's1';
+    agent.entries = [{ kind: 'user', text: 'hi' }];
+    agent.sessions = [
+      { id: 's1', workspaceDir: '/ws/a' },
+      { id: 's2', workspaceDir: '/ws/gone' },
+    ];
+    const calls: Array<{ url: string; method: string }> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: unknown, init?: { method?: string }) => {
+        const url = String(input);
+        calls.push({ url, method: init?.method ?? 'GET' });
+        if (url === '/api/workspace') return jsonResponse({ detail: '目录不存在' }, 400);
+        return jsonResponse({});
+      }),
+    );
+
+    await expect(agent.openSession('s2')).rejects.toThrow('目录不存在');
+    vi.unstubAllGlobals();
+
+    expect(calls.some((c) => c.url.includes('/history'))).toBe(false); // 未发起 selectSession
+    expect(ws.path).toBe('/ws/a'); // 工作区未变
+    expect(agent.sessionId).toBe('s1'); // 当前会话态保持
+    expect(agent.entries).toHaveLength(1);
+  });
+
+  it('当前工作区会话:直接 selectSession,不调 workspace API;无 workspaceDir 旧会话同理', async () => {
+    const { ws, agent } = await load();
+    ws.path = '/ws/a';
+    await nextTick();
+    agent.sessions = [
+      { id: 's1', workspaceDir: '/ws/a' },
+      { id: 's9' }, // 旧会话:无 workspaceDir
+    ];
+    const calls: Array<{ url: string; method: string }> = [];
+    stubWorkspaceFetch(calls);
+
+    await agent.openSession('s1');
+    expect(calls.some((c) => c.url === '/api/workspace')).toBe(false);
+    expect(agent.sessionId).toBe('s1');
+
+    calls.length = 0;
+    await agent.openSession('s9');
+    vi.unstubAllGlobals();
+    expect(calls.some((c) => c.url === '/api/workspace')).toBe(false);
+    expect(agent.sessionId).toBe('s9');
+    expect(ws.path).toBe('/ws/a');
+  });
+});

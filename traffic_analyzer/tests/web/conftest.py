@@ -275,11 +275,16 @@ def _isolate_env_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from traffic_analyzer.web import auth as _auth
     from traffic_analyzer.web import user_store as _user_store
     from traffic_analyzer.web import workspace as _workspace
+    from traffic_analyzer.web.agentproxy import runtime as _agent_runtime
 
     monkeypatch.setattr(_auth, "_ENV_PATH", tmp_path / ".env.nonexistent")
     # users.db 放进点目录:不污染 workspace tree/videos 列表(点目录会被跳过)。
     monkeypatch.setattr(_user_store, "DB_PATH", tmp_path / ".auth" / "users.db")
     monkeypatch.setattr(_workspace, "_CONFIG_ENV_PATH", tmp_path / ".env.nonexistent")
+    # agent 工作区登记表同样隔离:进 lifespan 的用例会触发 runtime.start() 登记。
+    monkeypatch.setattr(
+        _agent_runtime, "REGISTRY_PATH", tmp_path / ".auth" / "agent_workspaces.json"
+    )
     monkeypatch.delenv(_auth.USERS_ENV_VAR, raising=False)
     monkeypatch.delenv(_auth.SECRET_ENV_VAR, raising=False)
     monkeypatch.delenv(_workspace.WORKSPACE_DIRS_ENV_VAR, raising=False)
