@@ -34,16 +34,9 @@ export interface ExecutableToolErrorResult {
 
 export type ExecutableToolResult = ExecutableToolSuccessResult | ExecutableToolErrorResult;
 
-export interface ToolUpdate {
-  kind: 'stdout' | 'stderr' | 'progress' | 'status';
-  text?: string;
-  percent?: number;
-}
-
 export interface ExecutableToolContext {
   readonly toolCallId: string;
   readonly signal: AbortSignal;
-  readonly onUpdate?: (update: ToolUpdate) => void;
   /**
    * 嵌套(子代理)loop 事件上报通道,由 loop 执行工具时注入:工具(如
    * spawn_subagent)把子 loop 事件交给它,loop 侧包装成 AgentLoopEvent
@@ -56,7 +49,6 @@ export interface ExecutableToolContext {
 export interface RunnableToolExecution {
   readonly accesses?: ToolAccesses;
   readonly description?: string;
-  readonly stopBatchAfterThis?: boolean;
   /**
    * Stable string identifying "what is being done" for approval UX and
    * session-scope approval memory, e.g. `write_file(/abs/path)`.

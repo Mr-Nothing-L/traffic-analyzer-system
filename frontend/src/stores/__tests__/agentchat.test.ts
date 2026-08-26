@@ -232,7 +232,7 @@ describe('历史工具条目图片提取', () => {
                   output: [
                     { type: 'text', text: '帧 t=2.0s' },
                     { type: 'image_url', imageUrl: { url: 'data:image/jpeg;base64,AAA' } },
-                    { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,BBB' } },
+                    { type: 'image_url', imageUrl: { url: 'data:image/jpeg;base64,BBB' } },
                   ],
                   isError: false,
                   at: 1,

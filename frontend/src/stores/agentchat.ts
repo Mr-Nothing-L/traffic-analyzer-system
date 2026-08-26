@@ -60,7 +60,7 @@ export interface AgentAccess {
 export interface AgentSessionInfo {
   id: string
   workspaceDir?: string
-  mode?: string
+  mode?: AgentMode
   title?: string
   createdAt?: number
   lastActiveAt?: number
@@ -285,7 +285,7 @@ function formatToolOutput(output: unknown): string {
 }
 
 /** tool_result 的 output 为 ContentPart[] 时,提取 image_url 部分的 url(dataURL)。
- * 兼容 kosong 的 camelCase(imageUrl)与 snake_case(image_url)两种键名。 */
+ * kosong 的 ImageURLPart 使用 camelCase 的 imageUrl 键名。 */
 function extractToolImages(output: unknown): string[] {
   if (!Array.isArray(output)) return []
   const urls: string[] = []
@@ -294,10 +294,9 @@ function extractToolImages(output: unknown): string[] {
     const part = p as {
       type?: unknown
       imageUrl?: { url?: unknown }
-      image_url?: { url?: unknown }
     }
     if (part.type !== 'image_url') continue
-    const url = part.imageUrl?.url ?? part.image_url?.url
+    const url = part.imageUrl?.url
     if (typeof url === 'string' && url) urls.push(url)
   }
   return urls

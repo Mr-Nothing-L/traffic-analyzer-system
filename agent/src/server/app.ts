@@ -71,7 +71,7 @@
  * 结论留在对应 tool 条目的 output/note 里)。
  */
 import { readFileSync, statSync } from 'node:fs';
-import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { createServer as createHttpServer, type Server, type ServerResponse } from 'node:http';
 import { fileURLToPath } from 'node:url';
 
 import type { ContentPart, Message, ChatProvider } from '../llm/kosong';
@@ -89,6 +89,7 @@ import type { ToolAccesses } from '../tools/contract';
 import { ToolRegistry } from '../tools/registry';
 
 import { ApprovalBridge, type ApprovalDecisionInput } from './approvalBridge';
+import { createRouter, type RequestContext, sendJson, sendError, writeSseEvent, isRecord } from './routes';
 import { SessionManager, type Session } from './session';
 import type { TimelineEntry } from './storage';
 import { TurnPersister } from './turnPersister';
@@ -187,7 +188,6 @@ class ExecutionSnapshotGate extends PermissionGate {
   }
 }
 
-const MAX_BODY_BYTES = 16 * 1024 * 1024;
 /** POST /chat 单轮图片附件上限。 */
 const MAX_IMAGES_PER_TURN = 4;
 /** 默认上下文窗口:256k(本地 qwen3.8-27b-fp8 的 max_model_len)。 */
@@ -199,38 +199,6 @@ function resolveContextTokens(option: number | undefined): number {
   const raw = process.env.AGENT_CONTEXT_TOKENS;
   const parsed = raw === undefined ? NaN : Number(raw);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_CONTEXT_TOKENS;
-}
-
-async function readJsonBody(req: IncomingMessage): Promise<unknown> {
-  const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const chunk of req) {
-    const buf = chunk as Buffer;
-    size += buf.length;
-    if (size > MAX_BODY_BYTES) throw new Error('request body too large');
-    chunks.push(buf);
-  }
-  const raw = Buffer.concat(chunks).toString('utf8').trim();
-  if (raw === '') return {};
-  return JSON.parse(raw) as unknown;
-}
-
-function sendJson(res: ServerResponse, status: number, body: unknown): void {
-  const payload = JSON.stringify(body);
-  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
-  res.end(payload);
-}
-
-function sendError(res: ServerResponse, status: number, code: string, message: string): void {
-  sendJson(res, status, { error: { code, message } });
-}
-
-function writeSseEvent(res: ServerResponse, event: unknown): void {
-  res.write(`data: ${JSON.stringify(event)}\n\n`);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null;
 }
 
 /**
@@ -353,6 +321,10 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       if (runtime.bridge.has(requestId)) return runtime.bridge;
     }
     return undefined;
+  };
+
+  const handleHealth = (res: ServerResponse): void => {
+    sendJson(res, 200, { status: 'ok' });
   };
 
   const handleCreateSession = (res: ServerResponse, body: unknown): void => {
@@ -891,129 +863,24 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
     }
   };
 
-  const server = createHttpServer((req, res) => {
-    void (async (): Promise<void> => {
-      const url = new URL(req.url ?? '/', 'http://127.0.0.1');
-      try {
-        if (req.method === 'GET' && url.pathname === '/health') {
-          sendJson(res, 200, { status: 'ok' });
-          return;
-        }
-        if (req.method === 'POST' && url.pathname === '/sessions') {
-          handleCreateSession(res, await readJsonBody(req));
-          return;
-        }
-        if (req.method === 'GET' && url.pathname === '/sessions') {
-          handleListSessions(res);
-          return;
-        }
-        if (req.method === 'POST' && url.pathname === '/workspaces/restore') {
-          handleRestoreWorkspace(res, await readJsonBody(req));
-          return;
-        }
-        const historyMatch = /^\/sessions\/([^/]+)\/history$/.exec(url.pathname);
-        if (req.method === 'GET' && historyMatch !== null) {
-          const sessionId = historyMatch[1];
-          if (sessionId === undefined) {
-            sendError(res, 400, 'invalid_request', 'session id is required');
-            return;
-          }
-          handleGetHistory(res, sessionId);
-          return;
-        }
-        const eventsMatch = /^\/sessions\/([^/]+)\/events$/.exec(url.pathname);
-        if (req.method === 'GET' && eventsMatch !== null) {
-          const sessionId = eventsMatch[1];
-          if (sessionId === undefined) {
-            sendError(res, 400, 'invalid_request', 'session id is required');
-            return;
-          }
-          handleGetEvents(res, sessionId, url);
-          return;
-        }
-        const compactMatch = /^\/sessions\/([^/]+)\/compact$/.exec(url.pathname);
-        if (req.method === 'POST' && compactMatch !== null) {
-          const sessionId = compactMatch[1];
-          if (sessionId === undefined) {
-            sendError(res, 400, 'invalid_request', 'session id is required');
-            return;
-          }
-          await handleCompact(res, sessionId);
-          return;
-        }
-        const recallMatch = /^\/sessions\/([^/]+)\/recall$/.exec(url.pathname);
-        if (req.method === 'POST' && recallMatch !== null) {
-          const sessionId = recallMatch[1];
-          if (sessionId === undefined) {
-            sendError(res, 400, 'invalid_request', 'session id is required');
-            return;
-          }
-          handleRecall(res, sessionId, await readJsonBody(req));
-          return;
-        }
-        const modeMatch = /^\/sessions\/([^/]+)\/mode$/.exec(url.pathname);
-        if (req.method === 'POST' && modeMatch !== null) {
-          const sessionId = modeMatch[1];
-          if (sessionId === undefined) {
-            sendError(res, 400, 'invalid_request', 'session id is required');
-            return;
-          }
-          handleSetMode(res, sessionId, await readJsonBody(req));
-          return;
-        }
-        const cancelMatch = /^\/sessions\/([^/]+)\/cancel$/.exec(url.pathname);
-        if (req.method === 'POST' && cancelMatch !== null) {
-          const sessionId = cancelMatch[1];
-          if (sessionId === undefined) {
-            sendError(res, 400, 'invalid_request', 'session id is required');
-            return;
-          }
-          handleCancel(res, sessionId);
-          return;
-        }
-        const steerMatch = /^\/sessions\/([^/]+)\/steer$/.exec(url.pathname);
-        if (req.method === 'POST' && steerMatch !== null) {
-          const sessionId = steerMatch[1];
-          if (sessionId === undefined) {
-            sendError(res, 400, 'invalid_request', 'session id is required');
-            return;
-          }
-          handleSteer(res, sessionId, await readJsonBody(req));
-          return;
-        }
-        const sessionMatch = /^\/sessions\/([^/]+)$/.exec(url.pathname);
-        if (req.method === 'DELETE' && sessionMatch !== null) {
-          const sessionId = sessionMatch[1];
-          if (sessionId === undefined) {
-            sendError(res, 400, 'invalid_request', 'session id is required');
-            return;
-          }
-          handleDeleteSession(res, sessionId);
-          return;
-        }
-        if (req.method === 'POST' && url.pathname === '/approval') {
-          handleApproval(res, await readJsonBody(req));
-          return;
-        }
-        if (req.method === 'POST' && url.pathname === '/chat') {
-          await handleChat(res, await readJsonBody(req));
-          return;
-        }
-        sendError(res, 404, 'not_found', `${req.method ?? ''} ${url.pathname}`);
-      } catch (error) {
-        if (!res.headersSent) {
-          sendError(
-            res,
-            400,
-            'bad_request',
-            error instanceof Error ? error.message : String(error),
-          );
-        } else {
-          res.end();
-        }
-      }
-    })();
-  });
+  const ctx: RequestContext = {
+    handleHealth,
+    handleCreateSession,
+    handleListSessions,
+    handleRestoreWorkspace,
+    handleGetHistory,
+    handleGetEvents,
+    handleCompact,
+    handleRecall,
+    handleSetMode,
+    handleCancel,
+    handleSteer,
+    handleDeleteSession,
+    handleApproval,
+    handleChat,
+  };
+
+  const server = createHttpServer(createRouter(ctx));
 
   return {
     server,
