@@ -177,10 +177,10 @@ export interface DetectionPayload {
     /** 逐事件标注图(jpeg dataURL,submit_detection 服务端生成;无框/画框失败时缺省)。 */
     annotated_image?: string
   }>
-  /** 标注降级元信息:annotation_not_provided=检出但未给定位框;annotation_missing=画框失败。 */
+  /** 标注降级元信息(两级):missing_boxes=检出但未给 boxes/box_frame;annotation_failed=画框失败。 */
   meta?: {
-    annotation_not_provided?: number[]
-    annotation_missing?: number[]
+    missing_boxes?: number[]
+    annotation_failed?: number[]
   }
   report_markdown?: string
 }

@@ -429,7 +429,7 @@ describe('SSE 流式事件', () => {
         },
         { event_id: 5, detected: true, confidence: 0.8, reasoning: '逆行', evidence_frames: [8.2, 9.1] },
       ],
-      meta: { annotation_not_provided: [5] },
+      meta: { missing_boxes: [5] },
       report_markdown: '## 报告',
     };
     stubChatStream([{ type: 'detection', data: payload }, { type: 'done', reason: 'stop_turn' }]);

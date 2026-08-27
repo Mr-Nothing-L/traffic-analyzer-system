@@ -1,7 +1,8 @@
 /**
  * registerBuiltinTools: one-shot registration of the detection agent's
- * builtin tools.当前由本函数注册的通用工具共 17 个:
+ * builtin tools.当前由本函数注册的通用工具共 18 个:
  *   - 视频工具:video_meta / extract_frames / draw_boxes / load_video
+ *   - 动态事件取证:track_suspects(轨迹取证,长任务 900s)
  *   - 文件与执行:read_file / write_file / run_script / run_command /
  *     job_list / job_output / job_kill
  *   - 导航:edit_file / glob_files / grep_files
@@ -37,6 +38,7 @@ import { createNavTools } from './navTools';
 import { BackgroundJobRegistry, createShellTools } from './shellTools';
 import { createSubmitDetectionTool } from './submitDetection';
 import { createTodoWriteTool } from './todoTools';
+import { createTrackSuspectsTool } from './trackSuspects';
 import { createVideoTools, type ToolsetEntrySpec } from './videoTools';
 import { createWebFetchTool } from './webTools';
 
@@ -143,6 +145,8 @@ export function registerBuiltinTools(
     // 看画面的主方式,load_video 用于需要完整时序连贯理解的场景。
     ...createVideoTools(client, workspace, specOf),
     createLoadVideoTool(client, workspace, specOf('load_video')),
+    // 动态事件(违停/应急车道/逆行倒车)疑似目标的轨迹取证(900s 长任务)。
+    createTrackSuspectsTool(client, workspace, specOf('track_suspects')),
     ...createFileTools(workspace, specOf),
     ...createShellTools(shellToolsDeps, specOf),
     ...createNavTools(workspace, specOf),
@@ -174,6 +178,11 @@ export {
   type ToolsetLookup,
 } from './videoTools';
 export { createLoadVideoTool } from './loadVideo';
+export {
+  TRACK_SUSPECTS_TIMEOUT_MS,
+  TRACK_SUSPECTS_TOOL_NAME,
+  createTrackSuspectsTool,
+} from './trackSuspects';
 export { createFileTools, createReadFileTool, createRunScriptTool, createWriteFileTool } from './fileTools';
 export {
   BackgroundJobRegistry,

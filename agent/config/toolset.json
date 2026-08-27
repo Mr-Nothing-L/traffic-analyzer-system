@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "toolset.json",
   "title": "检测场景工具清单",
-  "description": "交通事件检测 agent 的可用工具清单。description 与 parameters(模型可见 JSON Schema,registerBuiltinTools 启动时原样发给 provider)在本文件维护;parameters 支持 {\"$ref\": \"./xxx.json\"} 相对引用(从本目录解析,如 submit_detection);when_to_use/returns/limits 为设计文档。视频类工具(video_meta/extract_frames/draw_boxes/load_video)由 TS 层经 HTTP 调用 Python 工具服务实现,帧数/体积上限的唯一执法者是 toolserver;submit_detection 的活跃事件枚举由 event_contract.json 派生注入;read_file/write_file/run_script 为沙盒内工具。",
+  "description": "交通事件检测 agent 的可用工具清单。description 与 parameters(模型可见 JSON Schema,registerBuiltinTools 启动时原样发给 provider)在本文件维护;parameters 支持 {\"$ref\": \"./xxx.json\"} 相对引用(从本目录解析,如 submit_detection);when_to_use/returns/limits 为设计文档。视频类工具(video_meta/extract_frames/draw_boxes/load_video)与轨迹取证工具(track_suspects)由 TS 层经 HTTP 调用 Python 工具服务实现,帧数/体积上限的唯一执法者是 toolserver;submit_detection 的活跃事件枚举由 event_contract.json 派生注入;read_file/write_file/run_script 为沙盒内工具。",
   "tools": [
     {
       "name": "video_meta",
@@ -132,8 +132,63 @@
       ]
     },
     {
+      "name": "track_suspects",
+      "description": "对视频中最多 5 个可疑目标做多目标轨迹取证:返回每条轨迹的数值档案(id、描述、画像含静止时长/速度、方位提示、方向裁决)、全轨迹叠加图、各轨迹关键帧裁剪图与取证产物路径(轨迹片段/CSV)。用于动态事件的证据强化。",
+      "when_to_use": "疑似动态事件——事件 1 违法停车、事件 2 占用应急车道、事件 8 逆行/倒车——且需要静止时长、方向、速度等证据时调用。静态事件(事故、抛洒物、施工等)不需要本工具;已有确定结论时不要为复核重复调用。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "video_path": { "type": "string", "description": "视频文件路径(绝对路径或 workspace 相对路径)" },
+          "suspects": {
+            "type": "array",
+            "description": "可疑目标锚点列表(1~5 个):必须是你从抽帧里实际看到的对象,不要凭空编造锚点",
+            "minItems": 1,
+            "maxItems": 5,
+            "items": {
+              "type": "object",
+              "properties": {
+                "box": {
+                  "type": "object",
+                  "description": "目标在锚点帧上的归一化 xyxy 定位框(0~1)",
+                  "properties": {
+                    "x1": { "type": "number", "minimum": 0, "maximum": 1 },
+                    "y1": { "type": "number", "minimum": 0, "maximum": 1 },
+                    "x2": { "type": "number", "minimum": 0, "maximum": 1 },
+                    "y2": { "type": "number", "minimum": 0, "maximum": 1 }
+                  },
+                  "required": ["x1", "y1", "x2", "y2"],
+                  "additionalProperties": false
+                },
+                "timestamp": { "type": "number", "description": "锚点帧的大致时刻(秒)", "minimum": 0 },
+                "description": { "type": "string", "description": "自然语言描述该目标外观与疑点(如\"白色小客车,疑似长时间静止\")" }
+              },
+              "required": ["box", "timestamp", "description"],
+              "additionalProperties": false
+            }
+          },
+          "time_range": {
+            "type": "array",
+            "description": "可选分析时段 [start, end](秒);不传则由服务端默认处理",
+            "minItems": 2,
+            "maxItems": 2,
+            "items": { "type": "number", "minimum": 0 }
+          }
+        },
+        "required": ["video_path", "suspects"],
+        "additionalProperties": false
+      },
+      "returns": "{tracks: [{id, description, profile, side_hint, direction_verdict, best_frames: [{timestamp, jpeg_base64}]}], annotated_image(jpeg_base64), artifacts: {dir, clip, csv}, failed, failure_reason};failed=true 表示跟踪失败(failure_reason 给出原因,此时无有效轨迹证据)",
+      "limits": [
+        "suspects 至少 1 个、最多 5 个;每个锚点 = 归一化 xyxy box + 大致时刻 timestamp + 自然语言 description",
+        "一次调用约 10-25 次 VLM 调用,耗时可达数分钟(执行超时上限 900s),不要对同批锚点重复调用",
+        "数值结论(静止时长、方向角、速度)只准引用返回的数值档案,车道归属等语义判断看叠加图;两者矛盾时信数值档案",
+        "failed=true 不是工具错误:说明未取得轨迹证据,应退回 extract_frames / draw_boxes 的纯视觉判断",
+        "只读操作,不修改原视频;取证产物(片段/CSV/叠加图)由 toolserver 管理,产物路径随结果返回"
+      ]
+    },
+    {
       "name": "submit_detection",
-      "description": "提交本次检测的最终结构化结果:视频路径(video_path)、逐事件判定(events)、11 位二进制编码(binary_encoding)、正常标志(normal)与中文 Markdown 报告(report_markdown)。正式检测时,每个 detected=true 的事件应尽量提供 boxes(归一化定位框)与 box_frame(取自 evidence_frames 的帧时刻),提交时会据此生成带定位框的标注图,用于给用户展示目标定位。",
+      "description": "提交本次检测的最终结构化结果:视频路径(video_path)、逐事件判定(events)、11 位二进制编码(binary_encoding)、正常标志(normal)与中文 Markdown 报告(report_markdown)。正式检测时,每个 detected=true 的事件一律提供 boxes(归一化定位框)与 box_frame(取自 evidence_frames 中最能看清事件主体的帧时刻):事件主体明确的直接框主体(车辆/行人/摩托车/抛洒物),拥堵、施工等场景级事件框事件大致范围(排队车流区域、施工作业区),多实例给多个框;提交时会据此逐事件生成带定位框的标注图,给用户展示目标定位。",
       "when_to_use": "分析全部完成后调用,且每次分析恰好调用一次。这是唯一有效输出——禁止只在文本回复里给结论。",
       "parameters": { "$ref": "./submit_detection.schema.json" },
       "returns": "{accepted: true} 或 {accepted: false, errors: [...]}(schema 校验失败,需修正后重新调用)",
@@ -141,7 +196,7 @@
         "参数必须符合 submit_detection.schema.json;位 9 为正常指示位:无任何事件检出时为 1(编码 {0_0_0_0_0_0_0_0_1_0_0}),其余情况为 0",
         "binary_encoding、normal 与 events 的 detected 必须互相一致:事件位(1-8、10、11)与 detected 一致,位 9=1 当且仅当无任何事件检出,normal 与位 9 一致(运行时校验,不一致会被拒绝)",
         "detected=true 的事件 evidence_frames 不得为空",
-        "detected=true 但缺 boxes/box_frame 不会被拒绝,会在结果 meta.annotation_not_provided 中记录,前端降级为无标注图展示;draw_boxes 标注失败同理记入 meta.annotation_missing,不阻塞提交",
+        "detected=true 但缺 boxes/box_frame 不会被拒绝,会在结果 meta.missing_boxes 中记录,前端降级为无标注图展示;提供了 boxes 但 draw_boxes 标注失败记入 meta.annotation_failed。两者均不阻塞提交",
         "提交后本轮分析即结束,不再进行其他工具调用"
       ]
     },

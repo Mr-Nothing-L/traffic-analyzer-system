@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "submit_detection.schema.json",
   "title": "submit_detection 工具参数",
-  "description": "交通事件检测 agent 的最终提交契约:逐事件结构化判定 + 11 位二进制编码 + 中文 Markdown 报告。位序 = 事件编号 1..11,位 9 为正常指示位(ADR-0001):已分析且无任何事件检出时位 9=1、其余位=0;有事件检出时位 9=0。一致性要求(schema 之外的运行时校验):位 i(i∈1-8、10、11)为 1 当且仅当 events 中 event_id=i 的 detected=true;位 9=1 当且仅当无任何事件检出;normal 与位 9 一致。提交时工具会为每个带 boxes+box_frame 的检出事件调用 draw_boxes 生成标注图,随结果一并返回给用户展示。",
+  "description": "交通事件检测 agent 的最终提交契约:逐事件结构化判定 + 11 位二进制编码 + 中文 Markdown 报告。位序 = 事件编号 1..11,位 9 为正常指示位(ADR-0001):已分析且无任何事件检出时位 9=1、其余位=0;有事件检出时位 9=0。一致性要求(schema 之外的运行时校验):位 i(i∈1-8、10、11)为 1 当且仅当 events 中 event_id=i 的 detected=true;位 9=1 当且仅当无任何事件检出;normal 与位 9 一致。提交时工具会依据每个检出事件的 boxes+box_frame 调用 draw_boxes 生成标注图,随结果一并返回给用户展示。",
   "type": "object",
   "additionalProperties": false,
   "required": ["video_path", "events", "binary_encoding", "normal", "report_markdown"],
@@ -75,7 +75,7 @@
           },
           "boxes": {
             "type": "array",
-            "description": "该事件关键目标的定位框列表(归一化 xyxy,0~1 浮点)。detected=true 时应尽量提供(配合 box_frame),提交时用于生成给用户展示的标注图;缺少时不拒绝,但用户将看不到该事件的定位图。",
+            "description": "该事件的定位框列表(归一化 xyxy,0~1 浮点)。detected=true 时一律提供:事件主体明确的目标直接框主体(车辆/行人/摩托车/抛洒物),拥堵、施工等场景级事件框事件大致范围(如排队车流区域、施工作业区),多实例事件给多个框;与 box_frame 配合在提交时生成给用户展示的标注图。缺失不拒绝提交(记入 meta.missing_boxes),但用户将看不到该事件的定位图。",
             "minItems": 1,
             "items": {
               "type": "object",
@@ -93,7 +93,7 @@
           "box_frame": {
             "type": "number",
             "minimum": 0,
-            "description": "boxes 对应的帧时刻(秒),应取自 evidence_frames 中目标最清晰的一帧。提供 boxes 时必须同时提供。"
+            "description": "boxes 对应的帧时刻(秒),应取自 evidence_frames 中最能看清事件主体的一帧。与 boxes 一同提供(detected=true 时一律给出)。"
           }
         }
       }

@@ -6,6 +6,7 @@ export const TOOL_LABELS: Record<string, string> = {
   video_meta: '视频元信息',
   extract_frames: '抽帧',
   draw_boxes: '画框标注',
+  track_suspects: '定向跟踪',
   read_file: '读文件',
   write_file: '写文件',
   run_script: '运行脚本',
@@ -56,17 +57,6 @@ export async function copyText(text: string): Promise<void> {
   } finally {
     ta.remove()
   }
-}
-
-/** 检测事件标注降级小字:meta.annotation_missing(画框失败)→「标注图生成失败」;
- * meta.annotation_not_provided(未给定位框)→「无定位框」;都不在返回 null。 */
-export function detectionEventNote(
-  meta: { annotation_not_provided?: number[]; annotation_missing?: number[] } | undefined,
-  eventId: number,
-): string | null {
-  if (meta?.annotation_missing?.includes(eventId)) return '标注图生成失败'
-  if (meta?.annotation_not_provided?.includes(eventId)) return '无定位框'
-  return null
 }
 
 /** composer 的 Enter 是否触发发送:Shift+Enter 换行不发送;
@@ -120,4 +110,46 @@ export function workspaceVideoSrc(
     if (!rel) return null
   }
   return `/api/workspace/stream?path=${encodeURIComponent(rel)}`
+}
+
+/** track_suspects 取证产物视图:从工具结果文本解析产物行并推导叠加视频地址。
+ * 产物行由 agent/src/tools/builtin/trackSuspects.ts 以纯文本附在输出末:
+ * 「取证产物已保存:目录 <dir>;轨迹片段 <clip>;数据表 <csv>(供用户复核与引用)」
+ * (全半角冒号/分号/括号兼容)。三段路径 toolserver 端可能为 None,经 agent
+ * 模板插值成字面量「null」,按缺失处理;行不存在(业务失败回退文本、其他工具、
+ * 旧会话数据)整体返回 null。clip 是工作区内跟踪叠加视频相对路径
+ * (.agent/tracks/<stem>/<ts>/track_overlay.mp4),地址推导复用 workspaceVideoSrc,
+ * 保持前端路径解析单一来源。 */
+export interface TrackSuspectsView {
+  dir: string | null
+  clip: string | null
+  csv: string | null
+  /** 叠加视频可播放地址;clip 缺失或推不出时为 null(UI 降级只显示路径文本)。 */
+  videoSrc: string | null
+}
+
+const TRACK_ARTIFACTS_LINE_RE =
+  /取证产物已保存[:：]\s*目录\s*(.+?)\s*[;；]\s*轨迹片段\s*(.+?)\s*[;；]\s*数据表\s*(.+?)\s*(?:[(（][^()（）]*[)）])?\s*$/m
+
+export function trackSuspectsView(
+  result: string,
+  workspaceDir?: string | null,
+): TrackSuspectsView | null {
+  const m = TRACK_ARTIFACTS_LINE_RE.exec(result)
+  if (!m) return null
+  const [rawDir = '', rawClip = '', rawCsv = ''] = m.slice(1)
+  const part = (raw: string): string | null => {
+    const t = raw.trim()
+    return t && t !== 'null' ? t : null
+  }
+  const dir = part(rawDir)
+  const clip = part(rawClip)
+  const csv = part(rawCsv)
+  if (!dir && !clip && !csv) return null
+  return {
+    dir,
+    clip,
+    csv,
+    videoSrc: clip ? workspaceVideoSrc(clip, undefined, workspaceDir ?? null) : null,
+  }
 }

@@ -833,7 +833,7 @@ describe('submit_detection', () => {
       }
     });
 
-    it('degrades when draw_boxes fails: submission stands, meta.annotation_missing records the event', async () => {
+    it('degrades when draw_boxes fails: submission stands, meta.annotation_failed records the event', async () => {
       mockToolserver({ error: { code: 'frame_unavailable', message: 'no frame at 3s' } }, 404);
       const result = await execute(annotatingTool(), {
         video_path: path.join(workspaceDir, 'demo.mp4'),
@@ -849,7 +849,7 @@ describe('submit_detection', () => {
       expect(result.stopTurn).toBe(true);
       const payload = result.payload as DetectionPayload;
       expect(payload.events[2]?.annotated_image).toBeUndefined();
-      expect(payload.meta?.annotation_missing).toEqual([3]);
+      expect(payload.meta?.annotation_failed).toEqual([3]);
     });
 
     it('degrades when the toolserver is unreachable', async () => {
@@ -866,10 +866,10 @@ describe('submit_detection', () => {
       });
       expect(result.isError).toBeFalsy();
       const payload = result.payload as DetectionPayload;
-      expect(payload.meta?.annotation_missing).toEqual([3]);
+      expect(payload.meta?.annotation_failed).toEqual([3]);
     });
 
-    it('soft-records detected events without boxes/box_frame (no draw call, no rejection)', async () => {
+    it('soft-records detected events without boxes/box_frame under meta.missing_boxes (no draw call, no rejection)', async () => {
       const result = await execute(annotatingTool(), {
         video_path: path.join(workspaceDir, 'demo.mp4'),
         events: eventsWithDetected({}),
@@ -882,7 +882,41 @@ describe('submit_detection', () => {
       expect(fetchMock).not.toHaveBeenCalled();
       const payload = result.payload as DetectionPayload;
       expect(payload.events[2]?.annotated_image).toBeUndefined();
-      expect(payload.meta?.annotation_not_provided).toEqual([3]);
+      expect(payload.meta?.missing_boxes).toEqual([3]);
+    });
+
+    it('lists both levels side by side: missing_boxes for the bare event, annotation_failed for the failed draw', async () => {
+      // 事件 1 检出但完全没给框(missing_boxes),事件 3 给了框但 draw 失败(annotation_failed)。
+      mockToolserver({ error: { code: 'frame_unavailable', message: 'no frame at 3s' } }, 404);
+      const events = baseEvents();
+      events[0] = { ...events[0], detected: true, evidence_frames: [1.5] };
+      events[2] = {
+        ...events[0],
+        event_id: 3,
+        confidence: 0.9,
+        reasoning: '第 3-8 秒可见静止车辆',
+        evidence_frames: [3.0],
+        boxes: [{ x1: 0.1, y1: 0.1, x2: 0.4, y2: 0.4 }],
+        box_frame: 3.0,
+      };
+      const result = await execute(annotatingTool(), {
+        video_path: path.join(workspaceDir, 'demo.mp4'),
+        events,
+        binary_encoding: '1_0_1_0_0_0_0_0_0_0_0',
+        normal: false,
+        report_markdown: '# 报告',
+      });
+      expect(result.isError).toBeFalsy();
+      expect(result.stopTurn).toBe(true);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const payload = result.payload as DetectionPayload;
+      expect(payload.events[0]?.annotated_image).toBeUndefined();
+      expect(payload.events[2]?.annotated_image).toBeUndefined();
+      // 两级元信息在同一份 payload 并存,逐事件列出 id 便于定位缺框原因。
+      expect(payload.meta).toEqual({
+        missing_boxes: [1],
+        annotation_failed: [3],
+      });
     });
   });
 
@@ -939,10 +973,10 @@ describe('submit_detection', () => {
 });
 
 describe('registerBuiltinTools', () => {
-  it('registers all seventeen builtin tools', () => {
+  it('registers all eighteen builtin tools', () => {
     const registry = new ToolRegistry();
     const tools = registerBuiltinTools(registry, { workspaceDir });
-    expect(tools).toHaveLength(17);
+    expect(tools).toHaveLength(18);
     expect(registry.list().map((tool) => tool.name).sort()).toEqual(
       [
         'draw_boxes',
@@ -959,6 +993,7 @@ describe('registerBuiltinTools', () => {
         'run_script',
         'submit_detection',
         'todo_write',
+        'track_suspects',
         'video_meta',
         'web_fetch',
         'write_file',

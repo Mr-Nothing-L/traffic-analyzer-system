@@ -1,10 +1,11 @@
 <script setup lang="ts">
-/** 工具条目:参数摘要 + 结果折叠(文本/图片/子代理),失败红字。 */
-import { computed } from 'vue'
+/** 工具条目:参数摘要 + 结果折叠(文本/图片/子代理),track_suspects 附叠加
+ * 视频与取证目录路径,失败红字。 */
+import { computed, ref, watch } from 'vue'
 import type { AgentEntry } from '../../stores/agentchat'
 import type { AgentToolEntry } from '../../stores/agentchat'
 import UiIcon from '../UiIcon.vue'
-import { toolLabel, toolErrorSummary } from '../../utils/chatDisplay'
+import { copyText, toolLabel, toolErrorSummary, trackSuspectsView } from '../../utils/chatDisplay'
 
 const props = defineProps<{
   entry: AgentEntry
@@ -19,6 +20,40 @@ const emit = defineEmits<{
 }>()
 
 const entry = computed(() => props.entry as AgentToolEntry)
+
+/** track_suspects 取证产物(trackSuspectsView 解析;其他工具恒 null):
+ * clip 推导出 stream 地址则渲染可播放叠加视频,推不出/渲染报错只留路径文本。 */
+const trackView = computed(() =>
+  entry.value.name === 'track_suspects' ? trackSuspectsView(entry.value.result) : null,
+)
+
+/** 叠加视频加载失败标记:置真后隐藏 video 换路径文本;换新结果(新 src)时复位。 */
+const overlayBroken = ref(false)
+watch(
+  () => trackView.value?.videoSrc,
+  () => {
+    overlayBroken.value = false
+  },
+)
+
+/** 取证目录点击复制:成功图标变 ✓ 一秒,失败静默保持原样(低调调试辅助)。 */
+const dirCopied = ref(false)
+let dirCopiedTimer: ReturnType<typeof setTimeout> | null = null
+async function onCopyArtifactsDir(): Promise<void> {
+  const dir = trackView.value?.dir
+  if (!dir || dirCopied.value) return
+  try {
+    await copyText(dir)
+  } catch {
+    return
+  }
+  dirCopied.value = true
+  if (dirCopiedTimer !== null) clearTimeout(dirCopiedTimer)
+  dirCopiedTimer = setTimeout(() => {
+    dirCopied.value = false
+    dirCopiedTimer = null
+  }, 1000)
+}
 
 function argsSummary(args: string): string {
   const cut = (s: string) => (s.length > 120 ? `${s.slice(0, 120)}…` : s)
@@ -92,6 +127,27 @@ function argsSummary(args: string): string {
                     @click="emit('preview', u)"
                   />
                 </div>
+                <!-- track_suspects 取证产物:叠加视频小播放器 + 可复制目录路径 -->
+                <template v-if="trackView">
+                  <video
+                    v-if="trackView.videoSrc && !overlayBroken"
+                    class="tool-track-video"
+                    :src="trackView.videoSrc"
+                    controls
+                    preload="metadata"
+                    @error="overlayBroken = true"
+                  />
+                  <button
+                    v-if="trackView.dir"
+                    type="button"
+                    class="tool-artifacts-dir"
+                    title="复制取证目录路径"
+                    @click="onCopyArtifactsDir"
+                  >
+                    <UiIcon :name="dirCopied ? 'check' : 'copy'" :size="10" />
+                    <span>{{ trackView.dir }}</span>
+                  </button>
+                </template>
               </div>
             </div>
 </template>
@@ -255,5 +311,37 @@ function argsSummary(args: string): string {
   color: var(--color-text2);
   font-family: var(--font-sans);
   font-size: var(--text-xs);
+}
+
+/* track_suspects:跟踪叠加片段小播放器(宽度规则同 user 气泡视频) */
+.tool-track-video {
+  display: block;
+  width: min(320px, 100%);
+  margin-top: var(--space-xs);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: var(--color-stage-bg);
+}
+
+/* 取证目录路径:低调等宽文本按钮,点击复制 */
+.tool-artifacts-dir {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  max-width: 100%;
+  margin-top: var(--space-xs);
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--color-text2);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  word-break: break-all;
+  text-align: left;
+}
+
+.tool-artifacts-dir:hover {
+  color: var(--color-accent);
 }
 </style>

@@ -1,9 +1,8 @@
 <script setup lang="ts">
-/** 检测结果卡:11 位编码高亮 + 检出事件(标注图/降级小字) + markdown 报告。 */
+/** 检测结果卡:11 位编码高亮 + 检出事件(标注图/未定位小标) + markdown 报告。 */
 import { computed } from 'vue'
 import type { AgentEntry, AgentDetectionEntry, DetectionPayload } from '../../stores/agentchat'
 import { mdToHtml } from '../../utils/markdown'
-import { detectionEventNote } from '../../utils/chatDisplay'
 
 const props = defineProps<{
   entry: AgentEntry
@@ -58,7 +57,7 @@ const encodingBits = (enc: string) => enc.split('_')
                     <span class="detection-event" :title="ev.reasoning">
                       事件 {{ ev.event_id }}
                     </span>
-                    <!-- 逐事件标注图(点击进画廊);无图时按 meta 降级小字 -->
+                    <!-- 逐事件标注图(点击进画廊);无图时显示低调「未定位」小标 -->
                     <img
                       v-if="ev.annotated_image"
                       class="detection-event-img"
@@ -67,10 +66,7 @@ const encodingBits = (enc: string) => enc.split('_')
                       loading="lazy"
                       @click="emit('preview', ev.annotated_image!)"
                     />
-                    <span
-                      v-else-if="detectionEventNote(payload!.meta, ev.event_id)"
-                      class="detection-event-note"
-                    >{{ detectionEventNote(payload!.meta, ev.event_id) }}</span>
+                    <span v-else class="detection-event-note unlocated">未定位</span>
                   </div>
                 </div>
                 <div
@@ -180,10 +176,17 @@ const encodingBits = (enc: string) => enc.split('_')
   cursor: zoom-in;
 }
 
-/* 标注降级小字(无定位框 / 标注图生成失败) */
+/* 标注降级小字基类;「未定位」标记另加虚线边(见下方 unlocated 修饰) */
 .detection-event-note {
   font-size: var(--text-xs);
   color: var(--color-text2);
+}
+
+/* 「未定位」小标:沿用降级小字底子,加虚线边做成低调但可发现的小标 */
+.detection-event-note.unlocated {
+  padding: 1px var(--space-sm);
+  border: 1px dashed var(--color-dot-muted);
+  border-radius: var(--radius-sm);
 }
 
 .detection-report {

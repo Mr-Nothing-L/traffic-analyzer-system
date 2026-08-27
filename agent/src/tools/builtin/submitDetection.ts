@@ -23,10 +23,10 @@
  * detected event carrying both `boxes` and `box_frame` is annotated via the
  * toolserver POST /tools/draw_boxes ({video_path, timestamp: box_frame,
  * boxes}); the returned JPEG is embedded as a data URL in that event's
- * `annotated_image` field. Annotation failures degrade gracefully — the event
- * keeps no `annotated_image` and its id is listed in payload meta
- * `annotation_missing`; detected events lacking boxes/box_frame are likewise
- * soft-recorded in meta `annotation_not_provided`. Neither blocks submission.
+ * `annotated_image` field. Annotation degradation is two-level (never blocks
+ * submission) and recorded per event_id in payload meta:
+ *   - `missing_boxes`: detected event lacking boxes/box_frame (模型侧没给)
+ *   - `annotation_failed`: boxes given, but the server-side draw failed
  */
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -133,10 +133,12 @@ export interface DetectionPayload {
   binary_encoding: string;
   normal: boolean;
   report_markdown: string;
-  /** 标注降级元信息;无降级时缺省。 */
+  /** 标注降级元信息(两级,逐事件列出 event_id);无降级时缺省。
+   * missing_boxes=检出事件未提供 boxes/box_frame(模型侧没给);
+   * annotation_failed=提供了 boxes/box_frame 但服务端 draw_boxes 画框失败。 */
   meta?: {
-    annotation_missing?: number[];
-    annotation_not_provided?: number[];
+    missing_boxes?: number[];
+    annotation_failed?: number[];
   };
 }
 
@@ -263,8 +265,9 @@ export function crossValidateDetection(input: SubmitDetectionInput): string[] {
 
 /**
  * Soft check (never rejects): detected events lacking boxes and/or box_frame.
- * Their ids are recorded in payload meta `annotation_not_provided` so the
- * frontend can degrade to a no-image presentation.
+ * Their ids are recorded in payload meta `missing_boxes`, so debug can tell a
+ * model-side gap (`missing_boxes`) apart from a server-side drawing failure
+ * (`annotation_failed`). Neither blocks submission.
  */
 export function findEventsWithoutBoxes(input: SubmitDetectionInput): number[] {
   return input.events
@@ -319,7 +322,6 @@ export function createSubmitDetectionTool(
         };
       }
 
-      const annotationNotProvided = findEventsWithoutBoxes(input);
       return {
         accesses:
           deps.workspace !== undefined
@@ -329,7 +331,7 @@ export function createSubmitDetectionTool(
         // 相同视频在 session 内可复用(避免重复审批)。
         approvalRule: `submit_detection(${videoPath})`,
         execute: async (): Promise<ExecutableToolResult> => {
-          const annotationMissing: number[] = [];
+          const annotationFailed: number[] = [];
           const events = input.events.map(async (event): Promise<DetectionPayloadEvent> => {
             const annotated: DetectionPayloadEvent = { ...event };
             const canAnnotate =
@@ -346,16 +348,15 @@ export function createSubmitDetectionTool(
             if (result.ok) {
               annotated.annotated_image = `data:image/jpeg;base64,${result.data.jpeg_base64}`;
             } else {
-              annotationMissing.push(event.event_id);
+              annotationFailed.push(event.event_id);
             }
             return annotated;
           });
           const payload: DetectionPayload = { ...input, events: await Promise.all(events) };
           const meta: NonNullable<DetectionPayload['meta']> = {};
-          if (annotationMissing.length > 0) meta.annotation_missing = annotationMissing;
-          if (annotationNotProvided.length > 0) {
-            meta.annotation_not_provided = annotationNotProvided;
-          }
+          if (annotationFailed.length > 0) meta.annotation_failed = annotationFailed;
+          const missingBoxes = findEventsWithoutBoxes(input);
+          if (missingBoxes.length > 0) meta.missing_boxes = missingBoxes;
           if (Object.keys(meta).length > 0) payload.meta = meta;
           return {
             output: '检测结果已提交',
