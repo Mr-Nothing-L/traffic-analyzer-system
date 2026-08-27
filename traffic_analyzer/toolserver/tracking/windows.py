@@ -337,30 +337,33 @@ def disp_per_second(
     return disp / dt if dt > 0 else 0.0
 
 
-def should_upgrade_fps(pts: Sequence[Dict[str, Any]], sample_fps: float) -> bool:
-    """窗内相邻点位移速率超过缓行上限(SLOW_SPEED_RATIO × 对角线/秒)
-    即视为高速运动目标 → 升 10fps(sample_fps 为相邻点的采样间隔)。"""
-    step = 1.0 / sample_fps
+def should_upgrade_fps(pts: Sequence[Dict[str, Any]], src_fps: float) -> bool:
+    """相邻点位移速率超过缓行上限(SLOW_SPEED_RATIO × 对角线/秒)
+    即视为高速运动目标 → 升 10fps(帧号为原始帧号,按实际帧差换算时间)。"""
     for p1, p2 in zip(pts, pts[1:]):
         diag = max(box_diagonal(p2["box"]), 1e-6)
-        c1, c2 = bbox_center(p1["box"]), bbox_center(p2["box"])
-        speed = math.hypot(c2[0] - c1[0], c2[1] - c1[1]) / step
+        speed = disp_per_second(p1, p2, src_fps)
         if speed > SLOW_SPEED_RATIO * diag:
             return True
     return False
 
 
-def compute_env_flow(ref_tracks: List[List[Dict[str, Any]]]) -> Optional[float]:
+def compute_env_flow(
+    ref_tracks: List[List[Dict[str, Any]]], src_fps: float, sample_fps: float
+) -> Optional[float]:
     """参照车速度中位数(归一化单位/秒);无有效连续位移返回 None。
 
-    只统计相邻点帧差 == 1 的速度样本(断裂跨段的距离不代表真实速率)。
+    只统计相邻采样步内的速度样本(断裂跨段的距离不代表真实速率);
+    帧号为原始帧号,名义采样步长 = src_fps / sample_fps。
     """
+    step = max(1, round(src_fps / sample_fps))
     speeds: List[float] = []
     for pts in ref_tracks:
         for p1, p2 in zip(pts, pts[1:]):
-            if abs(int(p2["frame"]) - int(p1["frame"])) != 1:  # type: ignore[arg-type]
+            diff = abs(int(p2["frame"]) - int(p1["frame"]))  # type: ignore[arg-type]
+            if diff <= 0 or diff > 2 * step:
                 continue
-            speeds.append(disp_per_second(p1, p2, DEFAULT_SAMPLE_FPS))
+            speeds.append(disp_per_second(p1, p2, src_fps))
     if not speeds:
         return None
     speeds.sort()
@@ -493,7 +496,7 @@ def run_tracking(
             _absorb_window_result(
                 suspects=suspects,
                 mode=mode,
-                offset=pos,
+                win_frames=win_frames,
                 first_frame=int(win_frames[0]),
                 suspect_boxes=suspect_parsed,
                 expected=expected,
@@ -501,16 +504,29 @@ def run_tracking(
             )
             for rid, boxes in refs_parsed.items():
                 if boxes:
-                    ref_windows.append((rid, boxes))
+                    # 参照框同样按 win_frames 查表换算到原始帧号
+                    # (否则各窗局部 0-4 帧互相污染)
+                    ref_windows.append(
+                        (
+                            rid,
+                            [
+                                {
+                                    "frame": int(win_frames[int(q["frame"])])
+                                    if 0 <= int(q["frame"]) < len(win_frames)
+                                    else int(win_frames[-1]),
+                                    "box": q["box"],
+                                }
+                                for q in boxes
+                            ],
+                        )
+                    )
 
             # 自适应升帧率:首个传播窗发现高速目标即整段改用 10fps 接续
             if not fps_upgraded and mode == "propagate":
                 upgraded = False
                 for s in suspects:
                     recent = s.points[-WINDOW_FRAMES:]
-                    if len(recent) >= 2 and should_upgrade_fps(
-                        recent, DEFAULT_SAMPLE_FPS
-                    ):
+                    if len(recent) >= 2 and should_upgrade_fps(recent, meta["fps"]):
                         upgraded = True
                         break
                 if upgraded:
@@ -543,7 +559,7 @@ def run_tracking(
         if ref_windows
         else []
     )
-    env_flow = compute_env_flow(ref_tracks)
+    env_flow = compute_env_flow(ref_tracks, meta["fps"], fps_used)
 
     # --- 轨迹装配:去重 → 瞬移断裂 → 取主链 → 平滑 → 档案/互证 ---
     tracks: List[Track] = []
@@ -682,7 +698,7 @@ def _expected_box(s: _SuspectState) -> Optional[List[float]]:
 def _absorb_window_result(
     suspects: Sequence[_SuspectState],
     mode: str,
-    offset: int,
+    win_frames: Sequence[int],
     first_frame: int,
     suspect_boxes: Dict[int, List[Dict[str, Any]]],
     expected: Dict[int, Optional[List[float]]],
@@ -690,14 +706,23 @@ def _absorb_window_result(
 ) -> None:
     """把一窗解析结果并入状态:传播窗追加点,re-anchor 窗校验偏移判跑飞。
 
-    帧号换算:窗内局部 frame + offset = 全局原始帧号。re-anchor 与外推
-    期望 IoU < REANCHOR_MISMATCH_IOU(或未检出)→ 目标标记跑飞、停止跟踪。
+    帧号换算:窗内局部 frame 经 win_frames 查表 = 原始帧号(采样网格跳号,
+    不能用 offset+local 线性换算)。re-anchor 与外推期望 IoU
+    < REANCHOR_MISMATCH_IOU(或未检出)→ 目标标记跑飞、停止跟踪。
     """
     for s in suspects:
         if not s.active:
             continue
         boxes_local = suspect_boxes.get(s.index, [])
-        boxes_global = [{"frame": offset + int(q["frame"]), "box": q["box"]} for q in boxes_local]
+        boxes_global = [
+            {
+                "frame": int(win_frames[int(q["frame"])])
+                if 0 <= int(q["frame"]) < len(win_frames)
+                else int(win_frames[-1]),
+                "box": q["box"],
+            }
+            for q in boxes_local
+        ]
         if mode != "reanchor":
             have = {int(q["frame"]) for q in s.points}
             s.points.extend(q for q in boxes_global if int(q["frame"]) not in have)

@@ -123,14 +123,12 @@ class PrepareVideoRequest(BaseModel):
 
 
 class SuspectBox(BaseModel):
-    """track_suspects 的单个疑似目标锚点(0-1 归一化框)。"""
+    """track_suspects 锚点的 0-1 归一化框。"""
 
     x1: float = Field(ge=0, le=1)
     y1: float = Field(ge=0, le=1)
     x2: float = Field(ge=0, le=1)
     y2: float = Field(ge=0, le=1)
-    timestamp: float = Field(ge=0)
-    description: str = ""
 
     @model_validator(mode="after")
     def _check_box(self) -> "SuspectBox":
@@ -139,9 +137,17 @@ class SuspectBox(BaseModel):
         return self
 
 
+class SuspectAnchorIn(BaseModel):
+    """track_suspects 的单个疑似目标锚点(嵌套 box + 时刻 + 描述,与 agent 侧契约一致)。"""
+
+    box: SuspectBox
+    timestamp: float = Field(ge=0)
+    description: str = ""
+
+
 class TrackSuspectsRequest(BaseModel):
     video_path: str
-    suspects: List[SuspectBox] = Field(min_length=1, max_length=5)
+    suspects: List[SuspectAnchorIn] = Field(min_length=1, max_length=5)
     time_range: Optional[List[float]] = None
 
     @model_validator(mode="after")
@@ -492,7 +498,7 @@ def create_app(workspace: Path | str) -> FastAPI:
         del meta
         anchors = [
             SuspectAnchor(
-                box=[s.x1, s.y1, s.x2, s.y2],
+                box=[s.box.x1, s.box.y1, s.box.x2, s.box.y2],
                 timestamp=s.timestamp,
                 description=s.description,
             )

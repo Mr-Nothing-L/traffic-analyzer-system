@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import base64
+import csv
 import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -32,9 +33,9 @@ _FPS = 5.0
 _FRAMES = 40  # 8s 视频
 
 
-def _make_video(path: Path, n: int = _FRAMES) -> Path:
-    """合成 5fps 灰底视频:一个白色方块从左向右匀速移动(供抽帧与渲染)。"""
-    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), _FPS, (160, 120))
+def _make_video(path: Path, n: int = _FRAMES, fps: float = _FPS) -> Path:
+    """合成灰底视频:一个白色方块从左向右匀速移动(供抽帧与渲染)。"""
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (160, 120))
     assert writer.isOpened(), "cv2.VideoWriter failed to open"
     for i in range(n):
         frame = np.full((120, 160, 3), 60, dtype=np.uint8)
@@ -129,10 +130,7 @@ def _post(client: TestClient, engine: Any, video_rel: str = "clip.mp4") -> Any:
             "video_path": video_rel,
             "suspects": [
                 {
-                    "x1": 0.06,
-                    "y1": 0.41,
-                    "x2": 0.25,
-                    "y2": 0.58,
+                    "box": {"x1": 0.06, "y1": 0.41, "x2": 0.25, "y2": 0.58},
                     "timestamp": 0.2,
                     "description": "左侧来向的白色轿车",
                 }
@@ -179,6 +177,30 @@ class TestContract:
             raw = base64.b64decode(track["best_frames"][0]["jpeg_base64"])
             assert raw[:2] == b"\xff\xd8"
             float(track["best_frames"][0]["timestamp"])
+
+    def test_timestamps_use_source_frame_space(
+        self, client: TestClient, tracked_video: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """回归:源 fps ≠ 采样 fps 时,轨迹点时间戳必须按原始帧号换算。
+
+        25fps 视频按 5fps 采样:采样网格第 1 点 = 源帧 5 = 0.2s;
+        若错把网格序号当帧号会得到 1/25=0.04s(原 bug)。
+        """
+        _make_video(tracked_video.parent / "clip25.mp4", n=50, fps=25.0)
+        monkeypatch.setattr(
+            "traffic_analyzer.toolserver.server._build_default_engine",
+            lambda: ScriptedEngine(responses=[_window_response("[100,700,400,950]")]),
+        )
+        resp = _post(client, client.app.state.tracking_engine, video_rel="clip25.mp4")  # type: ignore[attr-defined]
+        assert resp.status_code == 200 and resp.json()["failed"] is False
+        csv_path = tracked_video.parent / resp.json()["artifacts"]["csv"]
+        rows = list(csv.DictReader(open(csv_path, encoding="utf-8-sig")))
+        assert rows, "tracks.csv empty"
+        times = [float(r["time_s"]) for r in rows]
+        frames = [int(r["frame"]) for r in rows]
+        for f, ts in zip(frames, times):
+            assert ts == pytest.approx(f / 25.0, abs=1e-3), f"frame {f} -> ts {ts}"
+        assert times[1] == pytest.approx(0.2, abs=1e-3), times[:3]
 
     def test_artifacts_laid_out(
         self, client: TestClient, tracked_video: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -231,16 +253,13 @@ class TestContract:
         assert calls_after_first > 0
 
         # 同锚点同视频但不同描述 → 缓存键不变,VLM 不再被调用
-        client.post(
+        cache_resp = client.post(
             "/tools/track_suspects",
             json={
                 "video_path": "clip.mp4",
                 "suspects": [
                     {
-                        "x1": 0.06,
-                        "y1": 0.41,
-                        "x2": 0.25,
-                        "y2": 0.58,
+                        "box": {"x1": 0.06, "y1": 0.41, "x2": 0.25, "y2": 0.58},
                         "timestamp": 0.2,
                         "description": "喷过漆的蓝色货车(不同描述)",
                     }
@@ -248,6 +267,7 @@ class TestContract:
                 "time_range": [0.0, 6.0],
             },
         )
+        assert cache_resp.status_code == 200 and cache_resp.json()["failed"] is False
         assert engine.calls == calls_after_first
 
         # 缓存目录落了结果文件
@@ -297,7 +317,7 @@ class TestGuards:
             "/tools/track_suspects",
             json={
                 "video_path": "/etc/hostname",
-                "suspects": [{"x1": 0, "y1": 0, "x2": 0.5, "y2": 0.5, "timestamp": 0}],
+                "suspects": [{"box": {"x1": 0, "y1": 0, "x2": 0.5, "y2": 0.5}, "timestamp": 0}],
             },
         )
         assert resp.status_code == 403
@@ -308,14 +328,14 @@ class TestGuards:
             "/tools/track_suspects",
             json={
                 "video_path": "nope.mp4",
-                "suspects": [{"x1": 0, "y1": 0, "x2": 0.5, "y2": 0.5, "timestamp": 0}],
+                "suspects": [{"box": {"x1": 0, "y1": 0, "x2": 0.5, "y2": 0.5}, "timestamp": 0}],
             },
         )
         assert resp.status_code == 404
         assert resp.json()["error"]["code"] == "video_not_found"
 
     def test_too_many_suspects_422(self, client: TestClient) -> None:
-        suspects = [{"x1": 0.0, "y1": 0.0, "x2": 0.1, "y2": 0.1, "timestamp": 0}] * 6
+        suspects = [{"box": {"x1": 0.0, "y1": 0.0, "x2": 0.1, "y2": 0.1}, "timestamp": 0}] * 6
         resp = client.post(
             "/tools/track_suspects", json={"video_path": "clip.mp4", "suspects": suspects}
         )
@@ -326,7 +346,7 @@ class TestGuards:
             "/tools/track_suspects",
             json={
                 "video_path": "clip.mp4",
-                "suspects": [{"x1": 0.5, "y1": 0.0, "x2": 0.1, "y2": 0.1, "timestamp": 0}],
+                "suspects": [{"box": {"x1": 0.5, "y1": 0.0, "x2": 0.1, "y2": 0.1}, "timestamp": 0}],
             },
         )
         assert resp.status_code == 422
@@ -337,7 +357,7 @@ class TestGuards:
             "/tools/track_suspects",
             json={
                 "video_path": "clip.mp4",
-                "suspects": [{"x1": 0.0, "y1": 0.0, "x2": 0.2, "y2": 0.2, "timestamp": 0}],
+                "suspects": [{"box": {"x1": 0.0, "y1": 0.0, "x2": 0.2, "y2": 0.2}, "timestamp": 0}],
                 "time_range": [1.0],
             },
         )

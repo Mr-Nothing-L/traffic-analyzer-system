@@ -322,7 +322,7 @@ class TestReanchor:
         _absorb_window_result(
             suspects=[state],
             mode="reanchor",
-            offset=0,
+            win_frames=[15, 20, 25, 30, 35],
             first_frame=15,
             suspect_boxes={0: [{"frame": 0, "box": [0.9, 0.9, 1.0, 1.0]}]},
             expected={0: [0.11, 0.11, 0.31, 0.31]},

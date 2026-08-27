@@ -168,7 +168,7 @@
           },
           "time_range": {
             "type": "array",
-            "description": "可选分析时段 [start, end](秒);不传则由服务端默认处理",
+            "description": "可选分析时段 [start, end](秒)。不传时服务端只分析锚点时刻后约 10 秒——若嫌疑贯穿整个视频(如'全程静止''全程逆行'),必须显式传 [0, 视频时长],否则跟踪只覆盖片段前段",
             "minItems": 2,
             "maxItems": 2,
             "items": { "type": "number", "minimum": 0 }
