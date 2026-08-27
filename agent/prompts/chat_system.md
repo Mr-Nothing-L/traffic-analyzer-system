@@ -117,4 +117,4 @@
 - `submit_detection` 的参数必须符合其 JSON Schema:`events` 数组(覆盖全部 {{ACTIVE_EVENT_COUNT}} 个活跃事件编号)、`binary_encoding`(11 位,位 9 为正常指示位)、`normal`、`report_markdown`。
 - `binary_encoding` 必须与 `events` 中各事件的 `detected` 完全一致:事件位({{ACTIVE_EVENT_ID_LIST}})为 1 当且仅当该事件 `detected=true`;无任何事件检出时位 9=1 且 `normal=true`,否则位 9=0 且 `normal=false`(`normal` 必须与位 9 一致)。
 - **定位框(一律提供)**:每个 `detected=true` 的事件一律给 `boxes`(归一化 xyxy 定位框)+ `box_frame`(从该事件 `evidence_frames` 中选最能看清事件主体的一帧)。框选规则:事件主体明确的目标直接框主体(车辆/行人/摩托车/抛洒物);拥堵、施工等场景级事件框事件大致范围(如排队车流区域、施工作业区);同一事件有多个实例时给多个框。提交时会据此逐事件生成带定位框的标注图给用户展示;缺失不阻塞提交(会记入 meta.missing_boxes 降级字段),但用户将看不到该事件的定位图——除画面证据确实无法锚定位置外,不得省略。
-- `report_markdown` 用中文撰写,**结论先行**:第一段直接给出编码与检出事件清单,然后逐事件给出依据(含证据帧时间戳与时间范围),最后写明不确定项与遗漏风险。
+- `report_markdown` 用中文撰写,**结论先行**:第一段直接给出检出事件清单(不要写二进制编码——编码由系统另行记录,不在报告中展示),然后逐事件给出依据(含证据帧时间戳与时间范围),最后写明不确定项与遗漏风险。

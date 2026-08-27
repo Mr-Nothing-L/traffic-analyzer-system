@@ -1,5 +1,6 @@
 <script setup lang="ts">
-/** 检测结果卡:11 位编码高亮 + 检出事件(标注图/未定位小标) + markdown 报告。 */
+/** 检测结果卡:检出事件(标注图/未定位小标) + markdown 报告。
+ * 二进制编码保留在 payload 契约中(评估/记录用),卡片与报告均不展示。 */
 import { computed } from 'vue'
 import type { AgentEntry, AgentDetectionEntry, DetectionPayload } from '../../stores/agentchat'
 import { mdToHtml } from '../../utils/markdown'
@@ -19,7 +20,6 @@ function asPayload(data: unknown): DetectionPayload | null {
 }
 
 const payload = computed(() => asPayload(entry.value.data))
-const encodingBits = (enc: string) => enc.split('_')
 </script>
 
 <template>
@@ -35,15 +35,6 @@ const encodingBits = (enc: string) => enc.split('_')
                     v-else-if="payload!.normal === false"
                     class="detection-badge abnormal"
                   >检出事件</span>
-                </div>
-                <div v-if="payload!.binary_encoding" class="detection-encoding">
-                  <template
-                    v-for="(bit, j) in encodingBits(payload!.binary_encoding!)"
-                    :key="j"
-                  >
-                    <span class="bit" :class="{ on: bit === '1' }">{{ bit }}</span>
-                    <span v-if="j < 10" class="bit-sep">_</span>
-                  </template>
                 </div>
                 <div
                   v-if="payload!.events?.some((ev) => ev.detected)"
@@ -117,28 +108,6 @@ const encodingBits = (enc: string) => enc.split('_')
 .detection-badge.abnormal {
   background: var(--color-accent-soft);
   color: var(--color-accent);
-}
-
-/* 11 位编码:等宽字体,置位高亮 accent */
-.detection-encoding {
-  margin-top: var(--space-sm);
-  font-family: var(--font-mono);
-  font-size: var(--text-xl);
-  letter-spacing: 0.06em;
-  color: var(--color-text2);
-  overflow-wrap: anywhere;
-}
-
-.detection-encoding .bit.on {
-  color: var(--color-accent);
-  font-weight: 700;
-  background: var(--color-accent-soft);
-  border-radius: 4px;
-  padding: 0 2px;
-}
-
-.detection-encoding .bit-sep {
-  color: var(--color-dot-muted);
 }
 
 .detection-events {
