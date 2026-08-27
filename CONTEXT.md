@@ -87,7 +87,7 @@ Agent 运行时的唯一对话形态(系统 prompt 为 `agent/prompts/chat_syste
 _Avoid_: 快速对话, chatbot
 
 **工具 (Tool)**:
-Agent 运行时可调用的最小能力单元,声明 `{name, description, parameters}` 与资源访问(accesses);注册表管理,调度器按访问冲突并行执行同批调用。description 与 parameters(模型可见 JSON Schema)均以 `agent/config/toolset.json` 为单一来源,启动时加载(缺条目 fail-fast);帧数/体积上限的唯一执法者是 toolserver。`registerBuiltinTools` 注册 17 个通用工具:视频工具(video_meta / extract_frames / draw_boxes / load_video)、文件与执行(read_file / write_file / run_script / run_command / job_list / job_output / job_kill)、导航(edit_file / glob_files / grep_files)、协作(todo_write / web_fetch)、提交(submit_detection);另有 spawn_subagent / subagent_list / subagent_report 由 server/app.ts 按 session 注入,共享同一个 SubagentRunRegistry。
+Agent 运行时可调用的最小能力单元,声明 `{name, description, parameters}` 与资源访问(accesses);注册表管理,调度器按访问冲突并行执行同批调用。description 与 parameters(模型可见 JSON Schema)均以 `agent/config/toolset.json` 为单一来源,启动时加载(缺条目 fail-fast);帧数/体积上限的唯一执法者是 toolserver。`registerBuiltinTools` 注册 18 个通用工具:视频与轨迹取证(video_meta / extract_frames / draw_boxes / load_video / track_suspects)、文件与执行(read_file / write_file / run_script / run_command / job_list / job_output / job_kill)、导航(edit_file / glob_files / grep_files)、协作(todo_write / web_fetch)、提交(submit_detection);另有 spawn_subagent / subagent_list / subagent_report 由 server/app.ts 按 session 注入,共享同一个 SubagentRunRegistry。
 _Avoid_: function call, action
 
 **权限模式 (Permission Mode)**:
@@ -99,8 +99,12 @@ _Avoid_: approval flow, access control
 _Avoid_: chroot, container
 
 **工具服务 (Tool Server)**:
-`traffic_analyzer/toolserver/` 下的 Python 本地 HTTP 服务(默认 127.0.0.1:8601),向 Agent 运行时暴露视频元信息、抽帧、画框能力;`--workspace` 必填,视频路径越界返回 403。CV 计算全部留在 Python,TS 侧只做 HTTP client。
+`traffic_analyzer/toolserver/` 下的 Python 本地 HTTP 服务(默认 127.0.0.1:8601),向 Agent 运行时暴露视频元信息、抽帧、画框、整段预处理与 `track_suspects` 定向跟踪能力;`--workspace` 必填,视频路径越界返回 403。CV 计算全部留在 Python,TS 侧只做 HTTP client。跟踪取证产物(debug bundle)落在视频所在根的 `.agent/tracks/<stem>/<ts>/`。
 _Avoid_: tool API, video service
+
+**定向跟踪 (Track Suspects)**:
+动态事件(违停 1 / 应急车道 2 / 逆行倒车 8)的轨迹取证工具:agent 先定位 ≤5 个疑似目标锚点 `{box, timestamp, description}`,toolserver 在可疑时段内做确定性跟踪编排——5fps(高速目标自适应 10fps)滑窗 5 帧 VLM 调用,传播式为主、每 5 窗强制 re-anchor(IoU<0.3 判跑飞)、瞬移即时断裂;窗 prompt 顺带框 2-3 辆参照车以估计环境流速。产出逐轨迹数值档案(方向角/速度/静止时长/bbox 趋势/环境流速比,位移阈值按 bbox 对角线归一)+ 速度染色轨迹叠加图 + best-frame crop + debug bundle(跟踪叠加视频、windows.jsonl、tracks.csv)。裁决契约:数值问题只准引用数值档案,语义问题看叠加图,矛盾时信数值。
+_Avoid_: object tracker, MOT
 
 **上下文压缩 (Context Compaction)**:
 LLM 摘要式的会话历史压缩:上下文用量达窗口 85%(`triggerRatio 0.85`,或逼近预留输出空间)时触发,把安全切点之前的历史交由同一 LLM 摘要为一条消息,保留最近若干轮;摘要失败回退为工具结果占位替换。也可经 `POST /sessions/{id}/compact` 手动触发。

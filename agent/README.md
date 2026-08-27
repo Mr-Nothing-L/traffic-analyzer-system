@@ -40,8 +40,8 @@ agent/
   协议尚未接入,配置了会抛错。
 - `loop/`:多步「generate → 工具调用 → 回灌消息」主循环;按真实 usage 跟踪
   上下文用量,达到窗口 85% 自动压缩(优先 LLM 摘要,失败回退占位替换)。
-- `tools/`:17 个通用内置工具——视频工具 `video_meta` / `extract_frames` /
-  `draw_boxes` / `load_video`(经 HTTP 调 Python 工具服务);文件与执行
+- `tools/`:18 个通用内置工具——视频与轨迹取证 `video_meta` / `extract_frames` /
+  `draw_boxes` / `load_video` / `track_suspects`(经 HTTP 调 Python 工具服务);文件与执行
   `read_file` / `write_file` / `run_script` / `run_command` / `job_list` /
   `job_output` / `job_kill`(沙盒内);导航 `edit_file` / `glob_files` /
   `grep_files`;协作 `todo_write` / `web_fetch`;提交 `submit_detection`
