@@ -74,4 +74,4 @@ silent success 优先(无庆功 toast);破坏性操作用 optimistic update + �
 
 ## Provenance
 
-由 `docs/web_ui_review_and_refactor_plan.md` 评审决策产生(2026-08-04);调色板/字体提取自 `frontend/src/styles/tokens.css`(legacy `:root`),非新发明。
+由 `docs/archive/web_ui_review_and_refactor_plan.md` 评审决策产生(2026-08-04);调色板/字体提取自 `frontend/src/styles/tokens.css`(legacy `:root`),非新发明。

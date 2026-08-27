@@ -98,8 +98,9 @@ python3 -m traffic_analyzer analyze \
 `--log-level`。完整列表见 `python3 -m traffic_analyzer analyze --help`。
 
 在终端中运行时显示 **rich 实时进度面板**：每个专家一条泳道（10 个事件专家 + 裁决 + SFT
-标注 + 报告）；非 TTY 输出（Web 子进程、管道）自动退化为 `EXPERT_PROGRESS` 标记行，供
-Web 前端解析。退出码：`0` 成功，`1` 错误，`2` 视频被预过滤器筛除（不写报告文件）。
+标注 + 报告）；作为 Web 子进程运行时，结构化进度以 JSONL 写入 `TRAFFIC_ANALYZER_PROGRESS_FILE`
+指定的文件，由 web 层尾随解析并经 SSE 推送（`EXPERT_PROGRESS` 标记行仅作 CLI 兼容保留）。
+退出码：`0` 成功，`1` 错误，`2` 视频被预过滤器筛除（不写报告文件）。
 
 ### 3. Agent 模式（Web 界面）
 

@@ -2,7 +2,7 @@
  * agent 多轮循环:generate → 权限裁决 → 冲突调度执行 → 结果回灌。
  *
  * 把已有的 kosong(LLM 抽象)、tools(契约/注册表/调度器)与
- * permissions(权限门)串成 docs/agent_refactor_plan.md 描述的
+ * permissions(权限门)串成 docs/archive/agent_refactor_plan.md 描述的
  * 简化版 Turn/Step:`while (tool_calls) { ... }`,带 maxStepsPerTurn
  * 上限与真实 usage 触发压缩(compaction.ts 的 isOverContextByUsage,
  * 触发判定单轨,不再回退字符估算)。

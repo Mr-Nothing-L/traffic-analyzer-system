@@ -54,7 +54,7 @@ event_id 全局采用 v4.5 的 action 编号，不再做 0-based 映射；action
 │   ├── 交通事件数据标注说明文档_v4.5.md   ★ 权威标注文档(以此为准)
 │   ├── CHANGELOG.md                      更新日志
 │   ├── v4.5_images/                      10 张事件示例 png
-│   └── web_ui_review_and_refactor_plan.md  web 重构诊断与路线图(v6 已执行完毕)
+│   └── archive/                        历史文档(含 web 重构路线图、agent 重构计划,均已执行完毕)
 ├── frontend/                            Web 前端(Vue 3 + TS + Naive UI,构建挂 /;含 /chat 统一对话视图)
 ├── agent/                               TS agent 运行时(src/kosong vendored LLM 抽象层、llm、
 │                                        tools、permissions、sandbox、loop、server;npx vitest run)
@@ -62,7 +62,7 @@ event_id 全局采用 v4.5 的 action 编号，不再做 0-based 映射；action
 │   ├── config/
 │   │   ├── event_categories.yaml      事件定义 + 裁决规则
 │   │   ├── event_options.yaml         SFT 结构化属性选项(封闭枚举)
-│   │   └── prompt_templates.yaml      VLM Prompt 模板(多版本)
+│   │   └── prompts/                   VLM Prompt 模板(per 事件 YAML,多版本)
 │   ├── core/
 │   │   ├── pipeline_steps.py          ExpertAgentLayer / AdjudicationStep
 │   │   ├── grounding_verification.py  裁决后原始帧锚定核验(GROUNDING_CHECK_ENABLE)
@@ -129,7 +129,7 @@ LLM 配置在 `traffic_analyzer/config/.env`(`LLM_PROVIDER` / `LLM_API_KEY` / `L
 
 - **改 YAML 配置时**:必须跑 `validate-config` 通过
 - **新增事件**:用 `is_active: false` 关闭比注释更安全(保留二进制编码位)
-- **Prompt 调整**:在 `prompt_templates.yaml` 加新 version,通过 `traffic_percentage` 或 `PROMPT_VERSION_*` env 切换
+- **Prompt 调整**:在 `config/prompts/*.yaml` 对应事件文件加新 version,通过 `traffic_percentage` 或 `PROMPT_VERSION_*` env 切换
 - **长任务**:批量 `analyze` 时遵循全局 `~/.claude/CLAUDE.md` 的 *静默心跳* 规则(nohup + watcher,只在完成/硬错/stall 推送)
 - **路径敏感**:工作区已从 `11.64.37.48_ch1_20260401_142812/` 重命名为 `高速交通事件Agent/`,脚本里如还有旧路径需替换
 - **目录隔离**:本仓库是 git repo,Claude 后台 session 写文件时会先用 worktree(`.claude/worktrees/<name>/`)隔离,改动以分支形式提交
@@ -146,4 +146,4 @@ LLM 配置在 `traffic_analyzer/config/.env`(`LLM_PROVIDER` / `LLM_API_KEY` / `L
 
 ---
 
-*Last reviewed: 2026-08-25 — 统一对话(问答+检测双能力)落地后更新。*
+*Last reviewed: 2026-08-27 — 文档维护:prompt 模板路径更正(config/prompts/)、过期 plan 文档归档。*

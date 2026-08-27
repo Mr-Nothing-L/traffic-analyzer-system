@@ -59,7 +59,7 @@ runtime (multi-turn tool-calling chat):
   + Markdown report contract as the pipeline. Tool calls go through a
   permission chain (`yolo` / `manual` / `auto` modes) and a workspace sandbox.
 - The **analysis core** is fully configured in YAML (`traffic_analyzer/config/`):
-  event definitions, prompt templates, logic chains — new events need no code.
+  event definitions and prompt templates — new events need no code.
 
 ## Quick Start
 
@@ -108,10 +108,11 @@ default `output/sft_labels`), `--config-dir`, `--log-level`. Full list:
 `python3 -m traffic_analyzer analyze --help`.
 
 While analyzing in a terminal, a **rich live progress panel** shows one swimlane per
-expert (10 event experts + adjudication + SFT labeling + report); in non-TTY output
-(web subprocess, pipes) it degrades to `EXPERT_PROGRESS` marker lines that the web UI
-parses instead. Exit codes: `0` success, `1` error, `2` video rejected by the
-prefilter (no report file written).
+expert (10 event experts + adjudication + SFT labeling + report); when run as a web
+subprocess, structured progress is written as JSONL to the file named by
+`TRAFFIC_ANALYZER_PROGRESS_FILE`, which the web layer tails and forwards over SSE
+(`EXPERT_PROGRESS` marker lines remain as a CLI-compatible fallback). Exit codes:
+`0` success, `1` error, `2` video rejected by the prefilter (no report file written).
 
 ### 3. Agent mode (web UI)
 
