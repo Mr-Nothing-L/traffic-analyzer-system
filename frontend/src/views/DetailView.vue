@@ -37,6 +37,29 @@ const hasResults = computed(() => {
   const r = results.value
   return !!(r && (r.sft_label || r.report_md || r.evidence))
 })
+
+// 结果卡 tab 切换:视频预览常驻,下方 SFT 标注 / 分析报告 / 证据编辑 单卡显示。
+// v-show 保留各卡内部状态;选择持久化到 localStorage(全局,不按视频)。
+type DetailTab = 'sft' | 'report' | 'evidence'
+const TAB_LABELS: Record<DetailTab, string> = {
+  sft: 'SFT 标注',
+  report: '分析报告',
+  evidence: '证据编辑',
+}
+const TAB_STORAGE_KEY = 'detail.activeTab'
+const stored = localStorage.getItem(TAB_STORAGE_KEY)
+const activeTab = ref<DetailTab>(stored === 'report' || stored === 'evidence' ? stored : 'sft')
+const tabs = computed<DetailTab[]>(() => {
+  const r = results.value
+  const out: DetailTab[] = ['sft']
+  if (r?.report_md) out.push('report')
+  if (r?.evidence) out.push('evidence')
+  return out
+})
+watch(tabs, (list) => {
+  if (!list.includes(activeTab.value)) activeTab.value = list[0]
+})
+watch(activeTab, (t) => localStorage.setItem(TAB_STORAGE_KEY, t))
 const job = computed(() => jobs.latestJobForStem(stem.value))
 
 async function loadAll() {
@@ -124,9 +147,20 @@ const emptyNote = computed(() => {
           <div class="empty-note">加载结果失败:{{ ev.loadError }}</div>
         </n-card>
         <template v-else-if="hasResults && results">
-          <SftEditor :stem="stem" :sft="results.sft_label" :file-sig="results.file_sig" :raw-action="results.raw_action" />
-          <ReportCard :stem="stem" :report-md="results.report_md" />
-          <EvidenceCard v-if="results.evidence" :stem="stem" :source="source" />
+          <div class="detail-tabs">
+            <button
+              v-for="t in tabs"
+              :key="t"
+              class="detail-tab"
+              :class="{ active: activeTab === t }"
+              @click="activeTab = t"
+            >
+              {{ TAB_LABELS[t] }}
+            </button>
+          </div>
+          <SftEditor v-show="activeTab === 'sft'" :stem="stem" :sft="results.sft_label" :file-sig="results.file_sig" :raw-action="results.raw_action" />
+          <ReportCard v-show="activeTab === 'report'" :stem="stem" :report-md="results.report_md" />
+          <EvidenceCard v-if="results.evidence" v-show="activeTab === 'evidence'" :stem="stem" :source="source" />
         </template>
         <ExpertPanel v-else-if="job && job.status === 'running'" :stem="stem" />
         <n-card v-else>

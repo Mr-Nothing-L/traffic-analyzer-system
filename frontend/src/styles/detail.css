@@ -113,6 +113,38 @@ body.hsplit-dragging {
   animation: card-in var(--dur-med) var(--ease-out) both; /* 卡片进场(legacy layout.css:112-119) */
 }
 
+/* 结果卡 tab 切换条(SFT 标注 / 分析报告 / 证据编辑),风格对齐顶栏 ws-btn */
+.detail-tabs {
+  display: flex;
+  gap: var(--space-sm);
+}
+
+.detail-tab {
+  border: 1px solid var(--color-border);
+  background: var(--color-card);
+  color: var(--color-text2);
+  border-radius: var(--radius-sm);
+  padding: 5px 14px;
+  cursor: pointer;
+  font-family: var(--font-pixel);
+  font-size: var(--text-sm);
+  transition:
+    border-color var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out);
+}
+
+.detail-tab:hover {
+  border-color: var(--color-accent);
+  background: var(--color-hover-bg);
+}
+
+.detail-tab.active {
+  border-color: var(--color-accent);
+  background: var(--color-accent-soft);
+  color: var(--color-accent);
+  font-weight: 600;
+}
+
 /* 预览卡同样享受进场动画 */
 .pane-top .card-preview {
   animation: card-in var(--dur-med) var(--ease-out) both;
