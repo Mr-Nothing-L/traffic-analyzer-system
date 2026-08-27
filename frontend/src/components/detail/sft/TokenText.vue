@@ -2,7 +2,7 @@
 /** 事件文本富文本框(contenteditable):仅声明提及渲染为 token 分段,可自由编辑。
  * spike 结论(phase5):输入期间只回写纯文本、不更新分段,Vue 声明式渲染不丢光标;
  * 分段仅在挂载 / blur / chip 变更(refresh)时重算,与 legacy renderTokens 时机一致。 */
-import { h, nextTick, onMounted, ref } from 'vue'
+import { h, nextTick, onMounted, ref, watch } from 'vue'
 import type { FunctionalComponent } from 'vue'
 import { useMessage } from 'naive-ui'
 import { declaredSpans, groupMentionStrings, tokenizeSpans } from '../../../sft/spans'
@@ -118,6 +118,12 @@ onMounted(() => {
   segs.value = computeSegs()
   nextTick(autoGrow)
 })
+
+// 外部变更重算分段:草稿被整体替换(重置/切换视频/保存重建)或声明通道开合
+// (勾选/取消检出)。输入期间草稿引用与 hasDecl 均不变,不会触发(spike 光标
+// 安全结论不受影响);此前缺失此监听导致重置后文本框显示陈旧内容,继续输入
+// 会把旧文本写回草稿(假复活)。
+watch([() => store.draft, () => props.hasDecl], () => refresh())
 
 defineExpose({ refresh })
 </script>

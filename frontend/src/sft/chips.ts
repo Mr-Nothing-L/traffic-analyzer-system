@@ -61,6 +61,31 @@ export function applyDetectCheckOn(draft: SftDraft, ev: EventDef): void {
   d.mentionSpans[id] = null; // span 缓存作废,重渲染时按新文本重算
 }
 
+// 「检出 → 取消勾选」:撤销 applyDetectCheckOn 的文本插入——文本仍以当前骨架
+// (含句号/换行)开头说明骨架未被人工改过,移除前缀恢复原文;骨架被人工改过
+// (前缀不匹配)则不动文本、返回 false 由 UI 提示用户自行处理。
+// attrs/声明提及保留:chips 仅勾选时显示,重新勾选按已选值重插骨架,不丢工作。
+export function applyDetectCheckOff(draft: SftDraft, ev: EventDef): boolean {
+  const d = draft;
+  const id = ev.event_id;
+  const sk = d.skeletons[id] || '';
+  if (!sk) return true;
+  const text = String(d.texts[id] || '');
+  if (text === sk + '。') {
+    d.texts[id] = '';
+  } else if (text.indexOf(sk + '。\n') === 0) {
+    d.texts[id] = text.slice(sk.length + 2);
+  } else if (text.indexOf(sk + '。') === 0) {
+    d.texts[id] = text.slice(sk.length + 1);
+  } else if (text.indexOf(sk) === 0) {
+    d.texts[id] = text.slice(sk.length); // 结尾句号被删等边缘:只去骨架本体
+  } else {
+    return false; // 骨架被人工改过:不删,由 UI 提示
+  }
+  d.mentionSpans[id] = null;
+  return true;
+}
+
 // chip 变更 → 文本同步(优先级从高到低):
 //   1) 声明通道(attr_mentions)且该组有声明提及、单选换值 → 位置锚定替换:
 //      仅声明提及所在的 span 替换为新值(无别名扩展;背景句同形词不动),

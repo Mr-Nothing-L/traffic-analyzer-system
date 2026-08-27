@@ -2,7 +2,8 @@
 /** 单事件 SFT 编辑卡:事件头(名称/未激活标/检出勾选)+ chips + 富文本框。
  * chip 变更编排:改草稿(纯函数)→ 重渲染文本框(pulse 该组);hover 双向联动在此桥接。 */
 import { computed, ref } from 'vue'
-import { applyChipChange, applyDetectCheckOn } from '../../../sft/chips'
+import { useMessage } from 'naive-ui'
+import { applyChipChange, applyDetectCheckOff, applyDetectCheckOn } from '../../../sft/chips'
 import { evOptions, extractGtFromFilename } from '../../../sft/model'
 import type { AttrGroup, EventDef } from '../../../sft/types'
 import { useSftStore } from '../../../stores/sft'
@@ -14,6 +15,7 @@ import UiIcon from './../../UiIcon.vue'
 const props = defineProps<{ ev: EventDef }>()
 const store = useSftStore()
 const ws = useWorkspaceStore()
+const message = useMessage()
 
 // 标注(GT):从视频文件名解析的事件 ID 集,该事件在集中 → ✓
 const gtSet = computed(() => {
@@ -40,10 +42,11 @@ const root = ref<HTMLElement | null>(null)
 const textRef = ref<InstanceType<typeof TokenText> | null>(null)
 
 const opts = computed(() => (props.ev.is_active ? evOptions(props.ev) : []))
-// chips 仅在该事件有声明提及(attr_mentions)时渲染;无声明退化为纯文本卡(同 legacy)
+// chips 仅在该事件有声明提及(attr_mentions)且处于检出勾选时渲染;取消勾选保留
+// 数据(mentions/attrs)但隐藏 chips,重新勾选恢复(同 legacy 纯文本卡退化逻辑)
 const hasDecl = computed(() => {
   const m = store.draft?.mentions
-  return !!(m && m[props.ev.event_id])
+  return !!(m && m[props.ev.event_id] && store.draft?.checks[props.ev.event_id])
 })
 const attrs = computed(() => store.draft?.attrs[props.ev.event_id])
 
@@ -76,8 +79,14 @@ function onCheck(e: Event) {
   if (checked) {
     // 未检出 → 手动勾选:段首插入骨干句(默认槽值,原文保留),chips 即刻可用
     applyDetectCheckOn(d, props.ev)
-    textRef.value?.refresh()
+  } else {
+    // 取消勾选:骨架未被人工改过则自动移除恢复原文;改过则保留并提示
+    const reverted = applyDetectCheckOff(d, props.ev)
+    if (!reverted) {
+      message.warning('骨干句已被人工修改,未自动移除;不需要请自行删除')
+    }
   }
+  textRef.value?.refresh()
 }
 </script>
 
