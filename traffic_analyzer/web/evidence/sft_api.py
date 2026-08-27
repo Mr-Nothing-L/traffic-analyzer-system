@@ -59,7 +59,9 @@ def put_sft(stem: str, body: SftSample, request: Request) -> Dict[str, Any]:
         # exclude_unset 区分「字段未提交」与「显式 null」:
         # - 未提交:保留磁盘现状(旧格式样本不新增字段;已有结构化标注不丢失);
         # - 显式 null:删除该键(显式清除语义,经正常写路径落盘)。
-        new_payload = body.model_dump(exclude_unset=True, exclude={"base_sig"})
+        new_payload = body.model_dump(
+            exclude_unset=True, exclude={"base_sig", "last_edited_by", "last_edited_at"}
+        )
         for field in ("event_attributes", "attr_mentions"):
             if field not in new_payload:
                 if isinstance(disk, dict) and field in disk:
