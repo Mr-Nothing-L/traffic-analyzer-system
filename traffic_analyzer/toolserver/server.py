@@ -1,17 +1,19 @@
 """FastAPI application factory and /tools/* endpoints.
 
 [文件说明]
-作用:四个 POST JSON 端点:/tools/video_meta、/tools/extract_frames、
+作用:五个 POST JSON 端点:/tools/video_meta、/tools/extract_frames、
     /tools/draw_boxes、/tools/prepare_video(视频大小守门:超过 max_mb
-    用 ffmpeg 阶梯降帧转码,产物放 <允许根>/.agent/transcoded/)。
-    所有 video_path 解析后必须落在允许根(allowed_roots)
-    之内,越界返回 403;错误统一为 {"error": {"code", "message"}}。
+    用 ffmpeg 阶梯降帧转码,产物放 <允许根>/.agent/transcoded/)与
+    /tools/track_suspects(疑似目标定向跟踪,VLM 滑窗编排,产物放
+    <允许根>/.agent/tracks/<stem>/<ts>/,结果带磁盘缓存)。
+    所有 video_path 解析后必须落在允许根(allowed_roots)之内,
+    越界返回 403;错误统一为 {"error": {"code", "message"}}。
     允许根:启动 --workspace 为初始根,运行期可经 POST /config/roots
     热注册新工作区(web 层切换工作区时调用,免重启)。
 上游:toolserver/__init__.py(create_app 导出);__main__.py(uvicorn 启动)。
 下游:web/frames.read_video_meta/read_frame_jpeg(CV 复用);
     utils/image_drawing(load_image/_draw_text_with_background/_load_scaled_font);
-    utils/bbox_geometry._norm_to_px。
+    utils/bbox_geometry._norm_to_px;tracking/(track_suspects 编排与缓存)。
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ import logging
 import os
 import shutil
 import subprocess
+import time
 import zlib
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -31,9 +34,12 @@ import numpy as np
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from traffic_analyzer.toolserver.tracking import SuspectAnchor
+from traffic_analyzer.toolserver.tracking import cache as tracking_cache
+from traffic_analyzer.toolserver.tracking import windows as tracking_windows
 from traffic_analyzer.utils.bbox_geometry import _norm_to_px
 from traffic_analyzer.utils.image_drawing import (
     _draw_text_with_background,
@@ -114,6 +120,35 @@ class PrepareVideoRequest(BaseModel):
     max_mb: float = Field(
         default=_DEFAULT_PREPARE_MAX_MB, gt=0, le=_HARD_PREPARE_MAX_MB
     )
+
+
+class SuspectBox(BaseModel):
+    """track_suspects 的单个疑似目标锚点(0-1 归一化框)。"""
+
+    x1: float = Field(ge=0, le=1)
+    y1: float = Field(ge=0, le=1)
+    x2: float = Field(ge=0, le=1)
+    y2: float = Field(ge=0, le=1)
+    timestamp: float = Field(ge=0)
+    description: str = ""
+
+    @model_validator(mode="after")
+    def _check_box(self) -> "SuspectBox":
+        if self.x2 <= self.x1 or self.y2 <= self.y1:
+            raise ValueError("suspect box must satisfy x2 > x1 and y2 > y1")
+        return self
+
+
+class TrackSuspectsRequest(BaseModel):
+    video_path: str
+    suspects: List[SuspectBox] = Field(min_length=1, max_length=5)
+    time_range: Optional[List[float]] = None
+
+    @model_validator(mode="after")
+    def _check_time_range(self) -> "TrackSuspectsRequest":
+        if self.time_range is not None and len(self.time_range) != 2:
+            raise ValueError("time_range must be [start_s, end_s]")
+        return self
 
 
 def _error(status_code: int, code: str, message: str) -> HTTPException:
@@ -439,4 +474,114 @@ def create_app(workspace: Path | str) -> FastAPI:
             f"All fps ladder candidates stayed >= {body.max_mb} MB: {video}",
         )
 
+    # --- /tools/track_suspects:疑似目标定向跟踪 --------------------------
+
+    def _get_tracking_engine(request: Request) -> Any:
+        """懒构建并缓存 VLMInferenceEngine(配置来自 ConfigManager 默认目录)。
+
+        单独成函数以便测试注入 mock:monkeypatch server._build_engine。
+        """
+        if getattr(request.app.state, "tracking_engine", None) is None:
+            request.app.state.tracking_engine = _build_default_engine()
+        return request.app.state.tracking_engine
+
+    @app.post("/tools/track_suspects")
+    def track_suspects(body: TrackSuspectsRequest, request: Request) -> Dict[str, Any]:
+        video = _resolve(request, body.video_path)
+        meta = _meta_or_error(video)
+        del meta
+        anchors = [
+            SuspectAnchor(
+                box=[s.x1, s.y1, s.x2, s.y2],
+                timestamp=s.timestamp,
+                description=s.description,
+            )
+            for s in body.suspects
+        ]
+        time_range = (
+            [float(body.time_range[0]), float(body.time_range[1])]
+            if body.time_range
+            else None
+        )
+
+        # 磁盘结果缓存:键 = (视频解析路径, 规范化锚点集合),描述不进键
+        root = next(r for r in request.app.state.allowed_roots if video.is_relative_to(r))
+        cache_dir = root / ".agent" / "tracks" / "_cache"
+        key = tracking_cache.cache_key(video.resolve(), anchors)
+        cached = tracking_cache.load_cached(cache_dir, key)
+        if cached is not None:
+            return dict(cached)
+
+        # debug bundle 目录:<允许根>/.agent/tracks/<stem>/<ts>/
+        out_dir = root / ".agent" / "tracks" / video.stem / _timestamp_tag()
+        try:
+            engine = _get_tracking_engine(request)
+            result = tracking_windows.run_tracking(
+                engine,
+                video,
+                anchors,
+                time_range=time_range,
+                out_dir=out_dir,
+                deadline=time.monotonic() + _TRACK_TIMEOUT_S,
+            )
+        except tracking_windows.TrackingFailure as exc:
+            result = {"failed": True, "failure_reason": str(exc)}
+
+        clips = result.pop("clip", None)
+        csvs = result.pop("csv", None)
+        artifacts_dir = result.pop("artifacts_dir", None)
+        rel_dir = _rel_to_root(root, artifacts_dir) if artifacts_dir is not None else None
+        rel_dir_str = str(rel_dir) if rel_dir is not None else None
+        payload = {
+            "tracks": result.get("tracks", []),
+            "annotated_image": result.get("annotated_image"),
+            "artifacts": {
+                "dir": rel_dir_str,
+                "clip": f"{rel_dir}/{clips}" if (rel_dir_str and clips) else None,
+                "csv": f"{rel_dir}/{csvs}" if (rel_dir_str and csvs) else None,
+            },
+            "failed": bool(result.get("failed", False)),
+            "failure_reason": result.get("failure_reason"),
+            "env_flow": result.get("env_flow"),
+            "fps_used": result.get("fps_used"),
+            "events": result.get("events", []),
+        }
+        if not payload["failed"] and payload["tracks"]:
+            tracking_cache.store_cached(cache_dir, key, payload)
+        return payload
+
     return app
+
+
+_TRACK_TIMEOUT_S = 900.0  # track_suspects 同步执行总超时(秒)
+
+
+def _timestamp_tag() -> str:
+    """产物目录时间戳标签:YYYYmmdd_HHMMSS。"""
+    return time.strftime("%Y%m%d_%H%M%S")
+
+
+def _rel_to_root(root: Path, path: Path) -> Optional[Path]:
+    """产物绝对路径转相对允许根的展示路径;转换失败返回原路径。"""
+    try:
+        return path.relative_to(root)
+    except ValueError:
+        return path
+
+
+def _build_default_engine() -> Any:
+    """从 ConfigManager 默认配置目录构建生产用 VLMInferenceEngine。
+
+    构建失败(token 未配置等)抛异常,由端点统一转 failed:true 响应;
+    缓存走引擎自带 .vlm_cache.db 磁盘缓存约定路径。
+    """
+    from traffic_analyzer.core.config_manager import ConfigManager
+    from traffic_analyzer.core.vlm_engine import VLMInferenceEngine
+
+    default_config_dir = Path(__file__).resolve().parents[1] / "config"
+    config_manager = ConfigManager(str(default_config_dir))
+    system_config = config_manager.load_all()
+    disk_cache_path = Path(os.environ.get("TRAFFIC_ANALYZER_HOME", ".")) / ".vlm_cache.db"
+    for provider in system_config.llm_providers:
+        provider.disk_cache_path = str(disk_cache_path)
+    return VLMInferenceEngine(system_config.llm_providers)
