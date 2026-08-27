@@ -143,10 +143,16 @@ event_options:
         options: [塑料袋/纸张, 水瓶/容器, 木板/构件, 泥土/散落物, 三角警示牌, 其他]
 
   # --- event_id: 11 | 实线变道 ---
-  # 属性组与 sft_rewrite.yaml 必要描述元素一致:位置(来向/去向)+变道车辆类型;
+  # 属性组:位置(来向/去向)+车道类型+变道车辆类型;
   # v4.5 边界条件「只针对机动车」,车辆类型复用机动车封闭枚举。
+  # lane_type 为 2026-08 人工标注需求新增(骨干句式含车道槽,如「去向一侧应急车道
+  # 出现小型车实线变道行为」);旧样本无该键,骨架从句自动省略、必填缺失仅软提醒。
   - event_id: 11
     groups:
+      - key: lane_type
+        label: 车道类型
+        required: true
+        options: [行车道, 应急车道, 导流区, 路肩]
       - key: direction
         label: 方向
         required: true

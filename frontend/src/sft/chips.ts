@@ -2,7 +2,7 @@
 // 逐语义移植自 legacy sft.js applyChipChange 的非 DOM 部分;视图层(chip 选中态、
 // token 重渲染、dirty 徽标)由 Vue 壳负责,这里只改草稿数据。
 import type { AttrGroup, EventDef, MentionValue, SftDraft } from './types';
-import { skeleton } from './model';
+import { evOptions, skeleton, SFT_SKELETON_DEFAULTS } from './model';
 import {
   declaredSpans, groupMentionStrings, mapMentionToOption,
   replaceDeclaredSpans, swapSkeletonPrefix,
@@ -10,6 +10,55 @@ import {
 
 function isNest(v: MentionValue | undefined | null): v is Record<string, string[]> {
   return !!v && !Array.isArray(v) && typeof v === 'object';
+}
+
+// 「未检出 → 手动勾选检出」:按 SFT_SKELETON_DEFAULTS 写入骨架默认槽值
+// (模型/人工已有的值不覆盖),并把骨架句插到文本段首(原文换行保留在下方)。
+// 槽位登记为声明提及:chips 即刻渲染,后续换值走 applyChipChange 的既有联动
+// (声明 span 锚定替换 + 骨架前缀就地换新,骨架只前置一次不堆叠)。
+// 样本原本无 attr_mentions(mentions 整体 null)时为该事件单独开启声明通道。
+export function applyDetectCheckOn(draft: SftDraft, ev: EventDef): void {
+  const d = draft;
+  const id = ev.event_id;
+  const groups = evOptions(ev);
+  if (!groups.length) return;
+  const attrs = d.attrs[id] || (d.attrs[id] = {});
+  const defaults = SFT_SKELETON_DEFAULTS[id] || {};
+  groups.forEach(g => {
+    const cur = attrs[g.key];
+    const empty = Array.isArray(cur) ? !cur.length : !cur;
+    if (!empty) return;
+    const def = defaults[g.key];
+    if (g.multi) {
+      const arr = Array.isArray(def) ? def.filter(o => g.options.indexOf(o) >= 0) : [];
+      attrs[g.key] = arr.length ? arr : [g.options[0]];
+    } else {
+      attrs[g.key] = typeof def === 'string' && g.options.indexOf(def) >= 0 ? def : g.options[0];
+    }
+  });
+  const mentions = d.mentions || (d.mentions = {});
+  const decl = mentions[id] || (mentions[id] = {});
+  groups.forEach(g => {
+    const v = attrs[g.key];
+    if (decl[g.key]) return; // 已有声明提及:保留(如取消检出后再次勾选)
+    if (g.multi) {
+      const arr = Array.isArray(v) ? v : [];
+      if (arr.length) {
+        const nest: Record<string, string[]> = {};
+        arr.forEach(o => { nest[o] = [o]; });
+        decl[g.key] = nest;
+      }
+    } else if (v) {
+      decl[g.key] = [v as string];
+    }
+  });
+  const sk = skeleton(ev, attrs);
+  d.skeletons[id] = sk;
+  const text = String(d.texts[id] || '');
+  if (sk && text.indexOf(sk) !== 0) {
+    d.texts[id] = sk + '。' + (text ? '\n' + text : '');
+  }
+  d.mentionSpans[id] = null; // span 缓存作废,重渲染时按新文本重算
 }
 
 // chip 变更 → 文本同步(优先级从高到低):

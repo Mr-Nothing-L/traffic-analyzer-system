@@ -58,7 +58,12 @@ describe('skeleton:按模板拼句,空值从句整体省略', () => {
   });
 
   it('无模板的事件返回空串', () => {
-    expect(skeleton(ev(11), { direction: '来向' })).toBe('');
+    // 9 = 正常占位,无骨架模板;10/11 模板随「手动勾选检出插骨干句」需求补齐
+    expect(skeleton({ event_id: 9, name_zh: '正常', is_active: false }, {})).toBe('');
+    expect(skeleton(ev(11), { direction: '来向', lane_type: '应急车道', vehicle_type: '小型车' }))
+      .toBe('来向一侧应急车道出现小型车实线变道行为');
+    expect(skeleton(ev(10), { direction: '去向', object_type: '塑料袋/纸张' }))
+      .toBe('去向一侧路面有抛洒物(塑料袋/纸张)');
   });
 });
 

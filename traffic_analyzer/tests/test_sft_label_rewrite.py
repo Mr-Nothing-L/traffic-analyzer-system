@@ -1062,7 +1062,7 @@ class TestBuildSampleAttributes:
         )
 
         assert sample["event_attributes"] == {
-            "11": {"direction": None, "vehicle_type": None}
+            "11": {"lane_type": None, "direction": None, "vehicle_type": None}
         }
         assert sample["attr_mentions"] == {}
         assert "实线变道：，主体目标在原始帧中清晰可辨。" in sample["description"]

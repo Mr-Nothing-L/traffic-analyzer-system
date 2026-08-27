@@ -16,6 +16,23 @@ export const SFT_SKELETON_TEMPLATES: Record<number, SkeletonPart[]> = {
   6: [{ slot: 'direction', post: '一侧' }, '出现', { slot: 'scope' }, '拥堵'],
   7: [{ slot: 'direction', post: '一侧' }, '道路施工', { slot: 'work_elements', pre: ',现场有' }],
   8: [{ slot: 'direction', post: '一侧' }, { slot: 'lane_type', post: '内' }, { slot: 'vehicle_type', pre: '有', post: '逆行' }],
+  10: [{ slot: 'direction', post: '一侧' }, '路面有抛洒物(', { slot: 'object_type' }, ')'],
+  11: [{ slot: 'direction', post: '一侧' }, { slot: 'lane_type' }, '出现', { slot: 'vehicle_type' }, '实线变道行为'],
+};
+
+// 手动勾选检出时写入的骨架默认槽值(均为各组封闭枚举内的合法值;
+// 未列出的事件/组回退该组首个选项);方向一律默认「去向」
+export const SFT_SKELETON_DEFAULTS: Record<number, EventAttrs> = {
+  1: { direction: '去向', lane_type: '应急车道', vehicle_type: '小型车' },
+  2: { direction: '去向', lane_type: '应急车道', vehicle_type: '小型车' },
+  3: { direction: '去向', lane_type: '行车道', vehicle_type: '小型车' },
+  4: { direction: '去向', person_type: '行人' },
+  5: { direction: '去向', non_motor_type: '摩托车' },
+  6: { direction: '去向', scope: '多车道' },
+  7: { direction: '去向', work_elements: ['施工车辆'] },
+  8: { direction: '去向', lane_type: '行车道', vehicle_type: '小型车' },
+  10: { direction: '去向', object_type: '塑料袋/纸张' },
+  11: { direction: '去向', lane_type: '应急车道', vehicle_type: '小型车' },
 };
 
 // 事件的结构化属性组(event_options.yaml,经 /api/config/events 下发);旧版后端无该字段时回退空

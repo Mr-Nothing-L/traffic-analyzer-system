@@ -166,11 +166,13 @@ class TestConfigEvents:
         keys = [g["key"] for g in events[1]["options"]]
         assert keys == ["lane_type", "direction", "vehicle_type"]
         assert "应急车道" in events[1]["options"][0]["options"]
-        # 实线变道(11):方向 + 车辆类型两组必填(v4.5「只针对机动车」)
+        # 实线变道(11):车道类型 + 方向 + 车辆类型三组必填(lane_type 为 2026-08
+        # 人工标注骨干句式需求新增;v4.5「只针对机动车」)
         keys_11 = [g["key"] for g in events[11]["options"]]
-        assert keys_11 == ["direction", "vehicle_type"]
-        assert events[11]["options"][0]["options"] == ["来向", "去向"]
-        assert events[11]["options"][1]["options"] == ["小型车", "大客车", "货车", "工程车"]
+        assert keys_11 == ["lane_type", "direction", "vehicle_type"]
+        assert events[11]["options"][0]["options"] == ["行车道", "应急车道", "导流区", "路肩"]
+        assert events[11]["options"][1]["options"] == ["来向", "去向"]
+        assert events[11]["options"][2]["options"] == ["小型车", "大客车", "货车", "工程车"]
 
 
 class TestSftPut:

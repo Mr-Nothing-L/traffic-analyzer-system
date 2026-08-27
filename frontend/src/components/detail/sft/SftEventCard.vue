@@ -2,7 +2,7 @@
 /** 单事件 SFT 编辑卡:事件头(名称/未激活标/检出勾选)+ chips + 富文本框。
  * chip 变更编排:改草稿(纯函数)→ 重渲染文本框(pulse 该组);hover 双向联动在此桥接。 */
 import { computed, ref } from 'vue'
-import { applyChipChange } from '../../../sft/chips'
+import { applyChipChange, applyDetectCheckOn } from '../../../sft/chips'
 import { evOptions, extractGtFromFilename } from '../../../sft/model'
 import type { AttrGroup, EventDef } from '../../../sft/types'
 import { useSftStore } from '../../../stores/sft'
@@ -69,8 +69,15 @@ function onTokHover(group: string | null) {
 }
 
 function onCheck(e: Event) {
-  if (!store.draft) return
-  store.draft.checks[props.ev.event_id] = (e.target as HTMLInputElement).checked
+  const d = store.draft
+  if (!d) return
+  const checked = (e.target as HTMLInputElement).checked
+  d.checks[props.ev.event_id] = checked
+  if (checked) {
+    // 未检出 → 手动勾选:段首插入骨干句(默认槽值,原文保留),chips 即刻可用
+    applyDetectCheckOn(d, props.ev)
+    textRef.value?.refresh()
+  }
 }
 </script>
 
