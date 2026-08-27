@@ -209,6 +209,238 @@
         "无网络访问;不得修改沙盒外的任何文件或全局环境",
         "受 timeout_sec 限制,超时会被终止"
       ]
+    },
+    {
+      "name": "run_command",
+      "description": "在沙盒工作区内执行 shell 命令(前台立即返回,后台返回 job_id 供后续查询),返回退出码、标准输出与标准错误。",
+      "when_to_use": "统计数量、查找文件、查看目录、文本处理等简单 shell 操作优先用它,不要为此先写脚本文件再 run_script。需要长时间运行的任务可设 background=true,再用 job_list/job_output 跟踪。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "command": { "type": "string", "description": "要执行的 shell 命令( bash -c 执行)" },
+          "timeout_sec": { "type": "integer", "description": "前台命令超时秒数,默认 30,最大 300", "default": 30, "minimum": 1, "maximum": 300 },
+          "background": { "type": "boolean", "description": "是否后台运行;为 true 时立即返回 job_id,不等待命令结束", "default": false }
+        },
+        "required": ["command"],
+        "additionalProperties": false
+      },
+      "returns": "前台:{exit_code, stdout, stderr};后台:{job_id, command, status: 'running'};失败时返回 {error}",
+      "limits": [
+        "命令在 workspace 内以 bash -c 执行,环境仅保留 PATH",
+        "前台输出上限 16MB,后台输出单缓冲上限 64KB(旧数据丢弃)",
+        "后台任务只记录于本会话的内存注册表,会话结束即丢失",
+        "禁止修改沙盒外的文件或访问网络"
+      ]
+    },
+    {
+      "name": "job_list",
+      "description": "列出当前会话由 run_command(background=true)派生的所有后台任务及其状态。",
+      "when_to_use": "需要查看有哪些后台任务在运行、哪些已结束时调用。",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "returns": "[{job_id, command, status, exit_code, started_at}]",
+      "limits": [
+        "只返回本会话注册表中的任务",
+        "不接受任何参数"
+      ]
+    },
+    {
+      "name": "job_output",
+      "description": "按 job_id 读取后台任务的新输出(stdout/stderr)与完成状态,支持增量拉取。",
+      "when_to_use": "查询某个后台任务的输出进度;返回的 stdout_next_offset/stderr_next_offset 可供下次增量拉取。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "job_id": { "type": "string", "description": "后台任务 id(由 run_command 后台模式返回)" },
+          "stdout_offset": { "type": "integer", "description": "stdout 已读取偏移,默认 0", "default": 0, "minimum": 0 },
+          "stderr_offset": { "type": "integer", "description": "stderr 已读取偏移,默认 0", "default": 0, "minimum": 0 }
+        },
+        "required": ["job_id"],
+        "additionalProperties": false
+      },
+      "returns": "{stdout, stderr, stdout_truncated, stderr_truncated, stdout_next_offset, stderr_next_offset, finished, exit_code};任务不存在返回错误",
+      "limits": [
+        "只读取本会话注册表中的任务",
+        "超出缓冲容量的旧输出已被丢弃,offset 过小时 stdout_truncated 会标记"
+      ]
+    },
+    {
+      "name": "job_kill",
+      "description": "按 job_id 向后台任务发送信号(默认 SIGTERM)终止其执行。",
+      "when_to_use": "需要停止仍在运行的后台任务时调用。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "job_id": { "type": "string", "description": "后台任务 id" },
+          "signal": { "type": "string", "description": "发送的信号名,默认 SIGTERM", "default": "SIGTERM" }
+        },
+        "required": ["job_id"],
+        "additionalProperties": false
+      },
+      "returns": "{killed: true, job_id, signal} 或错误信息",
+      "limits": [
+        "只能终止本会话注册表中状态为 running 的任务",
+        "任务不存在或已结束时返回错误"
+      ]
+    },
+    {
+      "name": "edit_file",
+      "description": "对沙盒工作区内已有文本文件做精确字符串替换(支持 replace_all 全替换)。",
+      "when_to_use": "修改已有文件优先用 edit_file;只有整文件重写或新建文件时才用 write_file。编辑前先用 read_file 确认目标内容,确保 old_string 唯一或显式使用 replace_all。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string", "description": "文件路径(相对沙盒工作区,或其内的绝对路径)" },
+          "old_string": { "type": "string", "description": "要被替换的原文本" },
+          "new_string": { "type": "string", "description": "用于替换的新文本" },
+          "replace_all": { "type": "boolean", "description": "old_string 出现多次时是否全部替换;未提供且出现多次则报错", "default": false }
+        },
+        "required": ["path", "old_string", "new_string"],
+        "additionalProperties": false
+      },
+      "returns": "{path, replacements, changed_lines, context} 或 {error}",
+      "limits": [
+        "仅限沙盒工作区内路径,越界访问会被硬性拒绝",
+        "old_string 必须能在文件中匹配到",
+        "old_string 出现多次且 replace_all=false 时拒绝替换",
+        "二进制/超大文件可能失败"
+      ]
+    },
+    {
+      "name": "glob_files",
+      "description": "按 glob 模式在沙盒工作区内查找文件,返回匹配路径列表(按修改时间倒序)。",
+      "when_to_use": "快速定位文件,如「找出所有 .mp4」「列出 output 目录下的报告」。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "pattern": { "type": "string", "description": "glob 模式,如 '*.mp4'、'**/*.json'、'{a,b}.ts'" },
+          "path": { "type": "string", "description": "搜索根目录,默认当前工作区根目录", "default": "." }
+        },
+        "required": ["pattern"],
+        "additionalProperties": false
+      },
+      "returns": "{files: [...], truncated: boolean};失败时返回 {error}",
+      "limits": [
+        "搜索范围限制在沙盒工作区内",
+        "最多返回 200 条结果,超出时 truncated=true",
+        "支持 **、*、? 及 {} 多选一语法"
+      ]
+    },
+    {
+      "name": "grep_files",
+      "description": "按正则表达式在沙盒工作区内搜索文件内容,返回匹配行号与上下文。",
+      "when_to_use": "在代码、日志、笔记中搜索特定文本内容时使用,可配合 include 过滤文件类型。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "pattern": { "type": "string", "description": "搜索正则表达式( JavaScript RegExp 语法)" },
+          "path": { "type": "string", "description": "搜索根目录,默认当前工作区根目录", "default": "." },
+          "include": { "type": "string", "description": "glob 过滤,仅搜索匹配文件名的文件,如 '*.ts'", "default": "*" },
+          "context_lines": { "type": "integer", "description": "匹配行上下文行数,默认 0,最大 5", "default": 0, "minimum": 0, "maximum": 5 }
+        },
+        "required": ["pattern"],
+        "additionalProperties": false
+      },
+      "returns": "{results: [{path, line, text, match}], truncated: boolean};失败时返回 {error}",
+      "limits": [
+        "搜索范围限制在沙盒工作区内",
+        "最多返回 200 条结果(含上下文行),超出时 truncated=true",
+        "单文件超过 2MB 或二进制文件会被跳过",
+        "pattern 须为合法正则表达式"
+      ]
+    },
+    {
+      "name": "todo_write",
+      "description": "写入(整表替换)当前会话的任务清单,供模型组织多步工作。",
+      "when_to_use": "任务复杂、步骤较多时,用它把计划显式化并跟踪进度;每次调用替换整个清单,不增量追加。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "todos": {
+            "type": "array",
+            "description": "任务清单,整表替换式写入",
+            "items": {
+              "type": "object",
+              "properties": {
+                "content": { "type": "string", "description": "任务内容" },
+                "status": {
+                  "type": "string",
+                  "enum": ["pending", "in_progress", "done"],
+                  "description": "任务状态"
+                }
+              },
+              "required": ["content", "status"],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": ["todos"],
+        "additionalProperties": false
+      },
+      "returns": "当前任务清单的紧凑文本渲染",
+      "limits": [
+        "状态仅存内存,不落盘;会话结束即丢失",
+        "每次调用为整表替换"
+      ]
+    },
+    {
+      "name": "subagent_list",
+      "description": "列出当前会话派生的所有子代理运行记录及其状态。",
+      "when_to_use": "派生多个子代理后,用它查看各子代理是否完成。",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "returns": "子代理运行记录列表文本",
+      "limits": [
+        "只返回本会话的子代理运行记录",
+        "不接受任何参数"
+      ]
+    },
+    {
+      "name": "subagent_report",
+      "description": "按 id 查询当前会话某个子代理运行的详细结论、步数与停止原因。",
+      "when_to_use": "需要读取某个子代理最终结论时调用;id 从 subagent_list 获取。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "description": "子代理运行 id" }
+        },
+        "required": ["id"],
+        "additionalProperties": false
+      },
+      "returns": "子代理运行的 id/task/status/conclusion/steps/reason/error 文本;不存在返回错误",
+      "limits": [
+        "只能查询本会话的子代理运行记录",
+        "id 必须从 subagent_list 返回结果中获取"
+      ]
+    },
+    {
+      "name": "web_fetch",
+      "description": "只读抓取公开 http/https 网页,返回提取后的文本内容。",
+      "when_to_use": "需要参考外部网页信息(如文档、规范、公开页面)时调用。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "url": { "type": "string", "description": "要抓取的完整 http/https URL" },
+          "max_chars": { "type": "integer", "description": "返回内容最大字符数,默认 8000,最大 20000", "default": 8000, "minimum": 1, "maximum": 20000 }
+        },
+        "required": ["url"],
+        "additionalProperties": false
+      },
+      "returns": "{url, status, content_type, content, truncated};失败时返回 {error}",
+      "limits": [
+        "仅支持 http/https 公开 URL",
+        "响应体超过 5MB 拒绝读取",
+        "请求超时 30s",
+        "HTML 会简单提取正文文本,文本/plain/json 原样返回"
+      ]
     }
   ]
 }

@@ -16,6 +16,7 @@
  *   → 从 stopResult.payload 提取编码与结论;max_steps / error / cancelled →
  *   说明原因。note 统一为 JSON {reason, steps} 供调试。
  */
+import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
@@ -27,7 +28,7 @@ import {
   type Message,
   type ChatProvider,
 } from '../../llm/kosong';
-import { runAgentLoop, type AgentLoopResult } from '../../loop/agentLoop';
+import { runAgentLoop, type AgentLoopDoneReason, type AgentLoopResult } from '../../loop/agentLoop';
 import type { PermissionGate } from '../../permissions/gate';
 import type { WorkspaceConfig } from '../../sandbox/path-access';
 import {
@@ -84,6 +85,93 @@ function releaseSubagentSlot(): void {
 }
 
 // ---------------------------------------------------------------------------
+// 子代理运行注册表(按 session 注入,禁止模块级全局态)
+// ---------------------------------------------------------------------------
+
+export type SubagentStatus = 'running' | 'done' | 'failed' | 'timeout';
+
+export interface SubagentRecord {
+  readonly id: string;
+  /** 任务摘要(取任务文本前 120 字)。 */
+  readonly task: string;
+  readonly status: SubagentStatus;
+  /** 结论摘要:status 为 done 时,为 describeSubagentResult 的产物。 */
+  readonly conclusion?: string;
+  /** 子 loop 实际执行的 generate 步数。 */
+  readonly steps?: number;
+  /** 停止原因:completed / stop_turn / max_steps / error / cancelled / timeout。 */
+  readonly reason?: AgentLoopDoneReason | 'timeout';
+  /** status 为 failed 时的错误信息。 */
+  readonly error?: string;
+}
+
+export interface SubagentRunRegistry {
+  /** 登记一个新的子代理运行;状态设为 running。 */
+  register(run: { readonly id: string; readonly task: string }): void;
+  /** 子代理正常结束(含 completed / stop_turn / max_steps)。 */
+  complete(id: string, result: AgentLoopResult): void;
+  /** 子代理失败(含 error / cancelled)。 */
+  fail(
+    id: string,
+    params: {
+      readonly error: string;
+      readonly steps?: number;
+      readonly reason?: 'error' | 'cancelled';
+    },
+  ): void;
+  /** 子代理超时。 */
+  timeout(id: string, steps?: number): void;
+  /** 列出本会话所有子代理运行记录。 */
+  list(): readonly SubagentRecord[];
+  /** 按 id 查询单条记录。 */
+  get(id: string): SubagentRecord | undefined;
+}
+
+/** 构造一个按 session 隔离的子代理运行注册表。 */
+export function createSubagentRunRegistry(): SubagentRunRegistry {
+  const records = new Map<string, SubagentRecord>();
+  return {
+    register(run) {
+      records.set(run.id, { id: run.id, task: run.task.slice(0, 120), status: 'running' });
+    },
+    complete(id, result) {
+      const record = records.get(id);
+      if (record === undefined) return;
+      const described = describeSubagentResult(result);
+      records.set(id, {
+        ...record,
+        status: described.isError === true ? 'failed' : 'done',
+        conclusion: described.output,
+        steps: result.steps,
+        reason: result.reason,
+      });
+    },
+    fail(id, params) {
+      const record = records.get(id);
+      if (record === undefined) return;
+      records.set(id, {
+        ...record,
+        status: 'failed',
+        error: params.error,
+        steps: params.steps,
+        reason: params.reason,
+      });
+    },
+    timeout(id, steps) {
+      const record = records.get(id);
+      if (record === undefined) return;
+      records.set(id, { ...record, status: 'timeout', steps, reason: 'timeout' });
+    },
+    list() {
+      return [...records.values()];
+    },
+    get(id) {
+      return records.get(id);
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // 工具组装
 // ---------------------------------------------------------------------------
 
@@ -112,6 +200,8 @@ export interface SpawnSubagentDeps {
   /** 子 loop 压缩上下文窗口;缺省不给子 loop 配压缩。 */
   readonly contextTokens?: number;
   readonly maxSteps?: number;
+  /** 可选子代理运行注册表;提供时 spawn_subagent 执行会登记运行记录。 */
+  readonly registry?: SubagentRunRegistry;
 }
 
 const inputSchema = z.strictObject({
@@ -256,36 +346,39 @@ function describeStopResult(result: AgentLoopResult): string {
   );
 }
 
-function toToolResult(result: AgentLoopResult): ExecutableToolResult {
-  const note = JSON.stringify({ reason: result.reason, steps: result.steps });
+/** 把 AgentLoopResult 渲染成模型可读的结论文本(复用于 tool 输出与注册表)。 */
+export function describeSubagentResult(result: AgentLoopResult): { output: string; isError?: true } {
   switch (result.reason) {
     case 'completed': {
       const conclusion = lastAssistantText(result);
       return {
         output: conclusion === '' ? '子代理已完成,但未产生文本结论。' : conclusion,
-        note,
       };
     }
     case 'stop_turn':
-      return { output: describeStopResult(result), note };
+      return { output: describeStopResult(result) };
     case 'max_steps': {
       const partial = lastAssistantText(result);
       return {
         output:
           `子代理达到步数上限(${result.steps} 步),未能收敛出最终结论。` +
           (partial === '' ? '' : `最后的部分输出:${partial}`),
-        note,
       };
     }
     case 'cancelled':
-      return { output: '子代理执行被取消(父级中断)。', isError: true, note };
+      return { output: '子代理执行被取消(父级中断)。', isError: true };
     case 'error':
       return {
         output: `子代理执行失败:${result.error ?? '未知错误'}`,
         isError: true,
-        note,
       };
   }
+}
+
+function toToolResult(result: AgentLoopResult): ExecutableToolResult {
+  const described = describeSubagentResult(result);
+  const note = JSON.stringify({ reason: result.reason, steps: result.steps });
+  return { ...described, note };
 }
 
 async function runSubagent(
@@ -294,35 +387,49 @@ async function runSubagent(
   videoPath: string | undefined,
   ctx: ExecutableToolContext,
 ): Promise<ExecutableToolResult> {
-  const { provider } = deps.providerFactory();
+  const runId = randomUUID();
+  deps.registry?.register({ id: runId, task });
 
-  // 禁递归:子 registry 复制父级工具,去掉 spawn_subagent。
-  const childRegistry = new ToolRegistry();
-  for (const tool of deps.parentRegistry.list()) {
-    if (tool.name !== SPAWN_SUBAGENT_TOOL_NAME) childRegistry.register(tool);
+  try {
+    const { provider } = deps.providerFactory();
+
+    // 禁递归:子 registry 复制父级工具,去掉 spawn_subagent。
+    const childRegistry = new ToolRegistry();
+    for (const tool of deps.parentRegistry.list()) {
+      if (tool.name !== SPAWN_SUBAGENT_TOOL_NAME) childRegistry.register(tool);
+    }
+
+    const messages = await buildChildMessages(deps, task, videoPath);
+    if (!Array.isArray(messages)) {
+      const errorText = typeof messages.output === 'string' ? messages.output : '子代理预处理失败';
+      deps.registry?.fail(runId, { error: errorText });
+      return messages;
+    }
+
+    const result = await runAgentLoop({
+      provider,
+      systemPrompt: deps.systemPrompt,
+      registry: childRegistry,
+      gate: deps.gate,
+      messages,
+      maxStepsPerTurn: deps.maxSteps ?? SUBAGENT_MAX_STEPS,
+      ...(deps.contextTokens !== undefined
+        ? { compaction: { maxContextTokens: deps.contextTokens } }
+        : {}),
+      signal: ctx.signal,
+      onEvent: async (event) => {
+        // 子 loop 的上下文统计/压缩事件不转发(父级有自己的 context_usage)。
+        if (event.type === 'context_usage' || event.type === 'compaction') return;
+        await ctx.onSubagentEvent?.(event);
+      },
+    });
+    deps.registry?.complete(runId, result);
+    return toToolResult(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    deps.registry?.fail(runId, { error: message });
+    return { output: `子代理执行失败:${message}`, isError: true };
   }
-
-  const messages = await buildChildMessages(deps, task, videoPath);
-  if (!Array.isArray(messages)) return messages;
-
-  const result = await runAgentLoop({
-    provider,
-    systemPrompt: deps.systemPrompt,
-    registry: childRegistry,
-    gate: deps.gate,
-    messages,
-    maxStepsPerTurn: deps.maxSteps ?? SUBAGENT_MAX_STEPS,
-    ...(deps.contextTokens !== undefined
-      ? { compaction: { maxContextTokens: deps.contextTokens } }
-      : {}),
-    signal: ctx.signal,
-    onEvent: async (event) => {
-      // 子 loop 的上下文统计/压缩事件不转发(父级有自己的 context_usage)。
-      if (event.type === 'context_usage' || event.type === 'compaction') return;
-      await ctx.onSubagentEvent?.(event);
-    },
-  });
-  return toToolResult(result);
 }
 
 export function createSpawnSubagentTool(deps: SpawnSubagentDeps): ExecutableTool {

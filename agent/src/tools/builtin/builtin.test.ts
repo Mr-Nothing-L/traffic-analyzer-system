@@ -939,19 +939,28 @@ describe('submit_detection', () => {
 });
 
 describe('registerBuiltinTools', () => {
-  it('registers all eight builtin tools', () => {
+  it('registers all seventeen builtin tools', () => {
     const registry = new ToolRegistry();
     const tools = registerBuiltinTools(registry, { workspaceDir });
-    expect(tools).toHaveLength(8);
+    expect(tools).toHaveLength(17);
     expect(registry.list().map((tool) => tool.name).sort()).toEqual(
       [
         'draw_boxes',
+        'edit_file',
         'extract_frames',
+        'glob_files',
+        'grep_files',
+        'job_kill',
+        'job_list',
+        'job_output',
         'load_video',
         'read_file',
+        'run_command',
         'run_script',
         'submit_detection',
+        'todo_write',
         'video_meta',
+        'web_fetch',
         'write_file',
       ].sort(),
     );
@@ -974,6 +983,11 @@ describe('registerBuiltinTools', () => {
       ),
     ) as { tools: Array<{ name: string; description: string; parameters: Record<string, unknown> }> };
     for (const entry of toolset.tools) {
+      if (entry.name === 'subagent_list' || entry.name === 'subagent_report') {
+        // 这两个工具由 server/app.ts 按 session 注入,registerBuiltinTools 不注册,
+        // 但 toolset.json 仍保留它们的描述/参数契约,保证 app.ts 加载时可用。
+        continue;
+      }
       const tool = registry.resolve(entry.name);
       expect(tool, entry.name).toBeDefined();
       expect(tool?.description).toBe(entry.description);

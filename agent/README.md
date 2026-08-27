@@ -40,11 +40,15 @@ agent/
   协议尚未接入,配置了会抛错。
 - `loop/`:多步「generate → 工具调用 → 回灌消息」主循环;按真实 usage 跟踪
   上下文用量,达到窗口 85% 自动压缩(优先 LLM 摘要,失败回退占位替换)。
-- `tools/`:8 个内置工具——`video_meta` / `extract_frames` / `draw_boxes` /
-  `load_video`(经 HTTP 调 Python 工具服务)、`read_file` / `write_file` /
-  `run_script`(沙盒内)、`submit_detection`(结构化检测输出,即停止信号);
-  description 与 parameters(模型可见 JSON Schema)来自 `config/toolset.json`。
-  另有 `spawn_subagent` 由 server 组装时闭包注入。
+- `tools/`:17 个通用内置工具——视频工具 `video_meta` / `extract_frames` /
+  `draw_boxes` / `load_video`(经 HTTP 调 Python 工具服务);文件与执行
+  `read_file` / `write_file` / `run_script` / `run_command` / `job_list` /
+  `job_output` / `job_kill`(沙盒内);导航 `edit_file` / `glob_files` /
+  `grep_files`;协作 `todo_write` / `web_fetch`;提交 `submit_detection`
+  (结构化检测输出,即停止信号)。description 与 parameters(模型可见 JSON
+  Schema)来自 `config/toolset.json`。另有 `spawn_subagent` /
+  `subagent_list` / `subagent_report` 由 server 组装时闭包注入,共享同一个
+  SubagentRunRegistry。
 - `permissions/`:三档权限模式 `manual` / `auto` / `yolo`;写类工具按策略
   裁决,需审批时经 SSE `approval_request` 事件挂起等待 `/approval` 回执。
 - `sandbox/`:路径安全——文件与脚本工具的所有路径必须 resolve 在 session

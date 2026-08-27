@@ -9,9 +9,20 @@ export const TOOL_LABELS: Record<string, string> = {
   read_file: '读文件',
   write_file: '写文件',
   run_script: '运行脚本',
+  run_command: '运行命令',
+  job_list: '后台任务列表',
+  job_output: '后台任务输出',
+  job_kill: '终止后台任务',
+  edit_file: '编辑文件',
+  glob_files: '文件搜索',
+  grep_files: '文本搜索',
+  todo_write: '任务清单',
+  web_fetch: '网页抓取',
   submit_detection: '提交检测结果',
   load_video: '加载视频',
   spawn_subagent: '派生子代理',
+  subagent_list: '子代理列表',
+  subagent_report: '子代理报告',
 }
 
 /** 工具条目显示名:已知工具「中文名(原名)」,未知工具回退原名。 */

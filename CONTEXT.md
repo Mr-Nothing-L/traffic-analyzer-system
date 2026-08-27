@@ -87,7 +87,7 @@ Agent 运行时的唯一对话形态(系统 prompt 为 `agent/prompts/chat_syste
 _Avoid_: 快速对话, chatbot
 
 **工具 (Tool)**:
-Agent 运行时可调用的最小能力单元,声明 `{name, description, parameters}` 与资源访问(accesses);注册表管理,调度器按访问冲突并行执行同批调用。description 与 parameters(模型可见 JSON Schema)均以 `agent/config/toolset.json` 为单一来源,启动时加载(缺条目 fail-fast);帧数/体积上限的唯一执法者是 toolserver。内置 8 个:video_meta / extract_frames / draw_boxes / load_video / read_file / write_file / run_script / submit_detection,另有 spawn_subagent 由 server 组装时注入。
+Agent 运行时可调用的最小能力单元,声明 `{name, description, parameters}` 与资源访问(accesses);注册表管理,调度器按访问冲突并行执行同批调用。description 与 parameters(模型可见 JSON Schema)均以 `agent/config/toolset.json` 为单一来源,启动时加载(缺条目 fail-fast);帧数/体积上限的唯一执法者是 toolserver。`registerBuiltinTools` 注册 17 个通用工具:视频工具(video_meta / extract_frames / draw_boxes / load_video)、文件与执行(read_file / write_file / run_script / run_command / job_list / job_output / job_kill)、导航(edit_file / glob_files / grep_files)、协作(todo_write / web_fetch)、提交(submit_detection);另有 spawn_subagent / subagent_list / subagent_report 由 server/app.ts 按 session 注入,共享同一个 SubagentRunRegistry。
 _Avoid_: function call, action
 
 **权限模式 (Permission Mode)**:
