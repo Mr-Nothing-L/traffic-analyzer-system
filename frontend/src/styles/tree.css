@@ -235,6 +235,43 @@
   outline-offset: 1px;
 }
 
+/* ---------- 行内「删除报告」键(已完成行;默认淡隐,行悬停显现) ---------- */
+.del-report-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  color: var(--color-text2);
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out);
+}
+
+.video-item:hover .del-report-btn,
+.del-report-btn:focus-visible {
+  opacity: 0.6;
+}
+
+.del-report-btn:hover {
+  opacity: 1;
+  color: var(--color-red);
+  background: var(--color-red-soft);
+}
+
+.del-report-btn:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
 /* ---------- 行尾「送入对话」键(常驻;渲染为行内最后元素,各行右缘对齐) ---------- */
 .send-chat-btn {
   flex: 0 0 auto;

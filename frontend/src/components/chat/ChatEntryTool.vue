@@ -167,6 +167,7 @@ function argsSummary(args: string): string {
   background: none;
   color: var(--color-text2);
   font-size: var(--text-sm);
+  font-family: var(--font-pixel); /* 折叠头(按钮)→ 像素 */
   cursor: pointer;
 }
 
@@ -195,6 +196,7 @@ function argsSummary(args: string): string {
   margin: var(--space-xs) 0;
 }
 
+/* 工具条目头 → 像素(design.md §2 骨架;工具名/参数摘要/状态同行继承) */
 .tool-head {
   display: flex;
   align-items: center;
@@ -205,6 +207,7 @@ function argsSummary(args: string): string {
   background: none;
   color: var(--color-text2);
   font-size: var(--text-sm);
+  font-family: var(--font-pixel);
   cursor: pointer;
   text-align: left;
 }
@@ -294,12 +297,14 @@ function argsSummary(args: string): string {
   word-break: break-word;
 }
 
+/* 子工具行 = 工具条目头同类 → 像素 */
 .sub-tool {
   margin: 2px 0;
   display: flex;
   align-items: baseline;
   gap: var(--space-xs);
   min-width: 0;
+  font-family: var(--font-pixel);
 }
 
 /* load_video:视频 part 不做播放器,仅静态提示行 */

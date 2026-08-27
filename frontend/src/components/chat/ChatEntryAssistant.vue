@@ -150,6 +150,7 @@ const isThinkLive = computed(() => props.streaming && !entry.value.text)
   background: none;
   color: var(--color-text2);
   font-size: var(--text-sm);
+  font-family: var(--font-pixel); /* 折叠头(按钮)→ 像素 */
   cursor: pointer;
 }
 
@@ -199,6 +200,7 @@ const isThinkLive = computed(() => props.streaming && !entry.value.text)
 .msg-time {
   font-size: var(--text-xs);
   color: var(--color-text2);
+  font-family: var(--font-mono); /* 时间戳 → 等宽 */
 }
 
 .msg-actions {

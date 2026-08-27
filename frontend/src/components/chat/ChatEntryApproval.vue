@@ -89,6 +89,12 @@ const DECISION_LABEL: Record<string, string> = {
   font-size: var(--text-sm);
   font-weight: 600;
   color: var(--color-gold);
+  font-family: var(--font-pixel); /* 卡片头 → 像素 */
+}
+
+/* 原始工具标识符 → 等宽(代码) */
+.tool-name {
+  font-family: var(--font-mono);
 }
 
 .approval-rule {
@@ -124,6 +130,7 @@ const DECISION_LABEL: Record<string, string> = {
   font-size: var(--text-sm);
   font-weight: 600;
   color: var(--color-text2);
+  font-family: var(--font-pixel); /* 状态行(结果小标)→ 像素 */
 }
 
 .approval-preview-wrap {
@@ -141,6 +148,7 @@ const DECISION_LABEL: Record<string, string> = {
   color: var(--color-gold);
   font-size: var(--text-xs);
   font-weight: 600;
+  font-family: var(--font-pixel); /* 按钮 → 像素 */
   cursor: pointer;
 }
 

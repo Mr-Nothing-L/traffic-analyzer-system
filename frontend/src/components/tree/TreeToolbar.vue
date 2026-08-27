@@ -1,6 +1,7 @@
 <script setup lang="ts">
 /** 侧栏工具条:标题 + 全选 + 全选待推理 + 过滤框 + 排序下拉 + 批量关键帧
- * (迁移自 legacy index.html side-head/side-filter;批量关键帧为 v4.6 新增)。 */
+ * + 批量删除报告(迁移自 legacy index.html side-head/side-filter;
+ * 批量关键帧为 v4.6 新增,删除报告同批次新增)。 */
 import { computed, h, ref } from 'vue'
 import { NButton, NCheckbox, NInput, NSelect, useDialog, useMessage } from 'naive-ui'
 import type { SortKey } from '../../stores/workspace'
@@ -17,6 +18,9 @@ const dialog = useDialog()
 /** 批量关键帧状态(轮询进行中按钮转圈防重复提交)。 */
 const batchRunning = ref(false)
 const kfOverwrite = ref(false)
+
+/** 批量删除报告进行中(防重复提交)。 */
+const deleteRunning = ref(false)
 
 /** 「待推理」勾选态:选中集恰好等于待推理集合时才点亮(精确匹配,
  * 与「全选」解耦——点全选不会连带点亮它);不做半选态。 */
@@ -109,6 +113,43 @@ async function pollBatch(id: string) {
     return
   }
 }
+
+/* ---- 批量删除报告:仅对已选中且有报告的条目生效,一次确认,失败逐项提示 ---- */
+
+/** 勾选中「有报告」的 rel(视频列表缺失该条目时不视为有报告,不参与删除)。 */
+const checkedWithResults = computed(() =>
+  [...ws.checked].filter((rel) => ws.videoByRel.get(rel)?.has_results),
+)
+
+function onDeleteReports() {
+  const rels = checkedWithResults.value
+  if (!rels.length || deleteRunning.value) return
+  dialog.warning({
+    title: '批量删除分析报告',
+    content: `将删除 ${rels.length} 个视频的分析报告(analysis/<stem>/ 整目录,含报告、SFT 标注、证据与图片),不可恢复。`,
+    positiveText: '删除',
+    negativeText: '取消',
+    onPositiveClick: () => runDeleteReports(rels),
+  })
+}
+
+async function runDeleteReports(rels: string[]) {
+  deleteRunning.value = true
+  try {
+    const results = await ws.deleteReports(rels)
+    // 已回滚徽标的失败项逐项提示;成功项按实际删掉的目录数汇总。
+    results.filter((r) => !r.ok).forEach((r) =>
+      message.error(`删除 ${r.stem} 的分析报告失败:${r.error || '未知原因'}`),
+    )
+    const removed = results.filter((r) => r.ok && r.existed).length
+    if (removed > 0) message.success(`已删除 ${removed} 个分析报告`)
+    else if (results.every((r) => r.ok)) message.info('选中的条目均无报告目录')
+  } catch (e) {
+    message.error(`批量删除报告失败:${e instanceof Error ? e.message : String(e)}`)
+  } finally {
+    deleteRunning.value = false
+  }
+}
 </script>
 
 <template>
@@ -165,6 +206,17 @@ async function pollBatch(id: string) {
     >
       批量关键帧
     </n-button>
+    <n-button
+      size="small"
+      secondary
+      class="report-del-btn"
+      title="删除选中视频的分析报告(仅有报告的条目会删除)"
+      :disabled="!checkedWithResults.length || deleteRunning"
+      :loading="deleteRunning"
+      @click="onDeleteReports"
+    >
+      删除报告
+    </n-button>
   </div>
 </template>
 
@@ -212,6 +264,10 @@ async function pollBatch(id: string) {
 }
 
 .kf-batch-btn {
+  flex: none;
+}
+
+.report-del-btn {
   flex: none;
 }
 </style>

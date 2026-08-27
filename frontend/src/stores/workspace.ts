@@ -1,6 +1,11 @@
 /** 工作区/文件树/勾选状态(迁移自 legacy tree.js + workspace.js + state.js)。 */
 import { computed, reactive, ref, shallowReactive, shallowRef } from 'vue'
 import { defineStore } from 'pinia'
+import {
+  deleteAnalysisReport,
+  deleteAnalysisReports,
+} from '../api/analysis'
+import type { AnalysisDeleteResult } from '../api/analysis'
 import { apiFetch } from '../api/client'
 
 /** GET /api/workspace/tree 单层条目(目录或文件;视频带 stem/has_results)。 */
@@ -225,6 +230,64 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     if (on) videos.value.forEach((v) => checked.add(v.rel))
   }
 
+  /* ---- 分析报告删除(乐观清 has_results,失败回滚;契约见 web/workspace/videos.py) ---- */
+
+  /** rel → stem(videoFor 同口径:全量列表缺失时由文件名合成)。 */
+  function stemOfRel(rel: string): string {
+    const v = videoByRel.value.get(rel)
+    return v ? v.stem : rel.split('/').pop()!.replace(/\.[^.]+$/, '')
+  }
+
+  /** 整体替换方式翻转 has_results(root/各层 children/videos 三处来源;
+   * 浅响应式约定见上方 children/videos 声明:条目对象不做深代理)。 */
+  function flipHasResults(rels: ReadonlySet<string>, value: boolean) {
+    const flip = (es: TreeEntry[]) =>
+      es.map((e) => (rels.has(e.rel) ? { ...e, has_results: value } : e))
+    root.value = flip(root.value)
+    Object.keys(children).forEach((k) => (children[k] = flip(children[k])))
+    videos.value = videos.value.map((v) => (rels.has(v.rel) ? { ...v, has_results: value } : v))
+  }
+
+  /** 行内删除报告:免确认;乐观清徽标,DELETE 失败回滚并抛错(调用方提示)。 */
+  async function deleteReport(rel: string): Promise<void> {
+    flipHasResults(new Set([rel]), false)
+    try {
+      await deleteAnalysisReport(stemOfRel(rel))
+      void refreshTree() // 静默对齐盘上状态(同任务终态刷新路径)
+    } catch (e) {
+      flipHasResults(new Set([rel]), true)
+      throw e
+    }
+  }
+
+  /** 批量删报告(勾选集):返回后端逐项结果,ok=false 条目已回滚徽标,
+   * 调用方据其 error 逐项提示;网络级失败整体回滚并抛错。
+   * 回滚只把 has_results 翻回 true——调用方约定仅选中「有报告」的条目。 */
+  async function deleteReports(rels: string[]): Promise<AnalysisDeleteResult[]> {
+    if (!rels.length) return []
+    const stems = [...new Set(rels.map(stemOfRel))] // 同 stem 报告共用一个目录
+    const relByStem = new Map<string, string>()
+    rels.forEach((r) => relByStem.set(stemOfRel(r), r))
+    const all = new Set(rels)
+    flipHasResults(all, false)
+    let results: AnalysisDeleteResult[]
+    try {
+      results = await deleteAnalysisReports(stems)
+    } catch (e) {
+      flipHasResults(all, true)
+      throw e
+    }
+    const failedRels = new Set(
+      results
+        .filter((r) => !r.ok)
+        .map((r) => relByStem.get(r.stem))
+        .filter((x): x is string => x !== undefined),
+    )
+    if (failedRels.size) flipHasResults(failedRels, true)
+    void refreshTree()
+    return results
+  }
+
   /* ---- 最近使用的工作区(最新在前,去重,最多 8 条,同 legacy) ---- */
   const recentTick = ref(0) // localStorage 非响应式:pushRecent 后 +1 触发依赖重算
 
@@ -253,6 +316,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     path, loaded, treeLoading, root, children, expanded, videos, checked, currentRel,
     filter, sort, hasWorkspace, videoByRel, allChecked, someChecked,
     fetchWorkspace, loadTree, refreshTree, toggleDir, applyWorkspace,
-    setFilter, setSort, setChecked, setAllChecked, loadRecent, pushRecent,
+    setFilter, setSort, setChecked, setAllChecked, deleteReport, deleteReports,
+    loadRecent, pushRecent,
   }
 })

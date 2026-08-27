@@ -121,6 +121,8 @@ export interface AgentToolEntry {
   /** tool_call_start 的 call.id,tool_result 按它回填(区别于前端条目 id)。 */
   callId: string
   name: string
+  /** 创建时刻(epoch ms):流式本地打点/历史取落盘 at。分析链路流程图耗时推导用。 */
+  at?: number
   /** call.arguments 原文(JSON 字符串)。 */
   args: string
   result: string
@@ -143,6 +145,8 @@ export interface AgentApprovalEntry {
   approvalRule: string
   description?: string
   accesses: AgentAccess[]
+  /** 创建时刻(epoch ms),见 AgentToolEntry.at。 */
+  at?: number
   /** 工具调用参数的内容预览。 */
   preview?: AgentPreviewContent
   /** 已回执后记录:'approved' | 'rejected' | 'approved_session' | 'cancelled'(历史)。 */
@@ -190,6 +194,8 @@ export interface AgentDetectionEntry {
   id: string
   kind: 'detection'
   data: unknown
+  /** 创建时刻(epoch ms),见 AgentToolEntry.at。 */
+  at?: number
 }
 
 /** 系统提示条目(如自动压缩提示、输出截断警示),不进历史,仅流式期间插入时间线。
@@ -200,6 +206,8 @@ export interface AgentSystemEntry {
   kind: 'system'
   text: string
   tone?: 'warn'
+  /** 创建时刻(epoch ms),见 AgentToolEntry.at。 */
+  at?: number
 }
 
 export type AgentEntry =
@@ -371,6 +379,7 @@ function mapHistoryEntry(raw: unknown, seq?: number): AgentEntry | null {
       children: [],
       isError: e.isError === true,
       done: true,
+      ...(typeof e.at === 'number' ? { at: e.at } : {}),
     }
   }
   if (e.kind === 'approval') {
@@ -398,9 +407,17 @@ function mapHistoryEntry(raw: unknown, seq?: number): AgentEntry | null {
       ...(preview ? { preview } : {}),
       // 未决审批仍存在于服务端 pending 集合时渲染为可操作面板,否则历史里无 decision 的挂起审批标记失效
       ...(decision ? { decision } : pending ? {} : { stale: true }),
+      ...(typeof e.at === 'number' ? { at: e.at } : {}),
     }
   }
-  if (e.kind === 'detection') return { id: nextEntryId(), kind: 'detection', data: e.data }
+  if (e.kind === 'detection') {
+    return {
+      id: nextEntryId(),
+      kind: 'detection',
+      data: e.data,
+      ...(typeof e.at === 'number' ? { at: e.at } : {}),
+    }
+  }
   return null
 }
 
@@ -752,6 +769,7 @@ class ActiveSession {
         children: [],
         isError: false,
         done: false,
+        at: Date.now(),
       })
     } else if (ev.type === 'tool_result') {
       const callId = String(ev.toolCallId ?? '')
@@ -827,10 +845,11 @@ class ActiveSession {
         ...(ev.description != null ? { description: String(ev.description) } : {}),
         accesses: Array.isArray(ev.accesses) ? (ev.accesses as AgentAccess[]) : [],
         ...(preview ? { preview } : {}),
+        at: Date.now(),
       })
       status.value = 'awaiting_approval'
     } else if (ev.type === 'detection') {
-      entries.value.push({ id: nextEntryId(), kind: 'detection', data: ev.data })
+      entries.value.push({ id: nextEntryId(), kind: 'detection', data: ev.data, at: Date.now() })
     } else if (ev.type === 'steer') {
       // 进行中插话生效:本地已乐观插入(发 /steer 成功时)则按 id 队列出队绑定
       // 落盘 seq 后跳过;否则(他端插入)补一条带「已插话」标记的 user 条目。
@@ -879,7 +898,7 @@ class ActiveSession {
       if (Number.isFinite(used) && used >= 0) usedTokens.value = used
       if (Number.isFinite(max) && max > 0) maxTokens.value = max
     } else if (ev.type === 'compaction') {
-      entries.value.push({ id: nextEntryId(), kind: 'system', text: '上下文已自动压缩' })
+      entries.value.push({ id: nextEntryId(), kind: 'system', text: '上下文已自动压缩', at: Date.now() })
     } else if (ev.type === 'done') {
       // 落盘水位兜底:done 的 seq 在异常路径先于轮末兜底落盘,以本地非 system
       // 条目数对齐(本地与后端逐条对齐是既有契约;见 rewindTo/seq 注释)。
@@ -897,6 +916,7 @@ class ActiveSession {
             kind: 'system',
             text: '输出达到 token 上限被截断,部分内容可能不完整,可继续追问',
             tone: 'warn',
+            at: Date.now(),
           })
         }
       }

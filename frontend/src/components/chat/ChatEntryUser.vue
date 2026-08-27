@@ -174,6 +174,7 @@ const entry = computed(() => props.entry as AgentUserEntry)
 .msg-time {
   font-size: var(--text-xs);
   color: var(--color-text2);
+  font-family: var(--font-mono); /* 时间戳 → 等宽 */
 }
 
 .msg-actions {
@@ -230,6 +231,7 @@ const entry = computed(() => props.entry as AgentUserEntry)
   background: var(--color-blue-soft);
   border-radius: var(--radius-sm);
   padding: 0 var(--space-xs);
+  font-family: var(--font-pixel); /* 小标 chip → 像素 */
 }
 /* ---- user 气泡内视频小播放器(上传附件,src=/api/agent/uploads/{name}) ---- */
 .bubble-video {

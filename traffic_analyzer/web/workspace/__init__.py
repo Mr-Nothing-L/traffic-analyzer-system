@@ -9,7 +9,9 @@ and an ``images/`` subdirectory.
 作用:工作区包(自原单文件 workspace.py 拆分)。core.py 为工作区状态
 (WorkspaceState)、路径契约(analysis/<stem>/)、TTL 缓存设施与
 GET/POST /api/workspace 路由;videos.py 为视频发现(list_videos +
-长 TTL 缓存,见 videos._VIDEOS_CACHE_TTL_SEC)与 /api/workspace/videos 路由;tree.py 为单层目录树与
+长 TTL 缓存,见 videos._VIDEOS_CACHE_TTL_SEC)、/api/workspace/videos 路由
+与分析报告删除(DELETE /api/workspace/analysis/{stem}、批量 POST
+/api/workspace/analysis/delete);tree.py 为单层目录树与
 /api/workspace/tree 路由;quick_dirs.py 为 GET /api/workspace/quick-dirs
 (白名单根及一层子目录名对前端弹窗的暴露)。本模块聚合导出,保持
 ``from traffic_analyzer.web import workspace`` 及
@@ -61,13 +63,17 @@ from traffic_analyzer.web.workspace.core import (
 )
 from traffic_analyzer.web.workspace.tree import get_workspace_tree, list_tree
 from traffic_analyzer.web.workspace.videos import (
+    AnalysisDeleteRequest,
     _videos_cache,
+    delete_analysis,
+    delete_analysis_batch,
     get_workspace_videos,
     list_videos,
     list_videos_cached,
 )
 
 __all__ = [
+    "AnalysisDeleteRequest",
     "DEFAULT_DEMO_WORKSPACE",
     "LAST_WORKSPACE_PATH",
     "PRUNED_DIR_NAMES",
@@ -77,6 +83,8 @@ __all__ = [
     "WorkspaceState",
     "allowed_workspace_dirs",
     "analysis_dir",
+    "delete_analysis",
+    "delete_analysis_batch",
     "find_video",
     "get_workspace",
     "get_workspace_tree",

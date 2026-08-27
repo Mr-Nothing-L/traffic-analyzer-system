@@ -1,8 +1,9 @@
 <script setup lang="ts">
 /** 统一对话整卡(问答 + 检测,后端统一走 /api/agent/*):
- * 左侧历史会话栏(按工作区分组:当前工作区组最上恒展开,其他工作区/未分组组
- * 默认折叠;条目 title + 相对时间 / 点击切换(跨工作区先切工作区)重建时间线 /
- * 删除(optimistic + 确认)/ 新建)
+ * 左侧历史会话栏(按工作区分组的卡片纵列:每张卡片 = 卡片头(工作区名 + 会话数,
+ * 像素字体)+ 会话条目列表;当前工作区卡置顶恒展开,其他工作区/未分组卡默认折叠;
+ * 条目 title + 相对时间 / 点击切换(跨工作区先切工作区)重建时间线 /
+ * 删除(optimistic,点击即删)/ 新建)
  * + 右侧对话卡:顶条(状态 chip)/ 时间线(user 气泡(图片附件 + 视频预览或路径 chip)/
  * assistant 流式气泡(思考折叠(运行中末行横向跟随/结束后首行)+ 增量 markdown
  * (流式期间冻结已完成块,结束后一次性完整渲染,见 components/chat/MdStream))/ 
@@ -27,22 +28,17 @@
  * 图片画廊:点击气泡图放大,左右切换(按钮/键盘 ←→)。
  * 状态在 stores/agentchat.ts,组件只接线。 */
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import {
-  NButton,
-  NInput,
-  NModal,
-  NPopconfirm,
-  NPopover,
-  NScrollbar,
-  useMessage,
-} from 'naive-ui'
+import { NButton, NInput, NModal, NPopover, NScrollbar, useMessage } from 'naive-ui'
 import { useAgentChatStore } from '../stores/agentchat'
 import type { AgentAccess, AgentApprovalEntry, AgentMode, AgentSessionInfo, AgentUserEntry, DetectionPayload } from '../stores/agentchat'
 import { useWorkspaceStore } from '../stores/workspace'
 import { ApiError } from '../api/client'
 import { mdToHtml } from '../utils/markdown'
-import { groupSessionsByWorkspace } from '../utils/sessionGroups'
+import { groupSessionsByWorkspace, wsBasename } from '../utils/sessionGroups'
+import type { SessionGroup } from '../utils/sessionGroups'
 import { copyText, shouldSendOnEnter, toolLabel, workspaceVideoSrc } from '../utils/chatDisplay'
+import { buildAnalysisFlow } from '../utils/analysisFlow'
+import type { AnalysisFlow } from '../utils/analysisFlow'
 import UiIcon from '../components/UiIcon.vue'
 import ContextRing from '../components/chat/ContextRing.vue'
 import ChatEntryUser from '../components/chat/ChatEntryUser.vue'
@@ -51,6 +47,7 @@ import ChatEntryTool from '../components/chat/ChatEntryTool.vue'
 import ChatEntryApproval from '../components/chat/ChatEntryApproval.vue'
 import ChatEntrySystem from '../components/chat/ChatEntrySystem.vue'
 import ChatEntryDetection from '../components/chat/ChatEntryDetection.vue'
+import ChatAnalysisFlow from '../components/chat/ChatAnalysisFlow.vue'
 
 const agent = useAgentChatStore()
 const ws = useWorkspaceStore()
@@ -101,6 +98,21 @@ const ownSessions = computed(
 const expandedGroups = reactive(new Set<string>())
 function toggleGroup(key: string) {
   toggle(expandedGroups, key)
+}
+
+/** 卡片式分组:卡头标题兜底(当前工作区组 label 为空,显示当前工作区 basename)。 */
+const ownLabel = computed(() => wsBasename(ws.path ?? '') || '当前工作区')
+function headLabel(g: SessionGroup): string {
+  return g.label || ownLabel.value
+}
+
+/** 悬停提示:其他工作区组为完整路径;当前工作区组也补全路径,便于同名 basename 辨认。 */
+function headTitle(g: SessionGroup): string | undefined {
+  return g.title ?? (g.key === 'own' ? (ws.path ?? undefined) : undefined)
+}
+
+function onGroupHeadClick(g: SessionGroup) {
+  if (g.collapsible) toggleGroup(g.key)
 }
 
 function relTime(ts?: number): string {
@@ -461,6 +473,24 @@ const turnElapsedSec = computed(() =>
     : Math.max(0, Math.floor((nowTick.value - busySince.value) / 1000)),
 )
 
+/* ---- 分析链路流程图(W6):实时态 + 冻结态共用 ChatAnalysisFlow ----
+ * 实时态:分析中(connecting/running)在时间线底部生长完整树,当前步脉冲;
+ * 还没有任何工具节点时不渲染。冻结态:每个检测卡按其条目 id 预推导
+ * (区间 = 最近一条 user 之后至该检测),卡片内默认折叠一行摘要。 */
+const liveFlow = computed<AnalysisFlow | null>(() => {
+  if (!turnActive.value) return null
+  const f = buildAnalysisFlow(agent.entries, null)
+  return f.phases.some((p) => p.nodes.length > 0) ? f : null
+})
+
+const detectionFlows = computed(() => {
+  const m = new Map<string, AnalysisFlow>()
+  for (const e of agent.entries) {
+    if (e.kind === 'detection') m.set(e.id, buildAnalysisFlow(agent.entries, e.id))
+  }
+  return m
+})
+
 /* ---- composer 键盘:Enter 发送 / Shift+Enter 换行;输入法合成态(isComposing/
  * keyCode 229)中的 Enter 是选词上屏,不发送(判定抽 utils/chatDisplay 便于直测) ---- */
 function onComposerEnter(ev: KeyboardEvent) {
@@ -610,9 +640,10 @@ onUnmounted(() => {
 
 <template>
   <div class="chat-page">
-    <!-- 历史会话栏:按工作区分组(当前工作区组最上恒展开;其他工作区/未分组组
-         默认折叠,caret 展开;悬停组标题显示完整路径);title + 相对时间,
-         点击切换(跨工作区先切工作区),悬停出删除(确认后 optimistic 移除) -->
+    <!-- 历史会话栏:工作区分组渲染为独立卡片纵列(当前工作区卡最上恒展开;其他
+         工作区/未分组卡默认折叠,点击卡头展开,悬停卡头显示完整路径);条目
+         title + 相对时间,点击切换(跨工作区先切工作区),悬停出删除(点击即删,
+         store 乐观移除 + 失败回滚) -->
     <aside class="session-col">
       <div class="session-head">
         <UiIcon name="chat" :size="14" />
@@ -623,21 +654,25 @@ onUnmounted(() => {
       <n-scrollbar class="session-scroll">
         <div v-if="!sortedSessions.length" class="session-empty">暂无历史会话</div>
         <div v-else-if="!ownSessions.length" class="session-empty">当前工作区暂无会话</div>
-        <template v-for="g in sessionGroups" :key="g.key">
-          <!-- 其他工作区/未分组组标题:caret 折叠(同 TreeNode 模式),悬停显示完整路径 -->
-          <button
-            v-if="g.collapsible"
-            class="session-group-head"
-            :title="g.title ?? g.label"
-            @click="toggleGroup(g.key)"
+        <section v-for="g in sessionGroups" :key="g.key" class="session-card">
+          <!-- 卡片头:工作区名 + 会话数;可折叠组是按钮(caret 折叠),当前工作区组是静态头 -->
+          <component
+            :is="g.collapsible ? 'button' : 'div'"
+            class="session-card-head"
+            :title="headTitle(g)"
+            @click="onGroupHeadClick(g)"
           >
-            <span class="session-group-caret" :class="{ open: expandedGroups.has(g.key) }">
+            <span
+              v-if="g.collapsible"
+              class="session-group-caret"
+              :class="{ open: expandedGroups.has(g.key) }"
+            >
               ▸
             </span>
-            <span class="session-group-label">{{ g.label }}</span>
-            <span class="session-group-count">{{ g.items.length }}</span>
-          </button>
-          <template v-if="!g.collapsible || expandedGroups.has(g.key)">
+            <span class="session-card-label">{{ headLabel(g) }}</span>
+            <span class="session-card-count">{{ g.items.length }}</span>
+          </component>
+          <div v-if="!g.collapsible || expandedGroups.has(g.key)" class="session-card-body">
             <div
               v-for="s in g.items"
               :key="s.id"
@@ -652,18 +687,13 @@ onUnmounted(() => {
                 <span class="session-item-meta-left">
                   <span class="session-item-time">{{ relTime(s.lastActiveAt) }}</span>
                 </span>
-                <n-popconfirm @positive-click="onDelete(s.id)">
-                  <template #trigger>
-                    <button class="session-del" title="删除会话" @click.stop>
-                      <UiIcon name="close" :size="10" />
-                    </button>
-                  </template>
-                  删除该会话及其全部记录?
-                </n-popconfirm>
+                <button class="session-del" title="删除会话" @click.stop="onDelete(s.id)">
+                  <UiIcon name="close" :size="10" />
+                </button>
               </div>
             </div>
-          </template>
-        </template>
+          </div>
+        </section>
       </n-scrollbar>
     </aside>
 
@@ -727,9 +757,12 @@ onUnmounted(() => {
             <ChatEntryDetection
               v-else-if="e.kind === 'detection'"
               :entry="e"
+              :flow="detectionFlows.get(e.id)"
               @preview="openPreview"
             />
           </template>
+          <!-- 分析链路实时态:分析中随 entries 生长的完整阶段树(W6,当前步脉冲) -->
+          <ChatAnalysisFlow v-if="liveFlow" :flow="liveFlow" realtime />
           <!-- Turn 级 loading:对话进行中常驻一行,超过 15s 追加秒表(仅 status 驱动,step 间不闪烁) -->
           <div v-if="turnActive" class="turn-loading">
             <span class="turn-loading-dot" />
@@ -974,26 +1007,28 @@ onUnmounted(() => {
   min-height: 0;
 }
 
-/* ---- 历史会话栏 ---- */
+/* 按钮(design.md §2 骨架角色):Naive 按钮字体走主题,逐类覆盖为像素体 */
+.chat-page :deep(.n-button) {
+  font-family: var(--font-pixel);
+}
+
+/* ---- 历史会话栏:工作区分组卡片纵列 ----
+   会话栏整体是 UI 骨架(design.md §2),像素字体在此声明逐层继承;
+   仅数值(会话数/相对时间)按角色改回等宽 */
 .session-col {
   width: 220px;
   flex: 0 0 220px;
   display: flex;
   flex-direction: column;
   min-height: 0;
-  background: var(--color-card);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
-  overflow: hidden;
+  font-family: var(--font-pixel);
 }
 
 .session-head {
   display: flex;
   align-items: center;
   gap: var(--space-sm);
-  padding: var(--space-sm) var(--space-md);
-  border-bottom: 1px solid var(--color-border);
+  padding: var(--space-xs) var(--space-xs);
   color: var(--color-text2);
 }
 
@@ -1012,38 +1047,59 @@ onUnmounted(() => {
   min-height: 0;
 }
 
+/* 卡片与卡片之间留缝(滚动内容整体左右收进,不贴边) */
+.session-scroll :deep(.n-scrollbar-content) {
+  padding: 0 var(--space-xs) var(--space-xs);
+}
+
 .session-empty {
-  padding: var(--space-xl) var(--space-md);
+  padding: var(--space-xl) var(--space-xs);
   text-align: center;
   color: var(--color-text2);
   font-size: var(--text-sm);
 }
 
-/* 工作区分组标题:可折叠(caret 同 TreeNode:▸ 展开时旋转 90°),弱化处理 */
-.session-group-head {
+.session-card + .session-card {
+  margin-top: var(--space-sm);
+}
+
+.session-card {
+  background: var(--color-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+/* 卡片头(可折叠组是 button,当前工作区组是 div,基础样式共用) */
+.session-card-head {
   display: flex;
   align-items: center;
   gap: var(--space-xs);
   width: 100%;
-  padding: var(--space-sm) var(--space-md) var(--space-xs);
+  padding: var(--space-xs) var(--space-sm);
   border: none;
   border-bottom: 1px solid var(--color-border);
   background: var(--color-surface-2);
-  font-size: var(--text-xs);
   color: var(--color-text2);
-  cursor: pointer;
+  font-size: var(--text-xs);
   text-align: left;
 }
 
-.session-group-head:hover {
+button.session-card-head {
+  cursor: pointer;
+}
+
+button.session-card-head:hover {
   color: var(--color-text);
 }
 
-.session-group-head:focus-visible {
+button.session-card-head:focus-visible {
   outline: 2px solid var(--color-accent);
   outline-offset: -2px;
 }
 
+/* caret 同 TreeNode 模式:▸ 展开时旋转 90° */
 .session-group-caret {
   display: inline-block;
   width: 12px;
@@ -1057,20 +1113,31 @@ onUnmounted(() => {
   transform: rotate(90deg);
 }
 
-.session-group-label {
+.session-card-label {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.session-group-count {
+/* 会话数是数值 → 等宽 */
+.session-card-count {
   margin-left: auto;
+  font-family: var(--font-mono);
+}
+
+.session-card-body {
+  display: flex;
+  flex-direction: column;
 }
 
 .session-item {
-  padding: var(--space-sm) var(--space-md);
+  padding: var(--space-xs) var(--space-sm);
   border-bottom: 1px solid var(--color-border);
   cursor: pointer;
+}
+
+.session-item:last-child {
+  border-bottom: none;
 }
 
 .session-item:hover {
@@ -1087,7 +1154,7 @@ onUnmounted(() => {
 }
 
 .session-item-title {
-  font-size: var(--text-md);
+  font-size: var(--text-sm);
   color: var(--color-text);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1109,12 +1176,14 @@ onUnmounted(() => {
   min-width: 0;
 }
 
+/* 相对时间是时间戳 → 等宽 */
 .session-item-time {
   font-size: var(--text-xs);
   color: var(--color-text2);
+  font-family: var(--font-mono);
 }
 
-/* 删除按钮:默认淡隐,悬停/聚焦条目或自身时出现 */
+/* 删除按钮:点击即删(store 乐观移除 + 失败回滚);默认淡隐,悬停/聚焦条目或自身时出现 */
 .session-del {
   display: inline-flex;
   align-items: center;
@@ -1175,10 +1244,11 @@ onUnmounted(() => {
   color: var(--color-accent);
   font-size: var(--text-md);
   font-weight: 600;
+  font-family: var(--font-pixel); /* 操作提示覆盖层 → 像素(空态/骨架提示) */
   pointer-events: none;
 }
 
-/* ---- 顶条 ---- */
+/* ---- 顶条(卡片头 → 像素) ---- */
 .chat-bar {
   display: flex;
   align-items: center;
@@ -1186,6 +1256,7 @@ onUnmounted(() => {
   padding: var(--space-sm) var(--space-lg);
   border-bottom: 1px solid var(--color-border);
   color: var(--color-text2);
+  font-family: var(--font-pixel);
 }
 
 .chat-title {
@@ -1198,12 +1269,13 @@ onUnmounted(() => {
   flex: 1;
 }
 
-/* ---- 状态 chip:四态(+运行中)配色全部走 token ---- */
+/* ---- 状态 chip:四态(+运行中)配色全部走 token(chips → 像素) ---- */
 .status-chip {
   padding: 2px var(--space-sm);
   border-radius: var(--radius-sm);
   font-size: var(--text-xs);
   font-weight: 600;
+  font-family: var(--font-pixel);
   background: var(--color-surface-3);
   color: var(--color-text2);
 }
@@ -1244,6 +1316,7 @@ onUnmounted(() => {
   text-align: center;
   color: var(--color-text2);
   font-size: var(--text-md);
+  font-family: var(--font-pixel); /* 空态 → 像素 */
 }
 
 
@@ -1280,6 +1353,7 @@ onUnmounted(() => {
   color: var(--color-gold);
   font-size: var(--text-xs);
   font-weight: 700;
+  font-family: var(--font-pixel); /* 状态顶条(chips 同类)→ 像素 */
 }
 
 .approval-panel-body {
@@ -1293,6 +1367,7 @@ onUnmounted(() => {
   font-size: var(--text-sm);
   font-weight: 600;
   color: var(--color-text);
+  font-family: var(--font-pixel); /* 工具条目头 → 像素 */
 }
 
 .approval-panel-rule {
@@ -1328,6 +1403,7 @@ onUnmounted(() => {
   color: var(--color-gold);
   font-size: var(--text-xs);
   font-weight: 600;
+  font-family: var(--font-pixel); /* 按钮 → 像素 */
   cursor: pointer;
 }
 
@@ -1364,7 +1440,7 @@ onUnmounted(() => {
   border: none;
 }
 
-/* ---- Turn 级 loading(时间线底部常驻行) ---- */
+/* ---- Turn 级 loading(时间线底部常驻行;状态行 → 像素,秒表数值 → 等宽) ---- */
 .turn-loading {
   display: flex;
   align-items: center;
@@ -1372,6 +1448,7 @@ onUnmounted(() => {
   padding: var(--space-xs) 0;
   color: var(--color-text2);
   font-size: var(--text-sm);
+  font-family: var(--font-pixel);
 }
 
 .turn-loading-dot {
@@ -1481,6 +1558,7 @@ onUnmounted(() => {
 .bar-hint {
   font-size: var(--text-xs);
   color: var(--color-text2);
+  font-family: var(--font-pixel); /* 状态小标(chips 同类)→ 像素 */
 }
 
 .bar-btn,
@@ -1542,7 +1620,7 @@ onUnmounted(() => {
   cursor: default;
 }
 
-/* ---- 权限模式选择器(触发钮 + 弹层菜单) ---- */
+/* ---- 权限模式选择器(触发钮 + 弹层菜单;按钮/菜单均骨架 → 像素) ---- */
 .mode-btn {
   display: inline-flex;
   align-items: center;
@@ -1554,6 +1632,7 @@ onUnmounted(() => {
   background: var(--color-card);
   color: var(--color-text2);
   font-size: var(--text-xs);
+  font-family: var(--font-pixel);
   cursor: pointer;
   transition:
     background var(--dur-fast) var(--ease-out),
@@ -1590,6 +1669,7 @@ onUnmounted(() => {
   flex-direction: column;
   gap: 2px;
   min-width: 260px;
+  font-family: var(--font-pixel); /* 菜单(按钮簇)→ 像素 */
 }
 
 .mode-item {
@@ -1647,6 +1727,7 @@ onUnmounted(() => {
   color: var(--color-gold);
   font-size: var(--text-xs);
   font-weight: 600;
+  font-family: var(--font-pixel); /* 按钮 → 像素 */
   cursor: pointer;
 }
 
@@ -1723,7 +1804,8 @@ onUnmounted(() => {
 .attach-video-name {
   flex: 1;
   min-width: 0;
-  font-family: var(--font-mono);
+  /* 文件名精确辨认 → sans(design.md §2;路径悬停 title 展示) */
+  font-family: var(--font-sans);
   font-size: var(--text-xs);
   color: var(--color-text2);
   overflow: hidden;

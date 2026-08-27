@@ -128,8 +128,9 @@ def create_app(workspace: Optional[str] = None) -> FastAPI:
         path = Path(preset).expanduser().resolve()
         if path.is_dir():
             app.state.workspace.set(path)
-            # preset 也记入状态文件:下次无参启动沿用(经 _pkg_var 可被测试隔离)
-            workspace_mod.record_last_workspace(path)
+            # 启动 preset 不写盘:last_workspace 只记录用户在 UI 的主动切换
+            # (core.set_workspace),避免命令行启动参数(如 --workspace .)
+            # 污染"上次使用的工作区"记忆。
         else:
             logger.warning("Preset workspace is not a directory, ignored: %s", preset)
 

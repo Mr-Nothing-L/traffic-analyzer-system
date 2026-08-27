@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /** 递归树节点(自建,不用 NTree:行内有勾选/徽标/像素条/重试/停止/presence 徽章)。
  * 行为迁移自 legacy tree.js treeRowsHtml + toggleDir。 */
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
 import { useAppStore } from '../../stores/app'
@@ -162,6 +162,22 @@ async function onRetry(rel: string) {
   else if (r.status === 409) message.warning('该视频已有任务在运行或排队中,请等待完成后再试')
   else message.error(`重试提交失败(${r.status}):${r.message}`)
 }
+
+/* ---- 行内「删除报告」(已完成行):免确认,乐观移除徽标;失败提示并回滚 ---- */
+const deletingReports = reactive(new Set<string>())
+
+async function onDeleteReport(e: TreeEntry) {
+  if (deletingReports.has(e.rel)) return
+  deletingReports.add(e.rel)
+  try {
+    await ws.deleteReport(e.rel)
+    message.success(`已删除 ${e.name} 的分析报告`)
+  } catch (err) {
+    message.error(`删除报告失败:${err instanceof Error ? err.message : String(err)}`)
+  } finally {
+    deletingReports.delete(e.rel)
+  }
+}
 </script>
 
 <template>
@@ -253,6 +269,16 @@ async function onRetry(rel: string) {
           @click.stop="onRetry(row.e.rel)"
         >
           <UiIcon name="retry" :size="11" />
+        </button>
+        <!-- 已完成行的「删除报告」键:默认淡隐、悬停显现(tree.css),免确认 -->
+        <button
+          v-if="row.status?.cls === 'st-done'"
+          class="del-report-btn"
+          title="删除分析报告"
+          :disabled="deletingReports.has(row.e.rel)"
+          @click.stop="onDeleteReport(row.e)"
+        >
+          <UiIcon name="trash" :size="11" />
         </button>
       </template>
       <!-- 常驻在行尾(最后渲染,不受文件名/徽标宽度影响,各行右缘对齐) -->

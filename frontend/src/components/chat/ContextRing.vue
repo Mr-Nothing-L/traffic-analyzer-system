@@ -149,6 +149,7 @@ const usageText = computed(
 .ctx-percent {
   font-size: var(--text-lg);
   font-weight: 700;
+  font-family: var(--font-mono); /* 数值 → 等宽 */
 }
 
 .ctx-usage {
@@ -165,6 +166,7 @@ const usageText = computed(
   color: var(--color-gold);
   font-size: var(--text-xs);
   font-weight: 600;
+  font-family: var(--font-pixel); /* 按钮 → 像素 */
   cursor: pointer;
 }
 
