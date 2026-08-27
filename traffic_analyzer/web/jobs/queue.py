@@ -16,7 +16,9 @@ TRAFFIC_ANALYZER_PROGRESS_FILE 传给子进程,尾随线程驱动进度状态机
 job.proc,worker 挂上 proc 后复查 status(非 running 立即 terminate),
 收尾块只在 status=='running' 时改写 status/returncode;任务超时(默认
 4 小时,TRAFFIC_ANALYZER_JOB_TIMEOUT_SECONDS 可调,<=0 禁用)到点
-terminate 并标 failed;shutdown 后置 _shutdown 标志,submit 拒绝新任务。
+terminate 并标 failed;shutdown 后置 _shutdown 标志,submit 拒绝新任务;
+infer 成功(rc==0)后调度关键帧自动智能挑选(_schedule_keyframe_auto_pick,
+daemon 线程,失败仅告警)。
 进度更新与任务终态经 EventBus(realtime)publish job.progress/job.done。
 上游:web/jobs/__init__.py(聚合导出);web/jobs/routes.py(路由层)。
 下游:web/jobs/job.py(Job/子进程辅助)、web/jobs/progress_feed.py(进度
@@ -50,6 +52,20 @@ logger = logging.getLogger(__name__)
 # 任务超时:默认 4 小时,环境变量可调(<=0 禁用)。
 _JOB_TIMEOUT_ENV = "TRAFFIC_ANALYZER_JOB_TIMEOUT_SECONDS"
 _DEFAULT_JOB_TIMEOUT_SEC = 4 * 3600.0
+
+
+def _schedule_keyframe_auto_pick(job: Job) -> None:
+    """infer 成功后的关键帧自动智能挑选(延迟导入避免 jobs↔keyframes 环)。
+
+    无 SFT 标注/已有关键帧时 keyframes 侧静默跳过;任何异常仅告警,
+    绝不影响已完成任务的状态。
+    """
+    try:
+        from traffic_analyzer.web.keyframes import schedule_after_infer
+
+        schedule_after_infer(job.workspace, job.stem)
+    except Exception as exc:  # pragma: no cover - 钩子自身故障兜底
+        logger.warning("schedule keyframe auto-pick failed for %s: %s", job.stem, exc)
 
 
 class JobManager:
@@ -226,6 +242,7 @@ class JobManager:
             # (<stem>_raw.json)失去「编辑前基线」意义,删除以免 dashboard
             # 继续把旧快照当作原始输出。
             _discard_frozen_raw(job.workspace, job.stem)
+            _schedule_keyframe_auto_pick(job)
         if job.kind == "infer":
             # infer 完成(无论成败,<stem>.json / 快照可能已变化):
             # 看板与视频列表缓存失效,下一 GET 重算。

@@ -3,6 +3,8 @@
 [文件说明]
 作用:PUT /api/results/{stem}/sft。仅允许修改 description / action /
 event_attributes / attr_mentions,其余字段与磁盘版本比对不一致即 422;
+keyframes 由 web/keyframes.py 专用端点维护,文本保存排除提交值并沿用
+磁盘现状(防止过期副本回显误删);
 event_attributes/attr_mentions 区分「未提交」(exclude_unset,保留磁盘
 原值)与「显式 null」(删除该键);base_sig 乐观锁(指纹不匹配 → 409
 conflict);per-stem 锁内复查同 stem 在跑 infer(409);首次人工编辑落盘
@@ -60,7 +62,8 @@ def put_sft(stem: str, body: SftSample, request: Request) -> Dict[str, Any]:
         # - 未提交:保留磁盘现状(旧格式样本不新增字段;已有结构化标注不丢失);
         # - 显式 null:删除该键(显式清除语义,经正常写路径落盘)。
         new_payload = body.model_dump(
-            exclude_unset=True, exclude={"base_sig", "last_edited_by", "last_edited_at"}
+            exclude_unset=True,
+            exclude={"base_sig", "last_edited_by", "last_edited_at", "keyframes"},
         )
         for field in ("event_attributes", "attr_mentions"):
             if field not in new_payload:
@@ -68,6 +71,12 @@ def put_sft(stem: str, body: SftSample, request: Request) -> Dict[str, Any]:
                     new_payload[field] = disk[field]
             elif new_payload[field] is None:
                 del new_payload[field]
+        # 关键帧不经文本编辑通道改写:排除提交值(可能是过期副本)后无条件沿用
+        # 磁盘现状,由 web/keyframes.py 的专用端点即时落盘维护;磁盘上没有的
+        # 旧格式样本不新增键。
+        new_payload.pop("keyframes", None)
+        if isinstance(disk, dict) and disk.get("keyframes"):
+            new_payload["keyframes"] = disk["keyframes"]
         if not isinstance(disk, dict) or _strip_sft_editable(disk) != _strip_sft_editable(
             new_payload
         ):

@@ -1,13 +1,22 @@
 <script setup lang="ts">
-/** 侧栏工具条:标题 + 全选 + 全选待推理 + 过滤框 + 排序下拉(迁移自 legacy index.html side-head/side-filter)。 */
-import { computed } from 'vue'
-import { NCheckbox, NInput, NSelect } from 'naive-ui'
+/** 侧栏工具条:标题 + 全选 + 全选待推理 + 过滤框 + 排序下拉 + 批量关键帧
+ * (迁移自 legacy index.html side-head/side-filter;批量关键帧为 v4.6 新增)。 */
+import { computed, h, ref } from 'vue'
+import { NButton, NCheckbox, NInput, NSelect, useDialog, useMessage } from 'naive-ui'
 import type { SortKey } from '../../stores/workspace'
 import { useWorkspaceStore } from '../../stores/workspace'
 import { useTreeView } from '../../composables/useTree'
+import { getKfBatch, startKfBatch } from '../../api/keyframes'
+import type { BatchStatus } from '../../api/keyframes'
 
 const ws = useWorkspaceStore()
 const { pendingRels, setPendingChecked } = useTreeView()
+const message = useMessage()
+const dialog = useDialog()
+
+/** 批量关键帧状态(轮询进行中按钮转圈防重复提交)。 */
+const batchRunning = ref(false)
+const kfOverwrite = ref(false)
 
 /** 「待推理」勾选态:选中集恰好等于待推理集合时才点亮(精确匹配,
  * 与「全选」解耦——点全选不会连带点亮它);不做半选态。 */
@@ -24,6 +33,82 @@ const sortOptions: { label: string; value: SortKey }[] = [
   { label: '大小', value: 'size' },
   { label: '状态', value: 'status' },
 ]
+
+/** 勾选 rel → stem(取 basename 去扩展名,与后端 video.stem 口径一致)。 */
+function stemOf(rel: string): string {
+  const base = rel.split('/').pop() ?? rel
+  return base.replace(/\.[^.]+$/, '')
+}
+
+function onBatchKeyframes() {
+  if (!ws.checked.size || batchRunning.value) return
+  dialog.warning({
+    title: '批量智能挑选关键帧',
+    content: () =>
+      h('div', null, [
+        h(
+          'div',
+          { style: 'margin-bottom:8px;font-size:13px;line-height:1.6' },
+          `将对 ${ws.checked.size} 个选中视频用主用 LLM 挑选 2–5 张关键帧(无标注/未推理的自动跳过,不影响文本标注)。`,
+        ),
+        h(
+          NCheckbox,
+          {
+            checked: kfOverwrite.value,
+            'onUpdate:checked': (v: boolean) => (kfOverwrite.value = v),
+          },
+          { default: () => '覆盖已有关键帧(默认跳过已挑过的视频)' },
+        ),
+      ]),
+    positiveText: '开始挑选',
+    negativeText: '取消',
+    onPositiveClick: runBatch,
+  })
+}
+
+async function runBatch() {
+  const stems = [...ws.checked].map(stemOf)
+  if (!stems.length) return
+  batchRunning.value = true
+  try {
+    const { id } = await startKfBatch(stems, kfOverwrite.value)
+    message.info(`批量智能挑选已启动(${stems.length} 个视频)`)
+    await pollBatch(id)
+  } catch (e) {
+    message.error(`批量智能挑选启动失败:${e instanceof Error ? e.message : String(e)}`)
+  } finally {
+    batchRunning.value = false
+  }
+}
+
+/** 轮询 batch 进度直到终态;后端批次丢失(重启/过期)则静默结束。 */
+async function pollBatch(id: string) {
+  for (let i = 0; i < 1200; i++) {
+    let st: BatchStatus
+    try {
+      st = await getKfBatch(id)
+    } catch {
+      return // 批次不存在(web 重启):静默放弃轮询
+    }
+    if (st.running) {
+      await new Promise((r) => setTimeout(r, 1500))
+      continue
+    }
+    const items = Object.values(st.items)
+    const count = (s: string) => items.filter((it) => it.status === s).length
+    const ok = count('ok')
+    const skip = count('skipped')
+    const failed = items.find((it) => it.status === 'failed')
+    if (failed) {
+      message.error(
+        `批量完成:成功 ${ok},跳过 ${skip},失败 ${count('failed')};首个失败:${failed.message || '未知原因'}`,
+      )
+    } else {
+      message.success(`批量关键帧完成:成功 ${ok},跳过 ${skip}`)
+    }
+    return
+  }
+}
 </script>
 
 <template>
@@ -69,6 +154,17 @@ const sortOptions: { label: string; value: SortKey }[] = [
       aria-label="排序方式"
       @update:value="ws.setSort"
     />
+    <n-button
+      size="small"
+      secondary
+      class="kf-batch-btn"
+      title="对选中的视频运行智能挑选关键帧(无标注的跳过)"
+      :disabled="!ws.checked.size || batchRunning"
+      :loading="batchRunning"
+      @click="onBatchKeyframes"
+    >
+      批量关键帧
+    </n-button>
   </div>
 </template>
 
@@ -113,5 +209,9 @@ const sortOptions: { label: string; value: SortKey }[] = [
 
 .sort-sel {
   flex: 0 0 96px;
+}
+
+.kf-batch-btn {
+  flex: none;
 }
 </style>

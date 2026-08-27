@@ -7,7 +7,8 @@ v4.5 的封闭编号集;event_attributes 按 event_options.yaml 封闭枚举严�
 attr_mentions 的每个提及串必须出现在对应事件 description 的 think 段落正文中
 (model_validator(mode='after'),不再依赖字段声明顺序)。
 上游:web/evidence_api.py(PUT 端点的请求体模型)。
-下游:web/event_config.py(封闭枚举与事件名索引)。
+下游:web/event_config.py(封闭枚举与事件名索引);web/keyframes.py 的关键帧
+条目(SftKeyframe,SFT PUT 不改写该字段)。
 """
 
 from __future__ import annotations
@@ -237,6 +238,16 @@ def _check_attr_mentions(
     return value
 
 
+class SftKeyframe(BaseModel):
+    """关键帧条目:文件位于 analysis/<stem>/关键帧/ 下,由 web/keyframes.py
+    即时维护(列表位置即时间顺序);文本编辑 PUT 不改写它(sft_api 落盘时
+    无条件沿用磁盘值)。"""
+
+    filename: str
+    frame_index: int
+    time_sec: float
+
+
 class SftSample(BaseModel):
     """完整 SFT 样本;chunk/idx/时间戳/chunk_name 与磁盘版本不一致时拒绝。"""
 
@@ -251,6 +262,9 @@ class SftSample(BaseModel):
     chunk_name: Any
     event_attributes: Optional[Dict[str, Dict[str, Any]]] = None
     attr_mentions: Optional[Dict[str, Dict[str, Any]]] = None
+    # 关键帧(web/keyframes.py 维护):声明仅为兼容前端整对象回传 extra=forbid,
+    # 写盘走专用端点,SFT PUT 排除提交值并保留磁盘现状。
+    keyframes: List[SftKeyframe] = []
     # 乐观锁:GET /api/results 的 file_sig 回传,写前不一致 → 409;落盘时排除。
     base_sig: Optional[str] = None
     # 追溯字段:PUT 落盘时由服务端覆写;声明为可选仅为兼容「GET 带回磁盘

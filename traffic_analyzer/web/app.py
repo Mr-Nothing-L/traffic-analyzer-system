@@ -7,7 +7,7 @@ forward arguments).
 
 [文件说明]
 作用:FastAPI 应用工厂 create_app():装配 workspace/fs/jobs/evidence_api/frames/
-video_stream/dashboard/auth/presence/realtime/llm_settings/agentproxy
+keyframes/video_stream/dashboard/auth/presence/realtime/llm_settings/agentproxy
 各路由,提供 /api/expert-phases
 专家阶段定义接口,挂载 frontend/dist(/,Vue 3 SPA 构建产物,未构建时跳过)
 并为其禁用缓存,/v2/* 旧书签 301 重定向到对应 / 路径,在 no-cache 之后注册
@@ -18,9 +18,9 @@ loop.call_soon_threadsafe 投递),并拉起 agent 运行时(toolserver + TS agen
 server 子进程,失败仅降级,退出时 SIGTERM→SIGKILL);通过 TRAFFIC_ANALYZER_WEB_WORKSPACE
 环境变量接收预设工作区(工厂模式无法转发参数)。
 上游:traffic_analyzer/cli.py 的 web 子命令(uvicorn "traffic_analyzer.web.app:create_app")。
-下游:web/ 下 workspace、fs、jobs、evidence_api、frames、video_stream、dashboard、
-auth、presence、realtime、llm_settings、agentproxy 路由模块;frontend/dist
-前端构建产物。
+下游:web/ 下 workspace、fs、jobs、evidence_api、frames、keyframes、
+video_stream、dashboard、auth、presence、realtime、llm_settings、agentproxy
+路由模块;frontend/dist 前端构建产物。
 """
 
 from __future__ import annotations
@@ -47,6 +47,7 @@ from traffic_analyzer.web import (
     frames,
     fs,
     jobs,
+    keyframes,
     llm_settings,
     presence,
     realtime,
@@ -138,6 +139,7 @@ def create_app(workspace: Optional[str] = None) -> FastAPI:
     app.include_router(jobs.router)
     app.include_router(evidence_api.router)
     app.include_router(frames.router)
+    app.include_router(keyframes.router)
     app.include_router(video_stream.router)
     app.include_router(dashboard.router)
     app.include_router(llm_settings.router)

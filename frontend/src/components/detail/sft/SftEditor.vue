@@ -8,6 +8,7 @@ import type { SftLabel as ApiSftLabel } from '../../../api/results'
 import type { SftLabel } from '../../../sft/types'
 import { useEvidenceStore } from '../../../stores/evidence'
 import { useSftStore } from '../../../stores/sft'
+import KeyframePanel from './KeyframePanel.vue'
 import SftAnswer from './SftAnswer.vue'
 import SftEventCard from './SftEventCard.vue'
 
@@ -89,6 +90,8 @@ function onReset() {
         <span>{{ sec(sft.start_timestamp) }}s → {{ sec(sft.end_timestamp) }}s</span>
         <span>{{ sft.chunk_name || '' }}</span>
       </div>
+      <!-- 关键帧面板:增删改即时落盘并同步乐观锁指纹(见 KeyframePanel.vue) -->
+      <KeyframePanel :stem="stem" />
       <div v-if="store.configError" class="empty-note">
         事件配置加载失败:{{ store.configError }}
       </div>
