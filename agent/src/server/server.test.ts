@@ -51,11 +51,51 @@ function writeTool(): ExecutableTool {
     name: 'write_file',
     description: 'fake write tool',
     parameters: { type: 'object' },
-    resolveExecution: () => ({
-      accesses: [{ kind: 'file' as const, operation: 'write' as const, path: '/tmp/x' }],
-      approvalRule: 'write_file(/tmp/x)',
-      execute: () => Promise.resolve({ output: 'write-ok' }),
-    }),
+    resolveExecution: (rawInput: unknown) => {
+      const parsed = (rawInput ?? {}) as { path?: string; content?: string };
+      const filePath = parsed.path ?? '/tmp/x';
+      return {
+        accesses: [{ kind: 'file' as const, operation: 'write' as const, path: filePath }],
+        approvalRule: `write_file(${filePath})`,
+        execute: () => Promise.resolve({ output: 'write-ok' }),
+      };
+    },
+  };
+}
+
+/** 运行脚本假工具(manual 模式下触发 fallback-ask)。 */
+function runScriptTool(workspaceDir: string): ExecutableTool {
+  return {
+    name: 'run_script',
+    description: 'fake run script tool',
+    parameters: { type: 'object' },
+    resolveExecution: (rawInput: unknown) => {
+      const parsed = (rawInput ?? {}) as { path?: string };
+      const rawPath = parsed.path ?? 'script.py';
+      const scriptPath = path.isAbsolute(rawPath) ? rawPath : path.join(workspaceDir, rawPath);
+      return {
+        accesses: [{ kind: 'all' as const }],
+        approvalRule: `run_script(${scriptPath})`,
+        execute: () => Promise.resolve({ output: 'script-ok' }),
+      };
+    },
+  };
+}
+
+/** 其它会触发审批的假工具(用于 preview 回退到 JSON 的场景)。 */
+function otherTool(): ExecutableTool {
+  return {
+    name: 'custom_tool',
+    description: 'fake custom tool',
+    parameters: { type: 'object' },
+    resolveExecution: (rawInput: unknown) => {
+      const parsed = (rawInput ?? {}) as { path?: string };
+      return {
+        accesses: [{ kind: 'file' as const, operation: 'write' as const, path: parsed.path ?? '/tmp/x' }],
+        approvalRule: `custom_tool(${parsed.path ?? '/tmp/x'})`,
+        execute: () => Promise.resolve({ output: 'custom-ok' }),
+      };
+    },
   };
 }
 
@@ -845,6 +885,192 @@ describe('agent server', () => {
     const list = await getJson('/sessions');
     const sessions = (list.json as { sessions: Record<string, unknown>[] }).sessions;
     expect(sessions[0]).toMatchObject({ id: sessionId, mode: 'auto' });
+  });
+
+  it('approval_request 携带 write_file 内容预览', async () => {
+    const provider = new ScriptedProvider({
+      script: [
+        [toolCall('c1', 'write_file', { path: '/tmp/x.txt', content: 'hello preview' })],
+        [text('写完了')],
+      ],
+    });
+    await startServer(provider, [writeTool()]);
+    const sessionId = await createSession('manual');
+
+    const res = await startChat(sessionId, '写文件');
+    if (res.body === null) throw new Error('no body');
+    const next = sseReader(res.body);
+    let approval: SseEvent | null = null;
+    while (approval === null) {
+      const event = await next();
+      if (event === null) throw new Error('stream ended before approval_request');
+      if (event.type === 'approval_request') approval = event;
+    }
+    expect(approval).toMatchObject({
+      toolName: 'write_file',
+      preview: { language: 'txt', content: 'hello preview', truncated: false },
+    });
+
+    // 回执后轮次完成,再校验落盘条目携带 preview
+    await postJson('/approval', {
+      requestId: (approval as unknown as { requestId: string }).requestId,
+      decision: 'approved',
+    });
+    await readUntilDone(next);
+
+    const history = await getJson(`/sessions/${sessionId}/history`);
+    const entries = (history.json as { entries: TimelineEntry[] }).entries;
+    const approvalEntry = entries.find((e) => e.kind === 'approval');
+    expect(approvalEntry).toMatchObject({
+      kind: 'approval',
+      decision: 'approved',
+      preview: { language: 'txt', content: 'hello preview', truncated: false },
+    });
+  });
+
+  it('approval_request 携带 run_script 脚本内容预览', async () => {
+    const scriptPath = path.join(workspace, 'script.py');
+    writeFileSync(scriptPath, 'print("hello script")', 'utf8');
+
+    const provider = new ScriptedProvider({
+      script: [[toolCall('c1', 'run_script', { path: 'script.py' })]],
+    });
+    await startServer(provider, [runScriptTool(workspace)]);
+    const sessionId = await createSession('manual');
+
+    const res = await startChat(sessionId, '跑脚本');
+    if (res.body === null) throw new Error('no body');
+    const next = sseReader(res.body);
+    let approval: SseEvent | null = null;
+    while (approval === null) {
+      const event = await next();
+      if (event === null) throw new Error('stream ended before approval_request');
+      if (event.type === 'approval_request') approval = event;
+    }
+    expect(approval).toMatchObject({
+      toolName: 'run_script',
+      preview: { language: 'py', content: 'print("hello script")', truncated: false },
+    });
+
+    await postJson('/approval', {
+      requestId: (approval as unknown as { requestId: string }).requestId,
+      decision: 'approved',
+    });
+    await readUntilDone(next);
+  });
+
+  it('approval_request 对其它工具回退为参数 JSON 预览', async () => {
+    const provider = new ScriptedProvider({
+      script: [[toolCall('c1', 'custom_tool', { path: '/tmp/x', extra: 42 })]],
+    });
+    await startServer(provider, [otherTool()]);
+    const sessionId = await createSession('manual');
+
+    const res = await startChat(sessionId, '自定义工具');
+    if (res.body === null) throw new Error('no body');
+    const next = sseReader(res.body);
+    let approval: SseEvent | null = null;
+    while (approval === null) {
+      const event = await next();
+      if (event === null) throw new Error('stream ended before approval_request');
+      if (event.type === 'approval_request') approval = event;
+    }
+    const preview = (approval as unknown as { preview?: { language: string; content: string; truncated: boolean } }).preview;
+    expect(preview?.language).toBe('json');
+    expect(preview?.truncated).toBe(false);
+    expect(preview?.content).toContain('"path": "/tmp/x"');
+    expect(preview?.content).toContain('"extra": 42');
+
+    await postJson('/approval', {
+      requestId: (approval as unknown as { requestId: string }).requestId,
+      decision: 'approved',
+    });
+    await readUntilDone(next);
+  });
+
+  it('断连不取消挂起审批:events/history 可重新投递并回执', async () => {
+    const provider = new ScriptedProvider({
+      script: [
+        [toolCall('c1', 'write_file', { path: '/tmp/x', content: 'disconnect test' })],
+        [text('写完了')],
+      ],
+    });
+    await startServer(provider, [writeTool()]);
+    const sessionId = await createSession('manual');
+
+    const abortCtrl = new AbortController();
+    const res = await fetch(`${baseUrl}/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId, input: '写个文件' }),
+      signal: abortCtrl.signal,
+    });
+    if (res.body === null) throw new Error('no body');
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    let approval: SseEvent | null = null;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let sep: number;
+        while ((sep = buf.indexOf('\n\n')) >= 0) {
+          const raw = buf.slice(0, sep);
+          buf = buf.slice(sep + 2);
+          const line = raw.split('\n').find((l) => l.startsWith('data:'));
+          if (line === undefined) continue;
+          const ev = JSON.parse(line.slice(5).trim()) as SseEvent;
+          if (ev.type === 'approval_request') {
+            approval = ev;
+            break;
+          }
+        }
+        if (approval !== null) break;
+      }
+    } finally {
+      abortCtrl.abort();
+    }
+    expect(approval).not.toBeNull();
+    const requestId = (approval as unknown as { requestId: string }).requestId;
+
+    // 等待服务端感知 close
+    await new Promise((r) => setTimeout(r, 150));
+
+    // events 续传应把未决审批标记为 pending 并携带 preview
+    const eventsRes = await getJson(`/sessions/${sessionId}/events?fromSeq=0`);
+    expect(eventsRes.status).toBe(200);
+    const events = (eventsRes.json as { events: Array<{ seq: number; entry: TimelineEntry }>; inProgress: boolean }).events;
+    expect(eventsRes.json).toMatchObject({ inProgress: true });
+    const pendingEntry = events.find((e) => e.entry.kind === 'approval');
+    expect(pendingEntry).toBeDefined();
+    expect(pendingEntry?.entry).toMatchObject({
+      kind: 'approval',
+      pending: true,
+      preview: { language: 'text', content: 'disconnect test', truncated: false },
+    });
+
+    // history 同样应标记 pending
+    const historyRes = await getJson(`/sessions/${sessionId}/history`);
+    const historyEntries = (historyRes.json as { entries: TimelineEntry[] }).entries;
+    const historyApproval = historyEntries.find((e) => e.kind === 'approval');
+    expect(historyApproval).toMatchObject({ pending: true });
+
+    // 回执后轮次继续
+    await postJson('/approval', { requestId, decision: 'approved' });
+
+    // 轮询补齐直到结束
+    for (let i = 0; i < 20; i += 1) {
+      await new Promise((r) => setTimeout(r, 100));
+      const poll = await getJson(`/sessions/${sessionId}/events?fromSeq=0`);
+      const body = poll.json as { inProgress: boolean; events: Array<{ seq: number; entry: TimelineEntry }> };
+      if (!body.inProgress) {
+        expect(body.events.some((e) => e.entry.kind === 'tool')).toBe(true);
+        break;
+      }
+      if (i === 19) throw new Error('turn did not finish after approval');
+    }
   });
 
   it('defaultSystemPrompt:渲染事件契约占位符;chat_system.md 缺失即抛错(fail-fast)', () => {

@@ -40,6 +40,7 @@ import { useAgentChatStore } from '../stores/agentchat'
 import type { AgentAccess, AgentApprovalEntry, AgentMode, AgentSessionInfo, AgentUserEntry, DetectionPayload } from '../stores/agentchat'
 import { useWorkspaceStore } from '../stores/workspace'
 import { ApiError } from '../api/client'
+import { mdToHtml } from '../utils/markdown'
 import { groupSessionsByWorkspace } from '../utils/sessionGroups'
 import { copyText, shouldSendOnEnter, toolLabel, workspaceVideoSrc } from '../utils/chatDisplay'
 import UiIcon from '../components/UiIcon.vue'
@@ -227,6 +228,12 @@ const pendingApproval = computed<AgentApprovalEntry | null>(() => {
     if (e.kind === 'approval') return !e.decision && !e.stale ? e : null
   }
   return null
+})
+const approvalPreviewOpen = ref(false)
+const approvalPreviewHtml = computed(() => {
+  const p = pendingApproval.value?.preview
+  if (!p) return ''
+  return mdToHtml(`\`\`\`${p.language}\n${p.content}\n\`\`\``)
 })
 
 /* ---- 检测结果卡:data 正常是结构化 payload;后端解析失败时为原始字符串 ---- */
@@ -780,6 +787,17 @@ onUnmounted(() => {
                   {{ accessLabel(a) }}
                 </div>
               </div>
+              <div v-if="pendingApproval.preview" class="approval-preview-wrap">
+                <button
+                  class="approval-preview-toggle"
+                  @click="approvalPreviewOpen = !approvalPreviewOpen"
+                >
+                  <span class="preview-caret" :class="{ open: approvalPreviewOpen }">▸</span>
+                  <span>内容预览</span>
+                  <span v-if="pendingApproval.preview.truncated" class="preview-truncated">(已截断)</span>
+                </button>
+                <div v-if="approvalPreviewOpen" class="approval-preview" v-html="approvalPreviewHtml" />
+              </div>
               <div class="approval-panel-actions">
                 <n-button
                   size="small"
@@ -1293,6 +1311,57 @@ onUnmounted(() => {
   display: flex;
   gap: var(--space-sm);
   margin-top: var(--space-xs);
+}
+
+.approval-preview-wrap {
+  margin-top: var(--space-xs);
+}
+
+.approval-preview-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: 2px var(--space-xs);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-gold) 10%, transparent);
+  color: var(--color-gold);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.approval-preview-toggle:hover {
+  background: color-mix(in srgb, var(--color-gold) 18%, transparent);
+}
+
+.preview-caret {
+  display: inline-block;
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+
+.preview-caret.open {
+  transform: rotate(90deg);
+}
+
+.preview-truncated {
+  color: var(--color-text2);
+  font-weight: 400;
+}
+
+.approval-preview {
+  margin-top: var(--space-xs);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-2);
+  overflow-x: auto;
+}
+
+.approval-preview :deep(.md) > pre {
+  margin: 0;
+  padding: var(--space-sm);
+  background: transparent;
+  border: none;
 }
 
 /* ---- Turn 级 loading(时间线底部常驻行) ---- */

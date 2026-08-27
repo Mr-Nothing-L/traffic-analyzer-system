@@ -228,7 +228,7 @@ afterEach(async () => {
 // ---------------------------------------------------------------------------
 
 describe('断连恢复与增量落盘', () => {
-  it('SSE 断连不杀轮次:挂起审批以 cancelled 落定,loop 跑完并落盘,busy 释放', async () => {
+  it('SSE 断连不杀轮次:挂起审批保留,恢复后可回执,loop 跑完并落盘,busy 释放', async () => {
     const provider = new ScriptedProvider({ script: [
       [toolCall('c1', 'write_file', {})],
       [text('写完了')],
@@ -242,10 +242,9 @@ describe('断连恢复与增量落盘', () => {
     controller.abort();
     await sleep(50); // 等服务端感知 close
 
-    // 断连后挂起审批无人能回执(requestId 只经活跃流下发),立即以
-    // cancelled 落定:事后回执 → 404,轮次不拖满审批超时。
+    // 断连不再取消挂起审批:事后回执仍可成功,轮次继续跑完。
     const approval = await postJson('/approval', { requestId, decision: 'approved' });
-    expect(approval.status).toBe(404);
+    expect(approval.status).toBe(200);
 
     // 轮询 events 端点直到轮次结束(断连不 abort:loop 继续跑完)。
     let body = await getEvents(sessionId);
@@ -255,13 +254,12 @@ describe('断连恢复与增量落盘', () => {
     }
     expect(body.inProgress).toBe(false);
 
-    // 完整落盘:审批条目 decision=cancelled,工具被拒合成 isError 结果,
-    // 模型继续走完第二步给出回答。
+    // 完整落盘:审批条目 decision=approved,工具正常执行,模型继续走完第二步给出回答。
     const history = await getJson(`/sessions/${sessionId}/history`);
     const entries = (history.json as { entries: TimelineEntry[] }).entries;
     expect(entries.map((e) => e.kind)).toEqual(['user', 'approval', 'tool', 'assistant']);
-    expect(entries[1]).toMatchObject({ kind: 'approval', decision: 'cancelled' });
-    expect(entries[2]).toMatchObject({ kind: 'tool', name: 'write_file', isError: true });
+    expect(entries[1]).toMatchObject({ kind: 'approval', decision: 'approved' });
+    expect(entries[2]).toMatchObject({ kind: 'tool', name: 'write_file', isError: false });
     expect(entries[3]).toMatchObject({ kind: 'assistant', text: '写完了' });
     expect(agentServer?.sessions.get(sessionId)?.messages.map((m) => m.role)).toEqual([
       'user',
@@ -271,7 +269,7 @@ describe('断连恢复与增量落盘', () => {
     ]);
   });
 
-  it('按步增量落盘:轮次进行中磁盘已可见 user 条目与 user 消息', async () => {
+  it('按步增量落盘:轮次进行中磁盘已可见 user 条目、approval 条目与 user 消息', async () => {
     const provider = new ScriptedProvider({ script: [
       [toolCall('c1', 'write_file', {})],
       [text('写完了')],
@@ -281,10 +279,9 @@ describe('断连恢复与增量落盘', () => {
 
     const { requestId, next } = await chatUntilApproval(sessionId, '写个文件');
 
-    // 审批挂起中:磁盘上 user 条目已落(还带 title);messages 已落 user。
-    // approval 条目随 settle(回执 decision 回填内存条目)后的 step_done
-    // 一并落盘,挂起期间尚未落盘。
-    expect(diskRows(sessionId, 'entries').map((e) => e.kind)).toEqual(['user']);
+    // 审批挂起中:user 条目与 approval 条目已即时落盘(便于断连恢复);
+    // messages 已落 user。
+    expect(diskRows(sessionId, 'entries').map((e) => e.kind)).toEqual(['user', 'approval']);
     expect(diskRows(sessionId, 'messages')).toHaveLength(1);
 
     // 放行 → 轮次完成:磁盘与内存一致。
@@ -302,7 +299,7 @@ describe('断连恢复与增量落盘', () => {
       'tool',
       'assistant',
     ]);
-    // approval 条目在 settle 回填 decision 后才落盘:磁盘上带 decision。
+    // approval 条目在回执后由 settleHook 回填 decision,step_done 时落盘带 decision。
     const approvalEntry = diskRows(sessionId, 'entries')[1];
     expect(approvalEntry).toMatchObject({ kind: 'approval', decision: 'approved' });
   });

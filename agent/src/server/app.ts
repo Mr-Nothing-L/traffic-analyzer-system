@@ -72,6 +72,7 @@
  */
 import { readFileSync, statSync } from 'node:fs';
 import { createServer as createHttpServer, type Server, type ServerResponse } from 'node:http';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import type { ContentPart, Message, ChatProvider } from '../llm/kosong';
@@ -83,12 +84,20 @@ import { compactMessagesWithSummary } from '../loop/summarize';
 import { CallbackApprovalService } from '../permissions/approval';
 import { PermissionGate } from '../permissions/gate';
 import type { PermissionMode, PermissionPolicyContext } from '../permissions/types';
-import { registerBuiltinTools, createSpawnSubagentTool, renderSystemPrompt, ToolserverClient } from '../tools/builtin';
+import {
+  createSubagentListTool,
+  createSubagentReportTool,
+  loadToolsetEntrySpec,
+  registerBuiltinTools,
+  renderSystemPrompt,
+  ToolserverClient,
+} from '../tools/builtin';
+import { createSpawnSubagentTool, createSubagentRunRegistry } from '../tools/builtin/spawnSubagent';
 import type { DetectionPayload } from '../tools/builtin/submitDetection';
 import type { ToolAccesses } from '../tools/contract';
 import { ToolRegistry } from '../tools/registry';
 
-import { ApprovalBridge, type ApprovalDecisionInput } from './approvalBridge';
+import { ApprovalBridge, type ApprovalDecisionInput, type PreviewContent } from './approvalBridge';
 import { createRouter, type RequestContext, sendJson, sendError, writeSseEvent, isRecord } from './routes';
 import { SessionManager, type Session } from './session';
 import type { TimelineEntry } from './storage';
@@ -171,7 +180,7 @@ export function defaultSystemPrompt(promptsDir?: string): string {
 class ExecutionSnapshotGate extends PermissionGate {
   constructor(
     options: ConstructorParameters<typeof PermissionGate>[0],
-    private readonly snapshots: Map<string, { accesses: ToolAccesses }>,
+    private readonly snapshots: Map<string, { accesses: ToolAccesses; arguments: string | null }>,
   ) {
     super(options);
   }
@@ -179,7 +188,10 @@ class ExecutionSnapshotGate extends PermissionGate {
   override async authorize(
     context: Omit<PermissionPolicyContext, 'mode'>,
   ): ReturnType<PermissionGate['authorize']> {
-    this.snapshots.set(context.toolCall.id, { accesses: context.execution.accesses ?? [] });
+    this.snapshots.set(context.toolCall.id, {
+      accesses: context.execution.accesses ?? [],
+      arguments: context.toolCall.arguments,
+    });
     try {
       return await super.authorize(context);
     } finally {
@@ -199,6 +211,87 @@ function resolveContextTokens(option: number | undefined): number {
   const raw = process.env.AGENT_CONTEXT_TOKENS;
   const parsed = raw === undefined ? NaN : Number(raw);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_CONTEXT_TOKENS;
+}
+
+const MAX_PREVIEW_BYTES = 32 * 1024;
+
+/** 按工具类型构造审批内容预览。 */
+function buildPreview(
+  toolName: string,
+  argumentsJson: string | null | undefined,
+  approvalRule: string,
+): PreviewContent | undefined {
+  const args = ((): Record<string, unknown> | undefined => {
+    if (!argumentsJson) return undefined;
+    try {
+      return JSON.parse(argumentsJson) as Record<string, unknown>;
+    } catch {
+      return undefined;
+    }
+  })();
+
+  const formatArgs = (): string => {
+    if (args === undefined) return argumentsJson ?? '(无参数)';
+    try {
+      return JSON.stringify(args, null, 2);
+    } catch {
+      return argumentsJson ?? '(无参数)';
+    }
+  };
+
+  const truncateContent = (content: string): { content: string; truncated: boolean } => {
+    const bytes = Buffer.byteLength(content, 'utf8');
+    if (bytes <= MAX_PREVIEW_BYTES) return { content, truncated: false };
+    const buf = Buffer.from(content, 'utf8');
+    return { content: buf.subarray(0, MAX_PREVIEW_BYTES).toString('utf8'), truncated: true };
+  };
+
+  if (toolName === 'write_file') {
+    const content = args !== undefined && typeof args.content === 'string' ? args.content : '';
+    const rawPath = args !== undefined && typeof args.path === 'string' ? args.path : '';
+    const language = path.extname(rawPath).slice(1) || 'text';
+    const truncated = truncateContent(content);
+    return { language, content: truncated.content, truncated: truncated.truncated };
+  }
+
+  if (toolName === 'run_script') {
+    // approvalRule 形如 run_script(<已沙盒解析的绝对路径>)
+    const prefix = 'run_script(';
+    let scriptPath = '';
+    if (approvalRule.startsWith(prefix) && approvalRule.endsWith(')')) {
+      scriptPath = approvalRule.slice(prefix.length, -1);
+    }
+    if (scriptPath !== '') {
+      try {
+        const content = readFileSync(scriptPath, 'utf8');
+        const language = path.extname(scriptPath).slice(1) || 'text';
+        const truncated = truncateContent(content);
+        return { language, content: truncated.content, truncated: truncated.truncated };
+      } catch {
+        // 读取失败回退为格式化参数 JSON
+      }
+    }
+    return { language: 'json', content: formatArgs(), truncated: false };
+  }
+
+  return { language: 'json', content: formatArgs(), truncated: false };
+}
+
+/** 对未 decision 的 approval 条目,若仍挂起则补 pending 标记与 accesses/preview。 */
+function enrichPendingApprovalEntry(
+  entry: TimelineEntry,
+  bridge: ApprovalBridge | undefined,
+): void {
+  if (bridge === undefined || entry.kind !== 'approval' || entry.decision !== undefined) return;
+  const pending = bridge.getPending(entry.requestId);
+  if (pending === undefined) return;
+  entry.pending = true;
+  if (entry.accesses === undefined || entry.accesses.length === 0) {
+    entry.accesses = pending.accesses;
+  }
+  if (entry.preview === undefined) {
+    entry.preview = pending.preview;
+  }
 }
 
 /**
@@ -274,23 +367,26 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
         ? { timeoutMs: options.approvalTimeoutMs }
         : {},
     );
-    const snapshots = new Map<string, { accesses: ToolAccesses }>();
+    const snapshots = new Map<string, { accesses: ToolAccesses; arguments: string | null }>();
     const gate = new ExecutionSnapshotGate(
       {
         mode: session.mode,
-        approvalService: new CallbackApprovalService((request) =>
-          bridge.requestApproval(request, {
-            accesses: snapshots.get(request.toolCallId)?.accesses ?? [],
-          }),
-        ),
+        approvalService: new CallbackApprovalService((request) => {
+          const snapshot = snapshots.get(request.toolCallId);
+          return bridge.requestApproval(request, {
+            accesses: snapshot?.accesses ?? [],
+            preview: buildPreview(request.toolName, snapshot?.arguments, request.action),
+          });
+        }),
       },
       snapshots,
     );
     const registry = toolsFactory(session);
-    // spawn_subagent 在 server 组装处闭包注入(provider/gate/systemPrompt),
-    // 不进 registerBuiltinTools(toolset.json 暂无该条目);自定义 toolsFactory
-    // 已自带同名工具时跳过。
+    // spawn_subagent / subagent_list / subagent_report 在 server 组装处闭包注入
+    // (provider/gate/systemPrompt 与共享 SubagentRunRegistry);自定义 toolsFactory
+    // 已自带同名工具时跳过,避免覆盖。子代理运行注册表按 session 构造注入,避免全局态。
     if (registry.resolve('spawn_subagent') === undefined) {
+      const subagentRegistry = createSubagentRunRegistry();
       registry.register(
         createSpawnSubagentTool({
           parentRegistry: registry,
@@ -300,7 +396,20 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
           systemPrompt,
           contextTokens,
           toolserverClient: new ToolserverClient({}),
+          registry: subagentRegistry,
         }),
+      );
+      registry.register(
+        createSubagentListTool(
+          { registry: subagentRegistry },
+          loadToolsetEntrySpec('subagent_list'),
+        ),
+      );
+      registry.register(
+        createSubagentReportTool(
+          { registry: subagentRegistry },
+          loadToolsetEntrySpec('subagent_report'),
+        ),
       );
     }
     return { registry, gate, bridge, busy: false, controller: null, steerQueue: [] };
@@ -379,11 +488,16 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       sendError(res, 404, 'session_not_found', `unknown session: ${sessionId}`);
       return;
     }
+    const bridge = runtimes.get(sessionId)?.bridge;
+    for (const entry of entries) {
+      enrichPendingApprovalEntry(entry, bridge);
+    }
     sendJson(res, 200, { entries });
   };
 
   /** 断线续传:已落盘 entries 中 seq > fromSeq 的部分(带 seq)+ 该 session
-   * 是否有进行中轮次(inProgress)。前端刷新后用它补齐进度。 */
+   * 是否有进行中轮次(inProgress)。前端刷新后用它补齐进度。未决审批条目
+   * 若仍挂起,补 pending 标记与 accesses/preview,使恢复后可操作。 */
   const handleGetEvents = (res: ServerResponse, sessionId: string, url: URL): void => {
     const raw = url.searchParams.get('fromSeq');
     if (raw !== null && !/^\d+$/.test(raw)) {
@@ -395,6 +509,10 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
     if (events === undefined) {
       sendError(res, 404, 'session_not_found', `unknown session: ${sessionId}`);
       return;
+    }
+    const bridge = runtimes.get(sessionId)?.bridge;
+    for (const { entry } of events) {
+      enrichPendingApprovalEntry(entry, bridge);
     }
     sendJson(res, 200, { events, inProgress: runtimes.get(sessionId)?.busy === true });
   };
@@ -614,17 +732,16 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
     res.flushHeaders();
 
     // 断连不杀轮次:只标记客户端断开,loop 继续跑完并落盘(maxSteps 兜底);
-    // SSE 写出错同样只标记断开,不再抛出。断连后挂起的审批无人能回执
-    // (requestId 只经活跃流下发),立即以 cancelled 落定;仅在本轮仍进行
-    // 中时处理(res 'close' 在正常结束时也会触发,此时 controller 已清空),
-    // 防止误伤后续轮次的新审批。注:请求体在路由分发时已被 readJsonBody
-    // 读完,req 的 'close' 早已发出、此后监听不到;感知断连用 res 的
-    // 'close'(连接被提前断开或响应完成时触发)。
+    // SSE 写出错同样只标记断开,不再抛出。断连后挂起的审批保留,用户可经
+    // events/history 恢复后重新回执;仅在本轮仍进行中时处理(res 'close' 在
+    // 正常结束时也会触发,此时 controller 已清空),防止误伤后续轮次的新审批。
+    // 注:请求体在路由分发时已被 readJsonBody 读完,req 的 'close' 早已发出、
+    // 此后监听不到;感知断连用 res 的 'close'(连接被提前断开或响应完成时触发)。
     let clientDisconnected = false;
     res.on('close', () => {
       if (runtime.controller !== controller) return;
       clientDisconnected = true;
-      runtime.bridge.cancelAll('客户端已断开连接');
+      // 不再 cancelAll:显式 /cancel 与轮末兜底仍负责 settle。
     });
 
     // SSE 事件带 seq:发出时已落盘 entries 的水位(= 当前最大落盘 seq),
@@ -673,8 +790,12 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
         toolName: event.toolName,
         approvalRule: event.approvalRule,
         ...(event.description !== undefined ? { description: event.description } : {}),
+        ...(event.accesses.length > 0 ? { accesses: event.accesses } : {}),
+        ...(event.preview !== undefined ? { preview: event.preview } : {}),
         at: Date.now(),
       });
+      // 审批条目立即落盘:断连恢复时 events/history 能重新投递未决审批。
+      persister.flushEntries();
     });
     runtime.bridge.bindSettleHook((requestId, response) => {
       // 审批条目的 decision 回填:在落盘前的 step_done 批量落盘时一并序列化。

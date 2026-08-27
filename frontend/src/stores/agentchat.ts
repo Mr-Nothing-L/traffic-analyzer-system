@@ -56,6 +56,13 @@ export interface AgentAccess {
   recursive?: boolean
 }
 
+/** 审批内容预览(与 agent 端 PreviewContent 对齐)。 */
+export interface AgentPreviewContent {
+  language: string
+  content: string
+  truncated: boolean
+}
+
 /** GET /sessions 的列表项(createdAt/lastActiveAt 为 epoch ms)。 */
 export interface AgentSessionInfo {
   id: string
@@ -136,6 +143,8 @@ export interface AgentApprovalEntry {
   approvalRule: string
   description?: string
   accesses: AgentAccess[]
+  /** 工具调用参数的内容预览。 */
+  preview?: AgentPreviewContent
   /** 已回执后记录:'approved' | 'rejected' | 'approved_session' | 'cancelled'(历史)。 */
   decision?: string
   /** 历史载入的未决审批:后端不再接受回执,UI 显示「已失效」,不渲染按钮。 */
@@ -366,6 +375,18 @@ function mapHistoryEntry(raw: unknown, seq?: number): AgentEntry | null {
   }
   if (e.kind === 'approval') {
     const decision = e.decision != null ? String(e.decision) : undefined
+    const pending = e.pending === true
+    const accesses = Array.isArray(e.accesses)
+      ? (e.accesses as AgentAccess[])
+      : ([] as AgentAccess[])
+    const preview =
+      e.preview && typeof e.preview === 'object'
+        ? ({
+            language: String((e.preview as Record<string, unknown>).language ?? 'text'),
+            content: String((e.preview as Record<string, unknown>).content ?? ''),
+            truncated: (e.preview as Record<string, unknown>).truncated === true,
+          } as AgentPreviewContent)
+        : undefined
     return {
       id: nextEntryId(),
       kind: 'approval',
@@ -373,9 +394,10 @@ function mapHistoryEntry(raw: unknown, seq?: number): AgentEntry | null {
       toolName: String(e.toolName ?? ''),
       approvalRule: String(e.approvalRule ?? ''),
       ...(e.description != null ? { description: String(e.description) } : {}),
-      accesses: [],
-      // 历史里仍挂起的审批:后端已不回溯,标记失效(UI 显示「已失效」)
-      ...(decision ? { decision } : { stale: true }),
+      accesses,
+      ...(preview ? { preview } : {}),
+      // 未决审批仍存在于服务端 pending 集合时渲染为可操作面板,否则历史里无 decision 的挂起审批标记失效
+      ...(decision ? { decision } : pending ? {} : { stale: true }),
     }
   }
   if (e.kind === 'detection') return { id: nextEntryId(), kind: 'detection', data: e.data }
@@ -517,6 +539,9 @@ class ActiveSession {
       if (mapped === null) continue
       if (mapped.kind === 'user' && this.bindPendingSteer(seq)) continue
       this.host.entries.value.push(markRaw(mapped))
+      if (mapped.kind === 'approval' && !mapped.decision && !mapped.stale) {
+        this.host.status.value = 'awaiting_approval'
+      }
     }
   }
 
@@ -785,6 +810,14 @@ class ActiveSession {
         // 其余子事件(step_done/done 等)无独立 UI
       }
     } else if (ev.type === 'approval_request') {
+      const preview =
+        ev.preview && typeof ev.preview === 'object'
+          ? ({
+              language: String((ev.preview as Record<string, unknown>).language ?? 'text'),
+              content: String((ev.preview as Record<string, unknown>).content ?? ''),
+              truncated: (ev.preview as Record<string, unknown>).truncated === true,
+            } as AgentPreviewContent)
+          : undefined
       entries.value.push({
         id: nextEntryId(),
         kind: 'approval',
@@ -793,6 +826,7 @@ class ActiveSession {
         approvalRule: String(ev.approvalRule ?? ''),
         ...(ev.description != null ? { description: String(ev.description) } : {}),
         accesses: Array.isArray(ev.accesses) ? (ev.accesses as AgentAccess[]) : [],
+        ...(preview ? { preview } : {}),
       })
       status.value = 'awaiting_approval'
     } else if (ev.type === 'detection') {

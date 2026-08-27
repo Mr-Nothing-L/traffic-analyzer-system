@@ -218,12 +218,12 @@ export class SessionManager {
   }
 
   /** 追加时间线条目并刷新活跃时间(同步落盘);首个 user 条目生成 title。 */
-  appendEntries(id: string, entries: readonly TimelineEntry[]): boolean {
+  appendEntries(id: string, entries: readonly TimelineEntry[]): number[] {
     const session = this.sessions.get(id);
-    if (session === undefined) return false;
+    if (session === undefined) return [];
     session.entries.push(...entries);
     const storage = this.storages.get(session.workspaceDir);
-    storage?.appendEntries(id, entries);
+    const seqs = storage?.appendEntries(id, entries) ?? [];
     if (session.title === '') {
       const firstUser = entries.find((e) => e.kind === 'user');
       if (firstUser !== undefined && firstUser.kind === 'user') {
@@ -232,7 +232,7 @@ export class SessionManager {
       }
     }
     this.bumpLastActive(session, storage);
-    return true;
+    return seqs;
   }
 
   touch(id: string): void {
@@ -240,6 +240,15 @@ export class SessionManager {
     if (session !== undefined) {
       this.bumpLastActive(session, this.storages.get(session.workspaceDir));
     }
+  }
+
+  /** 更新指定 seq 的时间线条目(approval decision 回填已落盘条目)。 */
+  updateEntry(id: string, seq: number, entry: TimelineEntry): boolean {
+    const session = this.sessions.get(id);
+    if (session === undefined) return false;
+    const storage = this.storages.get(session.workspaceDir);
+    storage?.updateEntry(id, seq, entry);
+    return true;
   }
 
   /** 切换权限模式:内存 + 磁盘同步更新。未知 session 返回 false。 */

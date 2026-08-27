@@ -33,6 +33,8 @@ export class TurnPersister {
   private readonly sessions: SessionManager;
   private readonly sessionId: string;
   private readonly turnEntries: TimelineEntry[] = [];
+  /** 每个 turnEntries 对应落盘 seq,仅已 flush 的条目有值。 */
+  private readonly entrySeqs: number[] = [];
   /** 条目水位:turnEntries 前 persistedEntries 条已 append 落盘。 */
   private persistedEntries = 0;
   /** 消息水位:loop 消息数组(含 base 历史)前 persistedMessages 条已落盘。 */
@@ -51,7 +53,7 @@ export class TurnPersister {
   }
 
   /** 审批回执回填:在已累积的 approval 条目上补 decision(倒序找最近一条);
-   * 若该条目尚未落盘,decision 随下一次 flushEntries 一并序列化。 */
+   * 若该条目已落盘,同步 UPDATE 对应 seq 的磁盘行。 */
   settleApproval(
     requestId: string,
     decision: 'approved' | 'rejected' | 'cancelled',
@@ -60,6 +62,12 @@ export class TurnPersister {
       const entry = this.turnEntries[i];
       if (entry !== undefined && entry.kind === 'approval' && entry.requestId === requestId) {
         entry.decision = decision;
+        if (i < this.persistedEntries) {
+          const seq = this.entrySeqs[i];
+          if (seq !== undefined) {
+            this.sessions.updateEntry(this.sessionId, seq, entry);
+          }
+        }
         return;
       }
     }
@@ -68,7 +76,13 @@ export class TurnPersister {
   /** 落盘水位之后的全部条目(user / steer 条目立即调,step_done 时批量)。 */
   flushEntries(): void {
     if (this.persistedEntries >= this.turnEntries.length) return;
-    this.sessions.appendEntries(this.sessionId, this.turnEntries.slice(this.persistedEntries));
+    const seqs = this.sessions.appendEntries(
+      this.sessionId,
+      this.turnEntries.slice(this.persistedEntries),
+    );
+    for (const seq of seqs) {
+      this.entrySeqs.push(seq);
+    }
     this.persistedEntries = this.turnEntries.length;
   }
 

@@ -22,7 +22,8 @@ import type { Message } from '../llm/kosong';
 
 import type { PermissionMode } from '../permissions/types';
 import type { DetectionPayload } from '../tools/builtin/submitDetection';
-import type { ExecutableToolOutput } from '../tools/contract';
+import type { ExecutableToolOutput, ToolAccesses } from '../tools/contract';
+import type { PreviewContent } from './approvalBridge';
 
 /** 时间线条目:/chat 的 SSE 流累积而成,GET /sessions/{id}/history 原样返回。 */
 export type TimelineEntry =
@@ -70,8 +71,17 @@ export type TimelineEntry =
       toolName: string;
       approvalRule: string;
       description?: string;
+      /** 执行声明的资源访问(与 ApprovalRequestEvent 一致)。 */
+      accesses?: ToolAccesses;
+      /** 工具调用参数的内容预览。 */
+      preview?: PreviewContent;
       /** 回执结果;挂起中(历史里异常残留)时缺失。 */
       decision?: 'approved' | 'rejected' | 'cancelled';
+      /**
+       * 仅在运行时恢复路径附加:该未决审批仍存在于服务端未决集合,
+       * 前端应渲染为可操作面板。
+       */
+      pending?: boolean;
       at: number;
     }
   | {
@@ -221,13 +231,23 @@ export class SessionStorage {
     this.db.prepare('UPDATE sessions SET last_active_at = ? WHERE id = ?').run(lastActiveAt, id);
   }
 
-  appendEntries(sessionId: string, entries: readonly TimelineEntry[]): void {
+  appendEntries(sessionId: string, entries: readonly TimelineEntry[]): number[] {
+    const seqs: number[] = [];
     const stmt = this.db.prepare(
       'INSERT INTO entries (session_id, seq, entry_json) VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM entries WHERE session_id = ?), ?)',
     );
     for (const entry of entries) {
-      stmt.run(sessionId, sessionId, JSON.stringify(entry));
+      const info = stmt.run(sessionId, sessionId, JSON.stringify(entry));
+      seqs.push(Number(info.lastInsertRowid));
     }
+    return seqs;
+  }
+
+  /** 更新指定 seq 的时间线条目(用于 approval decision 回填已落盘条目)。 */
+  updateEntry(sessionId: string, seq: number, entry: TimelineEntry): void {
+    this.db
+      .prepare('UPDATE entries SET entry_json = ? WHERE session_id = ? AND seq = ?')
+      .run(JSON.stringify(entry), sessionId, seq);
   }
 
   loadEntries(sessionId: string): TimelineEntry[] {

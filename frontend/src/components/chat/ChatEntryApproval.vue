@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 /** 审批卡片(只读留档):工具/规则/资源访问/结果状态。 */
 import type { AgentEntry, AgentApprovalEntry, AgentAccess } from '../../stores/agentchat'
+import { mdToHtml } from '../../utils/markdown'
 import { toolLabel } from '../../utils/chatDisplay'
 
 const props = defineProps<{
@@ -9,6 +10,12 @@ const props = defineProps<{
 }>()
 
 const entry = computed(() => props.entry as AgentApprovalEntry)
+const previewOpen = ref(false)
+const previewHtml = computed(() => {
+  const p = entry.value.preview
+  if (!p) return ''
+  return mdToHtml(`\`\`\`${p.language}\n${p.content}\n\`\`\``)
+})
 
 const OP_LABEL: Record<string, string> = {
   read: '读取',
@@ -43,6 +50,14 @@ const DECISION_LABEL: Record<string, string> = {
                 <div v-for="(a, j) in entry.accesses" :key="j" class="approval-access">
                   {{ accessLabel(a) }}
                 </div>
+              </div>
+              <div v-if="entry.preview" class="approval-preview-wrap">
+                <button class="approval-preview-toggle" @click="previewOpen = !previewOpen">
+                  <span class="preview-caret" :class="{ open: previewOpen }">▸</span>
+                  <span>内容预览</span>
+                  <span v-if="entry.preview.truncated" class="preview-truncated">(已截断)</span>
+                </button>
+                <div v-if="previewOpen" class="approval-preview" v-html="previewHtml" />
               </div>
               <div v-if="!entry.decision && !entry.stale" class="approval-decided">
                 等待审批(请在下方输入区处理)
@@ -109,5 +124,56 @@ const DECISION_LABEL: Record<string, string> = {
   font-size: var(--text-sm);
   font-weight: 600;
   color: var(--color-text2);
+}
+
+.approval-preview-wrap {
+  margin-top: var(--space-xs);
+}
+
+.approval-preview-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: 2px var(--space-xs);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-gold) 10%, transparent);
+  color: var(--color-gold);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.approval-preview-toggle:hover {
+  background: color-mix(in srgb, var(--color-gold) 18%, transparent);
+}
+
+.preview-caret {
+  display: inline-block;
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+
+.preview-caret.open {
+  transform: rotate(90deg);
+}
+
+.preview-truncated {
+  color: var(--color-text2);
+  font-weight: 400;
+}
+
+.approval-preview {
+  margin-top: var(--space-xs);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-2);
+  overflow-x: auto;
+}
+
+.approval-preview :deep(.md) > pre {
+  margin: 0;
+  padding: var(--space-sm);
+  background: transparent;
+  border: none;
 }
 </style>

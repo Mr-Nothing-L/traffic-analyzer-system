@@ -13,6 +13,13 @@ import type { ToolAccesses } from '../tools/contract';
 
 export const DEFAULT_APPROVAL_TIMEOUT_MS = 5 * 60 * 1000;
 
+/** 审批内容预览。 */
+export interface PreviewContent {
+  readonly language: string;
+  readonly content: string;
+  readonly truncated: boolean;
+}
+
 /** 发给前端的审批请求事件(经 SSE 'data:' 行)。 */
 export interface ApprovalRequestEvent {
   readonly type: 'approval_request';
@@ -23,6 +30,8 @@ export interface ApprovalRequestEvent {
   readonly description?: string;
   /** 执行声明的资源访问(由 gate 层快照,ApprovalRequest 本身不携带)。 */
   readonly accesses: ToolAccesses;
+  /** 工具调用参数的内容预览(按工具类型构造)。 */
+  readonly preview?: PreviewContent;
 }
 
 export interface ApprovalDecisionInput {
@@ -39,6 +48,7 @@ export interface ApprovalBridgeOptions {
 interface PendingApproval {
   readonly resolve: (response: ApprovalResponse) => void;
   readonly timer: ReturnType<typeof setTimeout>;
+  readonly event: ApprovalRequestEvent;
 }
 
 export class ApprovalBridge {
@@ -75,7 +85,7 @@ export class ApprovalBridge {
    */
   requestApproval(
     request: ApprovalRequest,
-    extra: { readonly accesses: ToolAccesses },
+    extra: { readonly accesses: ToolAccesses; readonly preview?: PreviewContent },
   ): Promise<ApprovalResponse> {
     const requestId = randomUUID();
     const event: ApprovalRequestEvent = {
@@ -84,13 +94,14 @@ export class ApprovalBridge {
       toolName: request.toolName,
       approvalRule: request.action,
       accesses: extra.accesses,
+      ...(extra.preview !== undefined ? { preview: extra.preview } : {}),
       ...(request.description !== undefined ? { description: request.description } : {}),
     };
     return new Promise<ApprovalResponse>((resolve) => {
       const timer = setTimeout(() => {
         this.settle(requestId, { decision: 'cancelled' });
       }, this.timeoutMs);
-      this.pending.set(requestId, { resolve, timer });
+      this.pending.set(requestId, { resolve, timer, event });
       this.emit?.(event);
     });
   }
@@ -106,6 +117,16 @@ export class ApprovalBridge {
 
   has(requestId: string): boolean {
     return this.pending.has(requestId);
+  }
+
+  /** 获取指定未决审批的完整事件(含 accesses/preview)。 */
+  getPending(requestId: string): ApprovalRequestEvent | undefined {
+    return this.pending.get(requestId)?.event;
+  }
+
+  /** 当前未决审批的 requestId 列表。 */
+  pendingRequestIds(): readonly string[] {
+    return [...this.pending.keys()];
   }
 
   /** 会话结束/过期/cancel/断连时,把全部挂起审批以 cancelled 语义落定
