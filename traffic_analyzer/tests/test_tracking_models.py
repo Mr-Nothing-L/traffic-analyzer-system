@@ -397,8 +397,15 @@ class TestRenderSmoke:
         assert clip.is_file() and clip.stat().st_size > 0
         cap = cv2.VideoCapture(str(clip))
         n_written = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 1)
+        ok, oframe = cap.read()
         cap.release()
         assert n_written >= 3
+        assert ok and oframe is not None
+        # 像素级回归:静止车框 [0.7,0.6,0.76,0.68] → 像素 (112,72)-(121,81),
+        # 框左边中点应被着色(归一化坐标必须乘帧宽/高,否则框画在左上角 0 像素处)
+        edge = oframe[76, 112]
+        assert int(edge.sum()) > 0, "overlay box not drawn (normalized coords not scaled?)"
 
         img_path = tmp_path / "colored_overlay.jpg"
         img, jpeg = speed_colored_image(video_path, tracks, out_path=img_path)

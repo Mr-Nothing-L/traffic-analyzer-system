@@ -145,23 +145,27 @@ def overlay_video(
                     continue
                 color = _track_id_color(tid)
                 # 拖尾:过去 tail_len 帧内的中心点折线
+                # (box 为 0-1 归一化,须乘输出帧宽/高换算到像素)
                 if tail_len > 0:
                     tail = [
-                        tuple(v * sx for v in bbox_center(q["box"]))
+                        bbox_center(q["box"])
                         for q in pts
                         if fi - tail_len <= int(q["frame"]) <= fi
                     ]
                     for a, b in zip(tail, tail[1:]):
                         cv2.line(
                             frame,
-                            (int(a[0]), int(a[1])),
-                            (int(b[0]), int(b[1])),
+                            (int(a[0] * out_w), int(a[1] * out_h)),
+                            (int(b[0] * out_w), int(b[1] * out_h)),
                             color,
                             2,
                         )
-                x1, y1, x2, y2 = [int(v * sx) for v in bb]
+                x1, y1 = int(bb[0] * out_w), int(bb[1] * out_h)
+                x2, y2 = int(bb[2] * out_w), int(bb[3] * out_h)
                 ts_s = fi / src_fps if src_fps > 0 else 0.0
-                label = f"#{tid} {desc[:12]} {ts_s:.1f}s"
+                # cv2.putText 的 Hershey 字体不支持 CJK,描述渲染会变成问号,
+                # 标签只放 ID+时间戳(描述见 tracks.csv/run.json)
+                label = f"#{tid} {ts_s:.1f}s"
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
                 cv2.putText(
                     frame,
