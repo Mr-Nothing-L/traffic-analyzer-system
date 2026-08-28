@@ -5,12 +5,18 @@
  *   (无数据段静默省略),点击展开完整阶段树;
  * - 实时态(realtime):对话区底部随 entries 生长的完整树,当前步脉冲高亮、
  *   失败步红色 + 「已重试」标记,无摘要行。
+ * 链路节点即工具条目:每个节点(步骤/并发 chip/子代理分支)默认折叠
+ * (label + 耗时 + 状态),点击展开调用明细(ChatToolDetail:参数摘要 + 结果
+ * 文本/图片/子代理时间线/取证视频),展开态由宿主按条目 id 记忆(expandedTools,
+ * 会话内共享,实时态与冻结态同一份);面板头部提供「全部展开/全部折叠」。
  * 阶段标题/步骤标签/按钮为骨架 → 像素字体;thinking 摘要与子结论为说明文字
  * → sans;耗时数值 → mono。颜色全部 tokens 变量(design.md §8 禁 inline 色);
  * 图标一律 UiIcon(§8 禁 emoji)。 */
 import { computed, reactive } from 'vue'
 import UiIcon from '../UiIcon.vue'
 import type { AnalysisFlow, FlowNode, FlowStep, FlowSubagent } from '../../utils/analysisFlow'
+import type { AgentToolEntry } from '../../stores/agentchat'
+import ChatToolDetail from './ChatToolDetail.vue'
 
 const props = defineProps<{
   flow: AnalysisFlow
@@ -18,6 +24,14 @@ const props = defineProps<{
   realtime?: boolean
   /** 冻结态展开覆写(SSR 测试直渲染用);缺省用本地点击状态。 */
   open?: boolean
+  /** 节点展开态(按工具条目 id,宿主持有;实时态与冻结态共享同一份,会话内记忆)。 */
+  expandedTools?: Set<string>
+}>()
+
+const emit = defineEmits<{
+  'toggle-tool': [id: string]
+  'toggle-all-tools': [ids: string[], open: boolean]
+  preview: [url: string]
 }>()
 
 /** 冻结态默认折叠为一行摘要;open prop 覆写。 */
@@ -32,9 +46,9 @@ interface Row {
   retried: boolean
 }
 type Item =
-  | { t: 'step'; row: Row }
-  | { t: 'par'; rows: Row[] }
-  | { t: 'sub'; row: Row; task: string; conclusion: string; innerRows: Row[] }
+  | { t: 'step'; row: Row; entry?: AgentToolEntry }
+  | { t: 'par'; rows: Row[]; entries: Array<AgentToolEntry | undefined> }
+  | { t: 'sub'; row: Row; task: string; conclusion: string; entry?: AgentToolEntry }
 
 /** 步骤状态:active 进行中优先(实时态「最新推进位置」可能标在刚完成的步上,
  * 见 buildAnalysisFlow 的末步标记);其次 ok 成功;其余失败。 */
@@ -70,7 +84,9 @@ const phaseViews = computed(() =>
     icon: ph.icon,
     note: ph.thinkNote ?? '',
     items: ph.nodes.map((n): Item => {
-      if ('kind' in n) return { t: 'par', rows: n.steps.map(mkRow) }
+      if ('kind' in n) {
+        return { t: 'par', rows: n.steps.map(mkRow), entries: n.steps.map((s) => s.entry) }
+      }
       if ('inner' in n) {
         const sub = asSub(n)
         return {
@@ -78,10 +94,10 @@ const phaseViews = computed(() =>
           row: mkRow({ ...sub, ok: sub.ok === true }),
           task: sub.task,
           conclusion: sub.conclusion ?? '',
-          innerRows: sub.inner.map(mkRow),
+          entry: sub.entry,
         }
       }
-      return { t: 'step', row: mkRow(n) }
+      return { t: 'step', row: mkRow(n), entry: n.entry }
     }),
   })),
 )
@@ -99,13 +115,34 @@ const summaryText = computed(() => {
   return parts.join(' · ')
 })
 
-/* 子代理分支节点的展开态(默认折叠),键 = `阶段序:节点序`。 */
-const subOpen = reactive(new Set<string>())
-function toggleSub(pi: number, ni: number) {
-  const k = `${pi}:${ni}`
-  if (subOpen.has(k)) subOpen.delete(k)
-  else subOpen.add(k)
+/* ---- 节点折叠/展开:按来源工具条目 id(宿主的 expandedTools 记忆);
+ * 无内容可看(未完成且无子代理时间线)时点开也不渲染明细,同旧工具气泡口径。 ---- */
+function isOpen(e: AgentToolEntry | undefined): boolean {
+  return !!e && (props.expandedTools?.has(e.id) ?? false)
 }
+
+function toggleNode(e: AgentToolEntry | undefined) {
+  if (e) emit('toggle-tool', e.id)
+}
+
+function detailVisible(e: AgentToolEntry | undefined): boolean {
+  return isOpen(e) && !!e && (e.done || e.children.length > 0)
+}
+
+/** 可展开节点条目 id 清单(全部展开/全部折叠按钮用)。 */
+const expandableIds = computed(() => {
+  const ids: string[] = []
+  for (const ph of props.flow.phases) {
+    for (const n of ph.nodes) {
+      if ('kind' in n) {
+        for (const s of n.steps) if (s.entry) ids.push(s.entry.id)
+      } else if (n.entry) {
+        ids.push(n.entry.id)
+      }
+    }
+  }
+  return ids
+})
 </script>
 
 <template>
@@ -123,6 +160,16 @@ function toggleSub(pi: number, ni: number) {
     </button>
 
     <div v-if="expanded && phaseViews.length" class="aflow-body">
+      <!-- 节点全部展开/折叠(有可展开节点才出现) -->
+      <div v-if="expandableIds.length" class="aflow-toolbar">
+        <button type="button" class="aflow-toolbar-btn" @click="emit('toggle-all-tools', expandableIds, true)">
+          全部展开
+        </button>
+        <span class="aflow-toolbar-sep">·</span>
+        <button type="button" class="aflow-toolbar-btn" @click="emit('toggle-all-tools', expandableIds, false)">
+          全部折叠
+        </button>
+      </div>
       <section v-for="(ph, pi) in phaseViews" :key="ph.key" class="aflow-phase">
         <header class="aflow-phase-head">
           <UiIcon :name="ph.icon" :size="13" />
@@ -131,30 +178,63 @@ function toggleSub(pi: number, ni: number) {
         <p v-if="ph.note" class="aflow-phase-note">{{ ph.note }}</p>
         <div class="aflow-nodes">
           <template v-for="(it, ni) in ph.items" :key="`${pi}:${ni}`">
-            <!-- 主干步骤 -->
-            <div v-if="it.t === 'step'" class="aflow-node" :class="it.row.state">
-              <span class="aflow-dot" />
-              <span class="aflow-lbl">{{ it.row.label }}</span>
-              <span v-if="it.row.retried" class="aflow-retried" title="同名工具已在后续重试">
-                <UiIcon name="retry" :size="10" />
-                已重试
-              </span>
-              <span v-if="it.row.dur" class="aflow-dur">{{ it.row.dur }}</span>
+            <!-- 主干步骤:点击展开/收起调用明细 -->
+            <div v-if="it.t === 'step'" class="aflow-node-wrap">
+              <button
+                type="button"
+                class="aflow-node aflow-node-btn"
+                :class="[it.row.state, { 'is-open': isOpen(it.entry) }]"
+                :title="isOpen(it.entry) ? '收起调用明细' : '展开调用明细'"
+                @click="toggleNode(it.entry)"
+              >
+                <span class="aflow-dot" />
+                <span class="aflow-lbl">{{ it.row.label }}</span>
+                <span v-if="it.row.retried" class="aflow-retried" title="同名工具已在后续重试">
+                  <UiIcon name="retry" :size="10" />
+                  已重试
+                </span>
+                <span v-if="it.row.dur" class="aflow-dur">{{ it.row.dur }}</span>
+                <span class="aflow-caret" :class="{ open: isOpen(it.entry) }">▸</span>
+              </button>
+              <ChatToolDetail
+                v-if="detailVisible(it.entry) && it.entry"
+                class="aflow-detail"
+                :entry="it.entry"
+                @preview="emit('preview', $event)"
+              />
             </div>
-            <!-- 并行批:同批并发工具横排 chips -->
-            <div v-else-if="it.t === 'par'" class="aflow-node">
-              <span class="aflow-dot dot-par" />
-              <span class="aflow-par-tag">并发</span>
-              <span v-for="(r, qi) in it.rows" :key="qi" class="aflow-chip" :class="r.state">
-                {{ r.label }}
-                <b v-if="r.dur" class="aflow-dur">{{ r.dur }}</b>
-                <UiIcon v-if="r.retried" name="retry" :size="9" />
-              </span>
+            <!-- 并行批:同批并发工具横排 chips,逐 chip 展开明细 -->
+            <div v-else-if="it.t === 'par'" class="aflow-node aflow-par">
+              <div class="aflow-par-row">
+                <span class="aflow-dot dot-par" />
+                <span class="aflow-par-tag">并发</span>
+                <button
+                  v-for="(r, qi) in it.rows"
+                  :key="qi"
+                  type="button"
+                  class="aflow-chip"
+                  :class="[r.state, { 'is-open': isOpen(it.entries[qi]) }]"
+                  :title="isOpen(it.entries[qi]) ? '收起调用明细' : '展开调用明细'"
+                  @click="toggleNode(it.entries[qi])"
+                >
+                  {{ r.label }}
+                  <b v-if="r.dur" class="aflow-dur">{{ r.dur }}</b>
+                  <UiIcon v-if="r.retried" name="retry" :size="9" />
+                </button>
+              </div>
+              <template v-for="(e, qi) in it.entries" :key="`det-${qi}`">
+                <ChatToolDetail
+                  v-if="detailVisible(e) && e"
+                  class="aflow-detail"
+                  :entry="e"
+                  @preview="emit('preview', $event)"
+                />
+              </template>
             </div>
-            <!-- 子代理分支节点(默认折叠,点击展开内嵌子步骤) -->
+            <!-- 子代理分支节点(点击展开迷你时间线 + 结果明细) -->
             <div v-else class="aflow-node aflow-sub" :class="it.row.state">
-              <button type="button" class="aflow-sub-head" @click="toggleSub(pi, ni)">
-                <span class="aflow-caret" :class="{ open: subOpen.has(`${pi}:${ni}`) }">▸</span>
+              <button type="button" class="aflow-sub-head" @click="toggleNode(it.entry)">
+                <span class="aflow-caret" :class="{ open: isOpen(it.entry) }">▸</span>
                 <UiIcon name="branch" :size="11" />
                 <span class="aflow-lbl">派生子代理</span>
                 <span class="aflow-task" :title="it.task">{{ it.task }}</span>
@@ -162,13 +242,12 @@ function toggleSub(pi: number, ni: number) {
                 <span v-if="it.row.dur" class="aflow-dur">{{ it.row.dur }}</span>
               </button>
               <p v-if="it.conclusion" class="aflow-sub-concl">{{ it.conclusion }}</p>
-              <div v-if="subOpen.has(`${pi}:${ni}`)" class="aflow-inner">
-                <div v-for="(r, ii) in it.innerRows" :key="ii" class="aflow-node" :class="r.state">
-                  <span class="aflow-dot" />
-                  <span class="aflow-lbl">{{ r.label }}</span>
-                  <span v-if="r.dur" class="aflow-dur">{{ r.dur }}</span>
-                </div>
-              </div>
+              <ChatToolDetail
+                v-if="detailVisible(it.entry) && it.entry"
+                class="aflow-detail aflow-sub-detail"
+                :entry="it.entry"
+                @preview="emit('preview', $event)"
+              />
             </div>
           </template>
         </div>
@@ -207,7 +286,10 @@ function toggleSub(pi: number, ni: number) {
 }
 
 .aflow-summary:focus-visible,
-.aflow-sub-head:focus-visible {
+.aflow-node-btn:focus-visible,
+.aflow-chip:focus-visible,
+.aflow-sub-head:focus-visible,
+.aflow-toolbar-btn:focus-visible {
   outline: 2px solid var(--color-accent);
   outline-offset: 2px;
 }
@@ -219,6 +301,35 @@ function toggleSub(pi: number, ni: number) {
 
 .aflow-caret.open {
   transform: rotate(90deg);
+}
+
+/* ---- 节点全部展开/折叠工具行 ---- */
+.aflow-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  font-family: var(--font-sans);
+  font-size: var(--text-xs);
+  color: var(--color-text2);
+}
+
+.aflow-toolbar-btn {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--color-text2);
+  font-family: inherit;
+  font-size: inherit;
+  cursor: pointer;
+}
+
+.aflow-toolbar-btn:hover {
+  color: var(--color-accent);
+}
+
+.aflow-toolbar-sep {
+  color: var(--color-text2);
+  opacity: 0.6;
 }
 
 /* ---- 阶段(纵向分组,引导线在步骤列上) ---- */
@@ -280,6 +391,36 @@ function toggleSub(pi: number, ni: number) {
   font-family: var(--font-pixel); /* 步骤标签 = 骨架 → 像素 */
   font-size: var(--text-sm);
   color: var(--color-text2);
+}
+
+/* 主干步骤整行可点(button 复位,视觉与原步骤行一致) */
+.aflow-node-btn {
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.aflow-node-btn:hover {
+  color: var(--color-accent);
+}
+
+/* 展开态节点:标签走 accent 提示「当前看的是这条的明细」 */
+.aflow-node-btn.is-open .aflow-lbl {
+  color: var(--color-accent);
+}
+
+/* 节点明细:缩进对齐节点文字,与引导线区隔 */
+.aflow-node-wrap {
+  min-width: 0;
+}
+
+.aflow-detail {
+  margin: var(--space-xs) 0 0 var(--space-sm);
 }
 
 .aflow-dot {
@@ -351,6 +492,18 @@ function toggleSub(pi: number, ni: number) {
 }
 
 /* ---- 并行批:引导线分叉点(中性灰)+ 横排小 chips ---- */
+.aflow-par {
+  display: block;
+}
+
+.aflow-par-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
 .dot-par {
   background: var(--color-line-strong);
 }
@@ -377,7 +530,16 @@ function toggleSub(pi: number, ni: number) {
   color: var(--color-text);
   font-family: var(--font-pixel);
   font-size: var(--text-xs);
+  cursor: pointer;
   white-space: nowrap;
+}
+
+.aflow-chip:hover {
+  border-color: var(--color-accent);
+}
+
+.aflow-chip.is-open {
+  border-color: var(--color-accent);
 }
 
 .aflow-chip.is-fail {
@@ -392,7 +554,7 @@ function toggleSub(pi: number, ni: number) {
 
 /* ---- 子代理分支节点 ---- */
 .aflow-sub {
-  display: block; /* 头部按钮 + 结论 + 内嵌子步骤纵向堆叠 */
+  display: block; /* 头部按钮 + 结论 + 明细纵向堆叠 */
 }
 
 .aflow-sub-head {
@@ -439,13 +601,8 @@ function toggleSub(pi: number, ni: number) {
   line-height: 1.5;
 }
 
-/* 内嵌子步骤:再缩进一层,同样走引导线视觉 */
-.aflow-inner {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-xs);
-  margin: var(--space-xs) 0 0 var(--space-lg);
-  padding-left: var(--space-md);
-  border-left: 1px dashed var(--color-border);
+/* 子代理明细:比主干多一层缩进,与结论对齐 */
+.aflow-sub-detail {
+  margin-left: var(--space-lg);
 }
 </style>

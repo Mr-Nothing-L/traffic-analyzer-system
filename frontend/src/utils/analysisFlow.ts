@@ -24,6 +24,9 @@ import { thinkSummaryLine, toolLabel } from './chatDisplay'
 
 /** 主干步骤/并行批内步骤/子代理内嵌子步骤共用同一形状。 */
 export interface FlowStep {
+  /** 顶层步骤的来源工具条目(链路节点展开明细、折叠态记忆按它定位);
+   * 子代理内嵌子步骤(children 工具)没有条目,为 undefined。 */
+  entry?: AgentToolEntry
   /** 工具原名(draw_boxes 等)。 */
   name: string
   /** 中文标签(toolLabel 格式「中文名(原名)」)。 */
@@ -44,6 +47,8 @@ export interface FlowParallel {
 
 /** spawn_subagent 内嵌子步骤树(一层,分支节点,默认折叠)。 */
 export interface FlowSubagent {
+  /** 来源 spawn_subagent 工具条目(节点展开明细渲染用)。 */
+  entry: AgentToolEntry
   /** 任务描述(args.task,截断展示)。 */
   task: string
   /** 类型上保留 null(无数据占位);运行时恒为 boolean,状态同 FlowStep 约定。 */
@@ -252,6 +257,7 @@ export function buildAnalysisFlow(
     if (te.name === 'spawn_subagent') {
       wraps.push({
         node: {
+          entry: te,
           task: subagentTask(te.args),
           ok: te.done ? !te.isError : false,
           durationMs: durOf(slot.idx),
@@ -265,6 +271,7 @@ export function buildAnalysisFlow(
       continue
     }
     const step: FlowStep = {
+      entry: te,
       name: te.name,
       label: toolLabel(te.name),
       ok: te.done ? !te.isError : false,

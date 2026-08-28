@@ -12,12 +12,18 @@ const props = defineProps<{
   entry: AgentEntry
   /** 冻结态分析链路(ChatView 按检测条目 id 预推导);缺省不显示。 */
   flow?: AnalysisFlow | null
+  /** 冻结态链路整体展开覆写(SSR 测试直渲染用);缺省用流程图内部点击状态。 */
+  open?: boolean
+  /** 链路节点展开态(按工具条目 id,ChatView 持有,会话内记忆);透传给流程图。 */
+  expandedTools?: Set<string>
 }>()
 
 const entry = computed(() => props.entry as AgentDetectionEntry)
 
 const emit = defineEmits<{
   preview: [url: string]
+  'toggle-tool': [id: string]
+  'toggle-all-tools': [ids: string[], open: boolean]
 }>()
 
 function asPayload(data: unknown): DetectionPayload | null {
@@ -41,8 +47,16 @@ const payload = computed(() => asPayload(entry.value.data))
                     class="detection-badge abnormal"
                   >检出事件</span>
                 </div>
-                <!-- 分析链路流程图(W6 冻结态):默认折叠一行摘要,点击展开阶段树 -->
-                <ChatAnalysisFlow v-if="flow" :flow="flow" />
+                <!-- 分析链路流程图(W6 冻结态):默认折叠一行摘要,点击展开阶段树;
+                     节点即工具条目,展开态/明细事件透传给 ChatView 统一记忆 -->
+                <ChatAnalysisFlow
+                  v-if="flow"
+                  :flow="flow"
+                  :open="open"
+                  :expanded-tools="expandedTools"
+                  @toggle-tool="emit('toggle-tool', $event)"
+                  @toggle-all-tools="(ids, open) => emit('toggle-all-tools', ids, open)"
+                />
                 <div
                   v-if="payload!.events?.some((ev) => ev.detected)"
                   class="detection-events"

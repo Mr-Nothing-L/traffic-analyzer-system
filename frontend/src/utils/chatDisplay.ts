@@ -32,6 +32,24 @@ export function toolLabel(name: string): string {
   return label ? `${label}(${name})` : name
 }
 
+/** 时间线渲染条目:剔除 tool 条目——工具调用统一走分析链路节点展示
+ * (链路节点即工具条目,展开看明细),审批/系统/检测等条目原位保留。 */
+export function timelineEntries<T extends { kind: string }>(entries: readonly T[]): T[] {
+  return entries.filter((e) => e.kind !== 'tool')
+}
+
+/** 本轮真实起点:最后一条 user 条目的 at(轮次秒表从提问时刻起算,切出再切回
+ * 正在分析的会话不重计);无 user 条目或缺 at(旧数据)返回 null,调用方回退。 */
+export function lastUserEntryAt(
+  entries: ReadonlyArray<{ kind: string; at?: number }>,
+): number | null {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i]!
+    if (e.kind === 'user' && typeof e.at === 'number') return e.at
+  }
+  return null
+}
+
 /** 复制文本到剪贴板:优先异步 Clipboard API;非安全上下文(如局域网 IP
  * 直连,navigator.clipboard 为 undefined)回退隐藏 textarea + execCommand('copy')。
  * 失败抛错,成功/失败提示由调用方负责。 */

@@ -28,6 +28,7 @@ function tool(
     done?: boolean;
     args?: string;
     result?: string;
+    images?: string[];
   } = {},
 ): AgentEntry {
   seq += 1;
@@ -38,7 +39,7 @@ function tool(
     name,
     args: opts.args ?? '{}',
     result: opts.result ?? '',
-    images: [],
+    images: opts.images ?? [],
     hasVideo: false,
     children: [],
     isError: opts.isError === true,
@@ -199,6 +200,113 @@ describe('ChatAnalysisFlow(实时态)', () => {
   });
 });
 
+describe('ChatAnalysisFlow(链路节点即工具条目,折叠/展开)', () => {
+  /** 带真实结果的取证链:抽帧有图,track_suspects 有取证产物行。 */
+  function forensicEntries(): AgentEntry[] {
+    return [
+      user('检测这段视频', 100_000),
+      assistant('先看元信息', 101_000),
+      tool('video_meta', 102_000),
+      tool('extract_frames', 120_000, {
+        result: '抽帧完成:共 2 帧',
+        images: ['data:image/jpeg;base64,WFg='],
+      }),
+      tool('track_suspects', 138_000, {
+        result:
+          '已跟踪目标轨迹。\n取证产物已保存:目录 .agent/tracks/E1/T;' +
+          '轨迹片段 .agent/tracks/E1/T/track_overlay.mp4;' +
+          '数据表 .agent/tracks/E1/T/tracks.csv(供用户复核与引用)',
+      }),
+      tool('submit_detection', 190_000),
+      detection(196_000),
+    ];
+  }
+
+  const toolId = (entries: AgentEntry[], name: string) =>
+    entries.find((e) => e.kind === 'tool' && e.name === name)!.id;
+
+  it('节点默认折叠:展开阶段树后只有 label/耗时/状态,不渲染结果明细', async () => {
+    const entries = forensicEntries();
+    const flow = buildAnalysisFlow(entries, DET_ID(entries));
+    const html = await renderHtml(flow, { open: true });
+    expect(html).toContain('抽帧(extract_frames)'); // 折叠态仍可见 label
+    expect(html).not.toContain('抽帧完成:共 2 帧'); // 结果文本
+    expect(html).not.toContain('data:image/jpeg;base64,WFg='); // 结果图片
+    expect(html).not.toContain('tool-track-video'); // 取证视频
+  });
+
+  it('expandedTools 命中节点:渲染结果文本 + 图片(preview 走画廊)', async () => {
+    const entries = forensicEntries();
+    const flow = buildAnalysisFlow(entries, DET_ID(entries));
+    const html = await renderHtml(flow, {
+      open: true,
+      expandedTools: new Set([toolId(entries, 'extract_frames')]),
+    });
+    expect(html).toContain('抽帧完成:共 2 帧');
+    expect(html).toContain('tool-imgs');
+    expect(html).toContain('data:image/jpeg;base64,WFg=');
+    // 未命中的节点仍折叠
+    expect(html).not.toContain('tool-track-video');
+  });
+
+  it('track_suspects 节点展开:取证叠加视频与可复制目录路径可用', async () => {
+    const entries = forensicEntries();
+    const flow = buildAnalysisFlow(entries, DET_ID(entries));
+    const html = await renderHtml(flow, {
+      open: true,
+      expandedTools: new Set([toolId(entries, 'track_suspects')]),
+    });
+    expect(html).toContain('tool-track-video');
+    expect(html).toContain(
+      `/api/workspace/stream?path=${encodeURIComponent('.agent/tracks/E1/T/track_overlay.mp4')}`,
+    );
+    expect(html).toContain('tool-artifacts-dir');
+  });
+
+  it('子代理节点展开:迷你时间线(think 块/子工具行)随明细渲染', async () => {
+    seq += 1;
+    const entries: AgentEntry[] = [
+      user('q', 1000),
+      {
+        id: `t${seq}`,
+        kind: 'tool',
+        callId: 'call-sub',
+        name: 'spawn_subagent',
+        args: JSON.stringify({ task: '核对画面细节' }),
+        result: '结论:检出违停。',
+        images: [],
+        hasVideo: false,
+        children: [
+          { kind: 'think', text: '子代理思考中' },
+          { kind: 'tool', id: 'c1', name: 'read_file', args: '{}', done: true },
+        ],
+        isError: false,
+        done: true,
+        at: 2000,
+      },
+      detection(4000),
+    ];
+    const flow = buildAnalysisFlow(entries, DET_ID(entries));
+    const collapsed = await renderHtml(flow, { open: true });
+    expect(collapsed).not.toContain('子代理思考');
+    const expandedHtml = await renderHtml(flow, {
+      open: true,
+      expandedTools: new Set([toolId(entries, 'spawn_subagent')]),
+    });
+    // 明细里:子代理迷你时间线折叠头 + 子工具行;think 文本仍在其二级折叠内
+    expect(expandedHtml).toContain('子代理思考');
+    expect(expandedHtml).toContain('读文件(read_file)');
+  });
+
+  it('面板提供「全部展开/全部折叠」工具行', async () => {
+    const entries = forensicEntries();
+    const flow = buildAnalysisFlow(entries, DET_ID(entries));
+    const html = await renderHtml(flow, { open: true });
+    expect(html).toContain('全部展开');
+    expect(html).toContain('全部折叠');
+  });
+});
+
 describe('ChatEntryDetection 集成(冻结态接线冒烟)', () => {
   const detData = {
     normal: false,
@@ -238,5 +346,29 @@ describe('ChatEntryDetection 集成(冻结态接线冒烟)', () => {
     const html = await renderToString(app);
     expect(html).not.toContain('aflow-summary');
     expect(html).toContain('检测结果');
+  });
+
+  it('expandedTools 透传:冻结态检测卡内同样可展开节点明细', async () => {
+    const entries: AgentEntry[] = [
+      user('q', 1000),
+      tool('extract_frames', 2000, { result: '抽帧完成:共 2 帧' }),
+      detection(4000),
+    ];
+    const flow = buildAnalysisFlow(entries, DET_ID(entries));
+    const tid = entries.find((e) => e.kind === 'tool')!.id;
+    const render = (expandedTools?: Set<string>) =>
+      renderToString(
+        createSSRApp({
+          render: () =>
+            h(ChatEntryDetection, {
+              entry: { id: DET_ID(entries), kind: 'detection', data: detData },
+              flow,
+              open: true,
+              ...(expandedTools ? { expandedTools } : {}),
+            }),
+        }),
+      );
+    expect(await render()).not.toContain('抽帧完成:共 2 帧'); // 默认折叠
+    expect(await render(new Set([tid]))).toContain('抽帧完成:共 2 帧'); // 展开明细
   });
 });

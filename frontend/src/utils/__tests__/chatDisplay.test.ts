@@ -9,8 +9,10 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   copyText,
+  lastUserEntryAt,
   shouldSendOnEnter,
   thinkSummaryLine,
+  timelineEntries,
   toolErrorSummary,
   toolLabel,
   trackSuspectsView,
@@ -53,6 +55,53 @@ describe('toolLabel(工具名中文映射)', () => {
   it('load_video / spawn_subagent 中文名', () => {
     expect(toolLabel('load_video')).toBe('加载视频(load_video)');
     expect(toolLabel('spawn_subagent')).toBe('派生子代理(spawn_subagent)');
+  });
+});
+
+describe('timelineEntries(时间线条目过滤,链路节点即工具条目)', () => {
+  it('剔除 tool 条目,其余(user/assistant/approval/detection/system)按原序保留', () => {
+    const entries = [
+      { id: 'u1', kind: 'user' },
+      { id: 't1', kind: 'tool' },
+      { id: 't2', kind: 'tool' },
+      { id: 'a1', kind: 'assistant' },
+      { id: 'p1', kind: 'approval' },
+      { id: 'd1', kind: 'detection' },
+      { id: 's1', kind: 'system' },
+    ];
+    expect(timelineEntries(entries).map((e) => e.id)).toEqual(['u1', 'a1', 'p1', 'd1', 's1']);
+  });
+
+  it('没有 tool 条目时原样返回(纯问答轮次)', () => {
+    const entries = [{ id: 'u1', kind: 'user' }, { id: 'a1', kind: 'assistant' }];
+    expect(timelineEntries(entries)).toEqual(entries);
+  });
+});
+
+describe('lastUserEntryAt(轮次秒表起点)', () => {
+  it('取最后一条 user 条目的 at(其后的 assistant/tool 不影响起点)', () => {
+    const entries = [
+      { kind: 'user', at: 1000 },
+      { kind: 'assistant', at: 2000 },
+      { kind: 'tool', at: 3000 },
+      { kind: 'assistant', at: 4000 },
+    ];
+    expect(lastUserEntryAt(entries)).toBe(1000);
+  });
+
+  it('新一轮提问(含插话)刷新起点', () => {
+    const entries = [
+      { kind: 'user', at: 1000 },
+      { kind: 'assistant', at: 2000 },
+      { kind: 'user', at: 9000 },
+    ];
+    expect(lastUserEntryAt(entries)).toBe(9000);
+  });
+
+  it('无 user 条目、或 user 缺 at(旧数据)返回 null', () => {
+    expect(lastUserEntryAt([{ kind: 'assistant', at: 1 }])).toBeNull();
+    expect(lastUserEntryAt([{ kind: 'user' }, { kind: 'assistant', at: 2 }])).toBeNull();
+    expect(lastUserEntryAt([])).toBeNull();
   });
 });
 

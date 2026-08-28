@@ -298,6 +298,131 @@ describe('历史工具条目图片提取', () => {
   });
 });
 
+// 媒体引用(media ref)渲染支持:服务端把工具输出/检测载荷里的图片 dataURL
+// 落盘为内容寻址文件后,条目只携带 /sessions/{id}/media/{hash} 引用 URL;
+// 前端在 store 层统一加 /api/agent 代理前缀,旧 dataURL 原样混排。
+describe('媒体引用 URL 解析', () => {
+  const REF = '/sessions/s1/media/'.concat('a'.repeat(64), '.jpg');
+  const REF_URL = `/api/agent${REF}`;
+
+  it('history 的 tool 条目:image_url 引用加 /api/agent 前缀,与 dataURL 混排正常', async () => {
+    const { agent } = await load();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (String(url).endsWith('/history')) {
+          return new Response(
+            JSON.stringify({
+              entries: [
+                {
+                  kind: 'tool',
+                  toolCallId: 'c1',
+                  name: 'extract_frames',
+                  arguments: '{}',
+                  output: [
+                    { type: 'text', text: '帧图:' },
+                    { type: 'image_url', imageUrl: { url: REF } },
+                    { type: 'image_url', imageUrl: { url: 'data:image/jpeg;base64,AAA' } },
+                  ],
+                  isError: false,
+                  at: 1,
+                },
+              ],
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        return new Response('{}', { status: 200 });
+      }),
+    );
+    await agent.selectSession('s1');
+    vi.unstubAllGlobals();
+    const tool = agent.entries[0];
+    if (tool.kind !== 'tool') throw new Error('expected tool entry');
+    expect(tool.images).toEqual([REF_URL, 'data:image/jpeg;base64,AAA']);
+  });
+
+  it('SSE tool_result 的 image_url 引用同样加前缀', async () => {
+    const { agent } = await load();
+    agent.sessionId = 's1';
+    stubChatStream([
+      { type: 'tool_call_start', call: { id: 'c1', name: 'draw_boxes', arguments: '{}' } },
+      {
+        type: 'tool_result',
+        toolCallId: 'c1',
+        name: 'draw_boxes',
+        result: {
+          output: [
+            { type: 'text', text: '标注完成:' },
+            { type: 'image_url', imageUrl: { url: REF } },
+          ],
+        },
+        isError: false,
+      },
+      { type: 'done', reason: 'stop_turn' },
+    ]);
+    await agent.send('画框');
+    vi.unstubAllGlobals();
+
+    const tool = agent.entries[1];
+    if (tool.kind !== 'tool') throw new Error('expected tool entry');
+    expect(tool.images).toEqual([REF_URL]);
+  });
+
+  it('detection 事件/历史条目的 annotated_image 引用加前缀;dataURL 原样', async () => {
+    const { agent } = await load();
+    agent.sessionId = 's1';
+    const refPayload = {
+      events: [{ event_id: 3, detected: true, reasoning: 'r', evidence_frames: [1], annotated_image: REF }],
+    };
+    stubChatStream([
+      { type: 'detection', data: refPayload },
+      { type: 'done', reason: 'stop_turn' },
+    ]);
+    await agent.send('检测');
+    vi.unstubAllGlobals();
+
+    const det = agent.entries[1];
+    if (det.kind !== 'detection') throw new Error('expected detection entry');
+    const events = (det.data as { events: Array<{ annotated_image?: string }> }).events;
+    expect(events[0]?.annotated_image).toBe(REF_URL);
+
+    // 历史重载路径(mapHistoryEntry)同一转换;dataURL(旧条目)原样。
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (String(url).endsWith('/history')) {
+          return new Response(
+            JSON.stringify({
+              entries: [
+                {
+                  kind: 'detection',
+                  data: {
+                    events: [
+                      { event_id: 3, annotated_image: REF },
+                      { event_id: 5, annotated_image: 'data:image/jpeg;base64,WFg=' },
+                    ],
+                  },
+                  at: 1,
+                },
+              ],
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        return new Response('{}', { status: 200 });
+      }),
+    );
+    await agent.selectSession('s2');
+    vi.unstubAllGlobals();
+    const det2 = agent.entries[0];
+    if (det2.kind !== 'detection') throw new Error('expected detection entry');
+    const events2 = (det2.data as { events: Array<{ annotated_image?: string }> }).events;
+    expect(events2[0]?.annotated_image).toBe(REF_URL);
+    expect(events2[1]?.annotated_image).toBe('data:image/jpeg;base64,WFg=');
+  });
+});
+
 // SSE 流式事件测试:fetch 垫一个按 \n\n 分块的 data: 行流,驱动 send 全流程。
 function sseResponse(events: unknown[]): Response {
   const body = events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join('');
@@ -742,6 +867,58 @@ describe('cancel 显式终止', () => {
     const calls = eventCalls;
     await vi.advanceTimersByTimeAsync(20000);
     expect(eventCalls).toBe(calls); // 收尾后轮询已停
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+});
+
+// D 任务回归:恢复链路按 seq 去重——恢复探测与 5s 自动轮询连续拉取/重叠返回
+// 同一段落盘 events(水位回退重发、手动刷新与自动轮询并发的历史形态)时,
+// 同一条目(detection/收尾 assistant 等)只入时间线一次,「最后结果出现多次」不再发生。
+describe('恢复轮询去重(同一段 events 只入时间线一次)', () => {
+  it('恢复探测后连续两次轮询返回同一段 events:条目不重复追加', async () => {
+    vi.useFakeTimers();
+    const { agent } = await load();
+    let eventCalls = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: unknown) => {
+        const url = String(input);
+        if (url.endsWith('/history')) {
+          return historyResponse([{ kind: 'user', text: '首轮', images: [], at: 1 }]);
+        }
+        if (url.includes('/events')) {
+          eventCalls += 1;
+          // 恶劣情况:后端每次都返回同一段(忽略 fromSeq),全靠前端按 seq 去重
+          return jsonResponse({
+            events: [
+              { seq: 2, entry: { kind: 'assistant', text: '恢复的回答', think: '', at: 2 } },
+              { seq: 3, entry: { kind: 'detection', data: { normal: true }, at: 3 } },
+            ],
+            inProgress: eventCalls < 3, // 第三次拉取才收尾
+          });
+        }
+        return jsonResponse({ sessions: [] });
+      }),
+    );
+
+    // 第 1 次拉取(恢复探测):补齐 assistant + detection,进入恢复态
+    await agent.selectSession('s1');
+    expect(agent.entries).toHaveLength(3);
+    expect(agent.entries.filter((e) => e.kind === 'detection')).toHaveLength(1);
+    expect(agent.recovering).toBe(true);
+
+    // 第 2 次拉取(5s 轮询):同一段重放 → 整体跳过,不重复
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(agent.entries).toHaveLength(3);
+    expect(agent.recovering).toBe(true);
+
+    // 第 3 次拉取:inProgress=false 收尾,条目仍不重复
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(agent.entries).toHaveLength(3);
+    expect(agent.entries.map((e) => e.kind)).toEqual(['user', 'assistant', 'detection']);
+    expect(agent.status).toBe('done');
+    expect(agent.recovering).toBe(false);
     vi.unstubAllGlobals();
     vi.useRealTimers();
   });

@@ -3,18 +3,21 @@
  * 左侧历史会话栏(按工作区分组的卡片纵列:每张卡片 = 卡片头(工作区名 + 会话数,
  * 像素字体)+ 会话条目列表;当前工作区卡置顶恒展开,其他工作区/未分组卡默认折叠;
  * 条目 title + 相对时间 / 点击切换(跨工作区先切工作区)重建时间线 /
- * 删除(optimistic,点击即删)/ 新建)
- * + 右侧对话卡:顶条(状态 chip)/ 时间线(user 气泡(图片附件 + 视频预览或路径 chip)/
- * assistant 流式气泡(思考折叠(运行中末行横向跟随/结束后首行)+ 增量 markdown
- * (流式期间冻结已完成块,结束后一次性完整渲染,见 components/chat/MdStream))/ 
- * 消息底部行(HH:MM + hover/focus-within 显现的复制(成功变 ✓ 一秒);user 另有撤回,
- * 调 recall API 从时间线移除该条及其后全部,进行中禁用)/ 工具气泡(参数摘要 + 结果折叠
- * (文本 + 图片缩略图,点击进画廊),失败时折叠态直接显示错误首行,标红)/
- * 审批(approval_request 到达时 composer 输入区整体替换为审批面板
+ * 删除(optimistic,点击即删)/ 新建(运行中也可点:断连不杀服务端轮次,
+ * 切回时恢复轮询续跑))+ 右侧对话卡:顶条(状态 chip)/ 时间线(user 气泡(图片附件
+ * + 视频预览或路径 chip)/ assistant 流式气泡(思考折叠(运行中末行横向跟随/
+ * 结束后首行)+ 增量 markdown (流式期间冻结已完成块,结束后一次性完整渲染,
+ * 见 components/chat/MdStream))/ 消息底部行(HH:MM + hover/focus-within 显现的复制
+ * (成功变 ✓ 一秒);user 另有撤回,调 recall API 从时间线移除该条及其后全部,
+ * 进行中禁用)/ 审批(approval_request 到达时 composer 输入区整体替换为审批面板
  * (拒绝/批准一次/本会话都批准),时间线里的审批卡只读留档;历史未决显示「已失效」)/
- * 检测结果卡(11 位编码等宽高亮 +
- * 检出事件(逐事件标注图进画廊,无框/画框失败显示降级小字)+ markdown 报告))/ 失败条(错误 + 重试)/
- * 恢复条(刷新/断网后服务端轮次仍在跑:常驻「分析仍在进行中」+ 刷新进度,5s 轮询补齐)/
+ * 检测结果卡(11 位编码等宽高亮 + 检出事件(逐事件标注图进画廊,无框/画框失败显示
+ * 降级小字)+ markdown 报告))/ 失败条(错误 + 重试)/
+ * 恢复条(刷新/断网后服务端轮次仍在跑:常驻「分析仍在进行中」,5s 自动轮询补齐)/
+ * 工具调用不在时间线单独渲染:链路节点即工具条目(实时态底部生长的分析链路树与
+ * 检测卡内冻结链路共用 ChatAnalysisFlow,节点默认折叠 label+耗时+状态,点击展开
+ * ChatToolDetail 明细(结果文本/图片/子代理时间线/取证视频),展开态按条目 id
+ * 会话内记忆,面板有全部展开/折叠;纯问答轮次无工具节点不显示面板)。
  * composer 圆角盒(三行:附件预览行(图片缩略图 +
  * 视频块,视频同一时刻最多一个,可移除)/ 无边框 textarea(自动增高)/ 底部功能行(左:「+」
  * 上传图片或视频 + 权限模式选择器(逐条确认/自动通过/完全自主);右:压缩按钮 + 上下文圆环
@@ -22,9 +25,9 @@
  * 视频粘贴/选择/拖拽走 /api/agent/uploads 落盘拿 path;Enter 发送 / Shift+Enter 换行,
  * 输入法合成态(isComposing)中的 Enter 是选词上屏,不发送)。
  * 进行中输入框不禁用:发送即 /steer 插话(气泡带「已插话」标记),停止走 /cancel 显式终止。
- * 工作区视频(无 src)气泡内按 path 确定性推 /api/workspace/stream 小播放器预览;
- * 工具条目为思考过程同款弱化样式(无卡片,工具名走中文映射),点击展开结果。
- * 对话进行中时间线底部常驻一行「分析中…」,超过 15s 追加秒表。
+ * 工作区视频(无 src)气泡内按 path 确定性推 /api/workspace/stream 小播放器预览。
+ * 对话进行中时间线底部常驻一行「分析中…」,超过 15s 追加秒表(从本轮 user 条目
+ * 的 at 起算,切出再切回不重计)。
  * 图片画廊:点击气泡图放大,左右切换(按钮/键盘 ←→)。
  * 状态在 stores/agentchat.ts,组件只接线。 */
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
@@ -36,14 +39,13 @@ import { ApiError } from '../api/client'
 import { mdToHtml } from '../utils/markdown'
 import { groupSessionsByWorkspace, wsBasename } from '../utils/sessionGroups'
 import type { SessionGroup } from '../utils/sessionGroups'
-import { copyText, shouldSendOnEnter, toolLabel, workspaceVideoSrc } from '../utils/chatDisplay'
+import { copyText, lastUserEntryAt, shouldSendOnEnter, timelineEntries, toolLabel, workspaceVideoSrc } from '../utils/chatDisplay'
 import { buildAnalysisFlow } from '../utils/analysisFlow'
 import type { AnalysisFlow } from '../utils/analysisFlow'
 import UiIcon from '../components/UiIcon.vue'
 import ContextRing from '../components/chat/ContextRing.vue'
 import ChatEntryUser from '../components/chat/ChatEntryUser.vue'
 import ChatEntryAssistant from '../components/chat/ChatEntryAssistant.vue'
-import ChatEntryTool from '../components/chat/ChatEntryTool.vue'
 import ChatEntryApproval from '../components/chat/ChatEntryApproval.vue'
 import ChatEntrySystem from '../components/chat/ChatEntrySystem.vue'
 import ChatEntryDetection from '../components/chat/ChatEntryDetection.vue'
@@ -188,17 +190,31 @@ async function onRecall(e: AgentUserEntry) {
   }
 }
 
-/* ---- 折叠状态:思考过程 / 工具结果 / 子代理思考,均按条目 id 标记,默认收起;
+/* ---- 折叠状态:思考过程按条目 id 标记,默认收起;
  * id 随条目全局唯一且随会话重建,切换/新建会话后旧 id 自然失效(不会串到新
  * 会话的条目上,无需手工重置;撤回/换会话后残留 id 无人引用)。 ---- */
 const thinkOpen = reactive(new Set<string>())
-const toolOpen = reactive(new Set<string>())
-/** 子代理思考折叠:`${工具条目 id}:${child 下标}`。 */
-const subThinkOpen = reactive(new Set<string>())
 function toggle<T>(set: Set<T>, key: T) {
   if (set.has(key)) set.delete(key)
   else set.add(key)
 }
+
+/* ---- 链路节点展开态(链路节点即工具条目):按工具条目 id 记忆,会话内共享
+ * 同一份(实时态与各检测卡冻结态);折叠只记 id,明细在节点展开时渲染。 ---- */
+const toolNodesOpen = reactive(new Set<string>())
+function toggleToolNode(id: string) {
+  toggle(toolNodesOpen, id)
+}
+/** 全部展开/折叠(面板工具行):对链路内全部工具节点批量置开/关。 */
+function setAllToolNodes(ids: string[], open: boolean) {
+  for (const id of ids) {
+    if (open) toolNodesOpen.add(id)
+    else toolNodesOpen.delete(id)
+  }
+}
+
+/** 时间线渲染条目:tool 条目不单独渲染(链路节点即工具条目)。 */
+const timeline = computed(() => timelineEntries(agent.entries))
 
 /* ---- 流式渲染态:最后一个 assistant 条目在对话进行中走增量渲染;
  * 思考折叠行仅在「思考仍在流入」(该条目还没有正文)时取末行并横向跟随 ---- */
@@ -442,16 +458,18 @@ function scrollToBottom() {
 
 /* ---- Turn 级 loading:对话进行中(connecting/running,等审批不算——composer 已被
  * 审批面板接管)时间线底部常驻一行「分析中…」,超过 15s 追加秒表。
- * 只由 status 驱动,step 之间状态不变,行不闪烁。 ---- */
+ * 只由 status 驱动,step 之间状态不变,行不闪烁。
+ * 秒表起点 = 本轮真实起点(最后一条 user 条目的 at):切出再切回正在分析的会话
+ * (恢复轮询接上)不重计;user 条目缺 at(旧数据)回退 turnActive 翻真时刻。 ---- */
 const turnActive = computed(
   () => agent.status === 'connecting' || agent.status === 'running',
 )
-const busySince = ref<number | null>(null)
+const activeSince = ref<number | null>(null)
 const nowTick = ref(0)
 let tickTimer: ReturnType<typeof setInterval> | null = null
 watch(turnActive, (active) => {
   if (active) {
-    busySince.value = Date.now()
+    if (activeSince.value === null) activeSince.value = Date.now()
     nowTick.value = Date.now()
     if (tickTimer === null) {
       tickTimer = setInterval(() => {
@@ -459,7 +477,7 @@ watch(turnActive, (active) => {
       }, 1000)
     }
   } else {
-    busySince.value = null
+    activeSince.value = null
     if (tickTimer !== null) {
       clearInterval(tickTimer)
       tickTimer = null
@@ -467,11 +485,12 @@ watch(turnActive, (active) => {
   }
 })
 /** 已进行秒数(超过 15s 才在时间线 loading 行展示)。 */
-const turnElapsedSec = computed(() =>
-  busySince.value === null
-    ? 0
-    : Math.max(0, Math.floor((nowTick.value - busySince.value) / 1000)),
-)
+const turnElapsedSec = computed(() => {
+  if (!turnActive.value) return 0
+  const start = lastUserEntryAt(agent.entries) ?? activeSince.value
+  if (start === null) return 0
+  return Math.max(0, Math.floor((nowTick.value - start) / 1000))
+})
 
 /* ---- 分析链路流程图(W6):实时态 + 冻结态共用 ChatAnalysisFlow ----
  * 实时态:分析中(connecting/running)在时间线底部生长完整树,当前步脉冲;
@@ -540,17 +559,8 @@ async function onStop() {
   }
 }
 
-/** 恢复条「刷新进度」:立即拉一次 events 补齐(平时 5s 自动轮询)。 */
-const refreshing = ref(false)
-async function onRefreshProgress() {
-  if (refreshing.value) return
-  refreshing.value = true
-  try {
-    await agent.refreshProgress()
-  } finally {
-    refreshing.value = false
-  }
-}
+/** 恢复条:只提示 + 依赖 5s 自动轮询补齐(手动刷新按钮已移除:恢复轮询与
+ * 自动轮询并发拉取曾把同一段落盘条目重复并入时间线,去重修复后不再需要手动入口)。 */
 
 async function onRetry() {
   await agent.retry()
@@ -649,7 +659,8 @@ onUnmounted(() => {
         <UiIcon name="chat" :size="14" />
         <span class="session-head-title">历史会话</span>
         <span class="session-spacer" />
-        <n-button size="small" :disabled="busy" @click="onNewSession">新建</n-button>
+        <!-- 新建:运行中也可点(断连不杀服务端轮次,切回时恢复轮询续跑) -->
+        <n-button size="small" @click="onNewSession">新建</n-button>
       </div>
       <n-scrollbar class="session-scroll">
         <div v-if="!sortedSessions.length" class="session-empty">暂无历史会话</div>
@@ -721,7 +732,7 @@ onUnmounted(() => {
           <div v-if="!agent.entries.length" class="chat-empty">
             输入问题或检测指令,如:检测这段视频的交通事件
           </div>
-          <template v-for="e in agent.entries" :key="e.id">
+          <template v-for="e in timeline" :key="e.id">
             <ChatEntryUser
               v-if="e.kind === 'user'"
               :entry="e"
@@ -743,26 +754,28 @@ onUnmounted(() => {
               @copy="onCopy(e.id, $event)"
               @toggle-think="toggle(thinkOpen, e.id)"
             />
-            <ChatEntryTool
-              v-else-if="e.kind === 'tool'"
-              :entry="e"
-              :tool-open="toolOpen.has(e.id)"
-              :sub-think-open="subThinkOpen"
-              @toggle-tool="toggle(toolOpen, e.id)"
-              @toggle-sub-think="toggle(subThinkOpen, $event)"
-              @preview="openPreview"
-            />
             <ChatEntryApproval v-else-if="e.kind === 'approval'" :entry="e" />
             <ChatEntrySystem v-else-if="e.kind === 'system'" :entry="e" />
             <ChatEntryDetection
               v-else-if="e.kind === 'detection'"
               :entry="e"
               :flow="detectionFlows.get(e.id)"
+              :expanded-tools="toolNodesOpen"
+              @toggle-tool="toggleToolNode"
+              @toggle-all-tools="setAllToolNodes"
               @preview="openPreview"
             />
           </template>
-          <!-- 分析链路实时态:分析中随 entries 生长的完整阶段树(W6,当前步脉冲) -->
-          <ChatAnalysisFlow v-if="liveFlow" :flow="liveFlow" realtime />
+          <!-- 分析链路实时态:分析中随 entries 生长的完整阶段树(W6,当前步脉冲);
+               节点即工具条目,展开态与检测卡冻结链路共享同一份记忆 -->
+          <ChatAnalysisFlow
+            v-if="liveFlow"
+            :flow="liveFlow"
+            realtime
+            :expanded-tools="toolNodesOpen"
+            @toggle-tool="toggleToolNode"
+            @toggle-all-tools="setAllToolNodes"
+          />
           <!-- Turn 级 loading:对话进行中常驻一行,超过 15s 追加秒表(仅 status 驱动,step 间不闪烁) -->
           <div v-if="turnActive" class="turn-loading">
             <span class="turn-loading-dot" />
@@ -774,12 +787,9 @@ onUnmounted(() => {
         </div>
       </n-scrollbar>
 
-      <!-- 恢复条:刷新/断网后服务端轮次仍在跑(本地无 SSE 流),5s 轮询补齐,可手动刷新 -->
+      <!-- 恢复条:刷新/断网后服务端轮次仍在跑(本地无 SSE 流),5s 自动轮询补齐 -->
       <div v-if="agent.recovering" class="resume-bar">
         <span class="resume-text">分析仍在进行中,每 5 秒自动补齐进度</span>
-        <n-button size="small" :disabled="refreshing" @click="onRefreshProgress">
-          {{ refreshing ? '刷新中…' : '刷新进度' }}
-        </n-button>
       </div>
 
       <!-- 失败条:错误信息 + 重试 -->

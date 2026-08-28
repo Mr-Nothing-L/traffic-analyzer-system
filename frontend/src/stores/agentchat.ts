@@ -126,7 +126,8 @@ export interface AgentToolEntry {
   /** call.arguments 原文(JSON 字符串)。 */
   args: string
   result: string
-  /** 工具输出中的图片(dataURL;extract_frames/draw_boxes 等返回的 image ContentPart)。 */
+  /** 工具输出中的图片(展示地址:dataURL 或 /api/agent 代理的 media 引用 URL;
+   * extract_frames/draw_boxes 等返回的 image ContentPart)。 */
   images: string[]
   /** 工具输出含 video part(load_video 整段视频直传);只显示静态提示,不做播放器。 */
   hasVideo: boolean
@@ -178,7 +179,8 @@ export interface DetectionPayload {
     /** 可选定位框(归一化 xyxy)及其所属帧;用于服务端渲染标注图。 */
     boxes?: Array<{ x1: number; y1: number; x2: number; y2: number; label?: string }>
     box_frame?: number
-    /** 逐事件标注图(jpeg dataURL,submit_detection 服务端生成;无框/画框失败时缺省)。 */
+    /** 逐事件标注图(submit_detection 服务端生成;展示地址为 dataURL(旧条目)
+     * 或 /api/agent 代理的 media 引用 URL(新条目,store 解析后);无框/画框失败时缺省)。 */
     annotated_image?: string
   }>
   /** 标注降级元信息(两级):missing_boxes=检出但未给 boxes/box_frame;annotation_failed=画框失败。 */
@@ -301,7 +303,16 @@ function formatToolOutput(output: unknown): string {
   }
 }
 
-/** tool_result 的 output 为 ContentPart[] 时,提取 image_url 部分的 url(dataURL)。
+/** 服务端媒体引用(/sessions/{id}/media/{hash})→ 经 /api/agent 代理的展示
+ * 地址;dataURL(旧条目)与其他形态原样返回。服务端把工具输出/检测载荷里的
+ * 图片 dataURL 落盘为内容寻址文件后,条目里只携带引用 URL(见 agent
+ * mediaStore.ts),前端在渲染层统一解析。 */
+export function resolveMediaUrl(url: string): string {
+  return url.startsWith('/') ? `/api/agent${url}` : url
+}
+
+/** tool_result 的 output 为 ContentPart[] 时,提取 image_url 部分的 url 并解析
+ * 为可展示地址(dataURL 原样,media 引用加 /api/agent 代理前缀)。
  * kosong 的 ImageURLPart 使用 camelCase 的 imageUrl 键名。 */
 function extractToolImages(output: unknown): string[] {
   if (!Array.isArray(output)) return []
@@ -314,7 +325,7 @@ function extractToolImages(output: unknown): string[] {
     }
     if (part.type !== 'image_url') continue
     const url = part.imageUrl?.url
-    if (typeof url === 'string' && url) urls.push(url)
+    if (typeof url === 'string' && url) urls.push(resolveMediaUrl(url))
   }
   return urls
 }
@@ -326,6 +337,23 @@ function hasToolVideo(output: unknown): boolean {
   return output.some(
     (p) => p !== null && typeof p === 'object' && (p as { type?: unknown }).type === 'video_url',
   )
+}
+
+/** detection 载荷的逐事件 annotated_image 解析为可展示地址(服务端新条目是
+ * /sessions/{id}/media/{hash} 引用,旧条目是 dataURL,均原样/加代理前缀);
+ * 只在进入前端时间线时转换一次,其余字段不动。非对象形态(legacy 字符串)原样返回。 */
+function mapDetectionData(data: unknown): unknown {
+  if (!data || typeof data !== 'object' || !Array.isArray((data as { events?: unknown }).events)) {
+    return data
+  }
+  const d = data as { events?: Array<Record<string, unknown>> }
+  return {
+    ...d,
+    events: d.events?.map((ev) => {
+      const url = ev?.['annotated_image']
+      return typeof url === 'string' ? { ...ev, annotated_image: resolveMediaUrl(url) } : ev
+    }),
+  }
 }
 
 /** 前端条目 id 发号器(模块级递增,跨会话全局唯一):折叠态/复制态在会话切换
@@ -414,7 +442,7 @@ function mapHistoryEntry(raw: unknown, seq?: number): AgentEntry | null {
     return {
       id: nextEntryId(),
       kind: 'detection',
-      data: e.data,
+      data: mapDetectionData(e.data),
       ...(typeof e.at === 'number' ? { at: e.at } : {}),
     }
   }
@@ -451,6 +479,9 @@ class ActiveSession {
   /** 后端落盘水位(已落盘条数;后端 seq 从 1 起=落盘序号):events 轮询的
    * fromSeq,也是给本地新 user 条目推算落盘序号(+1)的基准。 */
   private persistedSeq = 0
+  /** 已并入时间线的落盘 seq 集合(防重):恢复探测与 5s 自动轮询并发/重叠返回
+   * 同一段 events 时按 seq 跳过已存在条目(detection/done 不重复追加)。 */
+  private mergedSeqs = new Set<number>()
   /** 乐观 steer 条目 id 队列(先入先出):POST /steer 成功入队;SSE steer 事件/
    * 轮询补齐按到达顺序出队绑定落盘 seq——同文本两次插话各占一席,不误判。 */
   private pendingSteerIds: string[] = []
@@ -475,9 +506,10 @@ class ActiveSession {
     this.stopPolling()
   }
 
-  /** 历史重载后校准落盘水位(条目 seq 即其数组下标+1)。 */
+  /** 历史重载后校准落盘水位(条目 seq 即其数组下标+1);1..seq 视为已在时间线。 */
   syncPersisted(seq: number) {
     this.persistedSeq = seq
+    for (let i = 1; i <= seq; i++) this.mergedSeqs.add(i)
   }
 
   /** 撤回成功后回卷水位:后端只保留前 seq-1 条。 */
@@ -546,11 +578,17 @@ class ActiveSession {
     }
   }
 
-  /** 合并一批已落盘条目(带 seq):推进水位;user 条目命中乐观 steer 账时绑定
-   * 真实 seq 并跳过(本地条目已在),其余 markRaw 压入时间线(落盘条目不再变更)。 */
+  /** 合并一批已落盘条目(带 seq):先按 seq 去重(已并入过的时间线条目跳过,
+   * 防并发/重叠拉取把 detection 等重复追加),再推进水位;user 条目命中乐观
+   * steer 账时绑定真实 seq 并跳过(本地条目已在),其余 markRaw 压入时间线
+   * (落盘条目不再变更)。 */
   private mergePersistedEvents(events: Array<{ seq?: unknown; entry?: unknown }>) {
     for (const ev of events) {
       const seq = typeof ev.seq === 'number' ? ev.seq : 0
+      if (seq > 0) {
+        if (this.mergedSeqs.has(seq)) continue // 已在时间线(水位回退/在途请求重叠):跳过
+        this.mergedSeqs.add(seq)
+      }
       if (seq > this.persistedSeq) this.persistedSeq = seq
       const mapped = mapHistoryEntry(ev.entry, seq > 0 ? seq : undefined)
       if (mapped === null) continue
@@ -563,12 +601,15 @@ class ActiveSession {
   }
 
   /** steer 乐观账出队:FIFO 取一个待绑定条目,把落盘 seq 写回它(它已在时间线,
-   * 落盘版跳过插入)。队列空说明是他端插入,返回 false。 */
+   * 落盘版跳过插入)并占住该 seq。队列空说明是他端插入,返回 false。 */
   private bindPendingSteer(seq: number): boolean {
     const id = this.pendingSteerIds.shift()
     if (id === undefined) return false
     const local = this.host.entries.value.find((e) => e.id === id)
-    if (local && local.kind === 'user' && seq > 0) local.seq = seq
+    if (local && local.kind === 'user' && seq > 0) {
+      local.seq = seq
+      this.mergedSeqs.add(seq)
+    }
     return true
   }
 
@@ -582,6 +623,8 @@ class ActiveSession {
       this.lastVideoPath = opts.videoPath || undefined
       this.lastImages = opts.images?.length ? [...opts.images] : undefined
       this.persistedSeq += 1
+      // 本地乐观条目占住该落盘序号:并发/重叠的 events 拉取按 seq 去重不重复插入
+      this.mergedSeqs.add(this.persistedSeq)
       this.host.entries.value.push({
         id: nextEntryId(),
         kind: 'user',
@@ -849,7 +892,12 @@ class ActiveSession {
       })
       status.value = 'awaiting_approval'
     } else if (ev.type === 'detection') {
-      entries.value.push({ id: nextEntryId(), kind: 'detection', data: ev.data, at: Date.now() })
+      entries.value.push({
+        id: nextEntryId(),
+        kind: 'detection',
+        data: mapDetectionData(ev.data),
+        at: Date.now(),
+      })
     } else if (ev.type === 'steer') {
       // 进行中插话生效:本地已乐观插入(发 /steer 成功时)则按 id 队列出队绑定
       // 落盘 seq 后跳过;否则(他端插入)补一条带「已插话」标记的 user 条目。
@@ -864,6 +912,7 @@ class ActiveSession {
           ev.seq > this.pendingSteerIds.length
         ) {
           local.seq = ev.seq - this.pendingSteerIds.length
+          this.mergedSeqs.add(local.seq) // 占住落盘序号:轮询重放不重复绑定/插入
         }
       } else {
         entries.value.push({
@@ -1017,11 +1066,6 @@ export const useAgentChatStore = defineStore('agentchat', () => {
       sessions?: AgentSessionInfo[]
     }
     sessions.value = Array.isArray(r.sessions) ? r.sessions : []
-  }
-
-  /** 手动「刷新进度」:立即拉一次 events(恢复条按钮)。 */
-  async function refreshProgress() {
-    if (sessionId.value) await ensureActive().pollEvents()
   }
 
   /** 创建会话:workspaceDir 由后端代理注入,前端只传权限模式。 */
@@ -1282,7 +1326,6 @@ export const useAgentChatStore = defineStore('agentchat', () => {
     retry,
     stop,
     cancelTurn,
-    refreshProgress,
     respondApproval,
     compactContext,
   }
