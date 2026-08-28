@@ -804,3 +804,88 @@ def test_far_object_enhancement_top_k_lower_bound() -> None:
     assert FarObjectEnhancementConfig(top_k=1).top_k == 1
     with pytest.raises(ValidationError):
         FarObjectEnhancementConfig(top_k=0)
+
+
+# ---------------------------------------------------------------------------
+# enable_thinking 传递(OpenAI 兼容 extra_body)与缓存隔离
+# ---------------------------------------------------------------------------
+
+
+def _mock_aliyun_response(tag: str) -> MagicMock:
+    choice = MagicMock()
+    choice.message.content = json.dumps({"tag": tag})
+    resp = MagicMock()
+    resp.choices = [choice]
+    resp.usage = MagicMock(prompt_tokens=1, completion_tokens=1, total_tokens=2)
+    return resp
+
+
+@patch("traffic_analyzer.core.vlm_engine.openai.OpenAI")
+def test_call_aliyun_enable_thinking_false_reaches_extra_body(
+    mock_openai_cls: MagicMock,
+    aliyun_config: LLMProviderConfig,
+    simple_template: PromptTemplate,
+) -> None:
+    mock_client = MagicMock()
+    mock_openai_cls.return_value = mock_client
+    mock_client.chat.completions.create.return_value = _mock_aliyun_response("off")
+
+    engine = VLMInferenceEngine(aliyun_config)
+    resp = engine.call(
+        simple_template,
+        images=[],
+        context_vars={"description": "w"},
+        enable_thinking=False,
+    )
+
+    assert resp.success is True
+    create_kwargs = mock_client.chat.completions.create.call_args.kwargs
+    assert create_kwargs["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
+
+
+@patch("traffic_analyzer.core.vlm_engine.openai.OpenAI")
+def test_call_aliyun_default_sends_no_thinking_override(
+    mock_openai_cls: MagicMock,
+    aliyun_config: LLMProviderConfig,
+    simple_template: PromptTemplate,
+) -> None:
+    mock_client = MagicMock()
+    mock_openai_cls.return_value = mock_client
+    mock_client.chat.completions.create.return_value = _mock_aliyun_response("default")
+
+    engine = VLMInferenceEngine(aliyun_config)
+    resp = engine.call(simple_template, images=[], context_vars={"description": "w"})
+
+    assert resp.success is True
+    create_kwargs = mock_client.chat.completions.create.call_args.kwargs
+    assert "extra_body" not in create_kwargs
+
+
+@patch("traffic_analyzer.core.vlm_engine.openai.OpenAI")
+def test_cache_does_not_mix_enable_thinking_variants(
+    mock_openai_cls: MagicMock,
+    aliyun_config: LLMProviderConfig,
+    simple_template: PromptTemplate,
+) -> None:
+    """同 prompt 同 images、enable_thinking 不同 → 二次调用必须真正打到 provider。"""
+    mock_client = MagicMock()
+    mock_openai_cls.return_value = mock_client
+    mock_client.chat.completions.create.side_effect = [
+        _mock_aliyun_response("off"),
+        _mock_aliyun_response("default"),
+    ]
+
+    engine = VLMInferenceEngine(aliyun_config)
+    r_off = engine.call(
+        simple_template,
+        images=[],
+        context_vars={"description": "same"},
+        enable_thinking=False,
+    )
+    r_default = engine.call(
+        simple_template, images=[], context_vars={"description": "same"}
+    )
+
+    assert r_off.parsed_data == {"tag": "off"}
+    assert r_default.parsed_data == {"tag": "default"}
+    assert mock_client.chat.completions.create.call_count == 2

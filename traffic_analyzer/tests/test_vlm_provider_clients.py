@@ -16,6 +16,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from traffic_analyzer.core.vlm_provider_clients import (
+    _build_aliyun_payload,
     _call_anthropic,
     _call_anthropic_with_tools,
     _call_google,
@@ -143,3 +144,29 @@ def test_call_google_without_timeout_uses_default_request_options() -> None:
 
     _, kwargs = client_model.generate_content.call_args
     assert kwargs["request_options"] is None
+
+
+# ---------------------------------------------------------------------------
+# _build_aliyun_payload: enable_thinking 经 extra_body 注入(OpenAI 兼容后端)
+# ---------------------------------------------------------------------------
+
+
+def test_build_aliyun_payload_enable_thinking_false_uses_extra_body() -> None:
+    """chat_template_kwargs 是 OpenAI SDK 未收录字段,必须走 extra_body。"""
+    _, kwargs = _build_aliyun_payload(
+        "sys", "user", [], "qwen3.8-27b-fp8", 1024, 0.1, enable_thinking=False
+    )
+    assert kwargs["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
+
+
+def test_build_aliyun_payload_enable_thinking_true_uses_extra_body() -> None:
+    _, kwargs = _build_aliyun_payload(
+        "sys", "user", [], "qwen3.8-27b-fp8", 1024, 0.1, enable_thinking=True
+    )
+    assert kwargs["extra_body"] == {"chat_template_kwargs": {"enable_thinking": True}}
+
+
+def test_build_aliyun_payload_default_has_no_extra_body() -> None:
+    """不传参保持原请求形状(服务端默认),不引入额外字段。"""
+    _, kwargs = _build_aliyun_payload("sys", "user", [], "qwen3.8-27b-fp8", 1024, 0.1)
+    assert "extra_body" not in kwargs

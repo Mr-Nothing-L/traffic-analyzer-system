@@ -321,6 +321,7 @@ class VLMInferenceEngine:
         images: List[Any],
         context_vars: Optional[Dict[str, Any]] = None,
         response_schema: Optional[Dict[str, Any]] = None,
+        enable_thinking: Optional[bool] = None,
     ) -> LLMResponse:
         """Execute a single VLM call.
 
@@ -329,6 +330,10 @@ class VLMInferenceEngine:
             images: List of images (PIL Image, bytes, or file paths).
             context_vars: Variables for Jinja2 prompt rendering.
             response_schema: Optional JSON schema for basic validation.
+            enable_thinking: Tri-state thinking switch for OpenAI-compatible
+                backends (vLLM qwen3 等):None=服务端默认;True/False 经
+                extra_body 传 chat_template_kwargs.enable_thinking。参与
+                cache key 计算。anthropic/google 分支不支持该参数,忽略。
 
         Returns:
             LLMResponse with parsed data, token usage, and latency.
@@ -338,7 +343,9 @@ class VLMInferenceEngine:
         # --- Cache lookup (memory first, then disk) ---
         cache_key = ""
         if self._cache_enabled:
-            cache_key = _compute_cache_key(system_prompt, user_prompt, images)
+            cache_key = _compute_cache_key(
+                system_prompt, user_prompt, images, enable_thinking=enable_thinking
+            )
             # Resolve the provider that would serve this call (under lock) so a
             # response cached before a failover is not returned for the new one.
             with self._provider_lock:
@@ -399,6 +406,7 @@ class VLMInferenceEngine:
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 images=images,
+                enable_thinking=enable_thinking,
             )
             parsed_data = _extract_json_from_text(raw_text)
             if response_schema:
@@ -513,6 +521,7 @@ class VLMInferenceEngine:
         user_prompt: str,
         images: List[Any],
         provider_index: Optional[int] = None,
+        enable_thinking: Optional[bool] = None,
     ) -> Tuple[str, int, int, int]:
         """Execute a single provider-specific API call (no retry).
 
@@ -524,6 +533,8 @@ class VLMInferenceEngine:
                 sticky index when omitted; callers doing failover must pass it
                 explicitly so a concurrent failover cannot swap provider,
                 config, and client mid-call.
+            enable_thinking: 仅 OpenAI 兼容(aliyun)分支支持;anthropic/google
+                分支不支持该参数,忽略。
         """
         if provider_index is None:
             with self._provider_lock:
@@ -533,6 +544,7 @@ class VLMInferenceEngine:
         client = self._clients[provider_index]
         try:
             if provider == "anthropic":
+                # enable_thinking 不适用(Anthropic 分支默认已尝试禁用 thinking)。
                 _, kwargs = _build_anthropic_payload(
                     system_prompt,
                     user_prompt,
@@ -543,6 +555,7 @@ class VLMInferenceEngine:
                 )
                 return _call_anthropic(client, kwargs)
             elif provider == "google":
+                # enable_thinking 不适用(google.generativeai 无对应参数)。
                 contents, kwargs = _build_google_payload(
                     system_prompt,
                     user_prompt,
@@ -565,6 +578,7 @@ class VLMInferenceEngine:
                     config.model,
                     config.max_tokens,
                     config.temperature,
+                    enable_thinking=enable_thinking,
                 )
                 return _call_aliyun(client, kwargs)
             else:
@@ -586,8 +600,12 @@ class VLMInferenceEngine:
         system_prompt: str,
         user_prompt: str,
         images: List[Any],
+        enable_thinking: Optional[bool] = None,
     ) -> Tuple[str, int, int, int, int, int]:
         """Execute the API call with per-provider retry and provider failover.
+
+        Args:
+            enable_thinking: 仅 OpenAI 兼容(aliyun)分支支持,原样下传。
 
         Returns:
             Tuple of (raw_text, prompt_tokens, completion_tokens, total_tokens,
@@ -612,7 +630,11 @@ class VLMInferenceEngine:
             for attempt in range(max_retries):
                 try:
                     result = self._execute_once(
-                        system_prompt, user_prompt, images, provider_index=provider_idx
+                        system_prompt,
+                        user_prompt,
+                        images,
+                        provider_index=provider_idx,
+                        enable_thinking=enable_thinking,
                     )
                     # Sticky failover: subsequent calls start from the provider
                     # that served this request.

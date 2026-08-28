@@ -3,7 +3,8 @@
 [文件说明]
 作用:track_suspects 的确定性编排核心。在可疑时段内默认 5fps 抽帧
     (首个传播窗发现高速运动目标自适应升 10fps)、滑窗 5 帧/stride 4 调
-    VLM(复用 core/vlm_engine 的 failover + .vlm_cache.db);窗 prompt 双
+    VLM(复用 core/vlm_engine 的 failover + .vlm_cache.db;传播窗关
+    thinking 换低延迟,re-anchor 窗保留服务端默认);窗 prompt 双
     模式:传播式(目标描述+上一框位+顺带框 2~3 辆参照车)与 re-anchor 式
     (每 REANCHOR_EVERY 窗按描述+外推预期位置重检测,检测结果与外推期望
     IoU < REANCHOR_MISMATCH_IOU 判跑飞);参照车位移中位数 → 环境流速;
@@ -459,7 +460,12 @@ def run_tracking(
             )
             try:
                 win_calls += 1
-                resp = engine.call(template=template, images=images)
+                call_kwargs: Dict[str, Any] = {"template": template, "images": images}
+                if mode == "propagate":
+                    # 传播窗是封闭感知任务(接框),关 thinking 换低延迟;
+                    # re-anchor 窗不传,保留服务端默认(qwen3 默认开)。
+                    call_kwargs["enable_thinking"] = False
+                resp = engine.call(**call_kwargs)
                 if getattr(resp, "success", False):
                     response_ok = True
                     n_ok_calls += 1
@@ -789,6 +795,9 @@ def _write_run_snapshot(
         "stride": STRIDE,
         "reanchor_every": REANCHOR_EVERY,
         "reanchor_mismatch_iou": REANCHOR_MISMATCH_IOU,
+        # thinking 口径:propagate 窗关 thinking(低延迟);reanchor 窗不传参
+        # (None = 服务端默认,vLLM qwen3 默认开启)。
+        "enable_thinking": {"propagate": False, "reanchor": None},
         "env_flow": env_flow,
         "thresholds": {
             "static_displacement_ratio": STATIC_DISPLACEMENT_RATIO,

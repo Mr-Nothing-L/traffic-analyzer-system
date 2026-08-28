@@ -189,14 +189,18 @@ def cmd_web(args: argparse.Namespace) -> int:
 
     url = f"http://{args.host}:{args.port}"
 
-    def _open_browser() -> None:
-        time.sleep(1.0)
-        try:
-            webbrowser.open(url)
-        except Exception as exc:
-            logger.warning("Could not open browser: %s", exc)
+    # 浏览器自动打开改为 opt-in:显式 BROWSER=true 才打开(默认无头,
+    # 测试/部署/后台运行不再每次弹标签页)。
+    if os.environ.get("BROWSER", "").lower() in ("1", "true", "yes"):
 
-    threading.Thread(target=_open_browser, daemon=True).start()
+        def _open_browser() -> None:
+            time.sleep(1.0)
+            try:
+                webbrowser.open(url)
+            except Exception as exc:
+                logger.warning("Could not open browser: %s", exc)
+
+        threading.Thread(target=_open_browser, daemon=True).start()
 
     logger.info("Starting web UI at %s", url)
     uvicorn.run(

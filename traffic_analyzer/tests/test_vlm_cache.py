@@ -13,7 +13,7 @@ import json
 import sqlite3
 from pathlib import Path
 
-from traffic_analyzer.core.vlm_cache import DiskCache
+from traffic_analyzer.core.vlm_cache import DiskCache, _compute_cache_key
 from traffic_analyzer.models.schemas import LLMResponse
 
 
@@ -80,3 +80,26 @@ def test_disk_cache_get_non_dict_json_returns_none_and_deletes(tmp_path: Path) -
 
     assert cache.get("list", "aliyun", "qwen-vl-max") is None
     assert not _row_exists(db_path, "list")
+
+
+# ---------------------------------------------------------------------------
+# _compute_cache_key: enable_thinking 必须参与键
+# ---------------------------------------------------------------------------
+
+
+def test_cache_key_distinguishes_enable_thinking() -> None:
+    """enable_thinking 三个取值必须得到三个不同 key,否则互相串缓存
+    (关 thinking 的请求吃到开 thinking 的旧响应,反之亦然)。"""
+    args = ("sys prompt", "user prompt", [b"fake-jpeg-bytes"])
+    keys = {
+        _compute_cache_key(*args),
+        _compute_cache_key(*args, enable_thinking=False),
+        _compute_cache_key(*args, enable_thinking=True),
+    }
+    assert len(keys) == 3
+
+
+def test_cache_key_none_thinking_matches_legacy_key() -> None:
+    """不传参(None)不追加字段 → 与历史键一致,旧缓存条目继续命中。"""
+    legacy = _compute_cache_key("sys", "user", [])
+    assert legacy == _compute_cache_key("sys", "user", [], enable_thinking=None)

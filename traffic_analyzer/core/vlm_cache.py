@@ -190,7 +190,12 @@ class DiskCache:
 # Cache key helper
 # ---------------------------------------------------------------------------
 
-def _compute_cache_key(system_prompt: str, user_prompt: str, images: List[Any]) -> str:
+def _compute_cache_key(
+    system_prompt: str,
+    user_prompt: str,
+    images: List[Any],
+    enable_thinking: Optional[bool] = None,
+) -> str:
     """Compute a deterministic cache key for a VLM call.
 
     The key is a SHA-256 hex digest of the prompt text combined with
@@ -202,6 +207,9 @@ def _compute_cache_key(system_prompt: str, user_prompt: str, images: List[Any]) 
         system_prompt: Rendered system prompt.
         user_prompt: Rendered user prompt.
         images: List of images (PIL Image, bytes, or file paths).
+        enable_thinking: Thinking 开关取值参与键(不同取值必须得到不同
+            key,否则关 thinking 的请求会命中开 thinking 的旧缓存,反之
+            亦然);None 不追加字段,与历史键保持一致。
 
     Returns:
         Hex digest string suitable as a cache key.
@@ -233,5 +241,9 @@ def _compute_cache_key(system_prompt: str, user_prompt: str, images: List[Any]) 
                     hasher.update(str(img).encode("utf-8"))
             except Exception:
                 hasher.update(str(img).encode("utf-8"))
+
+    if enable_thinking is not None:
+        hasher.update(b"\x00")
+        hasher.update(f"enable_thinking={enable_thinking}".encode("utf-8"))
 
     return hasher.hexdigest()

@@ -484,3 +484,43 @@ class TestAdaptiveFps:
         assert result["failed"] is False or "fps_upgrade" in [e["type"] for e in result["events"]]
         assert result["fps_used"] == W.FAST_SAMPLE_FPS
         assert any(e["type"] == "fps_upgrade" for e in result["events"])
+
+
+class KwargsRecordingEngine(ScriptedEngine):
+    """ScriptedEngine + 逐窗记录 engine.call 的 kwargs(验证 thinking 传递口径)。"""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.call_kwargs: List[Dict[str, Any]] = []
+
+    def call(self, template: Any, images: Any = None, **kwargs: Any) -> Any:
+        self.call_kwargs.append(dict(kwargs))
+        return super().call(template, images=images, **kwargs)
+
+
+class TestThinkingPropagation:
+    def test_propagate_windows_disable_thinking_reanchor_untouched(
+        self, client: TestClient, tracked_video: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """传播窗以 enable_thinking=False 调引擎;re-anchor 窗不传该参(保留
+        服务端默认);run.json 快照记录该口径。"""
+        engine = KwargsRecordingEngine(responses=[_window_response("[100,700,400,950]")])
+        monkeypatch.setattr(
+            "traffic_analyzer.toolserver.server._build_default_engine", lambda: engine
+        )
+        resp = _post(client, engine)
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["failed"] is False
+        # 至少覆盖窗 0(re-anchor)与若干传播窗
+        assert len(engine.call_kwargs) >= REANCHOR_EVERY + 1
+        for wi, kwargs in enumerate(engine.call_kwargs):
+            if wi % REANCHOR_EVERY == 0:
+                assert "enable_thinking" not in kwargs  # re-anchor:不传,保留默认
+            else:
+                assert kwargs.get("enable_thinking") is False
+
+        art = resp.json()["artifacts"]
+        run = json.loads(
+            (tracked_video.parent / art["dir"] / "run.json").read_text(encoding="utf-8")
+        )
+        assert run["enable_thinking"] == {"propagate": False, "reanchor": None}
