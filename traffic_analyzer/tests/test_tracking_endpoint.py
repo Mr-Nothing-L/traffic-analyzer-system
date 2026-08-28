@@ -121,21 +121,28 @@ def client(tracked_video: Path) -> TestClient:
     return TestClient(app)
 
 
-def _post(client: TestClient, engine: Any, video_rel: str = "clip.mp4") -> Any:
+def _post(
+    client: TestClient,
+    engine: Any,
+    video_rel: str = "clip.mp4",
+    side: Optional[str] = None,
+    time_range: Optional[List[float]] = None,
+) -> Any:
     """替换 app 内懒构建函数指向 mock 引擎后请求端点。"""
     client.app.state.tracking_engine = engine  # type: ignore[attr-defined]
+    suspect: Dict[str, Any] = {
+        "box": {"x1": 0.06, "y1": 0.41, "x2": 0.25, "y2": 0.58},
+        "timestamp": 0.2,
+        "description": "左侧来向的白色轿车",
+    }
+    if side is not None:
+        suspect["side"] = side
     return client.post(
         "/tools/track_suspects",
         json={
             "video_path": video_rel,
-            "suspects": [
-                {
-                    "box": {"x1": 0.06, "y1": 0.41, "x2": 0.25, "y2": 0.58},
-                    "timestamp": 0.2,
-                    "description": "左侧来向的白色轿车",
-                }
-            ],
-            "time_range": [0.0, 6.0],
+            "suspects": [suspect],
+            "time_range": time_range if time_range is not None else [0.0, 6.0],
         },
     )
 
@@ -527,3 +534,173 @@ class TestThinkingPropagation:
             (tracked_video.parent / art["dir"] / "run.json").read_text(encoding="utf-8")
         )
         assert run["enable_thinking"] == {"propagate": False, "reanchor": None}
+
+
+class ProgressiveEngine:
+    """按窗序号生成持续移动的脚本化框,避免 5 点滑动平均把运动抹平。"""
+
+    def __init__(self, mode: str = "stable", heading_answer: str = "朝镜头") -> None:
+        self.mode = mode
+        self.heading_answer = heading_answer
+        self.calls = 0
+        self.heading_calls = 0
+        self.window_calls = 0
+
+    def call(self, template: Any, images: Any = None, **kwargs: Any) -> Any:
+        from types import SimpleNamespace
+
+        self.calls += 1
+        if getattr(template, "template_id", None) == "vehicle_heading":
+            self.heading_calls += 1
+            return SimpleNamespace(
+                success=True,
+                raw_text=self.heading_answer,
+                parsed_data={},
+                model="mock",
+                provider="mock",
+            )
+        wi = self.window_calls
+        self.window_calls += 1
+        boxes: List[Dict[str, Any]] = []
+        for f in range(5):
+            x = 60 + wi * 80 + f * 20
+            if self.mode == "stable":
+                y1, y2, w = 410, 580, 190
+            elif self.mode == "shrink":
+                y1, y2, w = 410 + wi * 10 + f * 3, 580 - wi * 10 - f * 3, 190
+            else:  # grow
+                y1, y2, w = 410 - wi * 5 - f * 2, 580 + wi * 5 + f * 2, 190
+            boxes.append({"frame": f, "bbox": [x, y1, x + w, y2]})
+        data = {"targets": [{"key": "A", "found": True, "boxes": boxes}], "references": []}
+        return SimpleNamespace(
+            success=True,
+            parsed_data=data,
+            raw_text=f"```json\n{json.dumps(data)}\n```",
+            model="mock",
+            provider="mock",
+        )
+
+
+class TestHeading:
+    _TR_RANGE = [0.0, 4.0]
+
+    def test_heading_accepted_when_two_frames_agree(
+        self,
+        client: TestClient,
+        tracked_video: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        engine = ProgressiveEngine(mode="stable", heading_answer="朝镜头")
+        monkeypatch.setattr(
+            "traffic_analyzer.toolserver.server._build_default_engine", lambda: engine
+        )
+        resp = _post(client, engine, side="coming", time_range=self._TR_RANGE)
+        assert resp.status_code == 200, resp.text
+        track = resp.json()["tracks"][0]
+        assert track["heading"] is not None
+        assert track["heading"]["accepted"] == "toward"
+        assert track["heading"]["n_total"] >= 1
+        assert track["heading"]["n_consistent"] == track["heading"]["n_total"]
+        assert "车头朝向" in track["direction_verdict"]
+
+    def test_heading_uncertain_when_frames_disagree(
+        self,
+        client: TestClient,
+        tracked_video: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        class DisagreeEngine(ProgressiveEngine):
+            def call(self, template: Any, images: Any = None, **kwargs: Any) -> Any:
+                from types import SimpleNamespace
+
+                self.calls += 1
+                if getattr(template, "template_id", None) == "vehicle_heading":
+                    self.heading_calls += 1
+                    answer = "朝镜头" if self.heading_calls == 1 else "背镜头"
+                    return SimpleNamespace(
+                        success=True,
+                        raw_text=answer,
+                        parsed_data={},
+                        model="mock",
+                        provider="mock",
+                    )
+                return super().call(template, images, **kwargs)
+
+        engine = DisagreeEngine(mode="stable")
+        monkeypatch.setattr(
+            "traffic_analyzer.toolserver.server._build_default_engine", lambda: engine
+        )
+        resp = _post(client, engine, side="coming", time_range=self._TR_RANGE)
+        assert resp.status_code == 200, resp.text
+        track = resp.json()["tracks"][0]
+        assert track["heading"]["accepted"] == "unknown"
+        assert "难以判断" in track["direction_verdict"]
+
+    def test_heading_dichotomy_wrong_way(
+        self,
+        client: TestClient,
+        tracked_video: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # coming 目标 bbox 缩小(实际远离),车头背镜头 → 与移动方向一致 → 逆行
+        engine = ProgressiveEngine(mode="shrink", heading_answer="背镜头")
+        monkeypatch.setattr(
+            "traffic_analyzer.toolserver.server._build_default_engine", lambda: engine
+        )
+        resp = _post(client, engine, side="coming", time_range=self._TR_RANGE)
+        assert resp.status_code == 200, resp.text
+        track = resp.json()["tracks"][0]
+        assert track["heading"]["accepted"] == "away"
+        assert "疑似逆行" in track["direction_verdict"]
+        assert "车头朝向" in track["direction_verdict"]
+
+    def test_heading_dichotomy_backing(
+        self,
+        client: TestClient,
+        tracked_video: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # coming 目标 bbox 缩小(实际远离),车头朝镜头 → 与移动方向相反 → 倒车
+        engine = ProgressiveEngine(mode="shrink", heading_answer="朝镜头")
+        monkeypatch.setattr(
+            "traffic_analyzer.toolserver.server._build_default_engine", lambda: engine
+        )
+        resp = _post(client, engine, side="coming", time_range=self._TR_RANGE)
+        assert resp.status_code == 200, resp.text
+        track = resp.json()["tracks"][0]
+        assert track["heading"]["accepted"] == "toward"
+        assert "疑似倒车" in track["direction_verdict"]
+
+    def test_heading_not_triggered_on_consistent_track(
+        self,
+        client: TestClient,
+        tracked_video: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # coming 目标 bbox 增大 → 方向一致,不触发 heading
+        engine = ProgressiveEngine(mode="grow", heading_answer="朝镜头")
+        monkeypatch.setattr(
+            "traffic_analyzer.toolserver.server._build_default_engine", lambda: engine
+        )
+        resp = _post(client, engine, side="coming", time_range=self._TR_RANGE)
+        assert resp.status_code == 200, resp.text
+        track = resp.json()["tracks"][0]
+        assert track["heading"] is None
+        assert "方向一致" in track["direction_verdict"]
+
+    def test_request_side_overrides_description_hint(
+        self,
+        client: TestClient,
+        tracked_video: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # 描述含"左侧来向"会 infer 成 coming,显式 side=going 应覆盖
+        engine = ProgressiveEngine(mode="stable", heading_answer="朝镜头")
+        monkeypatch.setattr(
+            "traffic_analyzer.toolserver.server._build_default_engine", lambda: engine
+        )
+        resp = _post(client, engine, side="going", time_range=self._TR_RANGE)
+        assert resp.status_code == 200, resp.text
+        track = resp.json()["tracks"][0]
+        assert track["side_hint"] == "going"
+        assert "去向侧" in track["direction_verdict"]

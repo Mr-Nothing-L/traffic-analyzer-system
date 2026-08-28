@@ -34,6 +34,9 @@ TREND_CHANGE_RATIO = 0.15
 TREND_WINDOW = 5
 # 环境流速 ≈ 0 的下限(归一化单位/秒),低于它视为环境静止
 FLOW_EPSILON = 1e-3
+# 逆行/倒车二分:反向运动须持续足够时长/位移,低于阈值视为倒车(短距离后倒)
+REVERSE_MOTION_MIN_DURATION_S = 0.5  # 秒
+REVERSE_MOTION_MIN_DISTANCE_RATIO = 0.3  # 占 bbox 对角线比例
 
 
 @dataclass
@@ -43,6 +46,7 @@ class SuspectAnchor:
     box: List[float]
     timestamp: float
     description: str
+    side: Optional[str] = "unknown"  # "coming"|"going"|"unknown"
 
     @property
     def diagonal(self) -> float:
@@ -68,6 +72,7 @@ class Track:
     profile: Dict[str, Any] = field(default_factory=dict)
     side_hint: str = "unknown"
     direction_verdict: str = "未知"
+    heading: Optional[Dict[str, Any]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -111,11 +116,8 @@ def _direction_deg(start: Tuple[float, float], end: Tuple[float, float]) -> floa
     return math.degrees(math.atan2(dy, dx))
 
 
-def _bbox_trend(points: Sequence[TrackPoint]) -> str:
-    """bbox 面积变化趋势:靠近镜头(increasing)/远离(decreasing)/稳定。
-
-    用前后各 TREND_WINDOW 点的平均面积对比,避免单帧抖动。
-    """
+def _bbox_trend_with_change(points: Sequence[TrackPoint]) -> Tuple[str, float]:
+    """bbox 面积变化趋势 + 变化百分比(供 verdict 输出)。"""
     n = len(points)
     first = points[: min(TREND_WINDOW, n)]
     last = points[max(0, n - min(TREND_WINDOW, n)) :]
@@ -128,10 +130,18 @@ def _bbox_trend(points: Sequence[TrackPoint]) -> str:
     base = max(a_first, 1e-9)
     change = (a_last - a_first) / base
     if change > TREND_CHANGE_RATIO:
-        return "increasing"
+        return "increasing", change
     if change < -TREND_CHANGE_RATIO:
-        return "decreasing"
-    return "stable"
+        return "decreasing", change
+    return "stable", change
+
+
+def _bbox_trend(points: Sequence[TrackPoint]) -> str:
+    """bbox 面积变化趋势:靠近镜头(increasing)/远离(decreasing)/稳定。
+
+    用前后各 TREND_WINDOW 点的平均面积对比,避免单帧抖动。
+    """
+    return _bbox_trend_with_change(points)[0]
 
 
 def stationary_duration_s(points: Sequence[TrackPoint]) -> float:
@@ -286,24 +296,41 @@ def infer_side_hint(description: str) -> str:
     return "unknown"
 
 
-def direction_verdict(
-    track: Track,
-    fps: Optional[float] = None,
-) -> str:
-    """方向一致性初判(中文,供 agent 裁决引用)。
-
-    来向目标应 bbox 随时间增大(靠近镜头),去向应缩小;静止目标按
-    环境流速分流违停/拥堵(先验:环境流动→违停,环境静止→拥堵)。
-    轨迹覆盖率(coverage)< 0.5 时,静止类结论追加「证据不足」限定。
-    """
+def _direction_verdict_state(track: Track) -> Dict[str, Any]:
+    """计算方向一致性初判的中间状态(供 verdict 格式化与 heading 触发决策)。"""
     profile = track.profile
-    if not track.points or not profile:
-        return "无有效轨迹"
-    side = track.side_hint
-    trend = str(profile.get("bbox_trend") or "stable")
+    points = track.points
+    state: Dict[str, Any] = {"empty": True}
+    if not points or not profile:
+        return state
+
+    side = track.side_hint or "unknown"
+    trend, change = _bbox_trend_with_change(points)
     diag = float(profile.get("mean_diagonal") or 0.0)
-    duration_s = max(track.points[-1].timestamp - track.points[0].timestamp, 0.0)
+    duration_s = max(points[-1].timestamp - points[0].timestamp, 0.0)
     speed = float(profile.get("avg_speed_norm") or 0.0)
+    moving = duration_s > 0 and speed > STATIC_DISPLACEMENT_RATIO * max(diag, 1e-6)
+
+    start_c = point_center(points[0])
+    end_c = point_center(points[-1])
+    net_disp = math.hypot(end_c[0] - start_c[0], end_c[1] - start_c[1])
+    distance_ratio = net_disp / max(diag, 1e-6)
+
+    if not moving:
+        actual = "stationary"
+    else:
+        actual = {"increasing": "approaching", "decreasing": "leaving"}.get(
+            trend, "stable"
+        )
+
+    expected = {"coming": "approaching", "going": "leaving"}.get(side)
+    if side == "unknown":
+        consistent: Optional[bool] = None
+    elif actual in ("approaching", "leaving"):
+        consistent = expected == actual
+    else:
+        consistent = None  # 运动方向不明,无法与先验比对
+
     cov = profile.get("coverage")
     low_cov = (
         "；证据不足(轨迹仅覆盖 %d%%)" % int(round(float(cov) * 100))
@@ -311,26 +338,129 @@ def direction_verdict(
         else ""
     )
 
-    moving = duration_s > 0 and speed > STATIC_DISPLACEMENT_RATIO * max(diag, 1e-6)
-    if not moving:
+    return {
+        "empty": False,
+        "side": side,
+        "expected": expected,
+        "actual": actual,
+        "consistent": consistent,
+        "moving": moving,
+        "duration_s": duration_s,
+        "distance_ratio": distance_ratio,
+        "change_pct": round(change * 100, 1),
+        "low_cov": low_cov,
+    }
+
+
+def direction_verdict(
+    track: Track,
+    heading: Optional[Dict[str, Any]] = None,
+) -> str:
+    """方向一致性结构化 verdict(中文,供 agent 裁决引用)。
+
+    输出格式:「所在车道=...;轨迹=...;结论:...」
+    - coming=应靠近镜头, going=应远离镜头。
+    - 实际方向由 bbox 趋势 + 位移矢量综合;先验+轨迹为主判。
+    - 与预期相反时,无朝向旁证按反向运动持续距离/时长阈值二分逆行/倒车;
+      有可靠朝向旁证时,朝向优先用于二分。
+    - side=unknown 时标注「车道方位未知,仅凭几何初判」。
+    - 轨迹覆盖率 coverage < 0.5 时追加「证据不足」限定。
+    """
+    state = _direction_verdict_state(track)
+    if state.get("empty"):
+        return "无有效轨迹"
+
+    side = state["side"]
+    expected = state["expected"]
+    actual = state["actual"]
+    consistent = state["consistent"]
+    change_pct = state["change_pct"]
+    low_cov = state["low_cov"]
+    profile = track.profile or {}
+
+    # 车道侧/预期
+    if side == "coming":
+        lane = "所在车道=来向侧(应靠近镜头)"
+    elif side == "going":
+        lane = "所在车道=去向侧(应远离镜头)"
+    else:
+        lane = "所在车道=车道方位未知"
+
+    # 轨迹实际方向
+    if actual == "approaching":
+        traj = f"轨迹=靠近镜头(bbox+{abs(change_pct):.0f}%)"
+    elif actual == "leaving":
+        traj = f"轨迹=远离镜头(bbox-{abs(change_pct):.0f}%)"
+    elif actual == "stationary":
+        traj = "轨迹=基本静止"
+    else:
+        traj = "轨迹=大小稳定(位移方向不明)"
+
+    if consistent is True:
+        traj += ",与预期一致"
+    elif consistent is False:
+        traj += ",与预期相反"
+    else:
+        traj += ",先验缺失" if side == "unknown" else ",方向不明"
+
+    # 结论
+    if actual == "stationary":
         env_flow = profile.get("env_flow_norm")
         if env_flow is not None and env_flow >= FLOW_EPSILON:
-            return "目标静止且环境正常流动(疑似违停)" + low_cov
-        if env_flow is not None and env_flow < FLOW_EPSILON:
-            return "目标与环境均近乎静止(疑似拥堵)" + low_cov
-        return "基本静止(无环境流速参照)" + low_cov
+            conclusion = "目标静止且环境正常流动(疑似违停)"
+        elif env_flow is not None and env_flow < FLOW_EPSILON:
+            conclusion = "目标与环境均近乎静止(疑似拥堵)"
+        else:
+            conclusion = "基本静止(无环境流速参照)"
+    elif side == "unknown":
+        conclusion = "证据不足(车道方位未知,仅凭几何初判)"
+    elif consistent is True:
+        conclusion = "方向一致"
+    elif consistent is False:
+        heading_accepted: Optional[str] = None
+        if isinstance(heading, dict):
+            heading_accepted = heading.get("accepted")
+        if heading_accepted == "toward":
+            # 车头朝镜头:与靠近镜头方向一致→逆行;与远离镜头方向相反→倒车
+            conclusion = "疑似逆行" if actual == "approaching" else "疑似倒车"
+        elif heading_accepted == "away":
+            # 车头背镜头:与远离镜头方向一致→逆行;与靠近镜头方向相反→倒车
+            conclusion = "疑似逆行" if actual == "leaving" else "疑似倒车"
+        else:
+            # 无可靠朝向旁证:按反向运动持续距离/时长阈值默认二分
+            if (
+                state["distance_ratio"] >= REVERSE_MOTION_MIN_DISTANCE_RATIO
+                and state["duration_s"] >= REVERSE_MOTION_MIN_DURATION_S
+            ):
+                conclusion = "疑似逆行"
+            else:
+                conclusion = "疑似倒车"
+    else:
+        conclusion = "证据不足(运动方向不明)"
 
-    expectation_ok = {
-        ("coming", "increasing"): True,
-        ("going", "decreasing"): True,
-        ("coming", "decreasing"): False,
-        ("going", "increasing"): False,
-    }
-    key = (side, trend)
-    if key in expectation_ok:
-        side_cn = "来向" if side == "coming" else "去向"
-        trend_cn = "增大" if trend == "increasing" else "缩小"
-        if expectation_ok[key]:
-            return f"方向一致({side_cn}目标 bbox{trend_cn},与先验相符)"
-        return f"方向相反({side_cn}目标 bbox{trend_cn}),疑似逆行/倒车"
-    return "所在侧未知,方向不作判"
+    # 朝向旁证补充行(不翻盘,仅作为证据)
+    heading_evidence = ""
+    if isinstance(heading, dict) and heading.get("accepted") is not None:
+        accepted = heading["accepted"]
+        n_total = heading.get("n_total", 0)
+        n_consistent = heading.get("n_consistent", 0)
+        if accepted == "toward":
+            text = "朝镜头"
+        elif accepted == "away":
+            text = "背镜头"
+        else:
+            text = "难以判断"
+        if accepted == "unknown":
+            heading_evidence = f";车头朝向:{text}({n_total}帧不一致)"
+        else:
+            if (accepted == "toward" and actual == "approaching") or (
+                accepted == "away" and actual == "leaving"
+            ):
+                relation = "与移动方向一致"
+            else:
+                relation = "与移动方向相反"
+            heading_evidence = (
+                f";车头朝向({n_consistent}/{n_total}帧一致):{text},{relation}"
+            )
+
+    return f"{lane};{traj};结论:{conclusion}{heading_evidence}{low_cov}"

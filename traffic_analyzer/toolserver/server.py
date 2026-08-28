@@ -27,7 +27,7 @@ import subprocess
 import time
 import zlib
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 import cv2
 import numpy as np
@@ -138,11 +138,12 @@ class SuspectBox(BaseModel):
 
 
 class SuspectAnchorIn(BaseModel):
-    """track_suspects 的单个疑似目标锚点(嵌套 box + 时刻 + 描述,与 agent 侧契约一致)。"""
+    """track_suspects 的单个疑似目标锚点(嵌套 box + 时刻 + 描述 + 车道侧,与 agent 侧契约一致)。"""
 
     box: SuspectBox
     timestamp: float = Field(ge=0)
     description: str = ""
+    side: Optional[Literal["coming", "going", "unknown"]] = "unknown"
 
 
 class TrackSuspectsRequest(BaseModel):
@@ -501,6 +502,7 @@ def create_app(workspace: Path | str) -> FastAPI:
                 box=[s.box.x1, s.box.y1, s.box.x2, s.box.y2],
                 timestamp=s.timestamp,
                 description=s.description,
+                side=s.side or "unknown",
             )
             for s in body.suspects
         ]

@@ -396,6 +396,93 @@ describe('track_suspects', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('accepts side enum values coming/going/unknown and omits it when absent', async () => {
+    for (const side of ['coming', 'going', 'unknown']) {
+      mockTrack(successPayload());
+      const result = await execute({
+        video_path: path.join(workspaceDir, 'demo.mp4'),
+        suspects: [{ ...ANCHORS[0], side }],
+      });
+      expect(result.isError).toBeFalsy();
+      const [, init] = fetchMock.mock.calls[fetchMock.mock.calls.length - 1] as [string, RequestInit];
+      expect(JSON.parse(init.body as string).suspects[0].side).toBe(side);
+    }
+
+    mockTrack(successPayload());
+    await execute({
+      video_path: path.join(workspaceDir, 'demo.mp4'),
+      suspects: ANCHORS,
+    });
+    const [, init] = fetchMock.mock.calls[fetchMock.mock.calls.length - 1] as [string, RequestInit];
+    expect(JSON.parse(init.body as string).suspects[0]).not.toHaveProperty('side');
+  });
+
+  it('rejects an invalid side value', async () => {
+    const result = await execute({
+      video_path: path.join(workspaceDir, 'demo.mp4'),
+      suspects: [{ ...ANCHORS[0], side: 'left' }],
+    });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain('track_suspects 参数不合法');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('passes side through to the toolserver request body unchanged', async () => {
+    mockTrack(successPayload());
+    await execute({
+      video_path: path.join(workspaceDir, 'demo.mp4'),
+      suspects: [
+        { ...ANCHORS[0], side: 'going' },
+        { ...ANCHORS[0], description: 'second', side: 'coming' },
+      ],
+    });
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string).suspects).toEqual([
+      { ...ANCHORS[0], side: 'going' },
+      { ...ANCHORS[0], description: 'second', side: 'coming' },
+    ]);
+  });
+
+  it('renders a structured multi-line direction_verdict as-is and keeps it readable', async () => {
+    const verdict = [
+      '所在车道预期方向:来向',
+      '轨迹实际方向:去向',
+      '一致性:不一致',
+      '结论:逆行',
+      '车头朝向证据:与车流相反',
+    ].join('\n');
+    mockTrack({
+      tracks: [
+        {
+          id: 1,
+          description: '白色小客车',
+          profile: { avg_speed_norm: 0.0, covered_s: 12.4, coverage: 0.8 },
+          side_hint: '对向车道一侧',
+          direction_verdict: verdict,
+          best_frames: [],
+        },
+      ],
+      failed: false,
+    });
+    const result = await execute({
+      video_path: path.join(workspaceDir, 'demo.mp4'),
+      suspects: ANCHORS,
+    });
+    expect(result.isError).toBeFalsy();
+    const summary = (result.output as ContentPart[]).find(
+      (part) => part.type === 'text' && part.text.includes('已跟踪'),
+    );
+    const text = (summary as { type: 'text'; text: string }).text;
+    // verdict 原样呈现,多行结构化内容均可读。
+    expect(text).toContain('【轨迹 1】direction_verdict:所在车道预期方向:来向');
+    expect(text).toContain('轨迹实际方向:去向');
+    expect(text).toContain('一致性:不一致');
+    expect(text).toContain('结论:逆行');
+    expect(text).toContain('车头朝向证据:与车流相反');
+    // verdict 行出现在数值档案之前,保持显著置顶。
+    expect(text.indexOf('direction_verdict:')).toBeLessThan(text.indexOf('数值档案:'));
+  });
+
   it('maps a non-2xx toolserver error contract to an isError result', async () => {
     mockTrack(
       { error: { code: 'video_not_found', message: 'Video not found: x.mp4' } },

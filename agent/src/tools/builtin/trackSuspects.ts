@@ -71,6 +71,7 @@ const suspectSchema = z.strictObject({
   }),
   timestamp: z.number().min(0),
   description: z.string(),
+  side: z.enum(['coming', 'going', 'unknown']).optional(),
 });
 
 const trackSuspectsInputSchema = z.strictObject({

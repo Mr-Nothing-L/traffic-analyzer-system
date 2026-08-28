@@ -38,14 +38,18 @@ def cache_key(video_path: Path, anchors: Sequence[Any]) -> str:
         ts = getattr(a, "timestamp", None)
         if ts is None and isinstance(a, dict):
             ts = a.get("timestamp")
+        side = getattr(a, "side", None)
+        if side is None and isinstance(a, dict):
+            side = a.get("side")
         norm_anchors.append(
             {
                 "box": [round(float(v), _BOX_PRECISION) for v in (box or [])],
                 "timestamp": round(float(ts or 0.0), 3),
+                "side": (side or "unknown"),
             }
         )
-    # 按位置排序,锚点顺序差异不产生不同键
-    norm_anchors.sort(key=lambda item: item["box"])
+    # 按位置排序,锚点顺序差异不产生不同键;side 参与键(同一目标不同 side 语义不同)
+    norm_anchors.sort(key=lambda item: item["box"] + [item["side"]])
     payload = {"video": str(video_path), "anchors": norm_anchors}
     raw = json.dumps(payload, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]

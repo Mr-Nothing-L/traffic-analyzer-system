@@ -48,6 +48,7 @@ from traffic_analyzer.toolserver.tracking import (
     infer_side_hint,
     is_consistent,
 )
+from traffic_analyzer.toolserver.tracking.models import _direction_verdict_state
 from traffic_analyzer.toolserver.tracking import stitch
 from traffic_analyzer.toolserver.tracking.render import (
     best_frame_crops,
@@ -73,6 +74,14 @@ _JPEG_QUALITY = 80
 _SCALE_HINT_MAX = 2.0       # 坐标 <= 该值视为 0-1 输出,否则按 0-1000 解析
 
 _TEMPLATE_ID = "track_suspects_window"
+_HEADING_TEMPLATE_ID = "vehicle_heading"
+
+# 车头朝向 closed question 的合法答案(中文→内部枚举)
+_HEADING_ANSWERS = {
+    "朝镜头": "toward",
+    "背镜头": "away",
+    "难以判断": "unknown",
+}
 
 
 class TrackingFailure(Exception):
@@ -383,6 +392,91 @@ def compute_env_flow(
     n = len(speeds)
     mid = speeds[n // 2] if n % 2 else (speeds[n // 2 - 1] + speeds[n // 2]) / 2
     return round(mid, 6)
+
+
+# ---------------------------------------------------------------------------
+# 车头朝向旁证(仅补充证据,不翻盘)
+# ---------------------------------------------------------------------------
+
+
+def _needs_heading(state: Dict[str, Any]) -> bool:
+    """一致性初判为「相反」或「不明」时才请求车头朝向旁证。"""
+    if state.get("empty"):
+        return False
+    if state["consistent"] is False:
+        return True
+    if state["side"] == "unknown" and state["moving"]:
+        return True
+    # 运动但 bbox 趋势无法区分靠近/远离 → 方向不明
+    if state["actual"] == "stable" and state["moving"]:
+        return True
+    return False
+
+
+def _parse_heading(raw_text: str) -> str:
+    """从模型输出提取车头朝向:朝镜头/背镜头/难以判断。"""
+    text = (raw_text or "").strip()
+    # 简单关键词匹配,兼容 JSON 包装
+    for cn, value in _HEADING_ANSWERS.items():
+        if cn in text:
+            return value
+    # 容错:只看首尾关键字
+    if "朝" in text or "镜头" in text and "背" not in text:
+        return "toward"
+    if "背" in text:
+        return "away"
+    return "unknown"
+
+
+def _query_heading(
+    engine: Any, video_path: Path, track: Track, max_frames: int = 2
+) -> Optional[Dict[str, Any]]:
+    """对单条轨迹请求 1-2 张 best-frame 的车头朝向封闭问题。
+
+    返回 {"raw_answers": [...], "accepted": "toward"/"away"/"unknown",
+          "n_total": int, "n_consistent": int}。
+    调用失败或答案不一致均记为 unknown,不抛异常影响主流程。
+    """
+    try:
+        crops = best_frame_crops(video_path, track, max_frames=max_frames)
+    except Exception as exc:
+        logger.warning("[track_suspects] best-frame crop failed for heading: %s", exc)
+        return None
+    if not crops:
+        return None
+
+    raw_answers: List[str] = []
+    for crop in crops:
+        jpeg_bytes = base64.b64decode(crop["jpeg_base64"])
+        template = PromptTemplate(
+            template_id=_HEADING_TEMPLATE_ID,
+            name="vehicle heading",
+            user_prompt="图中目标车辆车头朝向?只答:朝镜头/背镜头/难以判断",
+        )
+        try:
+            resp = engine.call(
+                template=template, images=[jpeg_bytes], enable_thinking=False
+            )
+            ans = _parse_heading(getattr(resp, "raw_text", "") or "")
+        except Exception as exc:
+            logger.warning("[track_suspects] heading vlm call failed: %s", exc)
+            ans = "unknown"
+        raw_answers.append(ans)
+
+    non_unknown = [a for a in raw_answers if a != "unknown"]
+    if non_unknown and all(a == non_unknown[0] for a in non_unknown):
+        accepted = non_unknown[0]
+        n_consistent = len(non_unknown)
+    else:
+        accepted = "unknown"
+        n_consistent = 0
+
+    return {
+        "raw_answers": raw_answers,
+        "accepted": accepted,
+        "n_total": len(raw_answers),
+        "n_consistent": n_consistent,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -755,8 +849,20 @@ def run_tracking(
         track.profile = compute_profile(
             track, fps=fps_used, env_flow=env_flow, span_s=span_s
         )
-        track.side_hint = infer_side_hint(track.description)
-        track.direction_verdict = direction_verdict(track)
+        # side 优先取 anchor 显式字段,缺失/unknown 时从描述关键词兜底
+        anchor_side = getattr(s.anchor, "side", None) or "unknown"
+        track.side_hint = (
+            anchor_side
+            if anchor_side != "unknown"
+            else infer_side_hint(track.description)
+        )
+        # 方向初判:一致性相反/不明时请求车头朝向旁证(不翻盘)
+        state = _direction_verdict_state(track)
+        heading_result: Optional[Dict[str, Any]] = None
+        if _needs_heading(state):
+            heading_result = _query_heading(engine, video_path, track)
+        track.heading = heading_result
+        track.direction_verdict = direction_verdict(track, heading=heading_result)
         ok, why = is_consistent(track)
         if not ok:
             dropped.append(f"suspect {s.letter}({s.anchor.description}): {why}")
@@ -819,6 +925,7 @@ def run_tracking(
             "profile": track.profile,
             "side_hint": track.side_hint,
             "direction_verdict": track.direction_verdict,
+            "heading": track.heading,
             "best_frames": [],
         }
         try:
@@ -1074,6 +1181,7 @@ def _write_run_snapshot(
                 "profile": t.profile,
                 "side_hint": t.side_hint,
                 "direction_verdict": t.direction_verdict,
+                "heading": t.heading,
             }
             for t in tracks
         ],

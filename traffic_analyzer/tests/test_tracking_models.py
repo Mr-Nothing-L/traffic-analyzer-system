@@ -346,6 +346,12 @@ class TestSideAndVerdict:
         assert infer_side_hint("右侧去向货车") == "going"
         assert infer_side_hint("红色小车") == "unknown"
 
+    def test_anchor_side_overrides_infer(self) -> None:
+        anchor = SuspectAnchor(
+            box=[0.1, 0.1, 0.2, 0.2], timestamp=1.0, description="左侧来向的白色轿车", side="going"
+        )
+        assert anchor.side == "going"
+
     def test_direction_verdict_static_with_flow(self) -> None:
         pts = [{"frame": f, "box": [0.4, 0.4, 0.5, 0.55]} for f in range(5)]
         track = _mk_track(pts)
@@ -361,6 +367,108 @@ class TestSideAndVerdict:
         track.profile = compute_profile(track)
         verdict = direction_verdict(track)
         assert ("逆行" in verdict) or ("倒车" in verdict)
+
+
+class TestStructuredVerdict:
+    def _lerp_boxes(self, start: List[float], end: List[float], n: int) -> List[Dict[str, object]]:
+        return [
+            {
+                "frame": f,
+                "t": f * 0.2,
+                "box": [s + (e - s) * f / max(n - 1, 1) for s, e in zip(start, end)],
+            }
+            for f in range(n)
+        ]
+
+    def test_consistent_coming_approaching(self) -> None:
+        # coming 目标 bbox 明显增大 + 中心大幅右移 → 方向一致
+        pts = self._lerp_boxes(
+            [0.20, 0.30, 0.30, 0.55],
+            [0.50, 0.50, 0.70, 0.80],
+            10,
+        )
+        track = _mk_track(pts)
+        track.side_hint = "coming"
+        track.profile = compute_profile(track)
+        verdict = direction_verdict(track)
+        assert "方向一致" in verdict
+        assert "与预期一致" in verdict
+        assert "来向侧" in verdict
+
+    def test_opposite_sustained_wrong_way(self) -> None:
+        # coming 目标 bbox 持续缩小 + 中心大幅左移(远离镜头方向) → 疑似逆行
+        pts = self._lerp_boxes(
+            [0.60, 0.50, 0.80, 0.80],
+            [0.20, 0.20, 0.30, 0.40],
+            10,
+        )
+        track = _mk_track(pts)
+        track.side_hint = "coming"
+        track.profile = compute_profile(track)
+        verdict = direction_verdict(track)
+        assert "与预期相反" in verdict
+        assert "疑似逆行" in verdict
+
+    def test_opposite_short_backing(self) -> None:
+        # coming 目标 bbox 缩小、有位移但位移比 < 阈值 → 疑似倒车
+        pts = self._lerp_boxes(
+            [0.30, 0.30, 0.45, 0.50],
+            [0.29, 0.305, 0.36, 0.43],
+            8,
+        )
+        track = _mk_track(pts)
+        track.side_hint = "coming"
+        # 缩短短时长,使持续距离/时长低于逆行阈值
+        for p in track.points:
+            p.timestamp = p.frame_idx * 0.05
+        track.profile = compute_profile(track)
+        verdict = direction_verdict(track)
+        assert "与预期相反" in verdict
+        assert "疑似倒车" in verdict
+
+    def test_unknown_side_annotation(self) -> None:
+        pts = self._lerp_boxes(
+            [0.20, 0.30, 0.30, 0.55],
+            [0.50, 0.50, 0.70, 0.80],
+            10,
+        )
+        track = _mk_track(pts)
+        track.side_hint = "unknown"
+        track.profile = compute_profile(track)
+        verdict = direction_verdict(track)
+        assert "车道方位未知" in verdict
+        assert "仅凭几何初判" in verdict
+
+    def test_heading_supplementary_line(self) -> None:
+        # coming 目标实际远离;车头朝向旁证为 away(与移动方向一致)→ 疑似逆行
+        pts = self._lerp_boxes(
+            [0.60, 0.50, 0.80, 0.80],
+            [0.20, 0.20, 0.30, 0.40],
+            10,
+        )
+        track = _mk_track(pts)
+        track.side_hint = "coming"
+        track.profile = compute_profile(track)
+        heading = {"accepted": "away", "n_total": 2, "n_consistent": 2}
+        verdict = direction_verdict(track, heading=heading)
+        assert "疑似逆行" in verdict
+        assert "车头朝向(2/2帧一致):背镜头" in verdict
+        assert "与移动方向一致" in verdict
+
+    def test_heading_dichotomy_backing(self) -> None:
+        # 同上但车头朝向为 toward(与移动方向相反)→ 疑似倒车
+        pts = self._lerp_boxes(
+            [0.60, 0.50, 0.80, 0.80],
+            [0.20, 0.20, 0.30, 0.40],
+            10,
+        )
+        track = _mk_track(pts)
+        track.side_hint = "coming"
+        track.profile = compute_profile(track)
+        heading = {"accepted": "toward", "n_total": 2, "n_consistent": 2}
+        verdict = direction_verdict(track, heading=heading)
+        assert "疑似倒车" in verdict
+        assert "朝镜头" in verdict
 
 
 # ---------------------------------------------------------------------------
@@ -473,3 +581,16 @@ class TestCacheKey:
         store_cached(tmp_path, key, payload)
         assert load_cached(tmp_path, key) == payload
         assert load_cached(tmp_path, "missing") is None
+
+    def test_side_participates_in_key(self, tmp_path: Path) -> None:
+        from traffic_analyzer.toolserver.tracking.cache import cache_key
+
+        a_coming = SuspectAnchor(
+            box=[0.1, 0.1, 0.2, 0.2], timestamp=1.0, description="x", side="coming"
+        )
+        a_going = SuspectAnchor(
+            box=[0.1, 0.1, 0.2, 0.2], timestamp=1.0, description="x", side="going"
+        )
+        k_coming = cache_key(tmp_path / "v.mp4", [a_coming])
+        k_going = cache_key(tmp_path / "v.mp4", [a_going])
+        assert k_coming != k_going
