@@ -141,7 +141,7 @@
           "video_path": { "type": "string", "description": "视频文件路径(绝对路径或 workspace 相对路径)" },
           "suspects": {
             "type": "array",
-            "description": "可疑目标锚点列表(1~5 个):必须是你从抽帧里实际看到的对象,不要凭空编造锚点。每个锚点可选带 side 字段,说明目标所在车道相对隔离带的方位:coming=来向侧(预期靠近镜头)/going=去向侧(预期远离镜头)/unknown;判逆行/倒车时必填,不确定填 unknown",
+            "description": "可疑目标锚点列表(1~5 个):必须是你从抽帧里实际看到的对象,不要凭空编造锚点。每个锚点可选带 side 字段,说明目标所在车道相对中央隔离带(分隔双向车道的中央护栏,非路侧护栏)的方位:coming=来向侧(预期靠近镜头)/going=去向侧(预期远离镜头)/unknown;运行时服务端会做一次场景级方位复核,以此为准;判逆行/倒车时必填,不确定填 unknown",
             "minItems": 1,
             "maxItems": 5,
             "items": {
@@ -161,7 +161,7 @@
                 },
                 "timestamp": { "type": "number", "description": "锚点帧的大致时刻(秒)", "minimum": 0 },
                 "description": { "type": "string", "description": "自然语言描述该目标外观与疑点(如\"白色小客车,疑似长时间静止\")" },
-                "side": { "type": "string", "description": "目标所在车道相对隔离带的方位:coming=来向侧(预期靠近镜头)/going=去向侧(预期远离镜头)/unknown;判逆行/倒车时必填,不确定填 unknown", "enum": ["coming", "going", "unknown"] }
+                "side": { "type": "string", "description": "目标所在车道相对中央隔离带(分隔双向车道的中央护栏,非路侧护栏)的方位:coming=来向侧(预期靠近镜头)/going=去向侧(预期远离镜头)/unknown;运行时服务端会做一次场景级方位复核,以此为准;判逆行/倒车时必填,不确定填 unknown", "enum": ["coming", "going", "unknown"] }
               },
               "required": ["box", "timestamp", "description"],
               "additionalProperties": false

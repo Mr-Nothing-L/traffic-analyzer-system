@@ -74,6 +74,7 @@ _JPEG_QUALITY = 80
 _SCALE_HINT_MAX = 2.0       # 坐标 <= 该值视为 0-1 输出,否则按 0-1000 解析
 
 _TEMPLATE_ID = "track_suspects_window"
+_SCENE_TEMPLATE_ID = "track_suspects_scene_side"
 _HEADING_TEMPLATE_ID = "vehicle_heading"
 
 # 车头朝向 closed question 的合法答案(中文→内部枚举)
@@ -105,6 +106,10 @@ class _SuspectState:
     anchor_frame: Optional[int] = None       # 对应原始帧号(锚框所在帧)
     anchor_group: Optional[int] = None       # 锚点所在窗组号(grid 序号 // STRIDE)
     anchor_validated: bool = False           # 锚点窗重检测校验已执行
+    # 最终 side 来源(anchor/scene/infer/unknown)与依据文案
+    final_side: str = "unknown"
+    side_source: str = "unknown"
+    side_rationale: Optional[str] = None
 
     @property
     def last_box(self) -> Optional[List[float]]:
@@ -345,6 +350,168 @@ def parse_window_response(
 
 
 # ---------------------------------------------------------------------------
+# 场景级中央隔离带方位判定(一次跟踪一次 VLM 调用)
+# ---------------------------------------------------------------------------
+
+
+def build_scene_prompt(suspects: Sequence[Any]) -> str:
+    """构造中央隔离带方位封闭提问 prompt。
+
+    用首窗首帧做单图提问,要求模型输出 JSON:
+    {"median_side": "left|right|unknown",
+     "per_target": [{"index": 0, "side": "coming|going|unknown", "rationale": "..."}]}
+    """
+    lines: List[str] = [
+        "以上是同一路口监控视频的一帧画面。请回答一个关于画面中央隔离带的封闭问题:",
+        "",
+        "画面中的**中央隔离带**(分隔双向车道的中央护栏/绿化带,**不是**道路两侧的护栏)"
+        "在画面哪一侧?如果中央隔离带不可见或无法判断,请直接回答 unknown。",
+        "",
+        "画面中标注的疑似目标:",
+    ]
+    for s in suspects:
+        lines.append(f"目标{s.letter}: {s.anchor.description}。")
+    lines.extend(
+        [
+            "",
+            "对每个目标,判断它相对于中央隔离带位于哪一侧,以及该侧车道的正常行驶方向"
+            "是朝镜头(coming)还是背镜头(going)。中央隔离带不可见时全部回答 unknown。",
+            "",
+            "以 JSON 对象输出,不要任何解释:",
+            '{"median_side": "left|right|unknown", "per_target": ['
+            '{"index": 0, "side": "coming|going|unknown", "rationale": "..."}, '
+            '{"index": 1, ...}]}。',
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _as_unknown_scene(
+    suspects: Sequence[Any], error: Optional[str] = None
+) -> Dict[str, Any]:
+    """构造统一 unknown 场景结果(解析失败/中央隔离带不可见/调用失败时使用)。"""
+    return {
+        "median_side": "unknown",
+        "per_target": {
+            s.index: {"side": "unknown", "rationale": None} for s in suspects
+        },
+        "parse_error": error,
+    }
+
+
+def parse_scene_response(
+    resp: Any, suspect_indices: Sequence[int]
+) -> Optional[Dict[str, Any]]:
+    """解析场景级中央隔离带响应,失败返回 None(调用方落 unknown)。"""
+    data: Optional[Dict[str, Any]] = getattr(resp, "parsed_data", None)
+    if not isinstance(data, dict):
+        try:
+            data = parse_window_json(getattr(resp, "raw_text", "") or "")
+        except ValueError:
+            return None
+    if not isinstance(data, dict):
+        return None
+
+    raw_text = getattr(resp, "raw_text", "") or ""
+    median_side = str(data.get("median_side", "unknown")).lower()
+    if median_side not in ("left", "right"):
+        median_side = "unknown"
+
+    idx_set = set(suspect_indices)
+    per_target: Dict[int, Dict[str, Any]] = {}
+    raw_targets = data.get("per_target") or data.get("targets") or []
+    if isinstance(raw_targets, list):
+        for item in raw_targets:
+            if not isinstance(item, dict):
+                continue
+            try:
+                idx = int(item.get("index"))
+            except (TypeError, ValueError):
+                continue
+            if idx not in idx_set:
+                continue
+            side = str(item.get("side", "unknown")).lower()
+            if side not in ("coming", "going"):
+                side = "unknown"
+            per_target[idx] = {
+                "side": side,
+                "rationale": (item.get("rationale") or None),
+            }
+
+    # 中央隔离带不可见:强制全部 unknown
+    if median_side == "unknown":
+        per_target = {idx: {"side": "unknown", "rationale": None} for idx in idx_set}
+
+    return {
+        "median_side": median_side,
+        "per_target": per_target,
+        "raw_text": raw_text,
+    }
+
+
+def _query_scene_side(
+    engine: Any, frame_jpeg: bytes, suspects: Sequence[_SuspectState]
+) -> Dict[str, Any]:
+    """调用 VLM 做一次场景级中央隔离带方位判定。
+
+    失败/解析失败均返回统一 unknown 结构,不抛异常影响主流程。
+    """
+    prompt = build_scene_prompt(suspects)
+    template = PromptTemplate(
+        template_id=_SCENE_TEMPLATE_ID,
+        name="track_suspects scene side",
+        user_prompt=prompt,
+    )
+    try:
+        resp = engine.call(
+            template=template, images=[frame_jpeg], enable_thinking=False
+        )
+        if not getattr(resp, "success", False):
+            return _as_unknown_scene(
+                suspects,
+                error=getattr(resp, "error_message", None) or "vlm call failed",
+            )
+        result = parse_scene_response(resp, [s.index for s in suspects])
+        if result is None:
+            return _as_unknown_scene(suspects, error="scene side parse failed")
+        return result
+    except Exception as exc:
+        logger.warning("[track_suspects] scene side vlm call failed: %s", exc)
+        return _as_unknown_scene(suspects, error=str(exc))
+
+
+def _build_scene_rationale(
+    median_side: str, final_side: str, vlm_rationale: Optional[str]
+) -> str:
+    """由中央隔离带侧别与目标车道生成 verdict 的括号内依据文案。"""
+    if median_side not in ("left", "right") or final_side not in (
+        "coming",
+        "going",
+    ):
+        return vlm_rationale or ""
+    side_text = {"left": "左", "right": "右"}
+    # 目标车道必在中央隔离带另一侧
+    target_relative = "right" if median_side == "left" else "left"
+    direction_text = "来向" if final_side == "coming" else "去向"
+    camera_text = "应靠近镜头" if final_side == "coming" else "应远离镜头"
+    return (
+        f"中央隔离带在画面{side_text[median_side]}侧,目标位于其{side_text[target_relative]}侧,"
+        f"该侧为{direction_text}车道,{camera_text}"
+    )
+
+
+def _build_fallback_rationale(final_side: str, source: str) -> str:
+    """anchor / infer / unknown 等非 scene 来源的车道依据文案。"""
+    direction_text = "来向" if final_side == "coming" else "去向"
+    camera_text = "应靠近镜头" if final_side == "coming" else "应远离镜头"
+    if source == "anchor":
+        return f"由锚点 side 指定为{direction_text}车道,{camera_text}"
+    if source == "infer":
+        return f"由描述关键词推断为{direction_text}车道,{camera_text}"
+    return camera_text
+
+
+# ---------------------------------------------------------------------------
 # 运动估计与环境流速
 # ---------------------------------------------------------------------------
 
@@ -549,6 +716,20 @@ def run_tracking(
         s.points.append({"frame": s.anchor_frame, "box": list(s.anchor.box)})
     anchored_groups = [s.anchor_group for s in suspects if s.anchor_group is not None]
     first_group = min(anchored_groups) if anchored_groups else 0
+
+    # --- 场景级中央隔离带方位判定(首窗首帧,一次跟踪一次 VLM 调用) ---
+    scene_frame_index = grid[first_group * STRIDE] if grid else None
+    scene_side_result: Optional[Dict[str, Any]] = None
+    if scene_frame_index is not None:
+        scene_jpegs = extract_window_jpegs(video_path, [scene_frame_index])
+        if scene_jpegs:
+            scene_side_result = _query_scene_side(
+                engine, scene_jpegs[0], suspects
+            )
+    if scene_side_result is None:
+        scene_side_result = _as_unknown_scene(
+            suspects, error="first frame unavailable"
+        )
 
     def _reindex_anchors(new_grid: List[int]) -> int:
         """fps 升档后把锚点定位迁移到新网格,返回新的最早锚点窗组号。"""
@@ -796,6 +977,8 @@ def run_tracking(
                 out_dir, video_path, anchors, time_range, fps_used, None,
                 tracks=[], events=events_all, stop_reason=stop_reason,
                 suspects=suspects,
+                scene_side_result=scene_side_result,
+                scene_frame_index=scene_frame_index,
             )
         return {"failed": True, "failure_reason": "tracking timed out"}
 
@@ -807,6 +990,8 @@ def run_tracking(
                 out_dir, video_path, anchors, time_range, fps_used, None,
                 tracks=[], events=events_all, stop_reason=stop_reason,
                 suspects=suspects,
+                scene_side_result=scene_side_result,
+                scene_frame_index=scene_frame_index,
             )
         return {"failed": True, "failure_reason": f"all VLM window calls failed ({reason})"}
 
@@ -849,13 +1034,49 @@ def run_tracking(
         track.profile = compute_profile(
             track, fps=fps_used, env_flow=env_flow, span_s=span_s
         )
-        # side 优先取 anchor 显式字段,缺失/unknown 时从描述关键词兜底
+        # side 来源优先级:场景判定 > 锚点 side > 描述关键词嗅探
         anchor_side = getattr(s.anchor, "side", None) or "unknown"
-        track.side_hint = (
-            anchor_side
-            if anchor_side != "unknown"
-            else infer_side_hint(track.description)
+        scene_target = (scene_side_result or {}).get("per_target", {}).get(
+            s.index, {}
         )
+        scene_side = scene_target.get("side", "unknown")
+        scene_median = (scene_side_result or {}).get("median_side", "unknown")
+
+        if scene_side != "unknown":
+            track.side_hint = scene_side
+            track.side_source = "scene"
+            track.side_rationale = _build_scene_rationale(
+                scene_median, scene_side, scene_target.get("rationale")
+            )
+            if anchor_side != "unknown" and anchor_side != scene_side:
+                events_all.append(
+                    {
+                        "type": "side_conflict",
+                        "frame": scene_frame_index,
+                        "index": s.index,
+                        "anchor_side": anchor_side,
+                        "scene_side": scene_side,
+                    }
+                )
+        elif anchor_side != "unknown":
+            track.side_hint = anchor_side
+            track.side_source = "anchor"
+            track.side_rationale = _build_fallback_rationale(anchor_side, "anchor")
+        else:
+            inferred = infer_side_hint(track.description)
+            track.side_hint = inferred
+            track.side_source = "infer" if inferred != "unknown" else "unknown"
+            track.side_rationale = (
+                _build_fallback_rationale(inferred, "infer")
+                if inferred != "unknown"
+                else None
+            )
+
+        # 回写 suspect 状态,便于 run.json 记录每个目标最终 side 与来源
+        s.final_side = track.side_hint
+        s.side_source = track.side_source
+        s.side_rationale = track.side_rationale
+
         # 方向初判:一致性相反/不明时请求车头朝向旁证(不翻盘)
         state = _direction_verdict_state(track)
         heading_result: Optional[Dict[str, Any]] = None
@@ -879,6 +1100,8 @@ def run_tracking(
                 out_dir, video_path, anchors, time_range, fps_used, env_flow,
                 tracks=[], events=events_all, stop_reason=stop_reason,
                 suspects=suspects,
+                scene_side_result=scene_side_result,
+                scene_frame_index=scene_frame_index,
             )
         return {"failed": True, "failure_reason": f"all suspects lost: {reason}"}
 
@@ -915,6 +1138,8 @@ def run_tracking(
             out_dir, video_path, anchors, time_range, fps_used, env_flow,
             tracks=tracks, events=events_all, stop_reason=stop_reason,
             suspects=suspects,
+            scene_side_result=scene_side_result,
+            scene_frame_index=scene_frame_index,
         )
 
     payload_tracks: List[Dict[str, Any]] = []
@@ -1132,12 +1357,29 @@ def _write_run_snapshot(
     events: Optional[Sequence[Dict[str, Any]]] = None,
     stop_reason: str = "completed",
     suspects: Sequence[_SuspectState] = (),
+    scene_side_result: Optional[Dict[str, Any]] = None,
+    scene_frame_index: Optional[int] = None,
 ) -> None:
     """运行参数+数值档案快照(run.json):复现/回放一次跟踪所需全部数值。
 
     stop_reason: completed/max_calls/timeout/all_inactive;suspects 记录
     每个目标的失活状态(deactivated);events 为全量编排事件(含 re-anchor)。
     """
+    # 每个目标最终采用的 side 及来源(anchor/scene/infer/unknown)
+    per_target_side_summary = [
+        {
+            "index": s.index,
+            "side": s.final_side,
+            "source": s.side_source,
+            "anchor_side": getattr(s.anchor, "side", None) or "unknown",
+            "scene_side": (scene_side_result or {})
+            .get("per_target", {})
+            .get(s.index, {})
+            .get("side", "unknown"),
+        }
+        for s in suspects
+    ]
+
     snapshot = {
         "video": str(video_path),
         "time_range": list(time_range) if time_range else None,
@@ -1147,10 +1389,16 @@ def _write_run_snapshot(
         "reanchor_every": REANCHOR_EVERY,
         "reanchor_mismatch_iou": REANCHOR_MISMATCH_IOU,
         # thinking 口径:propagate 窗关 thinking(低延迟);reanchor 窗不传参
-        # (None = 服务端默认,vLLM qwen3 默认开启)。
-        "enable_thinking": {"propagate": False, "reanchor": None},
+        # (None = 服务端默认,vLLM qwen3 默认开启);场景判定 also False。
+        "enable_thinking": {"propagate": False, "reanchor": None, "scene_side": False},
         "env_flow": env_flow,
         "stop_reason": stop_reason,
+        "scene_side": {
+            "frame": scene_frame_index,
+            "median_side": (scene_side_result or {}).get("median_side", "unknown"),
+            "per_target": per_target_side_summary,
+            "raw_response": scene_side_result,
+        },
         "thresholds": {
             "static_displacement_ratio": STATIC_DISPLACEMENT_RATIO,
             "slow_speed_ratio": SLOW_SPEED_RATIO,
@@ -1180,6 +1428,8 @@ def _write_run_snapshot(
                 "description": t.description,
                 "profile": t.profile,
                 "side_hint": t.side_hint,
+                "side_source": t.side_source,
+                "side_rationale": t.side_rationale,
                 "direction_verdict": t.direction_verdict,
                 "heading": t.heading,
             }

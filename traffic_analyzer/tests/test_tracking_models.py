@@ -37,6 +37,12 @@ from traffic_analyzer.toolserver.tracking.models import (
     path_length,
 )
 from traffic_analyzer.toolserver.tracking import stitch
+from traffic_analyzer.toolserver.tracking.windows import (
+    build_scene_prompt,
+    parse_scene_response,
+    _build_scene_rationale,
+    _build_fallback_rationale,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -594,3 +600,108 @@ class TestCacheKey:
         k_coming = cache_key(tmp_path / "v.mp4", [a_coming])
         k_going = cache_key(tmp_path / "v.mp4", [a_going])
         assert k_coming != k_going
+
+
+# ---------------------------------------------------------------------------
+# 场景级中央隔离带方位判定
+# ---------------------------------------------------------------------------
+
+
+class _FakeSuspect:
+    def __init__(self, index: int, letter: str, description: str) -> None:
+        self.index = index
+        self.letter = letter
+        self.anchor = type("_A", (), {"description": description})()
+
+
+class TestSceneSide:
+    def test_prompt_mentions_median_and_targets(self) -> None:
+        suspects = [_FakeSuspect(0, "A", "白色轿车"), _FakeSuspect(1, "B", "红色货车")]
+        prompt = build_scene_prompt(suspects)
+        assert "中央隔离带" in prompt
+        assert "不是" in prompt and "道路两侧" in prompt
+        assert "目标A" in prompt
+        assert "目标B" in prompt
+        assert "coming" in prompt and "going" in prompt
+        assert "median_side" in prompt
+
+    def test_parse_normal_response(self) -> None:
+        from types import SimpleNamespace
+
+        resp = SimpleNamespace(
+            success=True,
+            parsed_data={
+                "median_side": "left",
+                "per_target": [
+                    {"index": 0, "side": "coming", "rationale": "在隔离带右侧,朝镜头"},
+                    {"index": 1, "side": "going", "rationale": "在隔离带右侧,背镜头"},
+                ],
+            },
+            raw_text="json",
+        )
+        result = parse_scene_response(resp, [0, 1])
+        assert result["median_side"] == "left"
+        assert result["per_target"][0]["side"] == "coming"
+        assert result["per_target"][1]["side"] == "going"
+        assert "朝镜头" in result["per_target"][0]["rationale"]
+
+    def test_parse_invisible_median_forces_unknown(self) -> None:
+        from types import SimpleNamespace
+
+        resp = SimpleNamespace(
+            success=True,
+            parsed_data={
+                "median_side": "unknown",
+                "per_target": [
+                    {"index": 0, "side": "coming", "rationale": "..."},
+                ],
+            },
+            raw_text="json",
+        )
+        result = parse_scene_response(resp, [0])
+        assert result["median_side"] == "unknown"
+        assert result["per_target"][0]["side"] == "unknown"
+
+    def test_parse_failure_returns_none(self) -> None:
+        from types import SimpleNamespace
+
+        resp = SimpleNamespace(success=True, parsed_data=None, raw_text="not json")
+        assert parse_scene_response(resp, [0]) is None
+
+    def test_build_scene_rationale_format(self) -> None:
+        text = _build_scene_rationale("left", "coming", "vlm")
+        assert "中央隔离带在画面左侧" in text
+        assert "目标位于其右侧" in text
+        assert "该侧为来向车道" in text
+        assert "应靠近镜头" in text
+
+    def test_build_fallback_rationale(self) -> None:
+        assert "锚点 side" in _build_fallback_rationale("going", "anchor")
+        assert "描述关键词" in _build_fallback_rationale("coming", "infer")
+
+    def test_direction_verdict_includes_scene_rationale(self) -> None:
+        pts = [
+            {"frame": f, "box": [0.20 + 0.03 * f, 0.30, 0.30 + 0.03 * f, 0.55]}
+            for f in range(6)
+        ]
+        track = _mk_track(pts)
+        track.side_hint = "coming"
+        track.side_source = "scene"
+        track.side_rationale = _build_scene_rationale("left", "coming", None)
+        track.profile = compute_profile(track)
+        verdict = direction_verdict(track)
+        assert "所在车道=来向侧(" in verdict
+        assert "中央隔离带在画面左侧" in verdict
+        assert "应靠近镜头" in verdict
+
+    def test_direction_verdict_unknown_side_keeps_original_text(self) -> None:
+        pts = [
+            {"frame": f, "box": [0.20 + 0.03 * f, 0.30, 0.30 + 0.03 * f, 0.55]}
+            for f in range(6)
+        ]
+        track = _mk_track(pts)
+        track.side_hint = "unknown"
+        track.profile = compute_profile(track)
+        verdict = direction_verdict(track)
+        assert "所在车道=车道方位未知,仅凭几何初判" in verdict
+        assert "中央隔离带" not in verdict

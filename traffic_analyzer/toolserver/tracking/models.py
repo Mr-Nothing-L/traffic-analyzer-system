@@ -71,6 +71,8 @@ class Track:
     points: List[TrackPoint] = field(default_factory=list)
     profile: Dict[str, Any] = field(default_factory=dict)
     side_hint: str = "unknown"
+    side_source: str = "unknown"  # anchor / scene / infer / unknown
+    side_rationale: Optional[str] = None
     direction_verdict: str = "未知"
     heading: Optional[Dict[str, Any]] = None
 
@@ -380,11 +382,11 @@ def direction_verdict(
 
     # 车道侧/预期
     if side == "coming":
-        lane = "所在车道=来向侧(应靠近镜头)"
+        lane = f"所在车道=来向侧({track.side_rationale or '应靠近镜头'})"
     elif side == "going":
-        lane = "所在车道=去向侧(应远离镜头)"
+        lane = f"所在车道=去向侧({track.side_rationale or '应远离镜头'})"
     else:
-        lane = "所在车道=车道方位未知"
+        lane = "所在车道=车道方位未知,仅凭几何初判"
 
     # 轨迹实际方向
     if actual == "approaching":

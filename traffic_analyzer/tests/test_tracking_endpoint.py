@@ -82,11 +82,17 @@ class ScriptedEngine:
         responses: Optional[List[Dict[str, Any]]] = None,
         raw_text: Optional[str] = None,
         fail_all: bool = False,
+        scene_response: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.responses = responses or []
         self.raw_text = raw_text
         self.fail_all = fail_all
+        self.scene_response = scene_response or {
+            "median_side": "unknown",
+            "per_target": [{"index": i, "side": "unknown", "rationale": ""} for i in range(5)],
+        }
         self.calls = 0
+        self.window_calls = 0
         self.prompts: List[str] = []
 
     def call(self, template: Any, images: Any = None, **kwargs: Any) -> Any:
@@ -94,13 +100,24 @@ class ScriptedEngine:
 
         self.calls += 1
         self.prompts.append(template.user_prompt)
-        if self.fail_all or self.calls > len(self.responses):
+        if getattr(template, "template_id", None) == "track_suspects_scene_side":
+            if self.fail_all:
+                return SimpleNamespace(
+                    success=False, error_message="provider down", parsed_data={}, raw_text=""
+                )
+            data = self.scene_response
+            text = f"```json\n{json.dumps(data)}\n```"
+            return SimpleNamespace(
+                success=True, parsed_data=data, raw_text=text, model="mock", provider="mock"
+            )
+        self.window_calls += 1
+        if self.fail_all or self.window_calls > len(self.responses):
             if self.fail_all:
                 return SimpleNamespace(
                     success=False, error_message="provider down", parsed_data={}, raw_text=""
                 )
             # 脚本耗尽后默认重复最后一个成功响应
-        data = self.responses[min(self.calls, len(self.responses)) - 1]
+        data = self.responses[min(self.window_calls, len(self.responses)) - 1]
         text = f"```json\n{json.dumps(data)}\n```"
         return SimpleNamespace(
             success=True, parsed_data=data, raw_text=text, model="mock", provider="mock"
@@ -521,9 +538,11 @@ class TestThinkingPropagation:
         resp = _post(client, engine)
         assert resp.status_code == 200, resp.text
         assert resp.json()["failed"] is False
-        # 至少覆盖窗 0(re-anchor)与若干传播窗
-        assert len(engine.call_kwargs) >= REANCHOR_EVERY + 1
-        for wi, kwargs in enumerate(engine.call_kwargs):
+        # 至少覆盖场景判定 1 次 + 窗 0(re-anchor)与若干传播窗
+        assert len(engine.call_kwargs) >= REANCHOR_EVERY + 2
+        # 第 1 次为场景判定,后续为窗调用
+        assert engine.call_kwargs[0].get("enable_thinking") is False
+        for wi, kwargs in enumerate(engine.call_kwargs[1:], start=0):
             if wi % REANCHOR_EVERY == 0:
                 assert "enable_thinking" not in kwargs  # re-anchor:不传,保留默认
             else:
@@ -533,7 +552,7 @@ class TestThinkingPropagation:
         run = json.loads(
             (tracked_video.parent / art["dir"] / "run.json").read_text(encoding="utf-8")
         )
-        assert run["enable_thinking"] == {"propagate": False, "reanchor": None}
+        assert run["enable_thinking"] == {"propagate": False, "reanchor": None, "scene_side": False}
 
 
 class ProgressiveEngine:
@@ -556,6 +575,15 @@ class ProgressiveEngine:
                 success=True,
                 raw_text=self.heading_answer,
                 parsed_data={},
+                model="mock",
+                provider="mock",
+            )
+        if getattr(template, "template_id", None) == "track_suspects_scene_side":
+            data = {"median_side": "unknown", "per_target": [{"index": 0, "side": "unknown", "rationale": ""}]}
+            return SimpleNamespace(
+                success=True,
+                parsed_data=data,
+                raw_text=json.dumps(data),
                 model="mock",
                 provider="mock",
             )
@@ -704,3 +732,89 @@ class TestHeading:
         track = resp.json()["tracks"][0]
         assert track["side_hint"] == "going"
         assert "去向侧" in track["direction_verdict"]
+
+
+class TestSceneSide:
+    _SCENE_COMING_LEFT = {
+        "median_side": "left",
+        "per_target": [{"index": 0, "side": "coming", "rationale": "在隔离带右侧,朝镜头"}],
+    }
+    _SCENE_GOING_LEFT = {
+        "median_side": "left",
+        "per_target": [{"index": 0, "side": "going", "rationale": "在隔离带右侧,背镜头"}],
+    }
+
+    def test_scene_side_overrides_anchor_and_records_run(
+        self,
+        client: TestClient,
+        tracked_video: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        engine = ScriptedEngine(
+            responses=[_window_response("[100,700,400,950]")],
+            scene_response=self._SCENE_COMING_LEFT,
+        )
+        monkeypatch.setattr(
+            "traffic_analyzer.toolserver.server._build_default_engine", lambda: engine
+        )
+        # 显式 anchor side=going,但场景判定为 coming → 应被覆盖并记冲突
+        resp = _post(client, engine, side="going")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        track = body["tracks"][0]
+        assert track["side_hint"] == "coming"
+        assert "来向侧" in track["direction_verdict"]
+        assert "中央隔离带在画面左侧" in track["direction_verdict"]
+        assert any(ev.get("type") == "side_conflict" for ev in body["events"])
+
+        art = body["artifacts"]
+        run = json.loads(
+            (tracked_video.parent / art["dir"] / "run.json").read_text(encoding="utf-8")
+        )
+        assert run["scene_side"]["median_side"] == "left"
+        assert run["scene_side"]["per_target"][0]["side"] == "coming"
+        assert run["scene_side"]["per_target"][0]["source"] == "scene"
+        assert run["tracks"][0]["side_source"] == "scene"
+        assert "side_rationale" in run["tracks"][0]
+
+    def test_unknown_scene_does_not_override_anchor(
+        self,
+        client: TestClient,
+        tracked_video: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        engine = ScriptedEngine(
+            responses=[_window_response("[100,700,400,950]")],
+            scene_response={
+                "median_side": "unknown",
+                "per_target": [{"index": 0, "side": "unknown", "rationale": ""}],
+            },
+        )
+        monkeypatch.setattr(
+            "traffic_analyzer.toolserver.server._build_default_engine", lambda: engine
+        )
+        resp = _post(client, engine, side="going")
+        assert resp.status_code == 200, resp.text
+        track = resp.json()["tracks"][0]
+        assert track["side_hint"] == "going"
+        assert "去向侧" in track["direction_verdict"]
+        assert "side_conflict" not in [e.get("type") for e in resp.json()["events"]]
+
+    def test_scene_side_agrees_with_anchor_no_conflict(
+        self,
+        client: TestClient,
+        tracked_video: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        engine = ScriptedEngine(
+            responses=[_window_response("[100,700,400,950]")],
+            scene_response=self._SCENE_GOING_LEFT,
+        )
+        monkeypatch.setattr(
+            "traffic_analyzer.toolserver.server._build_default_engine", lambda: engine
+        )
+        resp = _post(client, engine, side="going")
+        assert resp.status_code == 200, resp.text
+        track = resp.json()["tracks"][0]
+        assert track["side_hint"] == "going"
+        assert "side_conflict" not in [e.get("type") for e in resp.json()["events"]]

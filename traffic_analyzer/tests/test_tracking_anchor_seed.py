@@ -63,21 +63,33 @@ class IndexedEngine:
     """按窗序号脚本化响应的 mock 引擎(记录 prompt 供断言)。
 
     prompt 感知:只回报 prompt 中被点名跟踪的目标(真实模型只会追踪
-    prompt 里列出的目标,不会回报未要求的目标)。
+    prompt 里列出的目标,不会回报未要求的目标);场景判定单独返回 unknown,
+    不消耗窗脚本。
     """
 
     def __init__(self, responses: List[Dict[str, Any]]) -> None:
         self.responses = responses
         self.calls = 0
+        self.window_calls = 0
         self.prompts: List[str] = []
 
     def call(self, template: Any, images: Any = None, **kwargs: Any) -> Any:
         import re
 
-        letters = set(re.findall(r"目标([A-Z]):", template.user_prompt))
-        idx = min(self.calls, len(self.responses) - 1)
         self.calls += 1
         self.prompts.append(template.user_prompt)
+        if getattr(template, "template_id", None) == "track_suspects_scene_side":
+            data = {"median_side": "unknown", "per_target": []}
+            return SimpleNamespace(
+                success=True,
+                parsed_data=data,
+                raw_text=json.dumps(data),
+                model="mock",
+                provider="mock",
+            )
+        letters = set(re.findall(r"目标([A-Z]):", template.user_prompt))
+        idx = min(self.window_calls, len(self.responses) - 1)
+        self.window_calls += 1
         data = self.responses[idx]
         filtered = {
             "targets": [
