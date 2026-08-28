@@ -249,10 +249,11 @@ function setAllTextNodes(ids: string[], open: boolean) {
 
 /** 气泡 thinking 应隐藏的 assistant 条目(utils/chatDisplay 纯函数,与链路区间
  * 边界同口径):仅当该轮思考有链路面板承载(进行中或有 detection)时才隐藏,
- * 否则气泡保持原样。 */
+ * 否则气泡保持原样。awaiting_approval 也算进行中——审批等待期间轮次未结束,
+ * 否则 manual 模式下每次审批等待气泡都会重现造成与面板重复。 */
 const hideThinkIds = computed(() =>
   toolRoundAssistantIds(agent.entries, {
-    live: agent.status === 'running' || agent.status === 'connecting',
+    live: ['running', 'connecting', 'awaiting_approval'].includes(agent.status),
   }),
 )
 
@@ -261,7 +262,7 @@ const hideThinkIds = computed(() =>
  * 仍作普通气泡跟在检测卡后。 */
 const hideTextIds = computed(() =>
   toolRoundAssistantTextIds(agent.entries, {
-    live: agent.status === 'running' || agent.status === 'connecting',
+    live: ['running', 'connecting', 'awaiting_approval'].includes(agent.status),
   }),
 )
 
