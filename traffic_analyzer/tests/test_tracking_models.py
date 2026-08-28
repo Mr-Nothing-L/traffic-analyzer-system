@@ -22,6 +22,7 @@ import pytest
 
 from traffic_analyzer.toolserver.tracking.models import (
     STATIC_DISPLACEMENT_RATIO,
+    STATIC_NET_DISTANCE_RATIO,
     K_TRAJECTORY_LENGTH_RATIO,
     SLOW_SPEED_RATIO,
     SuspectAnchor,
@@ -104,6 +105,35 @@ class TestProfile:
         assert classify_motion_state(profile) == "red"
         assert profile["bbox_trend"] == "stable"
         assert profile["stationary_duration_s"] == pytest.approx(1.0)
+
+    def test_slow_crawl_is_moving_not_stationary(self) -> None:
+        """回归:低速蠕行(每步位移远小于静止阈值,但全程净位移 > 0.5×对角线)
+        必须判移动,不能判静止——净位移口径就是为此引入的(养护车案例)。"""
+        # box 对角线 = 0.25;每步右移 0.004(≈0.016×对角线,远低于 0.15 阈值),
+        # dt=0.2s → 速度 0.02/s ≈ 0.08×对角线/秒(低于速度阈值);
+        # 33 步后净位移 0.128 ≈ 0.51×对角线 → 必须判移动。
+        pts = [
+            {
+                "frame": f,
+                "t": f * 0.2,
+                "box": [0.60 + 0.004 * f, 0.30, 0.80 + 0.004 * f, 0.45],
+            }
+            for f in range(33)
+        ]
+        track = _mk_track(pts)
+        track.profile = compute_profile(track)
+        track.side_hint = "going"
+        profile = track.profile
+        diag = box_diagonal(pts[0]["box"])  # type: ignore[arg-type]
+        # 前提:速度口径确实低于静止阈值(否则这个测试没模拟到 crawl)
+        assert profile["avg_speed_norm"] < STATIC_DISPLACEMENT_RATIO * diag
+        # 净位移超过门槛
+        assert profile["net_displacement_diag"] >= STATIC_NET_DISTANCE_RATIO
+        # 核心断言:不是静止
+        assert classify_motion_state(profile) != "red"
+        verdict = direction_verdict(track)
+        assert "基本静止" not in verdict
+        assert "疑似违停" not in verdict
 
     def test_uniform_speed_profile(self) -> None:
         # 每采样点右移 0.02,dt=0.2s → 速度恒定

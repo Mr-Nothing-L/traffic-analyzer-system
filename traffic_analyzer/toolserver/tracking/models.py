@@ -22,6 +22,10 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 # 整段轨迹总位移 < 0.15 × 对角线 → 判静止
 STATIC_DISPLACEMENT_RATIO = 0.15
+# 静止/移动的净位移门槛:首尾中心净位移 ≥ 0.5 × 自身平均对角线即判移动。
+# 低速蠕行(path 很长但单步位移小)在逐段速度口径下会被误判静止;
+# 净位移按全程累积,慢车行驶十几秒也掩盖不了(实测 crawl 案例)。
+STATIC_NET_DISTANCE_RATIO = 0.5
 # 平均速度 < 0.5 × 对角线/秒 → 缓行(介于静止上界与正常之间)
 SLOW_SPEED_RATIO = 0.5
 # 互证防跑飞:轨迹总长 > 3.0 × 对角线 而档案称静止 → 标跑飞
@@ -201,6 +205,7 @@ def compute_profile(
     total_len = path_length(points)
     diags = [box_diagonal(p.box) for p in points]
     mean_diag = sum(diags) / len(diags)
+    net_disp = math.hypot(end_c[0] - start_c[0], end_c[1] - start_c[1])
 
     avg_speed = total_len / duration_s if duration_s > 0 else 0.0
     still_s = stationary_duration_s(points)
@@ -224,6 +229,8 @@ def compute_profile(
         "avg_speed_norm": round(avg_speed, 4),
         "stationary_duration_s": still_s,
         "path_length_norm": round(total_len, 4),
+        "net_displacement_norm": round(net_disp, 4),
+        "net_displacement_diag": round(net_disp / max(mean_diag, 1e-6), 3),
         "bbox_trend": _bbox_trend(points),
         "env_flow_ratio": env_ratio,
         "env_flow_norm": round(env_flow, 4) if env_flow is not None else None,
@@ -275,11 +282,20 @@ def is_consistent(track: Track) -> Tuple[bool, Optional[str]]:
 def classify_motion_state(profile: Dict[str, Any]) -> str:
     """按档案把运动状态分为 red(静止)/yellow(缓行)/green(正常)。
 
-    render.py 速度染色与 JSON 输出共用该口径。
+    render.py 速度染色与 JSON 输出共用该口径。静止判定以净位移为主:
+    速度低于阈值 **且** 净位移不足 0.5 × 对角线才是静止——低速蠕行
+    (全程净位移大)不再误判为静止。
     """
     diag = float(profile.get("mean_diagonal") or 0.0)
     speed = float(profile.get("avg_speed_norm") or 0.0)
-    if diag <= 0 or speed < STATIC_DISPLACEMENT_RATIO * max(diag, 1e-6):
+    net_diag = profile.get("net_displacement_diag")
+    slow = diag <= 0 or speed < STATIC_DISPLACEMENT_RATIO * max(diag, 1e-6)
+    if net_diag is not None:
+        # 有净位移字段:速度低且哪儿也没去才算静止
+        if slow and float(net_diag) < STATIC_NET_DISTANCE_RATIO:
+            return "red"
+    elif slow:
+        # 旧档案无该字段,退回速度口径
         return "red"
     if speed < SLOW_SPEED_RATIO * max(diag, 1e-6):
         return "yellow"
@@ -311,12 +327,20 @@ def _direction_verdict_state(track: Track) -> Dict[str, Any]:
     diag = float(profile.get("mean_diagonal") or 0.0)
     duration_s = max(points[-1].timestamp - points[0].timestamp, 0.0)
     speed = float(profile.get("avg_speed_norm") or 0.0)
-    moving = duration_s > 0 and speed > STATIC_DISPLACEMENT_RATIO * max(diag, 1e-6)
 
     start_c = point_center(points[0])
     end_c = point_center(points[-1])
     net_disp = math.hypot(end_c[0] - start_c[0], end_c[1] - start_c[1])
     distance_ratio = net_disp / max(diag, 1e-6)
+    # 移动判定以净位移为主(慢速蠕行全程累积净位移,不会被低速掩盖),
+    # 速度口径作为快速小目标的对角线比例补充。
+    moving = (
+        duration_s > 0
+        and (
+            distance_ratio >= STATIC_NET_DISTANCE_RATIO
+            or speed > STATIC_DISPLACEMENT_RATIO * max(diag, 1e-6)
+        )
+    )
 
     if not moving:
         actual = "stationary"
