@@ -5,9 +5,21 @@
  * TOOLSERVER_URL environment variable (or the explicit `baseUrl` option).
  * Non-2xx responses are mapped to the toolserver error contract
  * `{error: {code, message}}`; network failures map to `toolserver_unreachable`.
+ *
+ * 超时:undici 全局 fetch 的默认 headersTimeout 是 300s,而长任务端点
+ * (track_suspects 可达 8-15 分钟)会触发 `fetch failed`(HeadersTimeoutError)。
+ * 默认请求统一走长超时 dispatcher(15 分钟);post 另支持 per-call timeoutMs
+ * (AbortSignal)作兜底。
  */
+import { Agent } from 'undici';
 
 export const DEFAULT_TOOLSERVER_URL = 'http://127.0.0.1:8601';
+
+/** 长超时 dispatcher:track_suspects 等长任务端点响应可达 15 分钟。 */
+const LONG_TIMEOUT_DISPATCHER = new Agent({
+  headersTimeout: 15 * 60 * 1000,
+  bodyTimeout: 15 * 60 * 1000,
+});
 
 export interface ToolserverErrorInfo {
   readonly code: string;
@@ -33,17 +45,31 @@ export class ToolserverClient {
     const raw = options.baseUrl ?? process.env.TOOLSERVER_URL ?? DEFAULT_TOOLSERVER_URL;
     this.baseUrl = raw.replace(/\/+$/, '');
     this.fetchImpl =
-      options.fetchImpl ?? ((input, init) => globalThis.fetch(input, init));
+      options.fetchImpl ??
+      ((input, init) =>
+        globalThis.fetch(input, {
+          ...init,
+          // 全局 fetch 默认 headersTimeout=300s,长任务端点必然踩雷;
+          // 统一换长超时 dispatcher。dispatcher 不在 fetch 类型签名里,
+          // 且 undici 包与 @types/node 的 dispatcher 类型不同源,收敛断言。
+          dispatcher: LONG_TIMEOUT_DISPATCHER as never,
+        } as Parameters<typeof fetch>[1]));
   }
 
-  /** POST JSON to a toolserver endpoint, e.g. post('/tools/video_meta', {...}). */
-  async post<T>(endpoint: string, body: unknown): Promise<ToolserverResult<T>> {
+  /** POST JSON to a toolserver endpoint, e.g. post('/tools/video_meta', {...}).
+   * timeoutMs 为 per-call 兜底超时(AbortSignal),不传则只靠 dispatcher 长超时。 */
+  async post<T>(
+    endpoint: string,
+    body: unknown,
+    timeoutMs?: number,
+  ): Promise<ToolserverResult<T>> {
     let response: Response;
     try {
       response = await this.fetchImpl(`${this.baseUrl}${endpoint}`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(body),
+        ...(timeoutMs !== undefined ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
       });
     } catch (error) {
       return {

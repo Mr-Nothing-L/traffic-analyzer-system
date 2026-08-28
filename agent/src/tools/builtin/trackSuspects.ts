@@ -110,6 +110,7 @@ export function createTrackSuspectsTool(
           const result = await client.post<TrackSuspectsResponse>(
             '/tools/track_suspects',
             body,
+            TRACK_SUSPECTS_TIMEOUT_MS,
           );
           if (!result.ok) return toolserverErrorResult(result.error);
 
