@@ -374,12 +374,15 @@ def build_scene_prompt(suspects: Sequence[Any]) -> str:
     lines.extend(
         [
             "",
-            "对每个目标,判断它相对于中央隔离带位于哪一侧,以及该侧车道的正常行驶方向"
-            "是朝镜头(coming)还是背镜头(going)。中央隔离带不可见时全部回答 unknown。",
+            "对每个目标回答两个问题:①它相对于中央隔离带位于哪一侧;②**该侧车道(与目标"
+            "同侧的全部车道)的法定/正常行驶方向**是朝镜头(coming)还是背镜头(going)。",
+            "第②问只允许依据道路结构(中央隔离带位置、车道布局)与**其他车辆**的流向"
+            "判断,**禁止**用目标车辆自身的朝向或运动方向作答——目标可能是违章车,"
+            "它的朝向不能代表车道方向。中央隔离带不可见时全部回答 unknown。",
             "",
             "以 JSON 对象输出,不要任何解释:",
             '{"median_side": "left|right|unknown", "per_target": ['
-            '{"index": 0, "side": "coming|going|unknown", "rationale": "..."}, '
+            '{"index": 0, "side": "coming|going|unknown", "rationale": "...(须说明依据的是道路结构还是其他车辆流向)"}, '
             '{"index": 1, ...}]}。',
         ]
     )
@@ -449,10 +452,127 @@ def parse_scene_response(
     }
 
 
+def _scene_sample_frames(
+    grid: List[int], meta: Dict[str, Any], t0: float, t1: float
+) -> List[int]:
+    """在跟踪时段内均匀取 3 个采样帧(首/中/尾),复用现有采样网格。"""
+    if not grid:
+        return []
+    src_fps = meta["fps"]
+    targets = [t0, (t0 + t1) / 2.0, t1]
+    seen: set[int] = set()
+    chosen: List[int] = []
+    for ts in targets:
+        best = min(grid, key=lambda f: abs(f / src_fps - ts))
+        if best not in seen:
+            seen.add(best)
+            chosen.append(best)
+    return chosen
+
+
+def _vote_scene_side(
+    frame_results: List[Dict[str, Any]],
+    suspects: Sequence[_SuspectState],
+    events_all: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """对多帧场景判定结果做多数表决。
+
+    - median_side: 仅 left/right 出现 ≥2 次时采用,否则 unknown。
+    - 每个目标的 side: coming/going 仅出现 ≥2 次时采用,否则 unknown。
+    - 出现 coming 与 going 同时存在且未形成多数(如 1+1+1)时记
+      {type: "scene_side_split"} 事件。
+    """
+    total = len(frame_results)
+    median_sides = [
+        fr["result"].get("median_side", "unknown") for fr in frame_results
+    ]
+    median_counts: Dict[str, int] = {"left": 0, "right": 0, "unknown": 0}
+    for s in median_sides:
+        median_counts[s if s in median_counts else "unknown"] += 1
+
+    ordered = [("left", median_counts["left"]), ("right", median_counts["right"])]
+    median_side, n_median = max(ordered, key=lambda x: x[1])
+    if n_median < 2:
+        median_side = "unknown"
+
+    per_target: Dict[int, Dict[str, Any]] = {}
+    per_target_votes: Dict[int, Dict[str, int]] = {}
+    for s in suspects:
+        idx = s.index
+        counts: Dict[str, int] = {"coming": 0, "going": 0, "unknown": 0}
+        rationales: List[Optional[str]] = []
+        sides: List[str] = []
+        for fr in frame_results:
+            target = fr["result"].get("per_target", {}).get(idx, {})
+            side = target.get("side", "unknown")
+            if side not in counts:
+                side = "unknown"
+            counts[side] += 1
+            sides.append(side)
+            rationales.append(target.get("rationale"))
+
+        counts["total"] = total
+        per_target_votes[idx] = counts
+        ordered_s = [("coming", counts["coming"]), ("going", counts["going"])]
+        side, n_side = max(ordered_s, key=lambda x: x[1])
+        if n_side < 2:
+            side = "unknown"
+
+        non_unknown = {x for x in sides if x != "unknown"}
+        if side == "unknown" and len(non_unknown) > 1:
+            events_all.append(
+                {
+                    "type": "scene_side_split",
+                    "frames": [fr["frame"] for fr in frame_results],
+                    "index": idx,
+                    "votes": counts.copy(),
+                }
+            )
+
+        chosen_rationale: Optional[str] = None
+        if side != "unknown":
+            for fr, r in zip(frame_results, rationales):
+                if (
+                    r
+                    and fr["result"].get("per_target", {}).get(idx, {}).get("side")
+                    == side
+                ):
+                    chosen_rationale = r
+                    break
+        per_target[idx] = {"side": side, "rationale": chosen_rationale}
+
+    frames_record: List[Dict[str, Any]] = []
+    for fr in frame_results:
+        res = fr["result"]
+        frames_record.append(
+            {
+                "frame": fr["frame"],
+                "median_side": res.get("median_side", "unknown"),
+                "per_target": {
+                    idx: res.get("per_target", {}).get(idx, {}).get("side", "unknown")
+                    for idx in [s.index for s in suspects]
+                },
+                "raw_response": res.get("raw_text")
+                or res.get("parse_error")
+                or None,
+            }
+        )
+
+    return {
+        "median_side": median_side,
+        "per_target": per_target,
+        "votes": {
+            "median": {**median_counts, "total": total},
+            "per_target": per_target_votes,
+        },
+        "frames": frames_record,
+    }
+
+
 def _query_scene_side(
     engine: Any, frame_jpeg: bytes, suspects: Sequence[_SuspectState]
 ) -> Dict[str, Any]:
-    """调用 VLM 做一次场景级中央隔离带方位判定。
+    """调用 VLM 对单帧做场景级中央隔离带方位判定。
 
     失败/解析失败均返回统一 unknown 结构,不抛异常影响主流程。
     """
@@ -478,6 +598,17 @@ def _query_scene_side(
     except Exception as exc:
         logger.warning("[track_suspects] scene side vlm call failed: %s", exc)
         return _as_unknown_scene(suspects, error=str(exc))
+
+
+def _scene_vote_text(counts: Dict[str, int], side: str) -> str:
+    """生成表决口径文案,如「3/3 帧一致」或「2/3 帧」。"""
+    total = counts.get("total", 0)
+    n = counts.get(side, 0) if side != "unknown" else 0
+    if total == 0:
+        return "无有效帧"
+    if n == total and n > 0:
+        return f"{n}/{total}帧一致"
+    return f"{n}/{total}帧"
 
 
 def _build_scene_rationale(
@@ -717,18 +848,24 @@ def run_tracking(
     anchored_groups = [s.anchor_group for s in suspects if s.anchor_group is not None]
     first_group = min(anchored_groups) if anchored_groups else 0
 
-    # --- 场景级中央隔离带方位判定(首窗首帧,一次跟踪一次 VLM 调用) ---
-    scene_frame_index = grid[first_group * STRIDE] if grid else None
+    # --- 场景级中央隔离带方位判定(首/中/尾 3 帧多数表决) ---
+    scene_sample_frames = _scene_sample_frames(grid, meta, t0, t1)
+    scene_frame_index = scene_sample_frames[0] if scene_sample_frames else None
     scene_side_result: Optional[Dict[str, Any]] = None
-    if scene_frame_index is not None:
-        scene_jpegs = extract_window_jpegs(video_path, [scene_frame_index])
-        if scene_jpegs:
-            scene_side_result = _query_scene_side(
-                engine, scene_jpegs[0], suspects
+    scene_frame_results: List[Dict[str, Any]] = []
+    if scene_sample_frames:
+        scene_jpegs = extract_window_jpegs(video_path, scene_sample_frames)
+        for jpeg, frame in zip(scene_jpegs, scene_sample_frames):
+            scene_frame_results.append(
+                {"frame": frame, "result": _query_scene_side(engine, jpeg, suspects)}
             )
+    if scene_frame_results:
+        scene_side_result = _vote_scene_side(
+            scene_frame_results, suspects, events_all
+        )
     if scene_side_result is None:
         scene_side_result = _as_unknown_scene(
-            suspects, error="first frame unavailable"
+            suspects, error="sample frames unavailable"
         )
 
     def _reindex_anchors(new_grid: List[int]) -> int:
@@ -979,6 +1116,7 @@ def run_tracking(
                 suspects=suspects,
                 scene_side_result=scene_side_result,
                 scene_frame_index=scene_frame_index,
+                scene_sample_frames=scene_sample_frames,
             )
         return {"failed": True, "failure_reason": "tracking timed out"}
 
@@ -992,6 +1130,7 @@ def run_tracking(
                 suspects=suspects,
                 scene_side_result=scene_side_result,
                 scene_frame_index=scene_frame_index,
+                scene_sample_frames=scene_sample_frames,
             )
         return {"failed": True, "failure_reason": f"all VLM window calls failed ({reason})"}
 
@@ -1045,9 +1184,17 @@ def run_tracking(
         if scene_side != "unknown":
             track.side_hint = scene_side
             track.side_source = "scene"
-            track.side_rationale = _build_scene_rationale(
+            vote_text = _scene_vote_text(
+                (scene_side_result or {})
+                .get("votes", {})
+                .get("per_target", {})
+                .get(s.index, {}),
+                scene_side,
+            )
+            base_rationale = _build_scene_rationale(
                 scene_median, scene_side, scene_target.get("rationale")
             )
+            track.side_rationale = f"场景方位{vote_text}。" + (base_rationale or "")
             if anchor_side != "unknown" and anchor_side != scene_side:
                 events_all.append(
                     {
@@ -1102,6 +1249,7 @@ def run_tracking(
                 suspects=suspects,
                 scene_side_result=scene_side_result,
                 scene_frame_index=scene_frame_index,
+                scene_sample_frames=scene_sample_frames,
             )
         return {"failed": True, "failure_reason": f"all suspects lost: {reason}"}
 
@@ -1140,6 +1288,7 @@ def run_tracking(
             suspects=suspects,
             scene_side_result=scene_side_result,
             scene_frame_index=scene_frame_index,
+            scene_sample_frames=scene_sample_frames,
         )
 
     payload_tracks: List[Dict[str, Any]] = []
@@ -1359,6 +1508,7 @@ def _write_run_snapshot(
     suspects: Sequence[_SuspectState] = (),
     scene_side_result: Optional[Dict[str, Any]] = None,
     scene_frame_index: Optional[int] = None,
+    scene_sample_frames: Optional[Sequence[int]] = None,
 ) -> None:
     """运行参数+数值档案快照(run.json):复现/回放一次跟踪所需全部数值。
 
@@ -1395,8 +1545,10 @@ def _write_run_snapshot(
         "stop_reason": stop_reason,
         "scene_side": {
             "frame": scene_frame_index,
+            "frames": list(scene_sample_frames) if scene_sample_frames else None,
             "median_side": (scene_side_result or {}).get("median_side", "unknown"),
             "per_target": per_target_side_summary,
+            "votes": (scene_side_result or {}).get("votes"),
             "raw_response": scene_side_result,
         },
         "thresholds": {

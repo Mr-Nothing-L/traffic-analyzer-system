@@ -16,6 +16,7 @@ import base64
 import csv
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 import cv2
@@ -521,7 +522,9 @@ class KwargsRecordingEngine(ScriptedEngine):
         self.call_kwargs: List[Dict[str, Any]] = []
 
     def call(self, template: Any, images: Any = None, **kwargs: Any) -> Any:
-        self.call_kwargs.append(dict(kwargs))
+        self.call_kwargs.append(
+            {"template_id": getattr(template, "template_id", None), **kwargs}
+        )
         return super().call(template, images=images, **kwargs)
 
 
@@ -538,11 +541,21 @@ class TestThinkingPropagation:
         resp = _post(client, engine)
         assert resp.status_code == 200, resp.text
         assert resp.json()["failed"] is False
-        # 至少覆盖场景判定 1 次 + 窗 0(re-anchor)与若干传播窗
-        assert len(engine.call_kwargs) >= REANCHOR_EVERY + 2
-        # 第 1 次为场景判定,后续为窗调用
-        assert engine.call_kwargs[0].get("enable_thinking") is False
-        for wi, kwargs in enumerate(engine.call_kwargs[1:], start=0):
+        # 场景判定现在取首/中/尾 3 帧,每帧都以 enable_thinking=False 调用
+        scene_kwargs = [
+            kw
+            for kw in engine.call_kwargs
+            if kw.get("template_id") == "track_suspects_scene_side"
+        ]
+        window_kwargs = [
+            kw
+            for kw in engine.call_kwargs
+            if kw.get("template_id") != "track_suspects_scene_side"
+        ]
+        assert len(scene_kwargs) == 3
+        assert all(kw.get("enable_thinking") is False for kw in scene_kwargs)
+        assert len(window_kwargs) >= REANCHOR_EVERY + 1
+        for wi, kwargs in enumerate(window_kwargs):
             if wi % REANCHOR_EVERY == 0:
                 assert "enable_thinking" not in kwargs  # re-anchor:不传,保留默认
             else:
@@ -553,6 +566,8 @@ class TestThinkingPropagation:
             (tracked_video.parent / art["dir"] / "run.json").read_text(encoding="utf-8")
         )
         assert run["enable_thinking"] == {"propagate": False, "reanchor": None, "scene_side": False}
+        assert run["scene_side"]["frames"] is not None
+        assert len(run["scene_side"]["frames"]) == 3
 
 
 class ProgressiveEngine:
@@ -818,3 +833,117 @@ class TestSceneSide:
         track = resp.json()["tracks"][0]
         assert track["side_hint"] == "going"
         assert "side_conflict" not in [e.get("type") for e in resp.json()["events"]]
+
+
+class RotatingSceneEngine(ScriptedEngine):
+    """ScriptedEngine 变体:每次场景判定返回不同的 scene_responses。"""
+
+    def __init__(
+        self,
+        scene_responses: Optional[List[Dict[str, Any]]] = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.scene_responses = scene_responses or []
+        self._scene_idx = 0
+
+    def call(self, template: Any, images: Any = None, **kwargs: Any) -> Any:
+        if getattr(template, "template_id", None) == "track_suspects_scene_side":
+            self.calls += 1
+            data = (
+                self.scene_responses[self._scene_idx % len(self.scene_responses)]
+                if self.scene_responses
+                else self.scene_response
+            )
+            self._scene_idx += 1
+            text = f"```json\n{json.dumps(data)}\n```"
+            return SimpleNamespace(
+                success=True, parsed_data=data, raw_text=text, model="mock", provider="mock"
+            )
+        return super().call(template, images=images, **kwargs)
+
+
+class TestSceneSideVotingRun:
+    _SCENE_COMING = {
+        "median_side": "left",
+        "per_target": [{"index": 0, "side": "coming", "rationale": "在隔离带右侧,朝镜头"}],
+    }
+    _SCENE_UNKNOWN = {
+        "median_side": "unknown",
+        "per_target": [{"index": 0, "side": "unknown", "rationale": ""}],
+    }
+
+    def test_run_json_records_votes_and_raw_frames(
+        self,
+        client: TestClient,
+        tracked_video: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """2/3 多数场景判定:run.json 应记录 3 帧原始响应、票数与表决结果。"""
+        engine = RotatingSceneEngine(
+            responses=[_window_response("[100,700,400,950]")],
+            scene_responses=[
+                self._SCENE_COMING,
+                self._SCENE_COMING,
+                self._SCENE_UNKNOWN,
+            ],
+        )
+        monkeypatch.setattr(
+            "traffic_analyzer.toolserver.server._build_default_engine", lambda: engine
+        )
+        resp = _post(client, engine, side="going")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        track = body["tracks"][0]
+        assert track["side_hint"] == "coming"
+
+        art = body["artifacts"]
+        run = json.loads(
+            (tracked_video.parent / art["dir"] / "run.json").read_text(encoding="utf-8")
+        )
+        assert "场景方位2/3帧" in run["tracks"][0]["side_rationale"]
+        assert len(run["scene_side"]["frames"]) == 3
+        pt_votes = run["scene_side"]["votes"]["per_target"]["0"]
+        assert pt_votes["coming"] == 2
+        assert pt_votes["unknown"] == 1
+        assert len(run["scene_side"]["raw_response"]["frames"]) == 3
+        assert "side_conflict" in [e["type"] for e in run["events"]]
+        assert "scene_side_split" not in [e["type"] for e in run["events"]]
+
+    def test_split_event_emitted_when_frames_disagree(
+        self,
+        client: TestClient,
+        tracked_video: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """coming/going/unknown 分裂 → 目标 side 为 unknown 并记录 split 事件。"""
+        engine = RotatingSceneEngine(
+            responses=[_window_response("[100,700,400,950]")],
+            scene_responses=[
+                {
+                    "median_side": "left",
+                    "per_target": [{"index": 0, "side": "coming", "rationale": ""}],
+                },
+                {
+                    "median_side": "left",
+                    "per_target": [{"index": 0, "side": "going", "rationale": ""}],
+                },
+                {
+                    "median_side": "unknown",
+                    "per_target": [{"index": 0, "side": "unknown", "rationale": ""}],
+                },
+            ],
+        )
+        monkeypatch.setattr(
+            "traffic_analyzer.toolserver.server._build_default_engine", lambda: engine
+        )
+        resp = _post(client, engine, side="going")
+        assert resp.status_code == 200, resp.text
+        run = json.loads(
+            (tracked_video.parent / resp.json()["artifacts"]["dir"] / "run.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert run["scene_side"]["per_target"][0]["scene_side"] == "unknown"
+        assert run["scene_side"]["per_target"][0]["source"] == "anchor"
+        assert any(e["type"] == "scene_side_split" for e in run["events"])

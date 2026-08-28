@@ -42,6 +42,8 @@ from traffic_analyzer.toolserver.tracking.windows import (
     parse_scene_response,
     _build_scene_rationale,
     _build_fallback_rationale,
+    _scene_vote_text,
+    _vote_scene_side,
 )
 
 
@@ -705,3 +707,120 @@ class TestSceneSide:
         verdict = direction_verdict(track)
         assert "所在车道=车道方位未知,仅凭几何初判" in verdict
         assert "中央隔离带" not in verdict
+
+
+class TestSceneSideVoting:
+    """多帧多数表决单元测试。"""
+
+    def _frame_result(
+        self, frame: int, median_side: str, per_target: Dict[int, str]
+    ) -> Dict[str, Any]:
+        return {
+            "frame": frame,
+            "result": {
+                "median_side": median_side,
+                "per_target": {
+                    idx: {"side": side, "rationale": f"r{idx}"}
+                    for idx, side in per_target.items()
+                },
+                "raw_text": f"frame {frame}",
+            },
+        }
+
+    def test_unanimous_three_frames_adopted(self) -> None:
+        suspects = [_FakeSuspect(0, "A", "白色轿车")]
+        results = [
+            self._frame_result(0, "left", {0: "coming"}),
+            self._frame_result(10, "left", {0: "coming"}),
+            self._frame_result(20, "left", {0: "coming"}),
+        ]
+        events: List[Dict[str, Any]] = []
+        voted = _vote_scene_side(results, suspects, events)
+        assert voted["median_side"] == "left"
+        assert voted["per_target"][0]["side"] == "coming"
+        assert voted["votes"]["median"]["left"] == 3
+        assert voted["votes"]["per_target"][0]["coming"] == 3
+        assert not events
+
+    def test_two_of_three_majority_adopted(self) -> None:
+        suspects = [_FakeSuspect(0, "A", "白色轿车")]
+        results = [
+            self._frame_result(0, "left", {0: "coming"}),
+            self._frame_result(10, "left", {0: "coming"}),
+            {
+                "frame": 20,
+                "result": {
+                    "median_side": "unknown",
+                    "per_target": {0: {"side": "unknown", "rationale": None}},
+                    "parse_error": "parse failed",
+                },
+            },
+        ]
+        events: List[Dict[str, Any]] = []
+        voted = _vote_scene_side(results, suspects, events)
+        assert voted["median_side"] == "left"
+        assert voted["per_target"][0]["side"] == "coming"
+        assert voted["votes"]["median"]["left"] == 2
+        assert voted["votes"]["median"]["unknown"] == 1
+        assert voted["votes"]["per_target"][0]["coming"] == 2
+        assert not events
+
+    def test_split_becomes_unknown_and_emits_event(self) -> None:
+        suspects = [_FakeSuspect(0, "A", "白色轿车")]
+        results = [
+            self._frame_result(0, "left", {0: "coming"}),
+            self._frame_result(10, "left", {0: "going"}),
+            self._frame_result(20, "unknown", {0: "unknown"}),
+        ]
+        events: List[Dict[str, Any]] = []
+        voted = _vote_scene_side(results, suspects, events)
+        assert voted["per_target"][0]["side"] == "unknown"
+        assert len(events) == 1
+        assert events[0]["type"] == "scene_side_split"
+        assert events[0]["index"] == 0
+        assert events[0]["votes"]["coming"] == 1
+        assert events[0]["votes"]["going"] == 1
+
+    def test_single_failure_tolerated(self) -> None:
+        suspects = [_FakeSuspect(0, "A", "白色轿车")]
+        results = [
+            self._frame_result(0, "left", {0: "coming"}),
+            {
+                "frame": 10,
+                "result": {
+                    "median_side": "unknown",
+                    "per_target": {0: {"side": "unknown", "rationale": None}},
+                    "parse_error": "vlm failed",
+                },
+            },
+            self._frame_result(20, "left", {0: "coming"}),
+        ]
+        events: List[Dict[str, Any]] = []
+        voted = _vote_scene_side(results, suspects, events)
+        assert voted["median_side"] == "left"
+        assert voted["per_target"][0]["side"] == "coming"
+        assert voted["votes"]["per_target"][0]["unknown"] == 1
+        assert not events
+
+    def test_median_and_per_target_voted_independently(self) -> None:
+        suspects = [_FakeSuspect(0, "A", "白色轿车")]
+        results = [
+            self._frame_result(0, "left", {0: "going"}),
+            self._frame_result(10, "left", {0: "going"}),
+            self._frame_result(20, "right", {0: "coming"}),
+        ]
+        events: List[Dict[str, Any]] = []
+        voted = _vote_scene_side(results, suspects, events)
+        assert voted["median_side"] == "left"
+        assert voted["per_target"][0]["side"] == "going"
+        assert voted["votes"]["median"]["left"] == 2
+        assert voted["votes"]["per_target"][0]["going"] == 2
+        assert not events
+
+    def test_scene_vote_text_format(self) -> None:
+        assert "3/3帧一致" in _scene_vote_text(
+            {"coming": 3, "unknown": 0, "total": 3}, "coming"
+        )
+        assert "2/3帧" in _scene_vote_text(
+            {"coming": 2, "unknown": 1, "total": 3}, "coming"
+        )
