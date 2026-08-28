@@ -29,7 +29,8 @@ const isThinkLive = computed(() => props.streaming && !entry.value.text)
 </script>
 
 <template>
-            <div class="row assistant">
+            <!-- 思考已并入链路面板且无正文的条目不留空壳气泡 -->
+            <div v-if="entry.text || (entry.think && !hideThink)" class="row assistant">
               <div class="avatar"><UiIcon name="chip" :size="18" /></div>
               <div class="msg-col">
                 <div class="bubble">
