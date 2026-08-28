@@ -5,6 +5,7 @@
  * 不打真实模型 API。
  */
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -1331,5 +1332,224 @@ describe('workspace registry self-restore', () => {
     } finally {
       rmSync(registryPath, { force: true });
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 工具输出/检测载荷图片的媒体引用转换(SSE 与落盘条目不再内联 dataURL)
+// ---------------------------------------------------------------------------
+
+describe('媒体引用转换(media)', () => {
+  const JPEG_BYTES = Buffer.from([0xff, 0xd8, 0xff, 0xdb, 0x01, 0x02]);
+  const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x01]);
+  const jpegDataUrl = `data:image/jpeg;base64,${JPEG_BYTES.toString('base64')}`;
+  const pngDataUrl = `data:image/png;base64,${PNG_BYTES.toString('base64')}`;
+  const jpegName = `${createHash('sha256').update(JPEG_BYTES).digest('hex')}.jpg`;
+
+  /** 输出给定 ContentParts 的假工具(图片/视频 part 的载具)。 */
+  function partsTool(output: ExecutableToolResult['output']): ExecutableTool {
+    return {
+      name: 'emit_parts',
+      description: 'fake tool emitting image/video parts',
+      parameters: { type: 'object' },
+      resolveExecution: () => ({
+        accesses: [],
+        approvalRule: 'emit_parts()',
+        execute: () => Promise.resolve({ output }),
+      }),
+    };
+  }
+
+  it('image part dataURL → /sessions/{id}/media/{hash}.jpg 引用:SSE、history 一致,文件落盘,模型 messages 仍持原始 dataURL', async () => {
+    const provider = new ScriptedProvider({ script: [
+      [toolCall('c1', 'emit_parts', {})],
+      [text('看完图了')],
+    ] });
+    await startServer(provider, [partsTool([
+      { type: 'text', text: '帧图:' },
+      { type: 'image_url', imageUrl: { url: jpegDataUrl } },
+    ])]);
+    const sessionId = await createSession('yolo');
+
+    const res = await startChat(sessionId, '抽帧看看');
+    if (res.body === null) throw new Error('no body');
+    const events = await readUntilDone(sseReader(res.body));
+    const toolResult = events.find((e) => e.type === 'tool_result');
+    expect(toolResult).toBeDefined();
+    const output = (toolResult!.result as { output: unknown }).output;
+    expect(Array.isArray(output)).toBe(true);
+    const imagePart = (output as Array<{ type: string; imageUrl?: { url: string } }>).find(
+      (p) => p.type === 'image_url',
+    );
+    expect(imagePart?.imageUrl?.url).toBe(`/sessions/${sessionId}/media/${jpegName}`);
+    expect((output as Array<{ text?: string }>).some((p) => p.text === '帧图:')).toBe(true);
+
+    // 落盘条目与 SSE 一致;media 文件按内容寻址写入 workspace。
+    const history = await getJson(`/sessions/${sessionId}/history`);
+    const entries = (history.json as { entries: TimelineEntry[] }).entries;
+    const toolEntry = entries.find((e) => e.kind === 'tool');
+    if (toolEntry?.kind !== 'tool') throw new Error('expected tool entry');
+    const entryImage = (toolEntry.output as Array<{ type: string; imageUrl?: { url: string } }>).find(
+      (p) => p.type === 'image_url',
+    );
+    expect(entryImage?.imageUrl?.url).toBe(`/sessions/${sessionId}/media/${jpegName}`);
+    const mediaFile = path.join(workspace, '.agent', 'media', jpegName);
+    expect(existsSync(mediaFile)).toBe(true);
+
+    // 模型侧 messages 不受影响:tool 消息里仍是原始 dataURL(第二次 generate
+    // 的历史才含 tool 结果消息,见 ScriptedProvider.histories 按 generate 记录)。
+    const toolMessage = provider.histories.flatMap((h) => h).find((m) => m.role === 'tool');
+    expect(toolMessage).toBeDefined();
+    const modelImage = toolMessage!.content.find((p) => p.type === 'image_url');
+    expect(modelImage).toEqual({ type: 'image_url', imageUrl: { url: jpegDataUrl } });
+  });
+
+  it('同字节图片 → 同 hash 同 URL(重复落盘幂等);不同字节各自寻址', async () => {
+    const provider = new ScriptedProvider({ script: [[toolCall('c1', 'emit_parts', {})]] });
+    await startServer(provider, [partsTool([
+      { type: 'image_url', imageUrl: { url: jpegDataUrl } },
+      { type: 'image_url', imageUrl: { url: jpegDataUrl } },
+      { type: 'image_url', imageUrl: { url: pngDataUrl } },
+    ])]);
+    const sessionId = await createSession('yolo');
+    const res = await startChat(sessionId, '三张图');
+    if (res.body === null) throw new Error('no body');
+    await readUntilDone(sseReader(res.body));
+
+    const history = await getJson(`/sessions/${sessionId}/history`);
+    const entries = (history.json as { entries: TimelineEntry[] }).entries;
+    const toolEntry = entries.find((e) => e.kind === 'tool');
+    if (toolEntry?.kind !== 'tool') throw new Error('expected tool entry');
+    const urls = (toolEntry.output as Array<{ type: string; imageUrl?: { url: string } }>)
+      .filter((p) => p.type === 'image_url')
+      .map((p) => p.imageUrl?.url);
+    const pngName = `${createHash('sha256').update(PNG_BYTES).digest('hex')}.png`;
+    expect(urls).toEqual([
+      `/sessions/${sessionId}/media/${jpegName}`,
+      `/sessions/${sessionId}/media/${jpegName}`,
+      `/sessions/${sessionId}/media/${pngName}`,
+    ]);
+  });
+
+  it('video part 占位文本不变;非 dataURL 的 image part 原样保留(旧 ref 兼容)', async () => {
+    const provider = new ScriptedProvider({ script: [[toolCall('c1', 'emit_parts', {})]] });
+    await startServer(provider, [partsTool([
+      { type: 'video_url', videoUrl: { url: 'data:video/mp4;base64,AAAA' } },
+      { type: 'image_url', imageUrl: { url: '/sessions/other/media/alreadyref.jpg' } },
+    ])]);
+    const sessionId = await createSession('yolo');
+    const res = await startChat(sessionId, '看视频');
+    if (res.body === null) throw new Error('no body');
+    await readUntilDone(sseReader(res.body));
+
+    const history = await getJson(`/sessions/${sessionId}/history`);
+    const entries = (history.json as { entries: TimelineEntry[] }).entries;
+    const toolEntry = entries.find((e) => e.kind === 'tool');
+    if (toolEntry?.kind !== 'tool') throw new Error('expected tool entry');
+    const parts = toolEntry.output as Array<{ type: string; text?: string; imageUrl?: { url: string } }>;
+    expect(parts).toEqual([
+      { type: 'text', text: '[完整视频已发送给模型,不在此展示]' },
+      { type: 'image_url', imageUrl: { url: '/sessions/other/media/alreadyref.jpg' } },
+    ]);
+  });
+
+  it('GET /sessions/{id}/media/{name}:200 原字节 + Content-Type + 长缓存;未知 session/文件缺失 → 404', async () => {
+    const provider = new ScriptedProvider({ script: [[toolCall('c1', 'emit_parts', {})]] });
+    await startServer(provider, [partsTool([
+      { type: 'image_url', imageUrl: { url: jpegDataUrl } },
+    ])]);
+    const sessionId = await createSession('yolo');
+    const res = await startChat(sessionId, '抽帧');
+    if (res.body === null) throw new Error('no body');
+    await readUntilDone(sseReader(res.body));
+
+    const ok = await fetch(`${baseUrl}/sessions/${sessionId}/media/${jpegName}`);
+    expect(ok.status).toBe(200);
+    expect(ok.headers.get('content-type')).toBe('image/jpeg');
+    expect(ok.headers.get('cache-control')).toContain('immutable');
+    expect(Buffer.from(await ok.arrayBuffer()).equals(JPEG_BYTES)).toBe(true);
+
+    const missingFile = await fetch(
+      `${baseUrl}/sessions/${sessionId}/media/${'0'.repeat(64)}.jpg`,
+    );
+    expect(missingFile.status).toBe(404);
+
+    const unknownSession = await fetch(`${baseUrl}/sessions/ghost/media/${jpegName}`);
+    expect(unknownSession.status).toBe(404);
+
+    // 非白名单文件名路由不匹配 → 404(防路径穿越的第一道)。
+    const badName = await fetch(`${baseUrl}/sessions/${sessionId}/media/..%2Fsecret.jpg`);
+    expect(badName.status).toBe(404);
+  });
+
+  it('detection 载荷逐事件 annotated_image → 引用:tool 条目 payload、detection 事件与条目一致,文件落盘', async () => {
+    const payload = {
+      video_path: 'demo.mp4',
+      binary_encoding: '0_0_0_0_0_0_0_1_0_0_0',
+      normal: false,
+      events: [{
+        event_id: 7,
+        detected: true,
+        confidence: 0.9,
+        instances: [],
+        reasoning: 'r',
+        evidence_frames: [1.0],
+        annotated_image: jpegDataUrl,
+      }],
+      report_markdown: '# 报告',
+    };
+    const provider = new ScriptedProvider({ script: [[toolCall('c1', 'submit_detection', {})]] });
+    await startServer(provider, [submitTool(payload)]);
+    const sessionId = await createSession('yolo');
+
+    const res = await startChat(sessionId, '提交检测');
+    if (res.body === null) throw new Error('no body');
+    const events = await readUntilDone(sseReader(res.body));
+    const detection = events.find((e) => e.type === 'detection');
+    expect(detection).toBeDefined();
+
+    const expectedUrl = `/sessions/${sessionId}/media/${jpegName}`;
+    const detectionEvent = (detection!.data as { events: Array<{ annotated_image?: string }> }).events[0];
+    expect(detectionEvent?.annotated_image).toBe(expectedUrl);
+    const toolResult = events.find((e) => e.type === 'tool_result');
+    const toolResultPayload = (toolResult!.result as { payload: { events: Array<{ annotated_image?: string }> } }).payload;
+    expect(toolResultPayload.events[0]?.annotated_image).toBe(expectedUrl);
+
+    const history = await getJson(`/sessions/${sessionId}/history`);
+    const entries = (history.json as { entries: TimelineEntry[] }).entries;
+    const toolEntry = entries.find((e) => e.kind === 'tool');
+    const detectionEntry = entries.find((e) => e.kind === 'detection');
+    if (toolEntry?.kind !== 'tool' || detectionEntry?.kind !== 'detection') {
+      throw new Error('expected tool + detection entries');
+    }
+    expect((toolEntry.payload as typeof payload).events[0]?.annotated_image).toBe(expectedUrl);
+    expect((detectionEntry.data as typeof payload).events[0]?.annotated_image).toBe(expectedUrl);
+    expect(existsSync(path.join(workspace, '.agent', 'media', jpegName))).toBe(true);
+  });
+
+  it('旧 dataURL 条目直读不受影响:history/events 原样返回,不做二次转换', async () => {
+    await startServer(new ScriptedProvider({ script: [] }), [echoTool()]);
+    const sessionId = await createSession();
+    const legacyEntry: TimelineEntry = {
+      kind: 'tool',
+      toolCallId: 'legacy-1',
+      name: 'extract_frames',
+      arguments: '{}',
+      output: [{ type: 'image_url', imageUrl: { url: jpegDataUrl } }],
+      isError: false,
+      at: Date.now(),
+    };
+    agentServer?.sessions.appendEntries(sessionId, [legacyEntry]);
+
+    const history = await getJson(`/sessions/${sessionId}/history`);
+    const entries = (history.json as { entries: TimelineEntry[] }).entries;
+    const toolEntry = entries.find((e) => e.kind === 'tool');
+    if (toolEntry?.kind !== 'tool') throw new Error('expected tool entry');
+    expect(toolEntry.output).toEqual([{ type: 'image_url', imageUrl: { url: jpegDataUrl } }]);
+
+    const events = await getJson(`/sessions/${sessionId}/events?fromSeq=0`);
+    const batch = (events.json as { events: Array<{ entry: TimelineEntry }> }).events;
+    const legacyFromEvents = batch.map((e) => e.entry).find((e) => e.kind === 'tool');
+    expect(legacyFromEvents).toEqual(legacyEntry);
   });
 });

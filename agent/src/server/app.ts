@@ -34,6 +34,12 @@
  *                                      事件,不带入下一轮(否则会注入在下一轮新
  *                                      用户消息之后,时序颠倒);无进行中轮次 → 409
  *                                      no_active_turn,前端应改发 /chat)
+ *   GET    /sessions/{id}/media/{name}
+ *                                    → image/jpeg|png(内容寻址的媒体引用文件,
+ *                                      见 mediaStore.ts:SSE/条目中的图片 dataURL
+ *                                      写盘为 .agent/media/<sha256>.<ext> 后以
+ *                                      /sessions/{id}/media/{name} 引用,前端经
+ *                                      代理按需加载;文件名白名单校验,缺失 → 404)
  *   POST   /workspaces/restore     {workspaceDir} → {status:'ok',restored:n}
  *                                      (打开该 workspace 的 sessions.db 存储:列表
  *                                       以磁盘为准,会话内容按需懒恢复;幂等,
@@ -98,6 +104,7 @@ import type { ToolAccesses } from '../tools/contract';
 import { ToolRegistry } from '../tools/registry';
 
 import { ApprovalBridge, type ApprovalDecisionInput, type PreviewContent } from './approvalBridge';
+import { mediaContentType, mediaUrl, saveMediaFile } from './mediaStore';
 import { createRouter, type RequestContext, sendJson, sendError, writeSseEvent, isRecord } from './routes';
 import { SessionManager, type Session } from './session';
 import type { TimelineEntry } from './storage';
@@ -296,19 +303,56 @@ function enrichPendingApprovalEntry(
 
 /**
  * 工具结果传输/落盘裁剪:video part 的 dataURL 可达几十 MB(load_video),
- * SSE 与 sqlite 都承受不起,替换为占位文本;image part 保留(历史要渲染)。
- * 仅影响 SSE 事件与 entries 落盘,loop 内 messages 仍持原始内容。
+ * SSE 与 sqlite 都承受不起,替换为占位文本;image part 的 dataURL 同样达
+ * MB 级(extract_frames/track_suspects/draw_boxes),按内容寻址写盘
+ * (<workspace>/.agent/media/<sha256>.<ext>)后替换为 media 引用 URL
+ * (/sessions/{id}/media/{name},仍为 image_url part,前端经代理按需加载)。
+ * 仅影响 SSE 事件与 entries 落盘,loop 内 messages 仍持原始内容(模型照常
+ * 收到真实图片);写盘失败或非白名单图片类型时保留原 part(回退为旧行为)。
  */
 function sanitizeToolOutputForTransport(
   output: string | ContentPart[],
+  media: { sessionId: string; workspaceDir: string },
 ): string | ContentPart[] {
   if (!Array.isArray(output)) return output;
   return output.map((part): ContentPart => {
     if (part.type === 'video_url') {
       return { type: 'text', text: '[完整视频已发送给模型,不在此展示]' };
     }
+    if (part.type === 'image_url') {
+      const url = part.imageUrl.url;
+      if (url.startsWith('data:image/')) {
+        const name = saveMediaFile(media.workspaceDir, url);
+        if (name !== undefined) {
+          return { ...part, imageUrl: { ...part.imageUrl, url: mediaUrl(media.sessionId, name) } };
+        }
+      }
+    }
     return part;
   });
+}
+
+/**
+ * 结构化载荷(submit_detection 的 DetectionPayload)传输/落盘裁剪:逐事件
+ * annotated_image(jpeg dataURL)按内容寻址写盘并替换为 media 引用 URL,
+ * tool 条目的 payload、detection 事件与 detection 条目共用这一道转换。
+ * 非 dataURL(已转换的 URL 引用/旧条目)与解析失败的原值原样保留。
+ */
+function sanitizeDetectionPayloadForTransport(
+  payload: unknown,
+  media: { sessionId: string; workspaceDir: string },
+): unknown {
+  if (!isRecord(payload) || !Array.isArray(payload['events'])) return payload;
+  return {
+    ...payload,
+    events: (payload['events'] as unknown[]).map((event) => {
+      if (!isRecord(event) || typeof event['annotated_image'] !== 'string') return event;
+      const url = event['annotated_image'];
+      if (!url.startsWith('data:image/')) return event;
+      const name = saveMediaFile(media.workspaceDir, url);
+      return name === undefined ? event : { ...event, annotated_image: mediaUrl(media.sessionId, name) };
+    }),
+  };
 }
 
 /** 解析可选 images 字段:接受 dataURL 或裸 base64,统一为 dataURL,最多 4 张。 */
@@ -515,6 +559,32 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       enrichPendingApprovalEntry(entry, bridge);
     }
     sendJson(res, 200, { events, inProgress: runtimes.get(sessionId)?.busy === true });
+  };
+
+  /** media 引用文件:GET /sessions/{id}/media/{name}(内容寻址,可长缓存)。
+   * 文件名先过 hash+扩展名白名单(防路径穿越),再按 session 所属 workspace
+   * 的 .agent/media 定位;未知 session / 文件缺失 → 404。 */
+  const handleGetMedia = (res: ServerResponse, sessionId: string, name: string): void => {
+    const contentType = mediaContentType(name);
+    const workspaceDir = contentType === undefined ? undefined : sessions.workspaceDirOf(sessionId);
+    if (workspaceDir === undefined) {
+      sendError(res, 404, 'media_not_found', `unknown session or media: ${sessionId}/${name}`);
+      return;
+    }
+    let bytes: Buffer;
+    try {
+      bytes = readFileSync(path.join(workspaceDir, '.agent', 'media', name));
+    } catch {
+      sendError(res, 404, 'media_not_found', `media not found: ${name}`);
+      return;
+    }
+    res.writeHead(200, {
+      'Content-Type': contentType,
+      'Content-Length': bytes.length,
+      // 内容寻址:同字节即同 URL,可永久强缓存。
+      'Cache-Control': 'public, max-age=31536000, immutable',
+    });
+    res.end(bytes);
   };
 
   const handleDeleteSession = (res: ServerResponse, sessionId: string): void => {
@@ -899,12 +969,17 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
               const call = pendingCalls.get(event.toolCallId);
               pendingCalls.delete(event.toolCallId);
               // load_video 的 output 含整段视频 dataURL(可达 ~50MB):SSE 与
-              // sqlite 都用裁剪版——video part 替换为占位文本;模型侧 messages
-              // 不受影响(loop 内部仍持原始 output)。图片 part 保留(历史要渲染)。
-              const safeOutput = sanitizeToolOutputForTransport(event.result.output);
-              // 成功结果的结构化附件(submit_detection 的检测载荷)原样进条目。
+              // sqlite 都用裁剪版——video part 替换为占位文本;image part 的
+              // dataURL 写盘为 media 引用 URL(见 sanitizeToolOutputForTransport)。
+              // 模型侧 messages 不受影响(loop 内部仍持原始 output)。
+              const media = { sessionId: session.id, workspaceDir: session.workspaceDir };
+              const safeOutput = sanitizeToolOutputForTransport(event.result.output, media);
+              // 成功结果的结构化附件(submit_detection 的检测载荷)进条目前
+              // 同样把 annotated_image dataURL 转为 media 引用 URL。
               const resultPayload =
-                'payload' in event.result ? event.result.payload : undefined;
+                'payload' in event.result
+                  ? sanitizeDetectionPayloadForTransport(event.result.payload, media)
+                  : undefined;
               persister.pushEntry({
                 kind: 'tool',
                 toolCallId: event.toolCallId,
@@ -918,7 +993,11 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
               });
               emit({
                 ...event,
-                result: { ...event.result, output: safeOutput },
+                result: {
+                  ...event.result,
+                  output: safeOutput,
+                  ...(resultPayload !== undefined ? { payload: resultPayload } : {}),
+                },
               });
               return;
             }
@@ -937,10 +1016,15 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
                   ? event.stopResult.payload
                   : undefined;
               if (event.reason === 'stop_turn' && stopPayload !== undefined) {
-                emit({ type: 'detection', data: stopPayload });
+                // annotated_image dataURL 先转 media 引用 URL 再进 SSE 与落盘。
+                const safePayload = sanitizeDetectionPayloadForTransport(
+                  stopPayload,
+                  { sessionId: session.id, workspaceDir: session.workspaceDir },
+                );
+                emit({ type: 'detection', data: safePayload });
                 persister.pushEntry({
                   kind: 'detection',
-                  data: stopPayload as DetectionPayload,
+                  data: safePayload as DetectionPayload,
                   at: Date.now(),
                 });
               }
@@ -991,6 +1075,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
     handleRestoreWorkspace,
     handleGetHistory,
     handleGetEvents,
+    handleGetMedia,
     handleCompact,
     handleRecall,
     handleSetMode,

@@ -731,6 +731,64 @@ class TestSessionEventsCancelSteer:
 
 
 # ---------------------------------------------------------------------------
+# GET /sessions/{id}/media/{name}(内容寻址图片的二进制透传)
+# ---------------------------------------------------------------------------
+
+
+class TestSessionMedia:
+    JPEG = b"\xff\xd8\xff\xdb-media-bytes"
+
+    def test_binary_passthrough(
+        self, proxy_app: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.method == "GET"
+            assert request.url.path == "/sessions/s-1/media/" + "a" * 64 + ".jpg"
+            return httpx.Response(
+                200,
+                content=self.JPEG,
+                headers={
+                    "Content-Type": "image/jpeg",
+                    "Cache-Control": "public, max-age=31536000, immutable",
+                },
+            )
+
+        _patch_downstream(monkeypatch, handler)
+        client = TestClient(proxy_app)
+        resp = client.get(f"/api/agent/sessions/s-1/media/{'a' * 64}.jpg")
+        assert resp.status_code == 200
+        assert resp.content == self.JPEG
+        assert resp.headers["content-type"] == "image/jpeg"
+        assert "immutable" in resp.headers["cache-control"]
+
+    def test_not_found_passthrough(
+        self, proxy_app: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                404, json={"error": {"code": "media_not_found", "message": "?"}}
+            )
+
+        _patch_downstream(monkeypatch, handler)
+        client = TestClient(proxy_app)
+        resp = client.get(f"/api/agent/sessions/s-1/media/{'0' * 64}.jpg")
+        assert resp.status_code == 404
+        assert resp.json()["error"]["code"] == "media_not_found"
+
+    def test_downstream_unreachable(
+        self, proxy_app: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("connection refused", request=request)
+
+        _patch_downstream(monkeypatch, handler)
+        client = TestClient(proxy_app)
+        resp = client.get(f"/api/agent/sessions/s-1/media/{'a' * 64}.png")
+        assert resp.status_code == 503
+        assert resp.json()["error"]["code"] == "agent_unavailable"
+
+
+# ---------------------------------------------------------------------------
 # POST /api/agent/approval
 # ---------------------------------------------------------------------------
 

@@ -52,6 +52,7 @@ export interface RequestContext {
   readonly handleRestoreWorkspace: (res: ServerResponse, body: unknown) => void;
   readonly handleGetHistory: (res: ServerResponse, sessionId: string) => void;
   readonly handleGetEvents: (res: ServerResponse, sessionId: string, url: URL) => void;
+  readonly handleGetMedia: (res: ServerResponse, sessionId: string, name: string) => void;
   readonly handleCompact: (res: ServerResponse, sessionId: string) => Promise<void>;
   readonly handleRecall: (res: ServerResponse, sessionId: string, body: unknown) => void;
   readonly handleSetMode: (res: ServerResponse, sessionId: string, body: unknown) => void;
@@ -119,6 +120,12 @@ const routes: Route[] = [
     pattern: /^\/sessions\/([^/]+)\/events$/,
     needsBody: false,
     handler: (ctx, res, params, url) => ctx.handleGetEvents(res, params[0]!, url),
+  },
+  {
+    method: 'GET',
+    pattern: /^\/sessions\/([^/]+)\/media\/([0-9a-f]{64}\.(?:jpg|png))$/,
+    needsBody: false,
+    handler: (ctx, res, params) => ctx.handleGetMedia(res, params[0]!, params[1]!),
   },
   {
     method: 'POST',

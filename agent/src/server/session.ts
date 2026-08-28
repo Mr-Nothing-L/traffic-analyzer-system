@@ -145,6 +145,20 @@ export class SessionManager {
   }
 
   /**
+   * media 服务专用:定位 session 所属 workspace(不物化整会话,messages 里
+   * 可能有几十 MB 视频 dataURL)。内存命中直接返回;否则在已打开的 storage
+   * 里查 sessions 表行(只读单行,代价小);未知 session 返回 undefined。
+   */
+  workspaceDirOf(id: string): string | undefined {
+    const cached = this.sessions.get(id);
+    if (cached !== undefined) return cached.workspaceDir;
+    for (const [workspaceDir, storage] of this.storages) {
+      if (storage.getSession(id) !== undefined) return workspaceDir;
+    }
+    return undefined;
+  }
+
+  /**
    * events 续传(GET /sessions/{id}/events):返回磁盘上 seq > fromSeq 的
    * 条目(带 seq)。entries 内存与磁盘同步双写,直接以磁盘为准;未知
    * session 返回 undefined。

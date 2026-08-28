@@ -21,6 +21,9 @@
 - POST /chat      SSE 透传:httpx AsyncClient stream 读下游,
   StreamingResponse 逐块转发(不缓冲);客户端断连时在 generator finally
   里 aclose 下游响应与 client,取消下游请求。
+- GET  /sessions/{id}/media/{name}
+                  内容寻址媒体图片的二进制透传(缓冲转发,200 原样
+                  Content-Type/Cache-Control;不进 JSON 透传表,手写)。
 - POST /approval  透传(状态码与 body 原样返回)。
 普通透传端点由 _PASS_THROUGH_ROUTES 声明表统一注册;新增 agent 端点通常只需
 在表中加一行(配置 method/path/body 策略/是否注入 workspaceDir 等)。
@@ -44,7 +47,7 @@ from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 
 import httpx
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from httpx import AsyncClient
 
 from traffic_analyzer.web.agentproxy.runtime import AgentRuntimeManager
@@ -303,6 +306,43 @@ for _route in _PASS_THROUGH_ROUTES:
         methods=list(_route.methods),
         summary=_route.description.split("。")[0] if _route.description else "",
     )
+
+
+# ---------------------------------------------------------------------------
+# GET /sessions/{id}/media/{name} 透传(特殊:二进制响应,不进 JSON 透传表)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/sessions/{session_id}/media/{name}")
+async def session_media(session_id: str, name: str, request: Request) -> Any:
+    """透传 GET /sessions/{id}/media/{name}:内容寻址的媒体引用图片(二进制)。
+
+    普通 JSON 透传表经 _passthrough_error 复原 body,不适合 image/jpeg;
+    这里单独缓冲转发(单图 MB 级,缓冲即可):200 原样回 Content-Type,
+    非 200 走统一错误契约,下游不可达 503。
+    """
+    runtime = _runtime(request)
+    if runtime is None or not runtime.enabled:
+        return _unavailable()
+    client = AsyncClient(base_url=runtime.agent_url, timeout=_JSON_TIMEOUT)
+    try:
+        downstream = await client.get(f"/sessions/{session_id}/media/{name}")
+    except httpx.HTTPError as exc:
+        logger.warning("agent media %s/%s unreachable: %s", session_id, name, exc)
+        await client.aclose()
+        return _unavailable(f"agent server unreachable: {exc}")
+    try:
+        if downstream.status_code != 200:
+            return _passthrough_error(downstream.status_code, downstream.content)
+        return Response(
+            content=downstream.content,
+            media_type=downstream.headers.get("content-type", "application/octet-stream"),
+            headers={
+                "Cache-Control": downstream.headers.get("cache-control", "no-store"),
+            },
+        )
+    finally:
+        await client.aclose()
 
 
 # ---------------------------------------------------------------------------
