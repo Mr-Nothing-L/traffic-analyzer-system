@@ -38,34 +38,89 @@ export function timelineEntries<T extends { kind: string }>(entries: readonly T[
   return entries.filter((e) => e.kind !== 'tool')
 }
 
+/** 工具轮扫描(chatDisplay 内部共用):轮 = 相邻 user 条目之间(首条 user 前的
+ * 条目也算独立一轮),与 buildAnalysisFlow 的区间边界同口径。对每一轮回调
+ * 轮内数据与是否最后一轮。 */
+interface ToolRound {
+  /** 轮内全部 assistant 条目 id(按序)。 */
+  assistantIds: string[]
+  /** 其中位于 detection 条目之后的 id(submit_detection 之后的收尾条目)。 */
+  afterDetectionIds: string[]
+  hasTool: boolean
+  hasDetection: boolean
+}
+
+function scanToolRounds(
+  entries: ReadonlyArray<{ kind: string; id: string }>,
+  visit: (round: ToolRound, isLast: boolean) => void,
+): void {
+  const empty = (): ToolRound => ({
+    assistantIds: [],
+    afterDetectionIds: [],
+    hasTool: false,
+    hasDetection: false,
+  })
+  let round = empty()
+  for (const e of entries) {
+    if (e.kind === 'user') {
+      visit(round, false)
+      round = empty()
+    } else if (e.kind === 'assistant') {
+      round.assistantIds.push(e.id)
+      if (round.hasDetection) round.afterDetectionIds.push(e.id)
+    } else if (e.kind === 'tool') {
+      round.hasTool = true
+    } else if (e.kind === 'detection') {
+      round.hasDetection = true
+    }
+  }
+  visit(round, true)
+}
+
+/** 轮次的链路是否有面板承接:轮内有工具调用 **且** 轮次进行中(实时面板)或
+ * 轮内已有 detection 条目(冻结面板)。 */
+function roundPanelized(round: ToolRound, isLast: boolean, live: boolean | undefined): boolean {
+  return round.hasTool && (round.hasDetection || (isLast && live === true))
+}
+
 /** 时间线气泡 thinking 应隐藏(改由分析链路面板呈现)的 assistant 条目 id 集合。
  * 口径:轮内有工具调用 **且** 该轮的思考有链路面板承载——轮次进行中(实时面板)
- * 或轮内已有 detection 条目(冻结面板)。有工具但既未进行中也无 detection 的轮次
- * (如中途调过工具的追问),没有面板承接,气泡保持原样,否则思考无处回看。
- * 轮次 = 相邻 user 条目之间(首条 user 前的条目也算独立一轮),与
- * buildAnalysisFlow 的区间边界同口径;live=true 时最后一轮视为进行中。 */
+ * 或轮内已有 detection 条目(冻结面板);且仅覆盖位于 detection 条目**之前**的
+ * 条目——detection 之后的收尾条目不在面板区间内,其 thinking 须在气泡中原样显示,
+ * 否则两处都看不到。有工具但既未进行中也无 detection 的轮次(如中途调过工具的
+ * 追问),没有面板承接,气泡保持原样。轮次 = 相邻 user 条目之间(首条 user 前的
+ * 条目也算独立一轮),与 buildAnalysisFlow 的区间边界同口径;live=true 时最后
+ * 一轮视为进行中。 */
 export function toolRoundAssistantIds(
   entries: ReadonlyArray<{ kind: string; id: string }>,
   options: { live?: boolean } = {},
 ): Set<string> {
   const ids = new Set<string>()
-  let roundHasTool = false
-  let roundHasDetection = false
-  let roundAssistantIds: string[] = []
-  const flush = (isLast: boolean) => {
-    const panelized = roundHasTool && (roundHasDetection || (isLast && options.live === true))
-    if (panelized) for (const id of roundAssistantIds) ids.add(id)
-    roundHasTool = false
-    roundHasDetection = false
-    roundAssistantIds = []
-  }
-  for (const e of entries) {
-    if (e.kind === 'user') flush(false)
-    else if (e.kind === 'assistant') roundAssistantIds.push(e.id)
-    else if (e.kind === 'tool') roundHasTool = true
-    else if (e.kind === 'detection') roundHasDetection = true
-  }
-  flush(true)
+  scanToolRounds(entries, (round, isLast) => {
+    if (roundPanelized(round, isLast, options.live)) {
+      const after = new Set(round.afterDetectionIds)
+      for (const id of round.assistantIds) if (!after.has(id)) ids.add(id)
+    }
+  })
+  return ids
+}
+
+/** 气泡正文应隐藏(改由分析链路面板「说明」节点呈现)的 assistant 条目 id 集合。
+ * 口径与 toolRoundAssistantIds 一致,但 submit_detection 之后的收尾正文(位于
+ * detection 条目之后的 assistant 条目)不隐藏——它在面板区间之外,仍作普通气泡
+ * 跟在检测卡后;纯问答轮次(无工具)不出面板,正文照常显示。 */
+export function toolRoundAssistantTextIds(
+  entries: ReadonlyArray<{ kind: string; id: string }>,
+  options: { live?: boolean } = {},
+): Set<string> {
+  const ids = new Set<string>()
+  scanToolRounds(entries, (round, isLast) => {
+    if (!roundPanelized(round, isLast, options.live)) return
+    const after = new Set(round.afterDetectionIds)
+    for (const id of round.assistantIds) {
+      if (!after.has(id)) ids.add(id)
+    }
+  })
   return ids
 }
 
@@ -126,6 +181,17 @@ export function thinkSummaryLine(think: string, running: boolean): string {
   const lines = think.split('\n').filter((l) => l.trim())
   if (!lines.length) return ''
   return (running ? lines[lines.length - 1] : lines[0]).trim()
+}
+
+/** 正文折叠预览(链路面板「说明」节点):前 N 个非空行(默认两行),
+ * 行首尾空白裁掉;无内容返回空串。 */
+export function textPreviewLines(text: string, max = 2): string {
+  return text
+    .split('\n')
+    .filter((l) => l.trim())
+    .slice(0, max)
+    .map((l) => l.trim())
+    .join('\n')
 }
 
 /** 工具失败摘要:结果文本首个非空行(截断 80 字),无内容回退「未知错误」。 */

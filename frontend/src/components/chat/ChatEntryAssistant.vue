@@ -1,7 +1,9 @@
 <script setup lang="ts">
 /** assistant 气泡:思考折叠 + markdown 正文,底部行复制。
- * hideThink=true(有工具调用的轮次)时不渲染思考折叠——思考改由分析链路面板的
- * 思考节点按时间序呈现,气泡只留正文;纯问答轮次保持普通气泡。 */
+ * hideThink=true / hideText=true(该轮有面板承接:进行中或有 detection)时分别
+ * 不渲染思考/正文——思考改由分析链路面板的思考节点、正文改由说明节点按时间序
+ * 呈现(两者独立控制:submit_detection 之后的收尾正文在面板区间外,hideText=false
+ * 仍作普通气泡跟在检测卡后);纯问答轮次保持普通气泡。 */
 import { computed } from 'vue'
 import type { AgentEntry } from '../../stores/agentchat'
 import type { AgentAssistantEntry } from '../../stores/agentchat'
@@ -14,8 +16,10 @@ const props = defineProps<{
   copied: boolean
   streaming: boolean
   thinkOpen: boolean
-  /** true=该轮有工具调用,思考已并入链路面板,气泡内不再重复渲染。 */
+  /** true=该轮思考已并入链路面板,气泡内不再重复渲染。 */
   hideThink?: boolean
+  /** true=该轮正文已并入链路面板「说明」节点,气泡内不再重复渲染。 */
+  hideText?: boolean
   time: string
 }>()
 
@@ -30,7 +34,10 @@ const isThinkLive = computed(() => props.streaming && !entry.value.text)
 
 <template>
             <!-- 思考已并入链路面板且无正文的条目不留空壳气泡 -->
-            <div v-if="entry.text || (entry.think && !hideThink)" class="row assistant">
+            <div
+              v-if="(entry.text && !hideText) || (entry.think && !hideThink)"
+              class="row assistant"
+            >
               <div class="avatar"><UiIcon name="chip" :size="18" /></div>
               <div class="msg-col">
                 <div class="bubble">
@@ -49,7 +56,7 @@ const isThinkLive = computed(() => props.streaming && !entry.value.text)
                     <ThinkLine v-else :think="entry.think" :live="isThinkLive" />
                   </div>
                   <!-- 正文:流式期间增量渲染(冻结已完成块),定格后一次性完整渲染 -->
-                  <MdStream v-if="entry.text" :text="entry.text" :streaming="streaming" />
+                  <MdStream v-if="entry.text && !hideText" :text="entry.text" :streaming="streaming" />
                 </div>
                 <div class="msg-meta">
                   <span class="msg-time">{{ time }}</span>

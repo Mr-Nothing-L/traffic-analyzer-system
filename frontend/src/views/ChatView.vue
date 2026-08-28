@@ -6,9 +6,11 @@
  * 删除(optimistic,点击即删)/ 新建(运行中也可点:断连不杀服务端轮次,
  * 切回时恢复轮询续跑))+ 右侧对话卡:顶条(状态 chip)/ 时间线(user 气泡(图片附件
  * + 视频预览或路径 chip)/ assistant 流式气泡(思考折叠(运行中末行横向跟随/
- * 结束后首行)仅纯问答轮次——有工具调用的轮次 thinking 改由链路面板思考节点呈现,
- * 气泡只留正文 + 增量 markdown (流式期间冻结已完成块,结束后一次性完整渲染,
- * 见 components/chat/MdStream))/ 消息底部行(HH:MM + hover/focus-within 显现的复制
+ * 结束后首行)与正文 markdown(流式期间冻结已完成块,结束后一次性完整渲染,
+ * 见 components/chat/MdStream)仅纯问答/无面板轮次——有面板承接的轮次(进行中
+ * 或有 detection)思考与正文分别改由链路面板的思考/说明节点呈现,气泡对应隐藏;
+ * submit_detection 之后的收尾正文在面板区间外,仍作普通气泡跟在检测卡后)/
+ * 消息底部行(HH:MM + hover/focus-within 显现的复制
  * (成功变 ✓ 一秒);user 另有撤回,调 recall API 从时间线移除该条及其后全部,
  * 进行中禁用)/ 审批(approval_request 到达时 composer 输入区整体替换为审批面板
  * (拒绝/批准一次/本会话都批准),时间线里的审批卡只读留档;历史未决显示「已失效」)/
@@ -18,9 +20,10 @@
  * 工具调用不在时间线单独渲染:链路节点即工具条目(实时态底部生长的分析链路树与
  * 检测卡内冻结链路共用 ChatAnalysisFlow,节点默认折叠 label+耗时+状态,点击展开
  * ChatToolDetail 明细(tool_call 参数行 + 结果文本/图片/子代理时间线/取证视频),
- * assistant 思考按时间序插为思考节点(折叠一句话摘要,展开全文+复制);展开态按
- * 条目 id 会话内记忆,面板「全部展开/折叠」同时作用于工具与思考节点;纯问答轮次
- * 无工具节点不显示面板)。
+ * assistant 思考与正文按时间序交错插为思考/说明节点(思考折叠一句话摘要,说明
+ * 折叠前两行预览;展开全文/ markdown + 复制);展开态按条目 id 会话内记忆,面板
+ * 「全部展开/折叠」同时作用于工具、思考与说明节点;纯问答轮次无工具节点不显示
+ * 面板)。
  * composer 圆角盒(三行:附件预览行(图片缩略图 +
  * 视频块,视频同一时刻最多一个,可移除)/ 无边框 textarea(自动增高)/ 底部功能行(左:「+」
  * 上传图片或视频 + 权限模式选择器(逐条确认/自动通过/完全自主);右:压缩按钮 + 上下文圆环
@@ -42,7 +45,7 @@ import { ApiError } from '../api/client'
 import { mdToHtml } from '../utils/markdown'
 import { groupSessionsByWorkspace, wsBasename } from '../utils/sessionGroups'
 import type { SessionGroup } from '../utils/sessionGroups'
-import { copyText, lastUserEntryAt, shouldSendOnEnter, timelineEntries, toolLabel, toolRoundAssistantIds, workspaceVideoSrc } from '../utils/chatDisplay'
+import { copyText, lastUserEntryAt, shouldSendOnEnter, timelineEntries, toolLabel, toolRoundAssistantIds, toolRoundAssistantTextIds, workspaceVideoSrc } from '../utils/chatDisplay'
 import { buildAnalysisFlow } from '../utils/analysisFlow'
 import type { AnalysisFlow } from '../utils/analysisFlow'
 import UiIcon from '../components/UiIcon.vue'
@@ -217,7 +220,7 @@ function setAllToolNodes(ids: string[], open: boolean) {
 }
 
 /** 链路思考节点展开态:与气泡思考折叠共用同一份 thinkOpen(都按 assistant 条目
- * id 记忆)——有工具调用的轮次气泡不渲染 thinking,同一 id 只会出现在其中一处,
+ * id 记忆)——有面板承接的轮次气泡不渲染 thinking,同一 id 只会出现在其中一处,
  * 不会互相串扰;「全部展开/折叠」与工具节点一并批量动作。 */
 function toggleThinkNode(id: string) {
   toggle(thinkOpen, id)
@@ -230,11 +233,34 @@ function setAllThinkNodes(ids: string[], open: boolean) {
   }
 }
 
+/** 链路说明节点展开态(按 assistant 条目 id,与思考节点同机制、各自独立;
+ * 「全部展开/折叠」与工具、思考节点一并批量动作)。 */
+const textOpen = reactive(new Set<string>())
+function toggleTextNode(id: string) {
+  toggle(textOpen, id)
+}
+
+function setAllTextNodes(ids: string[], open: boolean) {
+  for (const id of ids) {
+    if (open) textOpen.add(id)
+    else textOpen.delete(id)
+  }
+}
+
 /** 气泡 thinking 应隐藏的 assistant 条目(utils/chatDisplay 纯函数,与链路区间
  * 边界同口径):仅当该轮思考有链路面板承载(进行中或有 detection)时才隐藏,
  * 否则气泡保持原样。 */
 const hideThinkIds = computed(() =>
   toolRoundAssistantIds(agent.entries, {
+    live: agent.status === 'running' || agent.status === 'connecting',
+  }),
+)
+
+/** 气泡正文应隐藏的 assistant 条目(口径同上):有面板承接的轮次正文改由链路
+ * 「说明」节点呈现;submit_detection 之后的收尾文本(detection 条目之后)不隐藏,
+ * 仍作普通气泡跟在检测卡后。 */
+const hideTextIds = computed(() =>
+  toolRoundAssistantTextIds(agent.entries, {
     live: agent.status === 'running' || agent.status === 'connecting',
   }),
 )
@@ -777,6 +803,7 @@ onUnmounted(() => {
               :streaming="streamingEntry?.id === e.id"
               :think-open="thinkOpen.has(e.id)"
               :hide-think="hideThinkIds.has(e.id)"
+              :hide-text="hideTextIds.has(e.id)"
               :time="fmtTime(e.at)"
               @copy="onCopy(e.id, $event)"
               @toggle-think="toggle(thinkOpen, e.id)"
@@ -789,26 +816,32 @@ onUnmounted(() => {
               :flow="detectionFlows.get(e.id)"
               :expanded-tools="toolNodesOpen"
               :expanded-thinks="thinkOpen"
+              :expanded-texts="textOpen"
               @toggle-tool="toggleToolNode"
               @toggle-all-tools="setAllToolNodes"
               @toggle-think="toggleThinkNode"
               @toggle-all-thinks="setAllThinkNodes"
+              @toggle-text="toggleTextNode"
+              @toggle-all-texts="setAllTextNodes"
               @preview="openPreview"
             />
           </template>
           <!-- 分析链路实时态:分析中随 entries 生长的完整阶段树(W6,当前步脉冲);
-               节点即工具条目,思考按时间序插为思考节点,展开态与检测卡冻结链路
-               共享同一份记忆 -->
+               节点即工具条目,思考/说明按时间序插为思考/说明节点,展开态与检测卡
+               冻结链路共享同一份记忆 -->
           <ChatAnalysisFlow
             v-if="liveFlow"
             :flow="liveFlow"
             realtime
             :expanded-tools="toolNodesOpen"
             :expanded-thinks="thinkOpen"
+            :expanded-texts="textOpen"
             @toggle-tool="toggleToolNode"
             @toggle-all-tools="setAllToolNodes"
             @toggle-think="toggleThinkNode"
             @toggle-all-thinks="setAllThinkNodes"
+            @toggle-text="toggleTextNode"
+            @toggle-all-texts="setAllTextNodes"
           />
           <!-- Turn 级 loading:对话进行中常驻一行,超过 15s 追加秒表(仅 status 驱动,step 间不闪烁) -->
           <div v-if="turnActive" class="turn-loading">

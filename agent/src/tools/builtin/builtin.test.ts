@@ -4,8 +4,10 @@
  * No real model API or toolserver process is touched.
  */
 import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createServer, type Server } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import type { AddressInfo } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -22,6 +24,8 @@ import { ToolRegistry } from '../registry';
 import { ToolserverClient } from './httpToolserver';
 import { registerBuiltinTools, expandToolsetParameters } from './index';
 import { createSubmitDetectionTool, loadSubmitDetectionSchema, type DetectionPayload } from './submitDetection';
+import { createTrackSuspectsTool } from './trackSuspects';
+import { TrackAttemptRecorder } from './trackAttemptRecorder';
 import { loadEventContract, type ToolsetEntrySpec } from './eventContract';
 import { createVideoTools } from './videoTools';
 import { createFileTools } from './fileTools';
@@ -968,6 +972,124 @@ describe('submit_detection', () => {
       }
     });
   });
+
+  describe('防跳跟踪闸门(事件 1/2/8 需先 track_suspects 取证)', () => {
+    const ANCHORS = [
+      {
+        box: { x1: 0.1, y1: 0.2, x2: 0.3, y2: 0.4 },
+        timestamp: 3.5,
+        description: '白色小客车,疑似长时间静止',
+      },
+    ];
+    const BASE_IDS = [1, 2, 3, 4, 5, 6, 7, 8, 10, 11];
+    const video = (): string => path.join(workspaceDir, 'demo.mp4');
+
+    const gatedTool = (recorder?: TrackAttemptRecorder): ExecutableTool =>
+      createSubmitDetectionTool('提交检测结果', loadSubmitDetectionSchema(), {
+        client,
+        workspace,
+        trackRecorder: recorder,
+      });
+
+    const trackTool = (recorder?: TrackAttemptRecorder): ExecutableTool =>
+      createTrackSuspectsTool(client, workspace, spec('track_suspects'), recorder);
+
+    function withDetected(id: number): Array<Record<string, unknown>> {
+      const events = baseEvents();
+      const index = BASE_IDS.indexOf(id);
+      if (index < 0) throw new Error(`not a base event id: ${id}`);
+      events[index] = {
+        event_id: id,
+        detected: true,
+        confidence: 0.9,
+        instances: [
+          { description: '测试检出', location: '画面右侧', start_sec: 2, end_sec: 8 },
+        ],
+        reasoning: '测试检出',
+        evidence_frames: [3.0],
+      };
+      return events;
+    }
+
+    /** 11 位编码:位 id 置 1(位 9 为正常指示位,有检出时为 0)。 */
+    function encoding(ids: number[]): string {
+      return Array.from({ length: 11 }, (_, i) => (ids.includes(i + 1) ? '1' : '0')).join('_');
+    }
+
+    function submitInput(video: string, id: number): Record<string, unknown> {
+      return {
+        video_path: video,
+        events: withDetected(id),
+        binary_encoding: encoding([id]),
+        normal: false,
+        report_markdown: '# 检测报告',
+      };
+    }
+
+    it('事件 1 检出但未发起过 track_suspects:拒绝提交并给出取证指引', async () => {
+      const result = await execute(gatedTool(new TrackAttemptRecorder()), submitInput(video(), 1));
+      expect(result.isError).toBe(true);
+      expect(result.stopTurn).toBeUndefined();
+      expect(result.output).toContain('必须先调用 track_suspects 取证');
+      expect(result.output).toContain('禁止目测静止时长/速度');
+    });
+
+    it('对同一 video_path 发起过 track_suspects 后提交:放行', async () => {
+      const recorder = new TrackAttemptRecorder();
+      recorder.record(video());
+      const result = await execute(gatedTool(recorder), submitInput(video(), 1));
+      expect(result.isError).toBeFalsy();
+      expect(result.stopTurn).toBe(true);
+    });
+
+    it('track_suspects 业务失败(非工具错误)也算已发起:仍放行', async () => {
+      const recorder = new TrackAttemptRecorder();
+      mockToolserver({ tracks: [], failed: true, failure_reason: '锚点时刻前后均未检出目标' });
+      const trackResult = await execute(trackTool(recorder), {
+        video_path: video(),
+        suspects: ANCHORS,
+      });
+      expect(trackResult.isError).toBeFalsy();
+      const result = await execute(gatedTool(recorder), submitInput(video(), 1));
+      expect(result.isError).toBeFalsy();
+      expect(result.stopTurn).toBe(true);
+    });
+
+    it('track_suspects 工具级失败(非 2xx)同样视为已发起:仍放行', async () => {
+      const recorder = new TrackAttemptRecorder();
+      mockToolserver({ error: { code: 'internal', message: 'boom' } }, 500);
+      const trackResult = await execute(trackTool(recorder), {
+        video_path: video(),
+        suspects: ANCHORS,
+      });
+      expect(trackResult.isError).toBe(true);
+      const result = await execute(gatedTool(recorder), submitInput(video(), 2));
+      expect(result.isError).toBeFalsy();
+      expect(result.stopTurn).toBe(true);
+    });
+
+    it('不同 video_path 互不影响:A 已取证,B 未取证仍被拒', async () => {
+      const recorder = new TrackAttemptRecorder();
+      recorder.record(video());
+      const other = path.join(workspaceDir, 'other.mp4');
+      const rejected = await execute(gatedTool(recorder), submitInput(other, 8));
+      expect(rejected.isError).toBe(true);
+      const allowed = await execute(gatedTool(recorder), submitInput(video(), 8));
+      expect(allowed.isError).toBeFalsy();
+    });
+
+    it('事件 3 等非动态事件不受闸门限制(未取证也可提交)', async () => {
+      const result = await execute(gatedTool(new TrackAttemptRecorder()), submitInput(video(), 3));
+      expect(result.isError).toBeFalsy();
+      expect(result.stopTurn).toBe(true);
+    });
+
+    it('recorder 缺省时闸门不启用:事件 1 检出可直接提交(既有行为不变)', async () => {
+      const result = await execute(gatedTool(undefined), submitInput(video(), 1));
+      expect(result.isError).toBeFalsy();
+      expect(result.stopTurn).toBe(true);
+    });
+  });
 });
 
 describe('registerBuiltinTools', () => {
@@ -1042,6 +1164,102 @@ describe('registerBuiltinTools', () => {
     expect(parameters.properties.events.description).toContain(
       `${contract.active_event_ids.length} 个活跃事件编号`,
     );
+  });
+
+  it('装配的 submit_detection 启用防跳跟踪闸门:事件 1 未取证提交被拒', async () => {
+    const registry = new ToolRegistry();
+    registerBuiltinTools(registry, { workspaceDir });
+    const submitTool = registry.resolve('submit_detection');
+    if (!submitTool) throw new Error('submit_detection not registered');
+    const events = [
+      {
+        event_id: 1,
+        detected: true,
+        confidence: 0.9,
+        instances: [],
+        reasoning: '目测静止',
+        evidence_frames: [3.0],
+      },
+      ...[2, 3, 4, 5, 6, 7, 8, 10, 11].map((id) => ({
+        event_id: id,
+        detected: false,
+        confidence: 0.1,
+        instances: [],
+        reasoning: '全片检查未见该事件',
+        evidence_frames: [],
+      })),
+    ];
+    const result = await execute(submitTool, {
+      video_path: path.join(workspaceDir, 'demo.mp4'),
+      events,
+      binary_encoding: '1_0_0_0_0_0_0_0_0_0_0',
+      normal: false,
+      report_markdown: '# 报告',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain('必须先调用 track_suspects 取证');
+  });
+
+  it('装配的 track_suspects 与 submit_detection 共享同一 recorder(发起失败后放行)', async () => {
+    // registerBuiltinTools 自建 ToolserverClient(undici fetch,不可注入 mock),
+    // 故起本地 HTTP 服务模拟 /tools/track_suspects 的业务失败响应。
+    const server = createServer((_, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ tracks: [], failed: true, failure_reason: '无法建轨迹' }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address() as AddressInfo;
+    try {
+      const registry = new ToolRegistry();
+      registerBuiltinTools(registry, {
+        workspaceDir,
+        toolserverUrl: `http://127.0.0.1:${address.port}`,
+      });
+      const trackTool = registry.resolve('track_suspects');
+      const submitTool = registry.resolve('submit_detection');
+      if (!trackTool || !submitTool) throw new Error('expected both tools registered');
+      const trackResult = await execute(trackTool, {
+        video_path: path.join(workspaceDir, 'demo.mp4'),
+        suspects: [
+          {
+            box: { x1: 0.1, y1: 0.2, x2: 0.3, y2: 0.4 },
+            timestamp: 3.5,
+            description: '白色小客车',
+          },
+        ],
+      });
+      expect(trackResult.isError).toBeFalsy();
+      const events = [
+        {
+          event_id: 1,
+          detected: true,
+          confidence: 0.9,
+          instances: [],
+          reasoning: '跟踪失败,纯视觉回退判断',
+          evidence_frames: [3.0],
+        },
+        ...[2, 3, 4, 5, 6, 7, 8, 10, 11].map((id) => ({
+          event_id: id,
+          detected: false,
+          confidence: 0.1,
+          instances: [],
+          reasoning: '全片检查未见该事件',
+          evidence_frames: [],
+        })),
+      ];
+      const result = await execute(submitTool, {
+        video_path: path.join(workspaceDir, 'demo.mp4'),
+        events,
+        binary_encoding: '1_0_0_0_0_0_0_0_0_0_0',
+        normal: false,
+        report_markdown: '# 报告',
+      });
+      expect(result.isError).toBeFalsy();
+      expect(result.stopTurn).toBe(true);
+    } finally {
+      server.closeAllConnections?.();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 });
 

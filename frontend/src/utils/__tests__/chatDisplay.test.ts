@@ -4,19 +4,21 @@
 // - workspaceVideoSrc:气泡视频地址由 path 确定性推导(历史重载同源);
 // - copyText:clipboard API 缺失(非安全上下文)时回退 textarea + execCommand;
 // - thinkSummaryLine:思考折叠行摘要(运行中取末行,结束后取首行);
+// - textPreviewLines:说明节点折叠预览(前两个非空行);
 // - toolRoundAssistantIds:有工具调用的轮次里的 assistant 条目(气泡不再渲染其 thinking);
-// - toolErrorSummary:工具失败折叠摘要取错误首行(截断 80 字);
-// - trackSuspectsView:track_suspects 取证产物行解析(三段路径 + 叠加视频 stream 地址)。
+// - toolRoundAssistantTextIds:同口径的正文气泡隐藏(detection 之后收尾文本除外);
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   copyText,
   lastUserEntryAt,
   shouldSendOnEnter,
   thinkSummaryLine,
+  textPreviewLines,
   timelineEntries,
   toolErrorSummary,
   toolLabel,
   toolRoundAssistantIds,
+  toolRoundAssistantTextIds,
   trackSuspectsView,
   workspaceVideoSrc,
 } from '../chatDisplay';
@@ -154,6 +156,67 @@ describe('toolRoundAssistantIds(有工具轮次的 assistant 条目)', () => {
   });
 });
 
+describe('toolRoundAssistantTextIds(有工具轮次的正文气泡隐藏)', () => {
+  it('有 detection 的工具轮:detection 之前的 assistant 正文命中(改由说明节点呈现)', () => {
+    const ids = toolRoundAssistantTextIds([
+      { id: 'u1', kind: 'user' },
+      { id: 'a1', kind: 'assistant' },
+      { id: 't1', kind: 'tool' },
+      { id: 'a2', kind: 'assistant' },
+      { id: 'd1', kind: 'detection' },
+    ]);
+    expect(ids).toEqual(new Set(['a1', 'a2']));
+  });
+
+  it('submit_detection 之后收尾文本(detection 条目之后的 assistant)不隐藏,仍作普通气泡', () => {
+    const entries = [
+      { id: 'u1', kind: 'user' },
+      { id: 'a1', kind: 'assistant' },
+      { id: 't1', kind: 'tool' },
+      { id: 'd1', kind: 'detection' },
+      { id: 'a2', kind: 'assistant' },
+    ];
+    expect(toolRoundAssistantTextIds(entries)).toEqual(new Set(['a1']));
+    // 思考口径同步:收尾条目(detection 之后)的 thinking 不隐藏——它不在面板
+    // 区间内,隐藏后两处都看不到(修复后的行为)。
+    expect(toolRoundAssistantIds(entries)).toEqual(new Set(['a1']));
+  });
+
+  it('实时轮(live=true)同样只隐藏 detection 之前的正文', () => {
+    const ids = toolRoundAssistantTextIds(
+      [
+        { id: 'u1', kind: 'user' },
+        { id: 't1', kind: 'tool' },
+        { id: 'd1', kind: 'detection' },
+        { id: 'a1', kind: 'assistant' },
+      ],
+      { live: true },
+    );
+    expect(ids.size).toBe(0);
+  });
+
+  it('纯问答轮次与无面板承接的工具轮都不隐藏正文', () => {
+    expect(
+      toolRoundAssistantTextIds([
+        { id: 'u1', kind: 'user' },
+        { id: 'a1', kind: 'assistant' },
+      ]).size,
+    ).toBe(0);
+    expect(
+      toolRoundAssistantTextIds([
+        { id: 'u1', kind: 'user' },
+        { id: 'a1', kind: 'assistant' },
+        { id: 't1', kind: 'tool' },
+        { id: 'a2', kind: 'assistant' },
+      ]).size,
+    ).toBe(0);
+  });
+
+  it('空时间线返回空集', () => {
+    expect(toolRoundAssistantTextIds([]).size).toBe(0);
+  });
+});
+
 describe('lastUserEntryAt(轮次秒表起点)', () => {
   it('取最后一条 user 条目的 at(其后的 assistant/tool 不影响起点)', () => {
     const entries = [
@@ -276,6 +339,21 @@ describe('thinkSummaryLine(思考折叠行摘要)', () => {
   it('空思考返回空串', () => {
     expect(thinkSummaryLine('', true)).toBe('');
     expect(thinkSummaryLine('\n  \n', false)).toBe('');
+  });
+});
+
+describe('textPreviewLines(说明节点折叠预览)', () => {
+  it('取前两个非空行', () => {
+    expect(textPreviewLines('第一行\n第二行\n第三行')).toBe('第一行\n第二行');
+  });
+
+  it('跳过空行并裁掉行首尾空白', () => {
+    expect(textPreviewLines('\n  第一行  \n\n第二行\n\n第三行')).toBe('第一行\n第二行');
+  });
+
+  it('不足两行原样;空文本返回空串', () => {
+    expect(textPreviewLines('只有一行')).toBe('只有一行');
+    expect(textPreviewLines('')).toBe('');
   });
 });
 

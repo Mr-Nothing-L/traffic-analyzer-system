@@ -19,9 +19,12 @@
  * (submit_detection.schema.json)在加载后由 event_contract.json 注入活跃
  * 事件枚举与编码位宽。
  *
- * 会话隔离:BackgroundJobRegistry 与 todo_write 实例在本函数每次调用时
- * 重新构造(registerBuiltinTools 本身就是按 session 调用一次),避免不同
- * session 的后台任务/任务清单互相污染。
+ * 会话隔离:BackgroundJobRegistry、todo_write 实例与 TrackAttemptRecorder
+ * (防跳跟踪闸门的取证发起记录)在本函数每次调用时重新构造
+ * (registerBuiltinTools 本身就是按 session 调用一次),避免不同 session 的
+ * 后台任务/任务清单/取证记录互相污染。recorder 同时注入 track_suspects 与
+ * submit_detection;spawn_subagent 复用 parentRegistry(同一批工具实例),
+ * 子代理自然共享同一 recorder。
  */
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -39,6 +42,7 @@ import { BackgroundJobRegistry, createShellTools } from './shellTools';
 import { createSubmitDetectionTool } from './submitDetection';
 import { createTodoWriteTool } from './todoTools';
 import { createTrackSuspectsTool } from './trackSuspects';
+import { TrackAttemptRecorder } from './trackAttemptRecorder';
 import { createVideoTools, type ToolsetEntrySpec } from './videoTools';
 import { createWebFetchTool } from './webTools';
 
@@ -135,9 +139,12 @@ export function registerBuiltinTools(
 
   const client = new ToolserverClient({ baseUrl: options.toolserverUrl });
 
-  // 每 session 新建:后台任务注册表与任务清单,保证会话隔离。
+  // 每 session 新建:后台任务注册表、任务清单与取证发起记录,保证会话隔离。
   const shellToolsDeps = { workspace, jobRegistry: new BackgroundJobRegistry() };
   const todoWriteTool = createTodoWriteTool(specOf('todo_write'));
+  // 防跳跟踪闸门:记录本 session 已对哪些视频发起过 track_suspects,
+  // 供 submit_detection 校验事件 1/2/8 的取证前置(生产路径必传)。
+  const trackRecorder = new TrackAttemptRecorder();
 
   const submitSpec = specOf('submit_detection');
   const tools: ExecutableTool[] = [
@@ -145,8 +152,9 @@ export function registerBuiltinTools(
     // 看画面的主方式,load_video 用于需要完整时序连贯理解的场景。
     ...createVideoTools(client, workspace, specOf),
     createLoadVideoTool(client, workspace, specOf('load_video')),
-    // 动态事件(违停/应急车道/逆行倒车)疑似目标的轨迹取证(900s 长任务)。
-    createTrackSuspectsTool(client, workspace, specOf('track_suspects')),
+    // 动态事件(违停/应急车道/逆行倒车)疑似目标的轨迹取证(900s 长任务);
+    // 发起即记入 trackRecorder,作为 submit_detection 防跳跟踪闸门的核查依据。
+    createTrackSuspectsTool(client, workspace, specOf('track_suspects'), trackRecorder),
     ...createFileTools(workspace, specOf),
     ...createShellTools(shellToolsDeps, specOf),
     ...createNavTools(workspace, specOf),
@@ -157,8 +165,9 @@ export function registerBuiltinTools(
       // 事件枚举/编码位宽从 event_contract.json 注入(单一权威源派生)。
       applyEventContractToSubmitSchema(submitSpec.parameters),
       // 传入 client 与 workspace:video_path 在 resolve 阶段做沙盒读校验,
-      // accesses 进权限链,与其他视频工具一致。
-      { client, workspace },
+      // accesses 进权限链,与其他视频工具一致;trackRecorder 启用事件 1/2/8
+      // 的防跳跟踪软闸门(未取证先拒绝并指引)。
+      { client, workspace, trackRecorder },
     ),
   ];
   for (const tool of tools) {

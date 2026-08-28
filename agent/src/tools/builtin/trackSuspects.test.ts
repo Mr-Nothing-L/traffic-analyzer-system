@@ -21,6 +21,7 @@ import {
   TRACK_SUSPECTS_TIMEOUT_MS,
   createTrackSuspectsTool,
 } from './trackSuspects';
+import { TrackAttemptRecorder } from './trackAttemptRecorder';
 
 const JPEG_OVERLAY = Buffer.from('overlay-annotated-jpeg').toString('base64');
 const JPEG_CROP_A = Buffer.from('track1-crop-a-jpeg').toString('base64');
@@ -51,15 +52,30 @@ function mockTrack(payload: unknown, status = 200): void {
   );
 }
 
-function tool() {
+function tool(recorder?: TrackAttemptRecorder) {
   return createTrackSuspectsTool(client, workspace, {
     description: 'desc:track_suspects',
     parameters: { type: 'object', properties: {} },
-  });
+  }, recorder);
 }
 
 async function execute(input: unknown): Promise<ExecutableToolResult> {
   const execution = tool().resolveExecution(input);
+  if (!isRunnableToolExecution(execution)) {
+    return execution as ExecutableToolErrorResult;
+  }
+  return (execution as RunnableToolExecution).execute({
+    toolCallId: 'test-call',
+    signal: new AbortController().signal,
+  });
+}
+
+/** 带 recorder 的执行(取证发起记录行为用)。 */
+async function executeWith(
+  recorder: TrackAttemptRecorder,
+  input: unknown,
+): Promise<ExecutableToolResult> {
+  const execution = tool(recorder).resolveExecution(input);
   if (!isRunnableToolExecution(execution)) {
     return execution as ExecutableToolErrorResult;
   }
@@ -297,5 +313,40 @@ describe('track_suspects', () => {
     });
     expect(result.isError).toBe(true);
     expect(result.output).toContain('toolserver_unreachable');
+  });
+
+  describe('track attempt recorder(防跳跟踪闸门的取证发起记录)', () => {
+    it('records the resolved video path on a successful call', async () => {
+      mockTrack(successPayload());
+      const recorder = new TrackAttemptRecorder();
+      const videoPath = path.join(workspaceDir, 'demo.mp4');
+      await executeWith(recorder, { video_path: videoPath, suspects: ANCHORS });
+      expect(recorder.hasAttempted(videoPath)).toBe(true);
+    });
+
+    it('records at call start regardless of the outcome(业务失败/工具错误都算已发起)', async () => {
+      const businessRecorder = new TrackAttemptRecorder();
+      mockTrack({ tracks: [], failed: true, failure_reason: '无法建轨迹' });
+      await executeWith(businessRecorder, {
+        video_path: path.join(workspaceDir, 'demo.mp4'),
+        suspects: ANCHORS,
+      });
+      expect(businessRecorder.hasAttempted(path.join(workspaceDir, 'demo.mp4'))).toBe(true);
+
+      const errorRecorder = new TrackAttemptRecorder();
+      mockTrack({ error: { code: 'internal', message: 'boom' } }, 500);
+      await executeWith(errorRecorder, {
+        video_path: path.join(workspaceDir, 'demo.mp4'),
+        suspects: ANCHORS,
+      });
+      expect(errorRecorder.hasAttempted(path.join(workspaceDir, 'demo.mp4'))).toBe(true);
+    });
+
+    it('does not record when sandbox resolution fails(无规范化路径可记)', async () => {
+      const recorder = new TrackAttemptRecorder();
+      const result = await executeWith(recorder, { video_path: '../outside.mp4', suspects: ANCHORS });
+      expect(result.isError).toBe(true);
+      expect(recorder.hasAttempted('../outside.mp4')).toBe(false);
+    });
   });
 });

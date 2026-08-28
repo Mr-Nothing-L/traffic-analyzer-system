@@ -12,6 +12,10 @@
  *
  * 耗时工具:一次调用约 10-25 次 VLM 调用、耗时可达数分钟,故显式声明
  * timeoutMs(900s),不受 loop 级 120s 截断影响(同 spawn_subagent 的做法)。
+ *
+ * 取证发起记录:传入可选 recorder(TrackAttemptRecorder)时,输入合法且
+ * video_path 经 resolver 规范化通过后立即记录(调用开始即记,不管后续
+ * 工具调用成败),供 submit_detection 的防跳跟踪闸门核查。
  */
 import { z } from 'zod';
 
@@ -22,6 +26,7 @@ import {
   type ExecutableTool,
   type ExecutableToolResult,
 } from '../contract';
+import type { TrackAttemptRecorder } from './trackAttemptRecorder';
 import type { ToolserverClient } from './httpToolserver';
 import { resolveWorkspacePath } from './fileTools';
 import type { ToolsetEntrySpec } from './videoTools';
@@ -84,6 +89,7 @@ export function createTrackSuspectsTool(
   client: ToolserverClient,
   workspace: WorkspaceConfig,
   spec: ToolsetEntrySpec,
+  recorder?: TrackAttemptRecorder,
 ): ExecutableTool {
   return {
     name: TRACK_SUSPECTS_TOOL_NAME,
@@ -95,6 +101,8 @@ export function createTrackSuspectsTool(
       const resolved = resolveWorkspacePath(parsed.data.video_path, workspace, 'read');
       if (!resolved.ok) return resolved.result;
       const videoPath = resolved.path;
+      // 调用开始即记(不管成败):submit_detection 防跳跟踪闸门的核查依据。
+      recorder?.record(videoPath);
       const input = parsed.data;
       return {
         accesses: ToolAccesses.readFile(videoPath),

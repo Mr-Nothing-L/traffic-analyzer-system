@@ -8,9 +8,11 @@
  * 链路节点即工具条目:每个节点(步骤/并发 chip/子代理分支)默认折叠
  * (label + 耗时 + 状态),点击展开调用明细(ChatToolDetail:tool_call 参数行 +
  * 结果文本/图片/子代理时间线/取证视频),展开态由宿主按条目 id 记忆(expandedTools,
- * 会话内共享,实时态与冻结态同一份);assistant 思考按时间序插为思考节点
- * (折叠=一句话摘要 ThinkLine,展开=全文+复制,展开态同理按条目 id 记忆于
- * expandedThinks);面板头部「全部展开/全部折叠」同时作用于工具与思考节点。
+ * 会话内共享,实时态与冻结态同一份);assistant 思考与正文按时间序交错插为
+ * 思考/说明节点(思考折叠=一句话摘要 ThinkLine,说明折叠=前两行预览
+ * textPreviewLines;展开=全文,说明走 markdown 渲染 MdStream,均带复制),
+ * 展开态同理按条目 id 记忆于 expandedThinks / expandedTexts;面板头部
+ * 「全部展开/全部折叠」同时作用于工具、思考与说明节点。
  * 阶段标题/步骤标签/按钮为骨架 → 像素字体;思考摘要/全文与子结论为说明文字
  * → sans;耗时数值 → mono。颜色全部 tokens 变量(design.md §8 禁 inline 色);
  * 图标一律 UiIcon(§8 禁 emoji)。 */
@@ -18,8 +20,9 @@ import { computed, reactive, ref } from 'vue'
 import UiIcon from '../UiIcon.vue'
 import type { AnalysisFlow, FlowNode, FlowStep, FlowSubagent } from '../../utils/analysisFlow'
 import type { AgentToolEntry } from '../../stores/agentchat'
-import { copyText } from '../../utils/chatDisplay'
+import { copyText, textPreviewLines } from '../../utils/chatDisplay'
 import ChatToolDetail from './ChatToolDetail.vue'
+import MdStream from './MdStream.vue'
 import ThinkLine from './ThinkLine.vue'
 
 const props = defineProps<{
@@ -32,6 +35,8 @@ const props = defineProps<{
   expandedTools?: Set<string>
   /** 思考节点展开态(按 assistant 条目 id,宿主持有,机制同 expandedTools)。 */
   expandedThinks?: Set<string>
+  /** 说明节点展开态(按 assistant 条目 id,宿主持有,机制同 expandedTools)。 */
+  expandedTexts?: Set<string>
 }>()
 
 const emit = defineEmits<{
@@ -39,6 +44,8 @@ const emit = defineEmits<{
   'toggle-all-tools': [ids: string[], open: boolean]
   'toggle-think': [id: string]
   'toggle-all-thinks': [ids: string[], open: boolean]
+  'toggle-text': [id: string]
+  'toggle-all-texts': [ids: string[], open: boolean]
   preview: [url: string]
 }>()
 
@@ -55,6 +62,7 @@ interface Row {
 }
 type Item =
   | { t: 'think'; id: string; text: string; live: boolean }
+  | { t: 'text'; id: string; text: string; live: boolean }
   | { t: 'step'; row: Row; entry?: AgentToolEntry }
   | { t: 'par'; rows: Row[]; entries: Array<AgentToolEntry | undefined> }
   | { t: 'sub'; row: Row; task: string; conclusion: string; entry?: AgentToolEntry }
@@ -94,6 +102,9 @@ const phaseViews = computed(() =>
     items: ph.nodes.map((n): Item => {
       if ('kind' in n && n.kind === 'think') {
         return { t: 'think', id: n.id, text: n.text, live: n.live === true }
+      }
+      if ('kind' in n && n.kind === 'text') {
+        return { t: 'text', id: n.id, text: n.text, live: n.live === true }
       }
       if ('kind' in n) {
         return { t: 'par', rows: n.steps.map(mkRow), entries: n.steps.map((s) => s.entry) }
@@ -149,20 +160,31 @@ function toggleThink(id: string) {
   emit('toggle-think', id)
 }
 
-/** 思考全文复制:面板内自管(与 ChatToolDetail 取证目录复制同款低调交互),
- * 成功图标变 ✓ 一秒,失败静默。 */
-const copiedThinkId = ref<string | null>(null)
+/* ---- 说明节点折叠/展开:按来源 assistant 条目 id(宿主的 expandedTexts 记忆),
+ * 与思考节点同机制但各自独立(同一条目的思考与说明互不联动)。 ---- */
+function isTextOpen(id: string): boolean {
+  return props.expandedTexts?.has(id) ?? false
+}
+
+function toggleText(id: string) {
+  emit('toggle-text', id)
+}
+
+/** 节点全文复制(思考/说明共用):面板内自管(与 ChatToolDetail 取证目录复制
+ * 同款低调交互),成功图标变 ✓ 一秒,失败静默。copiedKey 以 kind:id 区分同一条目
+ * 的思考与说明两处复制按钮。 */
+const copiedKey = ref<string | null>(null)
 let copiedTimer: ReturnType<typeof setTimeout> | null = null
-async function copyThink(id: string, text: string) {
+async function copyNode(kind: 'think' | 'text', id: string, text: string) {
   try {
     await copyText(text)
   } catch {
     return
   }
-  copiedThinkId.value = id
+  copiedKey.value = `${kind}:${id}`
   if (copiedTimer !== null) clearTimeout(copiedTimer)
   copiedTimer = setTimeout(() => {
-    copiedThinkId.value = null
+    copiedKey.value = null
     copiedTimer = null
   }, 1000)
 }
@@ -193,10 +215,22 @@ const expandableThinkIds = computed(() => {
   return ids
 })
 
-/** 面板工具行:批量动作同时下发工具节点与思考节点两类 id。 */
+/** 说明节点条目 id 清单(与工具、思考节点一并批量动作)。 */
+const expandableTextIds = computed(() => {
+  const ids: string[] = []
+  for (const ph of props.flow.phases) {
+    for (const n of ph.nodes) {
+      if ('kind' in n && n.kind === 'text') ids.push(n.id)
+    }
+  }
+  return ids
+})
+
+/** 面板工具行:批量动作同时下发工具、思考与说明三类节点 id。 */
 function toggleAll(open: boolean) {
   emit('toggle-all-tools', expandableIds.value, open)
   emit('toggle-all-thinks', expandableThinkIds.value, open)
+  emit('toggle-all-texts', expandableTextIds.value, open)
 }
 </script>
 
@@ -245,12 +279,40 @@ function toggleAll(open: boolean) {
                   type="button"
                   class="aflow-think-copy"
                   title="复制思考内容"
-                  @click="copyThink(it.id, it.text)"
+                  @click="copyNode('think', it.id, it.text)"
                 >
-                  <UiIcon :name="copiedThinkId === it.id ? 'check' : 'copy'" :size="11" />
+                  <UiIcon :name="copiedKey === `think:${it.id}` ? 'check' : 'copy'" :size="11" />
                 </button>
               </div>
               <div v-if="isThinkOpen(it.id)" class="aflow-think-text">{{ it.text }}</div>
+            </div>
+            <!-- 说明节点:折叠=前两行预览(textPreviewLines),展开=markdown 全文(MdStream)+复制 -->
+            <div v-else-if="it.t === 'text'" class="aflow-node-wrap aflow-text">
+              <div class="aflow-text-row">
+                <button
+                  type="button"
+                  class="aflow-node-btn aflow-text-head"
+                  :title="isTextOpen(it.id) ? '收起说明全文' : '展开说明全文'"
+                  @click="toggleText(it.id)"
+                >
+                  <span class="aflow-caret" :class="{ open: isTextOpen(it.id) }">▸</span>
+                  <span class="aflow-text-lbl">说明:</span>
+                  <span v-if="!isTextOpen(it.id)" class="aflow-text-preview">{{
+                    textPreviewLines(it.text)
+                  }}</span>
+                </button>
+                <button
+                  type="button"
+                  class="aflow-text-copy"
+                  title="复制说明内容"
+                  @click="copyNode('text', it.id, it.text)"
+                >
+                  <UiIcon :name="copiedKey === `text:${it.id}` ? 'check' : 'copy'" :size="11" />
+                </button>
+              </div>
+              <div v-if="isTextOpen(it.id)" class="aflow-text-text">
+                <MdStream :text="it.text" :streaming="it.live" />
+              </div>
             </div>
             <!-- 主干步骤:点击展开/收起调用明细 -->
             <div v-else-if="it.t === 'step'" class="aflow-node-wrap">
@@ -553,8 +615,9 @@ function toggleAll(open: boolean) {
   font-size: var(--text-xs);
 }
 
-/* ---- 思考节点:折叠头(▸ 思考过程: + 一句话摘要)+ 悬停显现复制 ---- */
-.aflow-think-row {
+/* ---- 思考/说明节点:折叠头(▸ 标签 + 摘要/预览)+ 悬停显现复制 ---- */
+.aflow-think-row,
+.aflow-text-row {
   display: flex;
   align-items: center;
   gap: var(--space-xs);
@@ -562,13 +625,15 @@ function toggleAll(open: boolean) {
 }
 
 /* 折叠头内摘要占满剩余宽度截断;摘要/全文是内容文本 → sans(按钮继承像素只给标签) */
-.aflow-think-head {
+.aflow-think-head,
+.aflow-text-head {
   width: auto; /* 覆盖 .aflow-node-btn 的 100%:同行还有悬停显现的复制按钮 */
   min-width: 0;
   flex: 1 1 auto;
 }
 
-.aflow-think-lbl {
+.aflow-think-lbl,
+.aflow-text-lbl {
   flex: 0 0 auto;
 }
 
@@ -580,7 +645,24 @@ function toggleAll(open: boolean) {
   font-size: var(--text-xs);
 }
 
-.aflow-think-copy {
+/* 说明折叠预览:前两行(超两行截断 + 省略号提示),内容文本 → sans */
+.aflow-text-preview {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  white-space: pre-line;
+  color: var(--color-text2);
+  font-family: var(--font-sans);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+  text-align: left;
+}
+
+.aflow-think-copy,
+.aflow-text-copy {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -598,15 +680,18 @@ function toggleAll(open: boolean) {
 }
 
 .aflow-think-row:hover .aflow-think-copy,
-.aflow-think-row:focus-within .aflow-think-copy {
+.aflow-think-row:focus-within .aflow-think-copy,
+.aflow-text-row:hover .aflow-text-copy,
+.aflow-text-row:focus-within .aflow-text-copy {
   opacity: 1;
 }
 
-.aflow-think-copy:hover {
+.aflow-think-copy:hover,
+.aflow-text-copy:hover {
   color: var(--color-accent);
 }
 
-/* 思考全文:说明文字 → sans,与节点文字缩进对齐 */
+/* 思考/说明全文:说明文字 → sans,与节点文字缩进对齐 */
 .aflow-think-text {
   margin: var(--space-xs) 0 0 var(--space-sm);
   white-space: pre-wrap;
@@ -615,6 +700,88 @@ function toggleAll(open: boolean) {
   font-family: var(--font-sans);
   font-size: var(--text-xs);
   line-height: 1.6;
+}
+
+/* 说明全文走 markdown(MdStream → .md 容器),样式与气泡正文同款 */
+.aflow-text-text {
+  margin: var(--space-xs) 0 0 var(--space-sm);
+  color: var(--color-text2);
+  font-family: var(--font-sans);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+  min-width: 0;
+}
+
+.aflow-text-text :deep(.md) > :first-child {
+  margin-top: 0;
+}
+
+.aflow-text-text :deep(.md) > :last-child {
+  margin-bottom: 0;
+}
+
+.aflow-text-text :deep(.md p),
+.aflow-text-text :deep(.md ul),
+.aflow-text-text :deep(.md ol),
+.aflow-text-text :deep(.md blockquote),
+.aflow-text-text :deep(.md pre),
+.aflow-text-text :deep(.md table) {
+  margin: var(--space-xs) 0;
+}
+
+.aflow-text-text :deep(.md h1),
+.aflow-text-text :deep(.md h2),
+.aflow-text-text :deep(.md h3),
+.aflow-text-text :deep(.md h4) {
+  margin: var(--space-sm) 0 var(--space-xs);
+  font-size: var(--text-sm);
+}
+
+.aflow-text-text :deep(.md ul),
+.aflow-text-text :deep(.md ol) {
+  padding-left: var(--space-lg);
+}
+
+.aflow-text-text :deep(.md code) {
+  padding: 0 4px;
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  font-size: var(--text-sm);
+}
+
+.aflow-text-text :deep(.md pre) {
+  padding: var(--space-sm);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  overflow-x: auto;
+}
+
+.aflow-text-text :deep(.md pre code) {
+  padding: 0;
+  border: none;
+  background: none;
+}
+
+.aflow-text-text :deep(.md a) {
+  color: var(--color-accent);
+}
+
+.aflow-text-text :deep(.md blockquote) {
+  padding-left: var(--space-sm);
+  border-left: 2px solid var(--color-border);
+  color: var(--color-text2);
+}
+
+.aflow-text-text :deep(.md table) {
+  border-collapse: collapse;
+}
+
+.aflow-text-text :deep(.md th),
+.aflow-text-text :deep(.md td) {
+  padding: 2px var(--space-sm);
+  border: 1px solid var(--color-border);
 }
 
 /* ---- 并行批:引导线分叉点(中性灰)+ 横排小 chips ---- */

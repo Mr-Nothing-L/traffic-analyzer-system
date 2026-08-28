@@ -9,6 +9,7 @@ import {
   type FlowParallel,
   type FlowStep,
   type FlowSubagent,
+  type FlowText,
   type FlowThink,
 } from '../analysisFlow';
 import type { AgentEntry, AgentSubItem } from '../../stores/agentchat';
@@ -18,9 +19,9 @@ function user(text: string, at: number): AgentEntry {
   seq += 1;
   return { id: `u${seq}`, kind: 'user', text, at };
 }
-function assistant(think: string, at: number): AgentEntry {
+function assistant(think: string, at: number, text = ''): AgentEntry {
   seq += 1;
-  return { id: `a${seq}`, kind: 'assistant', text: '', think, at };
+  return { id: `a${seq}`, kind: 'assistant', text, think, at };
 }
 function tool(
   name: string,
@@ -67,10 +68,12 @@ function detection(at: number): AgentEntry {
   return { id: `d${seq}`, kind: 'detection', data: { normal: true }, at };
 }
 
-/** 节点种类名:thinking 节点给 'think',其余(步骤/并发批/子代理)归 'step'。 */
+/** 节点种类名:thinking/说明/并发批给自身 kind,其余(步骤/子代理)归 'step'。 */
 function kindOf(n: unknown): string {
   const node = n as { kind?: string };
-  return node.kind === 'think' || node.kind === 'parallel' ? node.kind : 'step';
+  return node.kind === 'think' || node.kind === 'text' || node.kind === 'parallel'
+    ? node.kind
+    : 'step';
 }
 
 /** 线性全链冻结态:勘察→锁定→取证→提交。 */
@@ -212,6 +215,91 @@ describe('buildAnalysisFlow(thinking 节点归属)', () => {
     const f = buildAnalysisFlow([user('q', 1000), assistant('直接回答', 1500)], null);
     expect(f.phases).toHaveLength(0);
     expect(f.loops).toBe(1);
+  });
+});
+
+describe('buildAnalysisFlow(说明节点)', () => {
+  const detId = (entries: AgentEntry[]) =>
+    entries.find((e) => e.kind === 'detection')!.id;
+
+  it('正文按位置插为 text 节点:归属其后最近工具的相位,同一条目思考在前正文在后', () => {
+    const es = [
+      user('q', 1000),
+      assistant('先勘察', 1500, '我先看一下视频基本信息。'),
+      tool('video_meta', 2000),
+      detection(3000),
+    ];
+    const f = buildAnalysisFlow(es, detId(es));
+    const nodes = f.phases[0]!.nodes;
+    expect(nodes.map(kindOf)).toEqual(['think', 'text', 'step']);
+    const text = nodes[1] as FlowText;
+    expect(text.id).toBe(es[1]!.id);
+    expect(text.text).toBe('我先看一下视频基本信息。');
+  });
+
+  it('工具间的说明归其后最近工具的相位;末段说明(其后无工具)归前一工具相位殿后', () => {
+    const es = [
+      user('q', 1000),
+      tool('video_meta', 2000),
+      assistant('', 2500, '元信息已确认,继续抽帧分析。'), // 其后最近工具 draw_boxes → locate 开场
+      tool('draw_boxes', 3000),
+      assistant('', 3500, '框已画好,准备提交。'), // 其后无工具 → 前一工具相位殿后
+      detection(4000),
+    ];
+    const f = buildAnalysisFlow(es, detId(es));
+    expect(f.phases.map((p) => p.key)).toEqual(['probe', 'locate']);
+    expect(f.phases[0]!.nodes.map(kindOf)).toEqual(['step']);
+    expect(f.phases[1]!.nodes.map(kindOf)).toEqual(['text', 'step', 'text']);
+    expect((f.phases[1]!.nodes[0] as FlowText).text).toBe('元信息已确认,继续抽帧分析。');
+    expect((f.phases[1]!.nodes[2] as FlowText).text).toBe('框已画好,准备提交。');
+  });
+
+  it('思考/说明/工具严格按原始顺序交错(想→说→做)', () => {
+    const es = [
+      user('q', 1000),
+      assistant('想:先勘察', 1200, '说:开始勘察'),
+      tool('video_meta', 2000),
+      assistant('想:定抽帧密度', 2500, '说:按 2fps 抽帧'),
+      tool('extract_frames', 3000),
+      detection(4000),
+    ];
+    const f = buildAnalysisFlow(es, detId(es));
+    // 两段思考/说明的后继工具都在 probe 相位:同相位内按原始顺序交错
+    expect(f.phases).toHaveLength(1);
+    expect(f.phases[0]!.nodes.map(kindOf)).toEqual([
+      'think',
+      'text',
+      'step',
+      'think',
+      'text',
+      'step',
+    ]);
+  });
+
+  it('detection 之后收尾文本不进面板(冻结态在区间外,实时态显式排除)', () => {
+    const es = [
+      user('q', 1000),
+      tool('submit_detection', 2000),
+      detection(2500),
+      assistant('', 3000, '检测完成,报告见上卡。'),
+    ];
+    const textNodes = (f: ReturnType<typeof buildAnalysisFlow>) =>
+      f.phases.flatMap((p) => p.nodes).filter((n) => (n as FlowText).kind === 'text');
+    expect(textNodes(buildAnalysisFlow(es, detId(es)))).toHaveLength(0);
+    expect(textNodes(buildAnalysisFlow(es, null))).toHaveLength(0);
+  });
+
+  it('实时态末尾说明随流式标 live;纯文本问答轮次仍不产节点', () => {
+    const es = [
+      user('q', 1000),
+      tool('video_meta', 2000),
+      assistant('', 2500, '结果说明流入中…'),
+    ];
+    const f = buildAnalysisFlow(es, null);
+    expect(kindOf(f.phases[0]!.nodes[1])).toBe('text');
+    expect((f.phases[0]!.nodes[1] as FlowText).live).toBe(true);
+    const qa = buildAnalysisFlow([user('q', 1000), assistant('', 1500, '直接回答')], null);
+    expect(qa.phases).toHaveLength(0);
   });
 });
 

@@ -12,6 +12,10 @@
  *   - bit 9 is the normal indicator: 1 iff no event is detected
  *   - the `normal` flag must equal bit 9
  *   - detected === true requires a non-empty evidence_frames
+ *   - (防跳跟踪闸门,可选)events 1/2/8(违停/应急车道/逆行)任一 detected=true
+ *     时,payload.video_path 必须已发起过 track_suspects(经 TrackAttemptRecorder
+ *     按 session 记录,失败也算);未发起则拒绝提交并指引先取证,禁止目测
+ *     静止时长/速度。recorder 缺省时不启用该闸门。
  * Violations are returned as isError results describing each inconsistency so
  * the model can fix and retry. A valid submission returns
  * `{output: '检测结果已提交', stopTurn: true, payload}` with the structured
@@ -48,6 +52,7 @@ import {
 } from './eventContract';
 import { resolveWorkspacePath } from './fileTools';
 import { invalidInputResult } from './utils';
+import type { TrackAttemptRecorder } from './trackAttemptRecorder';
 
 /** 活跃事件编号:从 event_contract.json 派生(权威源 event_categories.yaml)。 */
 const eventContract = loadEventContract();
@@ -56,6 +61,8 @@ const ACTIVE_EVENT_IDS = new Set(eventContract.active_event_ids);
 const NORMAL_BIT_INDEX = eventContract.normal_bit_index;
 const ENCODING_LENGTH = eventContract.encoding_length;
 const BINARY_ENCODING_PATTERN = binaryEncodingPattern(ENCODING_LENGTH);
+/** 防跳跟踪闸门覆盖的动态事件:1 违停 / 2 应急车道 / 8 逆行倒车。 */
+const TRACK_GATED_EVENT_IDS = new Set([1, 2, 8]);
 
 const instanceSchema = z.strictObject({
   description: z.string(),
@@ -154,10 +161,13 @@ interface DrawBoxesResponse {
  * a hard veto; without it the toolserver's own path allowlist is the only
  * enforcement. When `client` is omitted, a default ToolserverClient
  * (TOOLSERVER_URL env or http://127.0.0.1:8601) is created lazily on first use.
+ * `trackRecorder` enables the防跳跟踪 soft gate (see module doc); when omitted
+ * the gate is disabled.
  */
 export interface SubmitDetectionDeps {
   readonly client?: ToolserverClient;
   readonly workspace?: WorkspaceConfig;
+  readonly trackRecorder?: TrackAttemptRecorder;
 }
 
 /**
@@ -309,6 +319,25 @@ export function createSubmitDetectionTool(
         const resolved = resolveWorkspacePath(input.video_path, deps.workspace, 'read');
         if (!resolved.ok) return resolved.result;
         videoPath = resolved.path;
+      }
+
+      // 防跳跟踪软闸门:事件 1/2/8 任一 detected=true 前必须对本视频发起过
+      // track_suspects(发起即记,失败也算——可凭回退结论提交)。未发起则
+      // 拒绝并指引取证;recorder 缺省时不启用(直接构造工厂的用例行为不变)。
+      if (deps.trackRecorder !== undefined) {
+        const gatedDetected = input.events
+          .filter((event) => TRACK_GATED_EVENT_IDS.has(event.event_id) && event.detected)
+          .map((event) => event.event_id);
+        if (gatedDetected.length > 0 && !deps.trackRecorder.hasAttempted(videoPath)) {
+          return {
+            output:
+              `提交被拒绝:事件 ${gatedDetected.join('/')} 判定 detected=true 前,` +
+              '必须先调用 track_suspects 取证(即使跟踪失败,也可凭回退结论再提交),' +
+              '禁止目测静止时长/速度。\n' +
+              '请先对本视频调用 track_suspects,再重新提交。',
+            isError: true,
+          };
+        }
       }
 
       const violations = crossValidateDetection(input);

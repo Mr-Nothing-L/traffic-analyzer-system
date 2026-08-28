@@ -1,6 +1,7 @@
 /** ChatAnalysisFlow 渲染测试(W6):冻结态折叠摘要/展开阶段树、并行批 chips、
- * 子代理分支、失败步与实时态当前步脉冲。经 @vue/server-renderer SSR 直渲染
- * (纯 node 环境,组件数据由 buildAnalysisFlow 从真实条目形状推导)。 */
+ * 子代理分支、失败步与实时态当前步脉冲、思考/说明节点折叠展开。经
+ * @vue/server-renderer SSR 直渲染(纯 node 环境,组件数据由 buildAnalysisFlow
+ * 从真实条目形状推导)。 */
 import { describe, it, expect } from 'vitest';
 import { createSSRApp, h } from 'vue';
 import { renderToString } from 'vue/server-renderer';
@@ -19,6 +20,10 @@ function user(text: string, at: number): AgentEntry {
 function assistant(think: string, at: number): AgentEntry {
   seq += 1;
   return { id: `a${seq}`, kind: 'assistant', text: '', think, at };
+}
+function assistantText(text: string, at: number, think = ''): AgentEntry {
+  seq += 1;
+  return { id: `a${seq}`, kind: 'assistant', text, think, at };
 }
 function tool(
   name: string,
@@ -233,6 +238,69 @@ describe('ChatAnalysisFlow(思考节点)', () => {
     const html = await renderHtml(flow, { open: true });
     expect(html).toContain('全部展开');
     expect(html).toContain('全部折叠');
+  });
+});
+
+describe('ChatAnalysisFlow(说明节点)', () => {
+  const textEntries = (): AgentEntry[] => [
+    user('检测这段视频', 100_000),
+    assistantText('已收到任务。**先看元信息**。\n然后抽帧分析。\n最后提交检测。', 101_000),
+    tool('video_meta', 102_000),
+    detection(120_000),
+  ];
+
+  it('展开阶段树后说明节点默认折叠:前两行预览可见,第三行不出现', async () => {
+    const entries = textEntries();
+    const flow = buildAnalysisFlow(entries, DET_ID(entries));
+    const html = await renderHtml(flow, { open: true });
+    expect(html).toContain('说明:');
+    expect(html).toContain('aflow-text-preview');
+    expect(html).toContain('先看元信息'); // 预览第一行
+    expect(html).toContain('然后抽帧分析。'); // 预览第二行
+    expect(html).not.toContain('最后提交检测。'); // 全文未展开
+  });
+
+  it('expandedTexts 命中:markdown 全文渲染 + 复制按钮,折叠预览收起', async () => {
+    const entries = textEntries();
+    const flow = buildAnalysisFlow(entries, DET_ID(entries));
+    const id = entries.find((e) => e.kind === 'assistant')!.id;
+    const html = await renderHtml(flow, { open: true, expandedTexts: new Set([id]) });
+    expect(html).toContain('aflow-text-text');
+    expect(html).toContain('<strong>先看元信息</strong>'); // markdown 渲染
+    expect(html).toContain('最后提交检测。'); // 全文可见
+    expect(html).toContain('aflow-text-copy');
+    expect(html).not.toContain('aflow-text-preview');
+  });
+
+  it('说明与思考展开态各自独立(同一条目的两个节点不联动)', async () => {
+    const entries: AgentEntry[] = [
+      user('q', 1000),
+      {
+        id: 'aX',
+        kind: 'assistant',
+        think: '思考第一行\n思考第二行',
+        text: '说明第一行\n说明第二行\n说明第三行',
+        at: 1500,
+      },
+      tool('video_meta', 2000),
+      detection(3000),
+    ];
+    const flow = buildAnalysisFlow(entries, DET_ID(entries));
+    const thinkOpenHtml = await renderHtml(flow, { open: true, expandedThinks: new Set(['aX']) });
+    expect(thinkOpenHtml).toContain('思考第二行'); // 思考展开
+    expect(thinkOpenHtml).not.toContain('说明第三行'); // 说明仍折叠(预览只有前两行)
+    const textOpenHtml = await renderHtml(flow, { open: true, expandedTexts: new Set(['aX']) });
+    expect(textOpenHtml).toContain('说明第三行'); // 说明展开
+    expect(textOpenHtml).not.toContain('思考第二行'); // 思考仍折叠(摘要只有首行)
+  });
+
+  it('「全部展开/全部折叠」工具行与说明节点并存(批量动作入口覆盖三类节点)', async () => {
+    const entries = textEntries();
+    const flow = buildAnalysisFlow(entries, DET_ID(entries));
+    const html = await renderHtml(flow, { open: true });
+    expect(html).toContain('全部展开');
+    expect(html).toContain('全部折叠');
+    expect(html).toContain('aflow-text-preview');
   });
 });
 
