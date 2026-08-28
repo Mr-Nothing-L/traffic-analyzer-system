@@ -6,17 +6,21 @@
  * - 实时态(realtime):对话区底部随 entries 生长的完整树,当前步脉冲高亮、
  *   失败步红色 + 「已重试」标记,无摘要行。
  * 链路节点即工具条目:每个节点(步骤/并发 chip/子代理分支)默认折叠
- * (label + 耗时 + 状态),点击展开调用明细(ChatToolDetail:参数摘要 + 结果
- * 文本/图片/子代理时间线/取证视频),展开态由宿主按条目 id 记忆(expandedTools,
- * 会话内共享,实时态与冻结态同一份);面板头部提供「全部展开/全部折叠」。
- * 阶段标题/步骤标签/按钮为骨架 → 像素字体;thinking 摘要与子结论为说明文字
+ * (label + 耗时 + 状态),点击展开调用明细(ChatToolDetail:tool_call 参数行 +
+ * 结果文本/图片/子代理时间线/取证视频),展开态由宿主按条目 id 记忆(expandedTools,
+ * 会话内共享,实时态与冻结态同一份);assistant 思考按时间序插为思考节点
+ * (折叠=一句话摘要 ThinkLine,展开=全文+复制,展开态同理按条目 id 记忆于
+ * expandedThinks);面板头部「全部展开/全部折叠」同时作用于工具与思考节点。
+ * 阶段标题/步骤标签/按钮为骨架 → 像素字体;思考摘要/全文与子结论为说明文字
  * → sans;耗时数值 → mono。颜色全部 tokens 变量(design.md §8 禁 inline 色);
  * 图标一律 UiIcon(§8 禁 emoji)。 */
-import { computed, reactive } from 'vue'
+import { computed, reactive, ref } from 'vue'
 import UiIcon from '../UiIcon.vue'
 import type { AnalysisFlow, FlowNode, FlowStep, FlowSubagent } from '../../utils/analysisFlow'
 import type { AgentToolEntry } from '../../stores/agentchat'
+import { copyText } from '../../utils/chatDisplay'
 import ChatToolDetail from './ChatToolDetail.vue'
+import ThinkLine from './ThinkLine.vue'
 
 const props = defineProps<{
   flow: AnalysisFlow
@@ -26,11 +30,15 @@ const props = defineProps<{
   open?: boolean
   /** 节点展开态(按工具条目 id,宿主持有;实时态与冻结态共享同一份,会话内记忆)。 */
   expandedTools?: Set<string>
+  /** 思考节点展开态(按 assistant 条目 id,宿主持有,机制同 expandedTools)。 */
+  expandedThinks?: Set<string>
 }>()
 
 const emit = defineEmits<{
   'toggle-tool': [id: string]
   'toggle-all-tools': [ids: string[], open: boolean]
+  'toggle-think': [id: string]
+  'toggle-all-thinks': [ids: string[], open: boolean]
   preview: [url: string]
 }>()
 
@@ -46,6 +54,7 @@ interface Row {
   retried: boolean
 }
 type Item =
+  | { t: 'think'; id: string; text: string; live: boolean }
   | { t: 'step'; row: Row; entry?: AgentToolEntry }
   | { t: 'par'; rows: Row[]; entries: Array<AgentToolEntry | undefined> }
   | { t: 'sub'; row: Row; task: string; conclusion: string; entry?: AgentToolEntry }
@@ -82,8 +91,10 @@ const phaseViews = computed(() =>
     key: ph.key as string,
     title: ph.title,
     icon: ph.icon,
-    note: ph.thinkNote ?? '',
     items: ph.nodes.map((n): Item => {
+      if ('kind' in n && n.kind === 'think') {
+        return { t: 'think', id: n.id, text: n.text, live: n.live === true }
+      }
       if ('kind' in n) {
         return { t: 'par', rows: n.steps.map(mkRow), entries: n.steps.map((s) => s.entry) }
       }
@@ -129,20 +140,64 @@ function detailVisible(e: AgentToolEntry | undefined): boolean {
   return isOpen(e) && !!e && (e.done || e.children.length > 0)
 }
 
+/* ---- 思考节点折叠/展开:按来源 assistant 条目 id(宿主的 expandedThinks 记忆) ---- */
+function isThinkOpen(id: string): boolean {
+  return props.expandedThinks?.has(id) ?? false
+}
+
+function toggleThink(id: string) {
+  emit('toggle-think', id)
+}
+
+/** 思考全文复制:面板内自管(与 ChatToolDetail 取证目录复制同款低调交互),
+ * 成功图标变 ✓ 一秒,失败静默。 */
+const copiedThinkId = ref<string | null>(null)
+let copiedTimer: ReturnType<typeof setTimeout> | null = null
+async function copyThink(id: string, text: string) {
+  try {
+    await copyText(text)
+  } catch {
+    return
+  }
+  copiedThinkId.value = id
+  if (copiedTimer !== null) clearTimeout(copiedTimer)
+  copiedTimer = setTimeout(() => {
+    copiedThinkId.value = null
+    copiedTimer = null
+  }, 1000)
+}
+
 /** 可展开节点条目 id 清单(全部展开/全部折叠按钮用)。 */
 const expandableIds = computed(() => {
   const ids: string[] = []
   for (const ph of props.flow.phases) {
     for (const n of ph.nodes) {
-      if ('kind' in n) {
+      if ('kind' in n && n.kind === 'parallel') {
         for (const s of n.steps) if (s.entry) ids.push(s.entry.id)
-      } else if (n.entry) {
+      } else if (!('kind' in n) && n.entry) {
         ids.push(n.entry.id)
       }
     }
   }
   return ids
 })
+
+/** 思考节点条目 id 清单(全部展开/全部折叠与工具节点一并批量动作)。 */
+const expandableThinkIds = computed(() => {
+  const ids: string[] = []
+  for (const ph of props.flow.phases) {
+    for (const n of ph.nodes) {
+      if ('kind' in n && n.kind === 'think') ids.push(n.id)
+    }
+  }
+  return ids
+})
+
+/** 面板工具行:批量动作同时下发工具节点与思考节点两类 id。 */
+function toggleAll(open: boolean) {
+  emit('toggle-all-tools', expandableIds.value, open)
+  emit('toggle-all-thinks', expandableThinkIds.value, open)
+}
 </script>
 
 <template>
@@ -160,26 +215,45 @@ const expandableIds = computed(() => {
     </button>
 
     <div v-if="expanded && phaseViews.length" class="aflow-body">
-      <!-- 节点全部展开/折叠(有可展开节点才出现) -->
+      <!-- 节点全部展开/折叠(有可展开节点才出现;同时作用于工具与思考节点) -->
       <div v-if="expandableIds.length" class="aflow-toolbar">
-        <button type="button" class="aflow-toolbar-btn" @click="emit('toggle-all-tools', expandableIds, true)">
-          全部展开
-        </button>
+        <button type="button" class="aflow-toolbar-btn" @click="toggleAll(true)">全部展开</button>
         <span class="aflow-toolbar-sep">·</span>
-        <button type="button" class="aflow-toolbar-btn" @click="emit('toggle-all-tools', expandableIds, false)">
-          全部折叠
-        </button>
+        <button type="button" class="aflow-toolbar-btn" @click="toggleAll(false)">全部折叠</button>
       </div>
       <section v-for="(ph, pi) in phaseViews" :key="ph.key" class="aflow-phase">
         <header class="aflow-phase-head">
           <UiIcon :name="ph.icon" :size="13" />
           <span class="aflow-phase-title">{{ ph.title }}</span>
         </header>
-        <p v-if="ph.note" class="aflow-phase-note">{{ ph.note }}</p>
         <div class="aflow-nodes">
           <template v-for="(it, ni) in ph.items" :key="`${pi}:${ni}`">
+            <!-- 思考节点:折叠=一句话摘要(ThinkLine,实时态末行跟随),展开=全文+复制 -->
+            <div v-if="it.t === 'think'" class="aflow-node-wrap aflow-think">
+              <div class="aflow-think-row">
+                <button
+                  type="button"
+                  class="aflow-node-btn aflow-think-head"
+                  :title="isThinkOpen(it.id) ? '收起思考全文' : '展开思考全文'"
+                  @click="toggleThink(it.id)"
+                >
+                  <span class="aflow-caret" :class="{ open: isThinkOpen(it.id) }">▸</span>
+                  <span class="aflow-think-lbl">思考过程:</span>
+                  <ThinkLine v-if="!isThinkOpen(it.id)" :think="it.text" :live="it.live" />
+                </button>
+                <button
+                  type="button"
+                  class="aflow-think-copy"
+                  title="复制思考内容"
+                  @click="copyThink(it.id, it.text)"
+                >
+                  <UiIcon :name="copiedThinkId === it.id ? 'check' : 'copy'" :size="11" />
+                </button>
+              </div>
+              <div v-if="isThinkOpen(it.id)" class="aflow-think-text">{{ it.text }}</div>
+            </div>
             <!-- 主干步骤:点击展开/收起调用明细 -->
-            <div v-if="it.t === 'step'" class="aflow-node-wrap">
+            <div v-else-if="it.t === 'step'" class="aflow-node-wrap">
               <button
                 type="button"
                 class="aflow-node aflow-node-btn"
@@ -350,18 +424,6 @@ const expandableIds = computed(() => {
   font-size: var(--text-sm);
 }
 
-/* thinking 一句话摘要:说明文字 → sans,muted 单行截断 */
-.aflow-phase-note {
-  margin: 2px 0 0 calc(13px + var(--space-xs));
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--color-text2);
-  font-family: var(--font-sans);
-  font-size: var(--text-xs);
-  line-height: 1.5;
-}
-
 /* 步骤列:虚线引导线贯穿状态点 */
 .aflow-nodes {
   position: relative;
@@ -489,6 +551,70 @@ const expandableIds = computed(() => {
   border-radius: var(--radius-sm);
   color: var(--color-text2);
   font-size: var(--text-xs);
+}
+
+/* ---- 思考节点:折叠头(▸ 思考过程: + 一句话摘要)+ 悬停显现复制 ---- */
+.aflow-think-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  min-width: 0;
+}
+
+/* 折叠头内摘要占满剩余宽度截断;摘要/全文是内容文本 → sans(按钮继承像素只给标签) */
+.aflow-think-head {
+  width: auto; /* 覆盖 .aflow-node-btn 的 100%:同行还有悬停显现的复制按钮 */
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.aflow-think-lbl {
+  flex: 0 0 auto;
+}
+
+.aflow-think-head :deep(.think-line) {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+  font-family: var(--font-sans);
+  font-size: var(--text-xs);
+}
+
+.aflow-think-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--color-text2);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease-out);
+}
+
+.aflow-think-row:hover .aflow-think-copy,
+.aflow-think-row:focus-within .aflow-think-copy {
+  opacity: 1;
+}
+
+.aflow-think-copy:hover {
+  color: var(--color-accent);
+}
+
+/* 思考全文:说明文字 → sans,与节点文字缩进对齐 */
+.aflow-think-text {
+  margin: var(--space-xs) 0 0 var(--space-sm);
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--color-text2);
+  font-family: var(--font-sans);
+  font-size: var(--text-xs);
+  line-height: 1.6;
 }
 
 /* ---- 并行批:引导线分叉点(中性灰)+ 横排小 chips ---- */

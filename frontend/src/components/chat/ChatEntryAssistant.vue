@@ -1,5 +1,7 @@
 <script setup lang="ts">
-/** assistant 气泡:思考折叠 + markdown 正文,底部行复制。 */
+/** assistant 气泡:思考折叠 + markdown 正文,底部行复制。
+ * hideThink=true(有工具调用的轮次)时不渲染思考折叠——思考改由分析链路面板的
+ * 思考节点按时间序呈现,气泡只留正文;纯问答轮次保持普通气泡。 */
 import { computed } from 'vue'
 import type { AgentEntry } from '../../stores/agentchat'
 import type { AgentAssistantEntry } from '../../stores/agentchat'
@@ -12,6 +14,8 @@ const props = defineProps<{
   copied: boolean
   streaming: boolean
   thinkOpen: boolean
+  /** true=该轮有工具调用,思考已并入链路面板,气泡内不再重复渲染。 */
+  hideThink?: boolean
   time: string
 }>()
 
@@ -29,7 +33,7 @@ const isThinkLive = computed(() => props.streaming && !entry.value.text)
               <div class="avatar"><UiIcon name="chip" :size="18" /></div>
               <div class="msg-col">
                 <div class="bubble">
-                  <div v-if="entry.think" class="think">
+                  <div v-if="entry.think && !hideThink" class="think">
                     <button class="think-head" @click="emit('toggle-think')">
                       <UiIcon
                         name="up"

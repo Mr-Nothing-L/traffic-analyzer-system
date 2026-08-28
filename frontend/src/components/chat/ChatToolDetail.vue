@@ -1,11 +1,14 @@
 <script setup lang="ts">
 /** 工具调用明细(分析链路节点展开区):原 ChatEntryTool 的结果内容区抽出复用。
- * 子代理迷你时间线(think 折叠 / text / 子工具行)+ 结果文本 + load_video 静态
- * 提示 + 结果图片(点击进画廊)+ track_suspects 取证叠加视频与可复制目录路径。
- * 折叠头(工具名/参数摘要/状态)由宿主(链路节点)负责,这里只渲染结果部分。 */
+ * 首行 tool_call: 参数摘要(mono);子代理迷你时间线(思考折叠块 / text /
+ * 子工具行,与主干节点同构:label 行点击展开,思考折叠=一句话摘要);之下是
+ * 结果文本 + load_video 静态提示 + 结果图片(点击进画廊)+ track_suspects
+ * 取证叠加视频与可复制目录路径。折叠头(工具名/状态)由宿主(链路节点)负责,
+ * 这里只渲染参数与结果部分。 */
 import { computed, reactive, ref, watch } from 'vue'
 import type { AgentToolEntry } from '../../stores/agentchat'
 import UiIcon from '../UiIcon.vue'
+import ThinkLine from './ThinkLine.vue'
 import { copyText, toolLabel, trackSuspectsView } from '../../utils/chatDisplay'
 
 const props = defineProps<{
@@ -63,37 +66,76 @@ function argsSummary(args: string): string {
   }
 }
 
-/** 子代理思考折叠(本地记忆;节点收起随明细卸载,重开复位)。 */
-const subThinkOpen = reactive(new Set<string>())
-function toggleSubThink(key: string) {
-  if (subThinkOpen.has(key)) subThinkOpen.delete(key)
-  else subThinkOpen.add(key)
+/** 子代理内层节点折叠态(思考块/子工具行同构,本地记忆;节点收起随明细卸载,
+ * 重开复位):key = `${entry.id}:${j}`,与子项在 children 里的位置一一对应。 */
+const subOpen = reactive(new Set<string>())
+function toggleSub(key: string) {
+  if (subOpen.has(key)) subOpen.delete(key)
+  else subOpen.add(key)
+}
+
+/** 子代理思考全文复制:成功图标变 ✓ 一秒,失败静默(同取证目录复制口径)。 */
+const copiedKey = ref<string | null>(null)
+let copiedTimer: ReturnType<typeof setTimeout> | null = null
+async function onCopyText(key: string, text: string): Promise<void> {
+  try {
+    await copyText(text)
+  } catch {
+    return
+  }
+  copiedKey.value = key
+  if (copiedTimer !== null) clearTimeout(copiedTimer)
+  copiedTimer = setTimeout(() => {
+    copiedKey.value = null
+    copiedTimer = null
+  }, 1000)
 }
 </script>
 
 <template>
   <div class="tool-detail">
-    <!-- 子代理迷你时间线(spawn_subagent:think/text 聚合块 + 子工具一行小字) -->
+    <!-- 首行:tool_call 引导的参数摘要(mono,随 .tool-detail 等宽底) -->
+    <div class="tool-call-line">tool_call: {{ argsSummary(entry.args) }}</div>
+    <!-- 子代理迷你时间线(spawn_subagent:思考折叠块 / text / 子工具行,与主干
+         节点同构:折叠=label 行,展开=tool_call 参数行 / 思考全文) -->
     <template v-for="(c, j) in entry.children" :key="`${entry.id}:${j}`">
       <div v-if="c.kind === 'think'" class="sub-think">
-        <button class="sub-think-head" @click="toggleSubThink(`${entry.id}:${j}`)">
-          <UiIcon
-            name="up"
-            :size="10"
-            class="think-caret"
-            :class="{ open: subThinkOpen.has(`${entry.id}:${j}`) }"
-          />
-          <span>子代理思考</span>
-        </button>
-        <div v-if="subThinkOpen.has(`${entry.id}:${j}`)" class="sub-think-text">
+        <div class="sub-row">
+          <button
+            class="sub-think-head"
+            :title="subOpen.has(`${entry.id}:${j}`) ? '收起思考全文' : '展开思考全文'"
+            @click="toggleSub(`${entry.id}:${j}`)"
+          >
+            <span class="row-caret" :class="{ open: subOpen.has(`${entry.id}:${j}`) }">▸</span>
+            <span>思考过程:</span>
+            <ThinkLine
+              v-if="!subOpen.has(`${entry.id}:${j}`)"
+              :think="c.text"
+              :live="false"
+            />
+          </button>
+          <button
+            class="row-copy"
+            title="复制思考内容"
+            @click="onCopyText(`${entry.id}:${j}`, c.text)"
+          >
+            <UiIcon :name="copiedKey === `${entry.id}:${j}` ? 'check' : 'copy'" :size="11" />
+          </button>
+        </div>
+        <div v-if="subOpen.has(`${entry.id}:${j}`)" class="sub-think-text">
           {{ c.text }}
         </div>
       </div>
       <div v-else-if="c.kind === 'text'" class="sub-text">{{ c.text }}</div>
       <div v-else class="sub-tool">
-        工具调用:{{ toolLabel(c.name) }}
-        <span class="tool-args">{{ argsSummary(c.args) }}</span>
-        <span v-if="!c.done" class="tool-state">执行中…</span>
+        <button class="sub-tool-head" @click="toggleSub(`${entry.id}:${j}`)">
+          <span class="row-caret" :class="{ open: subOpen.has(`${entry.id}:${j}`) }">▸</span>
+          <span class="sub-tool-lbl">{{ toolLabel(c.name) }}</span>
+          <span v-if="!c.done" class="tool-state">执行中…</span>
+        </button>
+        <div v-if="subOpen.has(`${entry.id}:${j}`)" class="tool-call-line sub-tool-call">
+          tool_call: {{ argsSummary(c.args) }}
+        </div>
       </div>
     </template>
     <div v-if="entry.result" class="tool-result-text">{{ entry.result }}</div>
@@ -151,16 +193,31 @@ function toggleSubThink(key: string) {
   overflow-y: auto;
 }
 
-/* ---- 子代理迷你时间线(spawn_subagent 展开区内) ---- */
+/* ---- 首行 tool_call 参数摘要(mono 继承 .tool-detail,弱化色) ---- */
+.tool-call-line {
+  color: var(--color-text2);
+  word-break: break-all;
+}
+
+/* ---- 子代理迷你时间线(spawn_subagent 展开区内,与主干节点同构折叠) ---- */
 .sub-think {
   margin: 2px 0;
 }
 
-/* 子代理思考折叠头(按钮)→ 像素,与思考过程折叠同款 */
-.sub-think-head {
+.sub-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  min-width: 0;
+}
+
+/* 折叠头(按钮)→ 像素,与思考过程折叠同款 */
+.sub-think-head,
+.sub-tool-head {
   display: inline-flex;
   align-items: center;
   gap: var(--space-xs);
+  min-width: 0;
   padding: 0;
   border: none;
   background: none;
@@ -168,22 +225,61 @@ function toggleSubThink(key: string) {
   font-size: var(--text-sm);
   font-family: var(--font-pixel);
   cursor: pointer;
+  text-align: left;
 }
 
-.sub-think-head:hover {
+.sub-think-head:hover,
+.sub-tool-head:hover {
   color: var(--color-accent);
 }
 
-.think-caret {
-  transform: rotate(180deg); /* 收起:向下 */
+.row-caret {
+  flex: 0 0 auto;
   transition: transform 0.15s ease;
 }
 
-.think-caret.open {
-  transform: rotate(0deg); /* 展开:向上 */
+.row-caret.open {
+  transform: rotate(90deg);
+}
+
+/* 折叠摘要占满剩余宽度截断;内容文本 → sans */
+.sub-think-head :deep(.think-line) {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+  font-family: var(--font-sans);
+  font-size: var(--text-xs);
+}
+
+/* 悬停显现的复制按钮(同主干思考节点) */
+.row-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--color-text2);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease-out);
+}
+
+.sub-row:hover .row-copy,
+.sub-row:focus-within .row-copy {
+  opacity: 1;
+}
+
+.row-copy:hover {
+  color: var(--color-accent);
 }
 
 .sub-think-text {
+  margin: 2px 0 0 var(--space-sm);
   white-space: pre-wrap;
   word-break: break-word;
   color: var(--color-text2);
@@ -197,23 +293,21 @@ function toggleSubThink(key: string) {
   word-break: break-word;
 }
 
-/* 子工具行 = 工具条目头同类 → 像素 */
+/* 子工具行 label = 工具条目头同类 → 像素;展开的参数行缩进对齐 label */
 .sub-tool {
   margin: 2px 0;
-  display: flex;
-  align-items: baseline;
-  gap: var(--space-xs);
   min-width: 0;
-  font-family: var(--font-pixel);
 }
 
-.tool-args {
-  flex: 1;
+.sub-tool-lbl {
   min-width: 0;
-  font-size: var(--text-xs);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.sub-tool-call {
+  margin: 2px 0 0 var(--space-sm);
 }
 
 .tool-state {

@@ -16,6 +16,8 @@ const props = defineProps<{
   open?: boolean
   /** 链路节点展开态(按工具条目 id,ChatView 持有,会话内记忆);透传给流程图。 */
   expandedTools?: Set<string>
+  /** 链路思考节点展开态(按 assistant 条目 id);透传给流程图。 */
+  expandedThinks?: Set<string>
 }>()
 
 const entry = computed(() => props.entry as AgentDetectionEntry)
@@ -24,6 +26,8 @@ const emit = defineEmits<{
   preview: [url: string]
   'toggle-tool': [id: string]
   'toggle-all-tools': [ids: string[], open: boolean]
+  'toggle-think': [id: string]
+  'toggle-all-thinks': [ids: string[], open: boolean]
 }>()
 
 function asPayload(data: unknown): DetectionPayload | null {
@@ -48,14 +52,18 @@ const payload = computed(() => asPayload(entry.value.data))
                   >检出事件</span>
                 </div>
                 <!-- 分析链路流程图(W6 冻结态):默认折叠一行摘要,点击展开阶段树;
-                     节点即工具条目,展开态/明细事件透传给 ChatView 统一记忆 -->
+                     节点即工具条目,思考按时间序插为思考节点;展开态/明细/批量动作
+                     事件透传给 ChatView 统一记忆 -->
                 <ChatAnalysisFlow
                   v-if="flow"
                   :flow="flow"
                   :open="open"
                   :expanded-tools="expandedTools"
+                  :expanded-thinks="expandedThinks"
                   @toggle-tool="emit('toggle-tool', $event)"
                   @toggle-all-tools="(ids, open) => emit('toggle-all-tools', ids, open)"
+                  @toggle-think="emit('toggle-think', $event)"
+                  @toggle-all-thinks="(ids, open) => emit('toggle-all-thinks', ids, open)"
                 />
                 <div
                   v-if="payload!.events?.some((ev) => ev.detected)"

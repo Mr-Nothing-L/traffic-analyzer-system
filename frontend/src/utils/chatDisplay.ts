@@ -38,6 +38,37 @@ export function timelineEntries<T extends { kind: string }>(entries: readonly T[
   return entries.filter((e) => e.kind !== 'tool')
 }
 
+/** 时间线气泡 thinking 应隐藏(改由分析链路面板呈现)的 assistant 条目 id 集合。
+ * 口径:轮内有工具调用 **且** 该轮的思考有链路面板承载——轮次进行中(实时面板)
+ * 或轮内已有 detection 条目(冻结面板)。有工具但既未进行中也无 detection 的轮次
+ * (如中途调过工具的追问),没有面板承接,气泡保持原样,否则思考无处回看。
+ * 轮次 = 相邻 user 条目之间(首条 user 前的条目也算独立一轮),与
+ * buildAnalysisFlow 的区间边界同口径;live=true 时最后一轮视为进行中。 */
+export function toolRoundAssistantIds(
+  entries: ReadonlyArray<{ kind: string; id: string }>,
+  options: { live?: boolean } = {},
+): Set<string> {
+  const ids = new Set<string>()
+  let roundHasTool = false
+  let roundHasDetection = false
+  let roundAssistantIds: string[] = []
+  const flush = (isLast: boolean) => {
+    const panelized = roundHasTool && (roundHasDetection || (isLast && options.live === true))
+    if (panelized) for (const id of roundAssistantIds) ids.add(id)
+    roundHasTool = false
+    roundHasDetection = false
+    roundAssistantIds = []
+  }
+  for (const e of entries) {
+    if (e.kind === 'user') flush(false)
+    else if (e.kind === 'assistant') roundAssistantIds.push(e.id)
+    else if (e.kind === 'tool') roundHasTool = true
+    else if (e.kind === 'detection') roundHasDetection = true
+  }
+  flush(true)
+  return ids
+}
+
 /** 本轮真实起点:最后一条 user 条目的 at(轮次秒表从提问时刻起算,切出再切回
  * 正在分析的会话不重计);无 user 条目或缺 at(旧数据)返回 null,调用方回退。 */
 export function lastUserEntryAt(

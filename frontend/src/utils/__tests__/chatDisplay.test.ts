@@ -4,6 +4,7 @@
 // - workspaceVideoSrc:气泡视频地址由 path 确定性推导(历史重载同源);
 // - copyText:clipboard API 缺失(非安全上下文)时回退 textarea + execCommand;
 // - thinkSummaryLine:思考折叠行摘要(运行中取末行,结束后取首行);
+// - toolRoundAssistantIds:有工具调用的轮次里的 assistant 条目(气泡不再渲染其 thinking);
 // - toolErrorSummary:工具失败折叠摘要取错误首行(截断 80 字);
 // - trackSuspectsView:track_suspects 取证产物行解析(三段路径 + 叠加视频 stream 地址)。
 import { describe, it, expect, vi, afterEach } from 'vitest';
@@ -15,6 +16,7 @@ import {
   timelineEntries,
   toolErrorSummary,
   toolLabel,
+  toolRoundAssistantIds,
   trackSuspectsView,
   workspaceVideoSrc,
 } from '../chatDisplay';
@@ -75,6 +77,80 @@ describe('timelineEntries(时间线条目过滤,链路节点即工具条目)', (
   it('没有 tool 条目时原样返回(纯问答轮次)', () => {
     const entries = [{ id: 'u1', kind: 'user' }, { id: 'a1', kind: 'assistant' }];
     expect(timelineEntries(entries)).toEqual(entries);
+  });
+});
+
+describe('toolRoundAssistantIds(有工具轮次的 assistant 条目)', () => {
+  it('含 tool 条目的轮次:轮内全部 assistant id 命中(气泡隐藏 thinking)', () => {
+    const ids = toolRoundAssistantIds([
+      { id: 'u1', kind: 'user' },
+      { id: 'a1', kind: 'assistant' },
+      { id: 't1', kind: 'tool' },
+      { id: 'a2', kind: 'assistant' },
+      { id: 'd1', kind: 'detection' },
+    ]);
+    expect(ids).toEqual(new Set(['a1', 'a2']));
+  });
+
+  it('纯问答轮次(无 tool)不命中,thinking 保持普通气泡', () => {
+    const ids = toolRoundAssistantIds([
+      { id: 'u1', kind: 'user' },
+      { id: 'a1', kind: 'assistant' },
+    ]);
+    expect(ids.size).toBe(0);
+  });
+
+  it('按 user 条目切轮:有 detection 的工具轮才隐藏;无 detection 的历史工具轮气泡保持', () => {
+    const ids = toolRoundAssistantIds([
+      { id: 'u1', kind: 'user' },
+      { id: 'a1', kind: 'assistant' },
+      { id: 't1', kind: 'tool' },
+      { id: 'd1', kind: 'detection' },
+      { id: 'u2', kind: 'user' },
+      { id: 'a2', kind: 'assistant' },
+      { id: 'u3', kind: 'user' },
+      { id: 'a3', kind: 'assistant' },
+      { id: 't2', kind: 'tool' },
+    ]);
+    expect(ids).toEqual(new Set(['a1']));
+  });
+
+  it('有工具但无 detection 且非进行中:不隐藏(思考没有面板承接,气泡保留)', () => {
+    const ids = toolRoundAssistantIds([
+      { id: 'u1', kind: 'user' },
+      { id: 'a1', kind: 'assistant' },
+      { id: 't1', kind: 'tool' },
+      { id: 'a2', kind: 'assistant' },
+    ]);
+    expect(ids.size).toBe(0);
+  });
+
+  it('同一无 detection 工具轮,live=true(进行中)时隐藏(实时面板承接)', () => {
+    const ids = toolRoundAssistantIds(
+      [
+        { id: 'u1', kind: 'user' },
+        { id: 'a1', kind: 'assistant' },
+        { id: 't1', kind: 'tool' },
+        { id: 'a2', kind: 'assistant' },
+      ],
+      { live: true },
+    );
+    expect(ids).toEqual(new Set(['a1', 'a2']));
+  });
+
+  it('首条 user 之前的条目算独立一轮(有 detection 才隐藏)', () => {
+    const ids = toolRoundAssistantIds([
+      { id: 'a0', kind: 'assistant' },
+      { id: 't0', kind: 'tool' },
+      { id: 'd0', kind: 'detection' },
+      { id: 'u1', kind: 'user' },
+      { id: 'a1', kind: 'assistant' },
+    ]);
+    expect(ids).toEqual(new Set(['a0']));
+  });
+
+  it('空时间线返回空集', () => {
+    expect(toolRoundAssistantIds([]).size).toBe(0);
   });
 });
 

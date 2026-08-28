@@ -102,7 +102,7 @@ describe('ChatAnalysisFlow(冻结态折叠)', () => {
 });
 
 describe('ChatAnalysisFlow(冻结态展开)', () => {
-  it('open=true 展开阶段树:阶段标题 + 步骤中文标签 + mono 耗时', async () => {
+  it('open=true 展开阶段树:阶段标题 + 步骤中文标签 + mono 耗时 + 思考摘要行', async () => {
     const entries = linearEntries();
     const flow = buildAnalysisFlow(entries, DET_ID(entries));
     const html = await renderHtml(flow, { open: true });
@@ -114,7 +114,8 @@ describe('ChatAnalysisFlow(冻结态展开)', () => {
     expect(html).toContain('视频元信息(video_meta)');
     expect(html).toContain('定向跟踪(track_suspects)');
     expect(html).toContain('36s'); // 138000-102000
-    expect(html).toContain('先看元信息再抽帧'); // thinking 一句话摘要(sans 说明行)
+    expect(html).toContain('先看元信息再抽帧'); // 思考节点折叠摘要(think-line 单行)
+    expect(html).toContain('思考过程:');
   });
 
   it('失败步红色(is-fail)+ 同名后续成功显示「已重试」标记', async () => {
@@ -173,6 +174,65 @@ describe('ChatAnalysisFlow(冻结态展开)', () => {
     expect(html).toContain('核对画面细节');
     expect(html).toContain('结论:检出违停。');
     expect(html).not.toContain('读文件(read_file)'); // inner 默认折叠
+  });
+});
+
+describe('ChatAnalysisFlow(思考节点)', () => {
+  const thinkEntries = (): AgentEntry[] => [
+    user('检测这段视频', 100_000),
+    assistant('先看视频元信息\n再决定抽帧密度', 101_000),
+    tool('video_meta', 102_000),
+    detection(120_000),
+  ];
+  const thinkId = (entries: AgentEntry[]) => entries.find((e) => e.kind === 'assistant')!.id;
+
+  it('折叠态渲染一句话摘要(思考过程: + 首行),全文不出现', async () => {
+    const entries = thinkEntries();
+    const flow = buildAnalysisFlow(entries, DET_ID(entries));
+    const html = await renderHtml(flow, { open: true });
+    expect(html).toContain('思考过程:');
+    expect(html).toContain('先看视频元信息');
+    expect(html).not.toContain('再决定抽帧密度');
+    expect(html).not.toContain('aflow-think-text');
+  });
+
+  it('expandedThinks 命中:展开全文 + 复制按钮,折叠摘要行隐藏', async () => {
+    const entries = thinkEntries();
+    const flow = buildAnalysisFlow(entries, DET_ID(entries));
+    const html = await renderHtml(flow, {
+      open: true,
+      expandedThinks: new Set([thinkId(entries)]),
+    });
+    expect(html).toContain('先看视频元信息');
+    expect(html).toContain('再决定抽帧密度');
+    expect(html).toContain('aflow-think-text');
+    expect(html).toContain('aflow-think-copy');
+    expect(html).not.toContain('think-line'); // 摘要行随展开隐藏
+  });
+
+  it('expandedThinks 未命中时其他节点不受影响(按条目 id 记忆)', async () => {
+    const entries = [
+      user('检测这段视频', 100_000),
+      assistant('先看视频元信息\n再决定抽帧密度', 101_000),
+      tool('video_meta', 102_000),
+      assistant('第二段思考\n后续计划是重抽', 103_000),
+      tool('extract_frames', 104_000),
+      detection(130_000),
+    ];
+    const flow = buildAnalysisFlow(entries, DET_ID(entries));
+    const firstId = entries.find((e) => e.kind === 'assistant')!.id;
+    const html = await renderHtml(flow, { open: true, expandedThinks: new Set([firstId]) });
+    expect(html).toContain('再决定抽帧密度'); // 第一段展开
+    expect(html).toContain('第二段思考'); // 第二段折叠摘要(首行)仍在
+    expect(html).not.toContain('后续计划是重抽'); // 第二段全文未展开
+  });
+
+  it('面板「全部展开/全部折叠」工具行存在(批量动作同时覆盖思考节点)', async () => {
+    const entries = thinkEntries();
+    const flow = buildAnalysisFlow(entries, DET_ID(entries));
+    const html = await renderHtml(flow, { open: true });
+    expect(html).toContain('全部展开');
+    expect(html).toContain('全部折叠');
   });
 });
 
@@ -235,18 +295,49 @@ describe('ChatAnalysisFlow(链路节点即工具条目,折叠/展开)', () => {
     expect(html).not.toContain('tool-track-video'); // 取证视频
   });
 
-  it('expandedTools 命中节点:渲染结果文本 + 图片(preview 走画廊)', async () => {
+  it('expandedTools 命中节点:渲染 tool_call 参数行 + 结果文本 + 图片', async () => {
     const entries = forensicEntries();
     const flow = buildAnalysisFlow(entries, DET_ID(entries));
     const html = await renderHtml(flow, {
       open: true,
       expandedTools: new Set([toolId(entries, 'extract_frames')]),
     });
+    expect(html).toContain('tool_call:'); // 展开区首行参数行
     expect(html).toContain('抽帧完成:共 2 帧');
     expect(html).toContain('tool-imgs');
     expect(html).toContain('data:image/jpeg;base64,WFg=');
     // 未命中的节点仍折叠
     expect(html).not.toContain('tool-track-video');
+  });
+
+  it('展开区第一行为 tool_call: 引导的参数行,不再有「工具调用:」前缀', async () => {
+    seq += 1;
+    const entries: AgentEntry[] = [
+      user('q', 1000),
+      {
+        id: `t${seq}`,
+        kind: 'tool',
+        callId: `call-${seq}`,
+        name: 'extract_frames',
+        args: JSON.stringify({ video_path: 'a.mp4', fps: 2 }),
+        result: '抽帧完成:共 3 帧',
+        images: [],
+        hasVideo: false,
+        children: [],
+        isError: false,
+        done: true,
+        at: 2000,
+      },
+      detection(4000),
+    ];
+    const flow = buildAnalysisFlow(entries, DET_ID(entries));
+    const html = await renderHtml(flow, {
+      open: true,
+      expandedTools: new Set([entries[1]!.id]),
+    });
+    expect(html).toContain('tool_call: video_path=a.mp4, fps=2');
+    expect(html).toContain('抽帧完成:共 3 帧');
+    expect(html).not.toContain('工具调用:');
   });
 
   it('track_suspects 节点展开:取证叠加视频与可复制目录路径可用', async () => {
@@ -263,7 +354,7 @@ describe('ChatAnalysisFlow(链路节点即工具条目,折叠/展开)', () => {
     expect(html).toContain('tool-artifacts-dir');
   });
 
-  it('子代理节点展开:迷你时间线(think 块/子工具行)随明细渲染', async () => {
+  it('子代理节点展开:内层与主干同构(思考折叠摘要 + 子工具 label 行,无前缀)', async () => {
     seq += 1;
     const entries: AgentEntry[] = [
       user('q', 1000),
@@ -278,7 +369,7 @@ describe('ChatAnalysisFlow(链路节点即工具条目,折叠/展开)', () => {
         hasVideo: false,
         children: [
           { kind: 'think', text: '子代理思考中' },
-          { kind: 'tool', id: 'c1', name: 'read_file', args: '{}', done: true },
+          { kind: 'tool', id: 'c1', name: 'read_file', args: '{"path":"a.ts"}', done: true },
         ],
         isError: false,
         done: true,
@@ -288,14 +379,17 @@ describe('ChatAnalysisFlow(链路节点即工具条目,折叠/展开)', () => {
     ];
     const flow = buildAnalysisFlow(entries, DET_ID(entries));
     const collapsed = await renderHtml(flow, { open: true });
-    expect(collapsed).not.toContain('子代理思考');
+    expect(collapsed).not.toContain('tool_call:'); // 明细默认折叠
     const expandedHtml = await renderHtml(flow, {
       open: true,
       expandedTools: new Set([toolId(entries, 'spawn_subagent')]),
     });
-    // 明细里:子代理迷你时间线折叠头 + 子工具行;think 文本仍在其二级折叠内
-    expect(expandedHtml).toContain('子代理思考');
+    // 节点自身参数行 + 子思考折叠头(摘要首行)+ 子工具 label(去「工具调用:」前缀)
+    expect(expandedHtml).toContain('tool_call: task=核对画面细节');
+    expect(expandedHtml).toContain('思考过程:');
+    expect(expandedHtml).toContain('子代理思考中');
     expect(expandedHtml).toContain('读文件(read_file)');
+    expect(expandedHtml).not.toContain('工具调用:');
   });
 
   it('面板提供「全部展开/全部折叠」工具行', async () => {

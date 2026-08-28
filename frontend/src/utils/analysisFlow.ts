@@ -18,9 +18,18 @@
  * - 步骤状态三元组约定:{ok:true}=成功;{ok:false, active:true}=进行中;
  *   {ok:false, active:false}=失败。渲染层据此着色,不再自行推断。
  * - 「已重试」标记:失败步之后同区间内出现同名工具且最终成功的调用,retried=true。
+ * - thinking 节点:assistant 条目的思考按位置插入链路——位于哪些工具调用之间就进
+ *   哪个阶段(取其后最近一条工具的相位,首段思考随之进首个阶段,末段思考归前一
+ *   工具相位殿后);折叠为一句话摘要(ThinkLine/thinkSummaryLine),展开与记忆由
+ *   渲染层按 assistant 条目 id 持有。
  */
-import type { AgentEntry, AgentSubItem, AgentToolEntry } from '../stores/agentchat'
-import { thinkSummaryLine, toolLabel } from './chatDisplay'
+import type {
+  AgentAssistantEntry,
+  AgentEntry,
+  AgentSubItem,
+  AgentToolEntry,
+} from '../stores/agentchat'
+import { toolLabel } from './chatDisplay'
 
 /** 主干步骤/并行批内步骤/子代理内嵌子步骤共用同一形状。 */
 export interface FlowStep {
@@ -45,6 +54,17 @@ export interface FlowParallel {
   steps: FlowStep[]
 }
 
+/** assistant 思考节点(按时间序插进链路的折叠块,默认一句话摘要)。 */
+export interface FlowThink {
+  kind: 'think'
+  /** 来源 assistant 条目 id(展开态记忆按它定位,与工具节点同一套机制)。 */
+  id: string
+  /** 思考全文(展开渲染;折叠摘要由渲染层 ThinkLine 从全文推导)。 */
+  text: string
+  /** 实时态思考仍在流入(该条目是区间末尾):摘要取末行并横向跟随。 */
+  live?: boolean
+}
+
 /** spawn_subagent 内嵌子步骤树(一层,分支节点,默认折叠)。 */
 export interface FlowSubagent {
   /** 来源 spawn_subagent 工具条目(节点展开明细渲染用)。 */
@@ -62,7 +82,7 @@ export interface FlowSubagent {
   active?: boolean
 }
 
-export type FlowNode = FlowStep | FlowParallel | FlowSubagent
+export type FlowNode = FlowStep | FlowParallel | FlowSubagent | FlowThink
 
 export type FlowPhaseKey = 'probe' | 'locate' | 'forensics' | 'verdict' | 'other'
 
@@ -72,8 +92,6 @@ export interface FlowPhase {
   /** UiIcon 图标名。 */
   icon: string
   nodes: FlowNode[]
-  /** 该阶段首个非空 thinking 一句话摘要(thinkSummaryLine 结束态取首行)。 */
-  thinkNote?: string
 }
 
 export interface AnalysisFlow {
@@ -332,31 +350,60 @@ export function buildAnalysisFlow(
     } else last.active = true
   }
 
-  /* ---- 阶段分组 ---- */
-  const nodesByKey = new Map<FlowPhaseKey, FlowNode[]>()
-  for (const w of wraps) {
-    const e = entries[w.srcIdx]!
-    const meta = phaseOf(e.kind === 'tool' ? (e as AgentToolEntry).name : '')
-    const bucket = nodesByKey.get(meta.key) ?? []
-    bucket.push(w.node)
-    nodesByKey.set(meta.key, bucket)
-  }
-
-  /* ---- thinking 摘要:assistant 归属其后第一条工具的相位,每相位取首个非空摘要 ---- */
-  const notesByKey = new Map<FlowPhaseKey, string>()
+  /* ---- thinking 节点槽:assistant 条目的思考按位置插入链路。归属口径:
+   * 位于哪些工具调用之间就进哪个阶段——取其后最近一条工具的相位(首段思考
+   * 随之进首个阶段;阶段边界上的思考是下一阶段的开场白);末段思考(其后无
+   * 工具)归前一工具相位殿后;区间内无工具则不产 thinking 节点(纯问答轮次
+   * 不出面板)。 ---- */
+  const thinkSlots: Array<{ entry: AgentAssistantEntry; idx: number }> = []
   for (let i = start; i < end; i++) {
     const e = entries[i]!
-    if (e.kind !== 'assistant' || !e.think.trim()) continue
-    let target: PhaseMeta | null = null
-    for (let j = i + 1; j < end; j++) {
-      if (entries[j]!.kind === 'tool') {
-        target = phaseOf((entries[j] as AgentToolEntry).name)
-        break
-      }
+    if (e.kind === 'assistant' && (e as AgentAssistantEntry).think.trim()) {
+      thinkSlots.push({ entry: e as AgentAssistantEntry, idx: i })
     }
-    if (!target || notesByKey.has(target.key)) continue
-    const note = thinkSummaryLine(e.think, false)
-    if (note) notesByKey.set(target.key, note)
+  }
+  const thinkPhaseKey = (idx: number): FlowPhaseKey | null => {
+    for (let j = idx + 1; j < end; j++) {
+      const e = entries[j]!
+      if (e.kind === 'tool') return phaseOf((e as AgentToolEntry).name).key
+    }
+    for (let j = idx - 1; j >= start; j--) {
+      const e = entries[j]!
+      if (e.kind === 'tool') return phaseOf((e as AgentToolEntry).name).key
+    }
+    return null
+  }
+
+  /* ---- 阶段分组:工具节点与 thinking 节点按原始下标归并入各相位桶 ---- */
+  const nodesByKey = new Map<FlowPhaseKey, FlowNode[]>()
+  const pushNode = (key: FlowPhaseKey, node: FlowNode) => {
+    const bucket = nodesByKey.get(key)
+    if (bucket) bucket.push(node)
+    else nodesByKey.set(key, [node])
+  }
+  let wi = 0
+  let ti = 0
+  while (wi < wraps.length || ti < thinkSlots.length) {
+    const w = wraps[wi]
+    const t = thinkSlots[ti]
+    if (w !== undefined && (t === undefined || w.srcIdx < t.idx)) {
+      const e = entries[w.srcIdx]!
+      const meta = phaseOf(e.kind === 'tool' ? (e as AgentToolEntry).name : '')
+      pushNode(meta.key, w.node)
+      wi += 1
+    } else {
+      const key = thinkPhaseKey(t!.idx)
+      if (key !== null) {
+        pushNode(key, {
+          kind: 'think',
+          id: t!.entry.id,
+          text: t!.entry.think,
+          // 实时态思考仍在流入(该条目为区间末尾):摘要取末行并横向跟随
+          ...(detectionId === null && t!.idx === end - 1 ? { live: true } : {}),
+        })
+      }
+      ti += 1
+    }
   }
 
   const phases: FlowPhase[] = []
@@ -364,14 +411,7 @@ export function buildAnalysisFlow(
     const pnodes = nodesByKey.get(key)
     if (!pnodes?.length) continue
     const meta = PHASE_DEFS.find((p) => p.key === key) ?? OTHER_META
-    const note = notesByKey.get(key)
-    phases.push({
-      key,
-      title: meta.title,
-      icon: meta.icon,
-      nodes: pnodes,
-      ...(note ? { thinkNote: note } : {}),
-    })
+    phases.push({ key, title: meta.title, icon: meta.icon, nodes: pnodes })
   }
 
   return {

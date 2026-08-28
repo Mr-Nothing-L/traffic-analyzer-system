@@ -4,7 +4,13 @@
 // - 失败步 ok=false + 同名后续成功 → retried;耗时 = 下一条目 at − 本条目 at;
 // - 计数(loops/toolCalls/subagents/approvals)与 totalMs 全链有 at 才给出。
 import { describe, it, expect } from 'vitest';
-import { buildAnalysisFlow, type FlowParallel, type FlowSubagent } from '../analysisFlow';
+import {
+  buildAnalysisFlow,
+  type FlowParallel,
+  type FlowStep,
+  type FlowSubagent,
+  type FlowThink,
+} from '../analysisFlow';
 import type { AgentEntry, AgentSubItem } from '../../stores/agentchat';
 
 let seq = 0;
@@ -61,6 +67,12 @@ function detection(at: number): AgentEntry {
   return { id: `d${seq}`, kind: 'detection', data: { normal: true }, at };
 }
 
+/** 节点种类名:thinking 节点给 'think',其余(步骤/并发批/子代理)归 'step'。 */
+function kindOf(n: unknown): string {
+  const node = n as { kind?: string };
+  return node.kind === 'think' || node.kind === 'parallel' ? node.kind : 'step';
+}
+
 /** 线性全链冻结态:勘察→锁定→取证→提交。 */
 function linearEntries(): AgentEntry[] {
   return [
@@ -83,8 +95,9 @@ describe('buildAnalysisFlow(冻结态线性链)', () => {
   it('阶段按 勘察→锁定→取证→提交 输出,节点归位正确', () => {
     expect(flow.phases.map((p) => p.key)).toEqual(['probe', 'locate', 'forensics', 'verdict']);
     const probe = flow.phases[0]!;
-    // video_meta/extract_frames 归初步勘察
-    expect(probe.nodes.map((n) => (n as { label: string }).label)).toEqual([
+    // video_meta/extract_frames 归初步勘察(前面的 thinking 节点除外,另测)
+    const probeSteps = probe.nodes.filter((n) => !('kind' in n)) as FlowStep[];
+    expect(probeSteps.map((n) => n.label)).toEqual([
       '视频元信息(video_meta)',
       '抽帧(extract_frames)',
     ]);
@@ -94,9 +107,11 @@ describe('buildAnalysisFlow(冻结态线性链)', () => {
   });
 
   it('每步耗时=下一条目 at − 本条目 at;末步到检测卡收口', () => {
-    const probeNodes = flow.phases[0]!.nodes as Array<{ durationMs: number | null }>;
-    expect(probeNodes[0]!.durationMs).toBe(3000); // 6000-3000
-    expect(probeNodes[1]!.durationMs).toBe(3000);
+    const probeSteps = flow.phases[0]!.nodes.filter((n) => !('kind' in n)) as Array<{
+      durationMs: number | null;
+    }>;
+    expect(probeSteps[0]!.durationMs).toBe(3000); // 6000-3000
+    expect(probeSteps[1]!.durationMs).toBe(3000);
     // submit_detection(15000)→ detection(16000)
     const verdictNode = flow.phases[3]!.nodes[0] as { durationMs: number | null };
     expect(verdictNode.durationMs).toBe(1000);
@@ -112,7 +127,19 @@ describe('buildAnalysisFlow(冻结态线性链)', () => {
     expect(flow.done).toBe(true);
   });
 
-  it('thinking 摘要挂相位:取该阶段首个非空行(thinkSummaryLine 结束态首行)', () => {
+  it('thinking 按位置插为节点:首段思考进首个相位、排在首个工具之前', () => {
+    // linearEntries 的 assistant 在 video_meta 之前 → probe 相位首个节点
+    expect(kindOf(flow.phases[0]!.nodes[0])).toBe('think');
+    const think = flow.phases[0]!.nodes[0] as FlowThink;
+    expect(think.id).toBe(
+      entries.find((e) => e.kind === 'assistant')!.id,
+    );
+    expect(think.text).toBe('先看视频元信息');
+  });
+});
+
+describe('buildAnalysisFlow(thinking 节点归属)', () => {
+  it('首段多段思考按时间序排列,都进首个相位', () => {
     const e2 = [
       user('q', 1000),
       assistant('第一步先确认编码\n\n再决定抽帧密度', 2000),
@@ -121,7 +148,70 @@ describe('buildAnalysisFlow(冻结态线性链)', () => {
       detection(4000),
     ];
     const f = buildAnalysisFlow(e2, e2.find((e) => e.kind === 'detection')!.id);
-    expect(f.phases[0]!.thinkNote).toBe('第一步先确认编码');
+    expect(f.phases[0]!.nodes.map(kindOf)).toEqual(['think', 'think', 'step']);
+    const [t1, t2] = f.phases[0]!.nodes as Array<FlowThink | FlowStep>;
+    expect((t1 as FlowThink).text).toBe('第一步先确认编码\n\n再决定抽帧密度');
+    expect((t2 as FlowThink).text).toBe('补充:帧率不足\n需要重抽');
+  });
+
+  it('工具间的思考归其后最近工具的相位(阶段边界思考是下一阶段的开场白)', () => {
+    const e3 = [
+      user('q', 1000),
+      tool('video_meta', 2000), // probe
+      tool('extract_frames', 3000), // probe
+      assistant('框已定,开始深挖', 3500), // 位于 extract_frames 与 track_suspects 之间
+      tool('track_suspects', 4000), // forensics
+      detection(5000),
+    ];
+    const f = buildAnalysisFlow(e3, e3.find((e) => e.kind === 'detection')!.id);
+    expect(f.phases.map((p) => p.key)).toEqual(['probe', 'forensics']);
+    // 思考进 forensics(其后工具的相位),排在该相位节点序列最前
+    expect(f.phases[1]!.nodes.map(kindOf)).toEqual(['think', 'step']);
+    expect((f.phases[1]!.nodes[0] as FlowThink).text).toBe('框已定,开始深挖');
+  });
+
+  it('末段思考(其后无工具)归前一工具相位殿后', () => {
+    const e4 = [
+      user('q', 1000),
+      tool('draw_boxes', 2000),
+      assistant('提交前最后核对一遍编码', 2500),
+      detection(3000),
+    ];
+    const f = buildAnalysisFlow(e4, e4.find((e) => e.kind === 'detection')!.id);
+    expect(f.phases.map((p) => p.key)).toEqual(['locate']);
+    expect(f.phases[0]!.nodes.map(kindOf)).toEqual(['step', 'think']);
+    expect((f.phases[0]!.nodes[1] as FlowThink).text).toBe('提交前最后核对一遍编码');
+  });
+
+  it('实时态末尾 assistant 的思考标 live(仍在流入);随工具推进复位', () => {
+    // 末段思考在其后无工具 → 归前一工具相位殿后,是该相位最后一个节点
+    const live = buildAnalysisFlow(
+      [
+        user('q', 1000),
+        tool('video_meta', 2000),
+        assistant('思考流入中…', 2500),
+      ],
+      null,
+    );
+    const liveNodes = live.phases[0]!.nodes;
+    expect(liveNodes.map(kindOf)).toEqual(['step', 'think']);
+    expect((liveNodes[1] as FlowThink).live).toBe(true);
+    const settled = buildAnalysisFlow(
+      [
+        user('q', 1000),
+        tool('video_meta', 2000),
+        assistant('已定格', 2500),
+        tool('extract_frames', 3000),
+      ],
+      null,
+    );
+    expect((settled.phases[0]!.nodes[0] as FlowThink).live).toBeUndefined();
+  });
+
+  it('纯问答轮次(区间无工具)不产任何节点,thinking 不出面板', () => {
+    const f = buildAnalysisFlow([user('q', 1000), assistant('直接回答', 1500)], null);
+    expect(f.phases).toHaveLength(0);
+    expect(f.loops).toBe(1);
   });
 });
 
@@ -193,7 +283,9 @@ describe('buildAnalysisFlow(子代理)', () => {
     const entries = subagentEntries(true);
     const flow = buildAnalysisFlow(entries, entries.find((e) => e.kind === 'detection')!.id);
     expect(flow.subagents).toBe(1);
-    const node = flow.phases.find((p) => p.key === 'forensics')!.nodes[0] as FlowSubagent;
+    const node = flow.phases
+      .find((p) => p.key === 'forensics')!
+      .nodes.find((n) => 'inner' in n) as FlowSubagent;
     expect(node.task).toBe('核对画面细节');
     expect(node.conclusion).toBe('结论:检出违停。');
     expect(node.ok).toBe(true);
@@ -291,7 +383,11 @@ describe('buildAnalysisFlow(实时态,detectionId=null)', () => {
     expect(flow.done).toBe(false);
     expect(flow.fromUserText).toBe('接着分析');
     expect(flow.toolCalls).toBe(1);
-    const step = flow.phases[0]!.nodes[0] as { ok: boolean; active?: boolean; durationMs: null };
+    const step = flow.phases[0]!.nodes.find((n) => !('kind' in n)) as {
+      ok: boolean;
+      active?: boolean;
+      durationMs: null;
+    };
     expect(step.ok).toBe(false);
     expect(step.active).toBe(true);
     expect(step.durationMs).toBeNull(); // 末条目无「下一条目」
