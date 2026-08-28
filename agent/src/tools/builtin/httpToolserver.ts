@@ -8,10 +8,12 @@
  *
  * 超时:undici 全局 fetch 的默认 headersTimeout 是 300s,而长任务端点
  * (track_suspects 可达 8-15 分钟)会触发 `fetch failed`(HeadersTimeoutError)。
- * 默认请求统一走长超时 dispatcher(15 分钟);post 另支持 per-call timeoutMs
+ * 注意 Node 24 的 globalThis.fetch 不接受外部 dispatcher(报
+ * "invalid onRequestStart method"),故默认实现改用 undici 包自带 fetch,
+ * 统一走长超时 dispatcher(15 分钟);post 另支持 per-call timeoutMs
  * (AbortSignal)作兜底。
  */
-import { Agent } from 'undici';
+import { Agent, fetch as undiciFetch } from 'undici';
 
 export const DEFAULT_TOOLSERVER_URL = 'http://127.0.0.1:8601';
 
@@ -33,7 +35,7 @@ export type ToolserverResult<T> =
 
 export interface ToolserverClientOptions {
   readonly baseUrl?: string | undefined;
-  /** Injectable for tests; defaults to globalThis.fetch (looked up per call). */
+  /** Injectable for tests; defaults to undici fetch(长超时 dispatcher)。 */
   readonly fetchImpl?: typeof fetch | undefined;
 }
 
@@ -47,13 +49,12 @@ export class ToolserverClient {
     this.fetchImpl =
       options.fetchImpl ??
       ((input, init) =>
-        globalThis.fetch(input, {
-          ...init,
+        undiciFetch(input as Parameters<typeof undiciFetch>[0], {
+          ...(init as object),
           // 全局 fetch 默认 headersTimeout=300s,长任务端点必然踩雷;
-          // 统一换长超时 dispatcher。dispatcher 不在 fetch 类型签名里,
-          // 且 undici 包与 @types/node 的 dispatcher 类型不同源,收敛断言。
-          dispatcher: LONG_TIMEOUT_DISPATCHER as never,
-        } as Parameters<typeof fetch>[1]));
+          // 统一换长超时 dispatcher(undici 包自带 fetch 才接受外部 dispatcher)。
+          dispatcher: LONG_TIMEOUT_DISPATCHER,
+        }) as unknown as Promise<Response>);
   }
 
   /** POST JSON to a toolserver endpoint, e.g. post('/tools/video_meta', {...}).

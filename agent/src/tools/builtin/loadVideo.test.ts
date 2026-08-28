@@ -33,12 +33,10 @@ beforeEach(() => {
   workspaceDir = mkdtempSync(path.join(os.tmpdir(), 'load-video-test-'));
   workspace = { workspaceDir, additionalDirs: [] };
   fetchMock = vi.fn();
-  vi.stubGlobal('fetch', fetchMock);
-  client = new ToolserverClient({ baseUrl: 'http://127.0.0.1:8601' });
+  client = new ToolserverClient({ baseUrl: 'http://127.0.0.1:8601', fetchImpl: fetchMock });
 });
 
 afterEach(() => {
-  vi.unstubAllGlobals();
   rmSync(workspaceDir, { recursive: true, force: true });
 });
 
