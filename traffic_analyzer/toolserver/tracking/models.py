@@ -3,8 +3,9 @@
 [文件说明]
 作用:定向跟踪的数据结构(SuspectAnchor 锚点 / TrackPoint 轨迹点 / Track
     轨迹)与数值档案计算:方向角、平均速度、静止时长、bbox 面积趋势、
-    环境流速比;附互证跑飞规则(档案称静止但轨迹总长超阈值→标跑飞)与
-    side_hint/方向一致性初判。所有位移阈值按 bbox 对角线比例归一,
+    环境流速比、轨迹覆盖时长/覆盖率;附互证跑飞规则(档案称静止但轨迹
+    总长超阈值→标跑飞)与 side_hint/方向一致性初判(低覆盖时静止结论
+    追加证据不足限定)。所有位移阈值按 bbox 对角线比例归一,
     不使用绝对像素。
 上游:tracking/__init__.py 再导出;windows.py(编排)、render.py(渲染)、
     tests/test_tracking_models.py。
@@ -153,6 +154,7 @@ def compute_profile(
     track: Track,
     fps: Optional[float] = None,
     env_flow: Optional[float] = None,
+    span_s: Optional[float] = None,
 ) -> Dict[str, Any]:
     """计算一条轨迹的数值档案(全部以归一化坐标/bbox 对角线为单位)。
 
@@ -160,10 +162,12 @@ def compute_profile(
         track: 目标轨迹(至少一个点)。
         fps: 抽帧帧率,未给出时按时间戳差直接算速度(时间戳恒可推导速度)。
         env_flow: 环境流速(参照车中位速度,归一化单位/秒);None 表示无参照。
+        span_s: 目标时段总长(秒);给出时输出 coverage = 轨迹覆盖时长/总长。
 
     Returns:
         dict: direction_deg / avg_speed_norm / stationary_duration_s /
-        path_length_norm / bbox_trend / env_flow_ratio / mean_diagonal。
+        path_length_norm / bbox_trend / env_flow_ratio / mean_diagonal /
+        covered_s / coverage。
     """
     points = track.points
     if not points:
@@ -175,6 +179,8 @@ def compute_profile(
             "bbox_trend": "stable",
             "env_flow_ratio": None,
             "mean_diagonal": 0.0,
+            "covered_s": 0.0,
+            "coverage": 0.0,
         }
 
     start_c = point_center(points[0])
@@ -194,6 +200,13 @@ def compute_profile(
     else:
         env_ratio = None
 
+    # 轨迹覆盖:covered_s = 首尾点时间跨度;coverage = 覆盖时长/目标时段总长。
+    covered_s = round(duration_s, 3)
+    if span_s is not None and span_s > 0:
+        coverage: Optional[float] = round(min(duration_s / span_s, 1.0), 3)
+    else:
+        coverage = None
+
     return {
         "direction_deg": round(_direction_deg(start_c, end_c), 1),
         "avg_speed_norm": round(avg_speed, 4),
@@ -203,6 +216,8 @@ def compute_profile(
         "env_flow_ratio": env_ratio,
         "env_flow_norm": round(env_flow, 4) if env_flow is not None else None,
         "mean_diagonal": round(mean_diag, 4),
+        "covered_s": covered_s,
+        "coverage": coverage,
     }
 
 
@@ -279,6 +294,7 @@ def direction_verdict(
 
     来向目标应 bbox 随时间增大(靠近镜头),去向应缩小;静止目标按
     环境流速分流违停/拥堵(先验:环境流动→违停,环境静止→拥堵)。
+    轨迹覆盖率(coverage)< 0.5 时,静止类结论追加「证据不足」限定。
     """
     profile = track.profile
     if not track.points or not profile:
@@ -288,15 +304,21 @@ def direction_verdict(
     diag = float(profile.get("mean_diagonal") or 0.0)
     duration_s = max(track.points[-1].timestamp - track.points[0].timestamp, 0.0)
     speed = float(profile.get("avg_speed_norm") or 0.0)
+    cov = profile.get("coverage")
+    low_cov = (
+        "；证据不足(轨迹仅覆盖 %d%%)" % int(round(float(cov) * 100))
+        if isinstance(cov, (int, float)) and cov < 0.5
+        else ""
+    )
 
     moving = duration_s > 0 and speed > STATIC_DISPLACEMENT_RATIO * max(diag, 1e-6)
     if not moving:
         env_flow = profile.get("env_flow_norm")
         if env_flow is not None and env_flow >= FLOW_EPSILON:
-            return "目标静止且环境正常流动(疑似违停)"
+            return "目标静止且环境正常流动(疑似违停)" + low_cov
         if env_flow is not None and env_flow < FLOW_EPSILON:
-            return "目标与环境均近乎静止(疑似拥堵)"
-        return "基本静止(无环境流速参照)"
+            return "目标与环境均近乎静止(疑似拥堵)" + low_cov
+        return "基本静止(无环境流速参照)" + low_cov
 
     expectation_ok = {
         ("coming", "increasing"): True,

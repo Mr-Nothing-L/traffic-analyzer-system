@@ -184,7 +184,7 @@ describe('track_suspects', () => {
     const imageParts = parts.filter((part) => part.type === 'image_url');
     expect(imageParts).toHaveLength(3); // 叠加图 + 轨迹 1 的 2 张关键帧
 
-    // 数值档案摘要文本:含各轨迹的数值字段,best_frames 只留时间戳。
+    // 逐轨迹摘要文本:verdict 置顶、数值档案随后;关键帧只留时间戳。
     expect(joinedText).toContain('2 条目标轨迹');
     expect(joinedText).toContain('静止 12.4s');
     expect(joinedText).toContain('逆行(航向角约 175°)');
@@ -204,6 +204,110 @@ describe('track_suspects', () => {
     // artifacts 路径以文本返回。
     expect(joinedText).toContain(path.join(workspaceDir, '.agent', 'tracking', 'run-1'));
     expect(joinedText).toContain('tracks.csv');
+  });
+
+  it('leads each track summary with direction_verdict, shows profile coverage, and appends the contradiction guidance', async () => {
+    mockTrack({
+      tracks: [
+        {
+          id: 1,
+          description: '白色小客车',
+          profile: {
+            direction_deg: 175,
+            avg_speed_norm: 0.0,
+            stationary_duration_s: 12.4,
+            covered_s: 3.2,
+            coverage: 0.3,
+          },
+          side_hint: '右侧第 3 车道附近',
+          direction_verdict: '疑似逆行(画面证据:车头朝向与车流相反)',
+          best_frames: [],
+        },
+      ],
+      annotated_image: JPEG_OVERLAY,
+      failed: false,
+    });
+    const result = await execute({
+      video_path: path.join(workspaceDir, 'demo.mp4'),
+      suspects: ANCHORS,
+    });
+    expect(result.isError).toBeFalsy();
+    const summary = (result.output as ContentPart[]).find(
+      (part) => part.type === 'text' && part.text.includes('已跟踪'),
+    );
+    expect(summary).toBeDefined();
+    const text = (summary as { type: 'text'; text: string }).text;
+
+    // verdict 显著行置顶:先 direction_verdict,后数值档案。
+    expect(text).toContain('【轨迹 1】direction_verdict:疑似逆行(画面证据:车头朝向与车流相反)');
+    expect(text.indexOf('direction_verdict:疑似逆行')).toBeLessThan(text.indexOf('数值档案:'));
+    expect(text.indexOf('direction_verdict:疑似逆行')).toBeLessThan(text.indexOf('avg_speed_norm'));
+
+    // 展示 profile.covered_s / profile.coverage;coverage<0.5 显著标注证据不足。
+    expect(text).toContain('轨迹覆盖:covered_s=3.2s,coverage=30%');
+    expect(text).toContain('注意:轨迹仅覆盖时段的 30%,结论证据不足');
+
+    // 摘要末尾追加矛盾裁决指引。
+    expect(text).toContain(
+      '若 direction_verdict 与速度/位移数值看似矛盾,以 direction_verdict 与画面证据为准;禁止仅凭 speed≈0 推翻 verdict',
+    );
+  });
+
+  it('shows the coverage line without the low-coverage warning when coverage >= 0.5', async () => {
+    mockTrack({
+      tracks: [
+        {
+          id: 1,
+          description: '白色小客车',
+          profile: { avg_speed_norm: 0.0, covered_s: 12.4, coverage: 0.8 },
+          side_hint: '右侧第 3 车道附近',
+          direction_verdict: '全程停驻,未发生位移',
+          best_frames: [],
+        },
+      ],
+      failed: false,
+    });
+    const result = await execute({
+      video_path: path.join(workspaceDir, 'demo.mp4'),
+      suspects: ANCHORS,
+    });
+    expect(result.isError).toBeFalsy();
+    const summary = (result.output as ContentPart[]).find(
+      (part) => part.type === 'text' && part.text.includes('已跟踪'),
+    );
+    const text = (summary as { type: 'text'; text: string }).text;
+    expect(text).toContain('轨迹覆盖:covered_s=12.4s,coverage=80%');
+    expect(text).not.toContain('结论证据不足');
+  });
+
+  it('degrades gracefully when coverage fields are absent and no verdict exists', async () => {
+    mockTrack({
+      tracks: [
+        {
+          id: 1,
+          description: '白色小客车',
+          profile: '位移 145m;平均速度 61km/h',
+          side_hint: '右侧第 3 车道附近',
+          direction_verdict: '',
+          best_frames: [],
+        },
+      ],
+      failed: false,
+    });
+    const result = await execute({
+      video_path: path.join(workspaceDir, 'demo.mp4'),
+      suspects: ANCHORS,
+    });
+    expect(result.isError).toBeFalsy();
+    const summary = (result.output as ContentPart[]).find(
+      (part) => part.type === 'text' && part.text.includes('已跟踪'),
+    );
+    const text = (summary as { type: 'text'; text: string }).text;
+    // 无覆盖字段不展示,无 verdict 不追加指引;字符串 profile 原样透传。
+    expect(text).not.toContain('轨迹覆盖');
+    expect(text).not.toContain('结论证据不足');
+    expect(text).not.toContain('speed≈0');
+    expect(text).toContain('数值档案:位移 145m;平均速度 61km/h');
   });
 
   it('declares timeoutMs=900000 with a read access and an approvalRule on the resolved video', () => {

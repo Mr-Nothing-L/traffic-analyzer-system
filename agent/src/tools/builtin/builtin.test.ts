@@ -835,7 +835,35 @@ describe('submit_detection', () => {
       }
     });
 
-    it('degrades when draw_boxes fails: submission stands, meta.annotation_failed records the event', async () => {
+    it('retries a failed draw once with the same parameters and succeeds: image attached, no annotation_failed', async () => {
+      mockToolserver({ error: { code: 'internal', message: 'restarting' } }, 500);
+      mockToolserver({ jpeg_base64: FAKE_JPEG_BASE64, width: 640, height: 360 });
+      const boxes = [{ x1: 0.5, y1: 0.5, x2: 0.7, y2: 0.8 }];
+      const result = await execute(annotatingTool(), {
+        video_path: path.join(workspaceDir, 'demo.mp4'),
+        events: eventsWithDetected({ boxes, box_frame: 3.0 }),
+        binary_encoding: '0_0_1_0_0_0_0_0_0_0_0',
+        normal: false,
+        report_markdown: '# 报告',
+      });
+      expect(result.isError).toBeFalsy();
+      expect(result.stopTurn).toBe(true);
+      // 立即重试一次:恰好两次调用,且两次参数完全相同。
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      const bodyOf = (call: unknown[]): unknown =>
+        JSON.parse((call as [string, RequestInit])[1].body as string);
+      expect(bodyOf(fetchMock.mock.calls[0] as unknown[])).toEqual(
+        bodyOf(fetchMock.mock.calls[1] as unknown[]),
+      );
+      const payload = result.payload as DetectionPayload;
+      expect(payload.events[2]?.annotated_image).toBe(
+        `data:image/jpeg;base64,${FAKE_JPEG_BASE64}`,
+      );
+      expect(payload.meta).toBeUndefined();
+    });
+
+    it('degrades when draw_boxes fails twice: submission stands, meta.annotation_failed records the event', async () => {
+      mockToolserver({ error: { code: 'frame_unavailable', message: 'no frame at 3s' } }, 404);
       mockToolserver({ error: { code: 'frame_unavailable', message: 'no frame at 3s' } }, 404);
       const result = await execute(annotatingTool(), {
         video_path: path.join(workspaceDir, 'demo.mp4'),
@@ -849,12 +877,14 @@ describe('submit_detection', () => {
       });
       expect(result.isError).toBeFalsy();
       expect(result.stopTurn).toBe(true);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
       const payload = result.payload as DetectionPayload;
       expect(payload.events[2]?.annotated_image).toBeUndefined();
       expect(payload.meta?.annotation_failed).toEqual([3]);
     });
 
-    it('degrades when the toolserver is unreachable', async () => {
+    it('degrades when the toolserver is unreachable (retry also fails)', async () => {
+      fetchMock.mockRejectedValueOnce(new Error('connect ECONNREFUSED'));
       fetchMock.mockRejectedValueOnce(new Error('connect ECONNREFUSED'));
       const result = await execute(annotatingTool(), {
         video_path: path.join(workspaceDir, 'demo.mp4'),
@@ -867,6 +897,7 @@ describe('submit_detection', () => {
         report_markdown: '# 报告',
       });
       expect(result.isError).toBeFalsy();
+      expect(fetchMock).toHaveBeenCalledTimes(2);
       const payload = result.payload as DetectionPayload;
       expect(payload.meta?.annotation_failed).toEqual([3]);
     });
@@ -888,7 +919,8 @@ describe('submit_detection', () => {
     });
 
     it('lists both levels side by side: missing_boxes for the bare event, annotation_failed for the failed draw', async () => {
-      // 事件 1 检出但完全没给框(missing_boxes),事件 3 给了框但 draw 失败(annotation_failed)。
+      // 事件 1 检出但完全没给框(missing_boxes),事件 3 给了框但 draw 两次(含重试)均失败(annotation_failed)。
+      mockToolserver({ error: { code: 'frame_unavailable', message: 'no frame at 3s' } }, 404);
       mockToolserver({ error: { code: 'frame_unavailable', message: 'no frame at 3s' } }, 404);
       const events = baseEvents();
       events[0] = { ...events[0], detected: true, evidence_frames: [1.5] };
@@ -910,7 +942,7 @@ describe('submit_detection', () => {
       });
       expect(result.isError).toBeFalsy();
       expect(result.stopTurn).toBe(true);
-      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledTimes(2); // 首次 + 立即重试,无第三次
       const payload = result.payload as DetectionPayload;
       expect(payload.events[0]?.annotated_image).toBeUndefined();
       expect(payload.events[2]?.annotated_image).toBeUndefined();

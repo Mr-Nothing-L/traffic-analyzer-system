@@ -27,10 +27,11 @@
  * detected event carrying both `boxes` and `box_frame` is annotated via the
  * toolserver POST /tools/draw_boxes ({video_path, timestamp: box_frame,
  * boxes}); the returned JPEG is embedded as a data URL in that event's
- * `annotated_image` field. Annotation degradation is two-level (never blocks
- * submission) and recorded per event_id in payload meta:
+ * `annotated_image` field. A failed draw is immediately retried once with the
+ * same parameters (no backoff). Annotation degradation is two-level (never
+ * blocks submission) and recorded per event_id in payload meta:
  *   - `missing_boxes`: detected event lacking boxes/box_frame (模型侧没给)
- *   - `annotation_failed`: boxes given, but the server-side draw failed
+ *   - `annotation_failed`: boxes given, but the server-side draw failed twice
  */
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -142,7 +143,8 @@ export interface DetectionPayload {
   report_markdown: string;
   /** 标注降级元信息(两级,逐事件列出 event_id);无降级时缺省。
    * missing_boxes=检出事件未提供 boxes/box_frame(模型侧没给);
-   * annotation_failed=提供了 boxes/box_frame 但服务端 draw_boxes 画框失败。 */
+   * annotation_failed=提供了 boxes/box_frame 但服务端 draw_boxes 画框失败
+   * (立即重试一次后仍失败)。 */
   meta?: {
     missing_boxes?: number[];
     annotation_failed?: number[];
@@ -369,11 +371,16 @@ export function createSubmitDetectionTool(
               event.boxes.length > 0 &&
               event.box_frame !== undefined;
             if (!canAnnotate) return annotated;
-            const result = await client().post<DrawBoxesResponse>('/tools/draw_boxes', {
+            const drawBody = {
               video_path: videoPath,
               timestamp: event.box_frame,
               boxes: event.boxes,
-            });
+            };
+            // 瞬时失败(如 toolserver 重启瞬间)同参数立即重试一次,仍失败才计降级。
+            let result = await client().post<DrawBoxesResponse>('/tools/draw_boxes', drawBody);
+            if (!result.ok) {
+              result = await client().post<DrawBoxesResponse>('/tools/draw_boxes', drawBody);
+            }
             if (result.ok) {
               annotated.annotated_image = `data:image/jpeg;base64,${result.data.jpeg_base64}`;
             } else {

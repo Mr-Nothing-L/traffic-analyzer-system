@@ -47,7 +47,8 @@ interface TrackBestFrame {
 interface SuspectTrack {
   id: number | string;
   description: string;
-  profile: string;
+  // toolserver 实际返回数值档案对象(可含 covered_s/coverage);字符串按旧形态透传。
+  profile: unknown;
   side_hint: string;
   direction_verdict: string;
   best_frames: TrackBestFrame[];
@@ -84,6 +85,46 @@ function jpegImagePart(jpegBase64: string): ContentPart {
     imageUrl: { url: `data:image/jpeg;base64,${jpegBase64}` },
   };
 }
+
+/** profile 为对象时取覆盖字段;字符串/字段缺失/类型不符时返回空(优雅降级不展示)。 */
+function coverageOf(profile: unknown): { coveredS?: number; coverage?: number } {
+  if (typeof profile !== 'object' || profile === null || Array.isArray(profile)) return {};
+  const record = profile as Record<string, unknown>;
+  const coveredS = record['covered_s'];
+  const coverage = record['coverage'];
+  return {
+    ...(typeof coveredS === 'number' ? { coveredS } : {}),
+    ...(typeof coverage === 'number' ? { coverage } : {}),
+  };
+}
+
+/** 单条轨迹的摘要文本:direction_verdict 显著行置顶,数值档案随后(模型先看裁决再看数值)。 */
+function renderTrackSummary(track: SuspectTrack): string {
+  const lines = [
+    `【轨迹 ${track.id}】direction_verdict:${track.direction_verdict}`,
+    `描述:${track.description} | 方位:${track.side_hint}`,
+    `数值档案:${
+      typeof track.profile === 'string' ? track.profile : JSON.stringify(track.profile ?? {})
+    }`,
+  ];
+  const { coveredS, coverage } = coverageOf(track.profile);
+  const coverageParts: string[] = [];
+  if (coveredS !== undefined) coverageParts.push(`covered_s=${coveredS}s`);
+  if (coverage !== undefined) coverageParts.push(`coverage=${Math.round(coverage * 100)}%`);
+  if (coverageParts.length > 0) lines.push(`轨迹覆盖:${coverageParts.join(',')}`);
+  if (coverage !== undefined && coverage < 0.5) {
+    lines.push(`注意:轨迹仅覆盖时段的 ${Math.round(coverage * 100)}%,结论证据不足`);
+  }
+  const timestamps = track.best_frames.map((frame) => frame.timestamp);
+  if (timestamps.length > 0) {
+    lines.push(`关键帧时刻:${timestamps.map((t) => `${t}s`).join('、')}`);
+  }
+  return lines.join('\n');
+}
+
+/** 矛盾裁决指引(存在任一 verdict 时追加):防模型仅凭 speed≈0 推翻跟踪器裁决。 */
+const VERDICT_CONTRADICTION_GUIDANCE =
+  '提示:若 direction_verdict 与速度/位移数值看似矛盾,以 direction_verdict 与画面证据为准;禁止仅凭 speed≈0 推翻 verdict。';
 
 export function createTrackSuspectsTool(
   client: ToolserverClient,
@@ -134,21 +175,19 @@ export function createTrackSuspectsTool(
           const tracks = result.data.tracks ?? [];
           const parts: ContentPart[] = [];
 
-          // 数值档案摘要:只含文本字段;best_frames 仅保留时间戳(base64 过大)。
-          // 数值问题(停多久/方向角/速度)以本档案为唯一引用来源。
-          const summaries = tracks.map((track) => ({
-            id: track.id,
-            description: track.description,
-            profile: track.profile,
-            side_hint: track.side_hint,
-            direction_verdict: track.direction_verdict,
-            best_frame_timestamps: track.best_frames.map((frame) => frame.timestamp),
-          }));
+          // 逐轨迹摘要:direction_verdict 显著行置顶,数值档案随后——数值问题
+          // (停多久/方向角/速度)以「数值档案」为唯一引用来源;存在 verdict 时
+          // 末尾追加矛盾裁决指引,防止模型仅凭 speed≈0 推翻跟踪器裁决。
+          const trackCount = tracks.length;
+          const summaryBlocks = tracks.map(renderTrackSummary);
+          const hasVerdict = tracks.some((track) => track.direction_verdict.trim() !== '');
+          if (hasVerdict) summaryBlocks.push(VERDICT_CONTRADICTION_GUIDANCE);
           parts.push({
             type: 'text',
             text:
-              `已跟踪 ${summaries.length} 条目标轨迹,数值档案(JSON,数值问题的唯一引用来源)如下:\n` +
-              JSON.stringify(summaries),
+              `已跟踪 ${trackCount} 条目标轨迹` +
+              '(数值问题以各轨迹「数值档案」为唯一引用来源):\n\n' +
+              summaryBlocks.join('\n\n'),
           });
 
           // 轨迹叠加图:车道归属等语义问题看这张图。

@@ -4,11 +4,16 @@
 作用:track_suspects 的确定性编排核心。在可疑时段内默认 5fps 抽帧
     (首个传播窗发现高速运动目标自适应升 10fps)、滑窗 5 帧/stride 4 调
     VLM(复用 core/vlm_engine 的 failover + .vlm_cache.db;传播窗关
-    thinking 换低延迟,re-anchor 窗保留服务端默认);窗 prompt 双
-    模式:传播式(目标描述+上一框位+顺带框 2~3 辆参照车)与 re-anchor 式
-    (每 REANCHOR_EVERY 窗按描述+外推预期位置重检测,检测结果与外推期望
-    IoU < REANCHOR_MISMATCH_IOU 判跑飞);参照车位移中位数 → 环境流速;
-    再经 stitch 后处理与渲染产出数值档案和产物文件。
+    thinking 换低延迟,re-anchor 窗保留服务端默认);锚点 {box, timestamp}
+    是唯一直接可靠的定位:锚框直接作为传播链初始框,以锚点所在采样窗为
+    界先向后(未来)再向前(过去)双向传播,锚点窗做一次重检测校验
+    (锚框 vs 重检 IoU,严重不符时记事件但保留锚框;时间戳缺省回退旧式
+    t0 正向盲检);窗 prompt 双模式:传播式(目标描述+上一框位+顺带框
+    2~3 辆参照车)与 re-anchor 式(每 REANCHOR_EVERY 窗按描述+外推预期
+    位置重检测,检测结果与外推期望 IoU < REANCHOR_MISMATCH_IOU 判跑飞);
+    参照车位移中位数 → 环境流速;再经 stitch 后处理与渲染产出数值档案
+    (含 covered_s/coverage 覆盖率)和产物文件,run.json 记录 stop_reason、
+    逐目标 deactivated 与全部 events。
 上游:toolserver/server.py(端点调用);tests/test_track_windows.py(mock 引擎)。
 下游:models/stitch/render 本包协作;core/vlm_engine(PromptTemplate 渲染入口);
     cv2(抽帧)。
@@ -84,6 +89,13 @@ class _SuspectState:
     active: bool = True
     points: List[Dict[str, Any]] = field(default_factory=list)  # {frame, box}
     events: List[Dict[str, Any]] = field(default_factory=list)
+    # 失活记录:{"reason": reanchor_mismatch/reanchor_not_found, "window": 窗号}
+    deactivated: Optional[Dict[str, Any]] = None
+    # 锚点播种定位(时间戳缺省时保持 None → 旧式 t0 正向盲检)
+    anchor_grid_index: Optional[int] = None  # 锚点时刻在采样网格中的序号
+    anchor_frame: Optional[int] = None       # 对应原始帧号(锚框所在帧)
+    anchor_group: Optional[int] = None       # 锚点所在窗组号(grid 序号 // STRIDE)
+    anchor_validated: bool = False           # 锚点窗重检测校验已执行
 
     @property
     def last_box(self) -> Optional[List[float]]:
@@ -425,25 +437,90 @@ def run_tracking(
 
     fps_used = DEFAULT_SAMPLE_FPS
     fps_upgraded = False
-    pos = 0
     win_calls = 0
     n_ok_calls = 0
+    stop_reason = "completed"
 
-    # --- 滑窗主循环 ---
-    while pos < len(grid) and win_calls < MAX_WINDOW_CALLS:
-        if deadline is not None and deadline - _now() <= 0:
-            return {"failed": True, "failure_reason": "tracking timed out"}
-        win_frames = grid[pos : pos + WINDOW_FRAMES]
-        if not win_frames:
-            break
+    # --- 锚点播种:锚框直接入链,锚点时刻映射到采样网格 ---
+    # (时间戳缺省 → 不播种,回退旧式 t0 正向盲检路径)
+    for s in suspects:
+        ts = getattr(s.anchor, "timestamp", None)
+        if ts is None:
+            continue
+        s.anchor_grid_index = min(
+            range(len(grid)), key=lambda i: abs(grid[i] / meta["fps"] - ts)
+        )
+        s.anchor_frame = grid[s.anchor_grid_index]
+        s.anchor_group = s.anchor_grid_index // STRIDE
+        s.points.append({"frame": s.anchor_frame, "box": list(s.anchor.box)})
+    anchored_groups = [s.anchor_group for s in suspects if s.anchor_group is not None]
+    first_group = min(anchored_groups) if anchored_groups else 0
+
+    def _reindex_anchors(new_grid: List[int]) -> int:
+        """fps 升档后把锚点定位迁移到新网格,返回新的最早锚点窗组号。"""
+        for s in suspects:
+            if s.anchor_frame is None:
+                continue
+            s.anchor_grid_index = min(
+                range(len(new_grid)), key=lambda i: abs(new_grid[i] - s.anchor_frame)  # type: ignore[arg-type]
+            )
+            s.anchor_frame = new_grid[s.anchor_grid_index]
+            s.anchor_group = s.anchor_grid_index // STRIDE
+        groups_now = [s.anchor_group for s in suspects if s.anchor_group is not None]
+        return min(groups_now) if groups_now else 0
+
+    def _participants(group: Optional[int], direction: str) -> List[_SuspectState]:
+        """本窗参与目标:剔除失活;前向未到锚点窗的锚定目标不参与
+        (防止目标进场前盲检锁错对象)。"""
+        out: List[_SuspectState] = []
+        for s in suspects:
+            if not s.active:
+                continue
+            if (
+                direction == "forward"
+                and group is not None
+                and s.anchor_group is not None
+                and s.anchor_group > group
+            ):
+                continue
+            out.append(s)
+        return out
+
+    def _deadline_hit() -> bool:
+        return deadline is not None and deadline - _now() <= 0
+
+    def _execute_window(
+        win_frames: List[int], direction: str, group: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """跑一个窗:prompt → VLM → 吸收。
+
+        返回 {"status": "ok"/"skip"/"inactive", "response_ok": bool,
+        "mode": 窗模式};skip = 有存活目标但都不属于本窗(静默跳过);
+        inactive = 全部目标已失活。窗号/日志/事件/参照框/目标状态经闭包
+        变量累积。
+        """
+        nonlocal win_calls, n_ok_calls
         wi = win_calls
-        mode = "reanchor" if wi % REANCHOR_EVERY == 0 else "propagate"
-        active = [s for s in suspects if s.active]
-        if not active:
-            break
-
-        expected = {s.index: _expected_box(s) for s in active}
-        prompt = build_window_prompt(mode, active, len(win_frames), expected)
+        participants = _participants(group, direction)
+        if not participants:
+            if not any(s.active for s in suspects):
+                return {"status": "inactive", "response_ok": False, "mode": "propagate"}
+            # 有存活目标但都不属于本窗(如锚点窗在更后面):静默跳过
+            return {"status": "skip", "response_ok": False, "mode": "propagate"}
+        validations = {
+            s.index: list(s.anchor.box)
+            for s in participants
+            if direction == "forward"
+            and s.anchor_group == group
+            and not s.anchor_validated
+        }
+        mode = (
+            "reanchor"
+            if (validations or wi % REANCHOR_EVERY == 0)
+            else "propagate"
+        )
+        expected = {s.index: _expected_box(s, direction) for s in participants}
+        prompt = build_window_prompt(mode, participants, len(win_frames), expected)
         images = extract_window_jpegs(video_path, win_frames)
 
         suspect_parsed: Dict[int, List[Dict[str, Any]]] = {}
@@ -470,7 +547,7 @@ def run_tracking(
                     response_ok = True
                     n_ok_calls += 1
                     suspect_parsed, refs_parsed = parse_window_response(
-                        resp, active, len(win_frames)
+                        resp, participants, len(win_frames)
                     )
                 else:
                     err_msg = (
@@ -480,34 +557,26 @@ def run_tracking(
                 logger.warning("[track_suspects] window %d vlm failed: %s", wi, exc)
                 err_msg = f"vlm call error: {exc}"
 
-        record = {
-            "window": wi,
-            "mode": mode,
-            "frames": list(win_frames),
-            "timestamps": [round(f / meta["fps"], 3) for f in win_frames],
-            "request_prompt": prompt,
-            "response": {
-                "targets": {str(k): v for k, v in suspect_parsed.items()},
-                "references": {str(k): v for k, v in refs_parsed.items()},
-            },
-            "error": err_msg,
-            "ok": response_ok,
-        }
-        windows_log.append(record)
-        if out_dir is not None:
-            with open(out_dir / "windows.jsonl", "a", encoding="utf-8") as f:
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
-
+        deactivated_now: List[Dict[str, Any]] = []
         if response_ok:
+            before = {s.index: s.deactivated for s in participants}
             _absorb_window_result(
-                suspects=suspects,
+                suspects=participants,
                 mode=mode,
                 win_frames=win_frames,
                 first_frame=int(win_frames[0]),
                 suspect_boxes=suspect_parsed,
                 expected=expected,
                 events_all=events_all,
+                direction=direction,
+                anchor_validations=validations or None,
+                window=wi,
             )
+            deactivated_now = [
+                {"index": s.index, "letter": s.letter, **(s.deactivated or {})}
+                for s in participants
+                if s.deactivated is not None and s.deactivated is not before[s.index]
+            ]
             for rid, boxes in refs_parsed.items():
                 if boxes:
                     # 参照框同样按 win_frames 查表换算到原始帧号
@@ -526,37 +595,125 @@ def run_tracking(
                             ],
                         )
                     )
+        # 锚点窗执行过即消耗校验机会(该窗不重跑,失败窗不重试)
+        for s in participants:
+            if s.index in validations:
+                s.anchor_validated = True
 
-            # 自适应升帧率:首个传播窗发现高速目标即整段改用 10fps 接续
-            if not fps_upgraded and mode == "propagate":
-                upgraded = False
-                for s in suspects:
-                    recent = s.points[-WINDOW_FRAMES:]
-                    if len(recent) >= 2 and should_upgrade_fps(recent, meta["fps"]):
-                        upgraded = True
-                        break
-                if upgraded:
-                    fps_upgraded = True
-                    fps_used = FAST_SAMPLE_FPS
-                    new_grid = sampling_grid(meta, t0, t1, FAST_SAMPLE_FPS)
-                    boundary = win_frames[-1]
-                    # 从边界帧继续(保留 1 帧重叠供段间 IoU 缝合)
-                    pos = max(bisect.bisect_left(new_grid, boundary) - 1, 0)
-                    grid = new_grid
-                    events_all.append(
-                        {
-                            "type": "fps_upgrade",
-                            "frame": int(boundary),
-                            "label": f"{fps_used:g}fps",
-                        }
-                    )
-                    continue
+        record = {
+            "window": wi,
+            "mode": mode,
+            "direction": direction,
+            "frames": list(win_frames),
+            "timestamps": [round(f / meta["fps"], 3) for f in win_frames],
+            "request_prompt": prompt,
+            "response": {
+                "targets": {str(k): v for k, v in suspect_parsed.items()},
+                "references": {str(k): v for k, v in refs_parsed.items()},
+            },
+            "error": err_msg,
+            "ok": response_ok,
+            "deactivated": deactivated_now,
+        }
+        windows_log.append(record)
+        if out_dir is not None:
+            with open(out_dir / "windows.jsonl", "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        return {"status": "ok", "response_ok": response_ok, "mode": mode}
+
+    # --- 正向传播:锚点窗 → 时段末端 ---
+    pos = first_group * STRIDE
+    while pos < len(grid):
+        if _deadline_hit():
+            stop_reason = "timeout"
+            break
+        if win_calls >= MAX_WINDOW_CALLS:
+            stop_reason = "max_calls"
+            break
+        if not any(s.active for s in suspects):
+            stop_reason = "all_inactive"
+            break
+        win_frames = grid[pos : pos + WINDOW_FRAMES]
+        if not win_frames:
+            break
+        res = _execute_window(win_frames, "forward", group=pos // STRIDE)
+        if res["status"] == "skip":
+            pos += STRIDE
+            continue
+        if res["status"] != "ok":
+            stop_reason = "all_inactive" if res["status"] == "inactive" else "timeout"
+            break
+
+        # 自适应升帧率:首个传播窗发现高速目标即整段改用 10fps 接续
+        if res["response_ok"] and not fps_upgraded and res["mode"] == "propagate":
+            upgraded = False
+            for s in suspects:
+                recent = s.points[-WINDOW_FRAMES:]
+                if len(recent) >= 2 and should_upgrade_fps(recent, meta["fps"]):
+                    upgraded = True
+                    break
+            if upgraded:
+                fps_upgraded = True
+                fps_used = FAST_SAMPLE_FPS
+                new_grid = sampling_grid(meta, t0, t1, FAST_SAMPLE_FPS)
+                boundary = win_frames[-1]
+                bi = min(bisect.bisect_left(new_grid, boundary), len(new_grid) - 1)
+                grid = new_grid
+                first_group = _reindex_anchors(grid)
+                # 对齐到组边界继续:重叠帧吸收时去重,不产生覆盖空洞
+                pos = max((bi // STRIDE) * STRIDE, 0)
+                events_all.append(
+                    {
+                        "type": "fps_upgrade",
+                        "frame": int(boundary),
+                        "label": f"{fps_used:g}fps",
+                    }
+                )
+                continue
 
         pos += STRIDE
+
+    # --- 反向传播:锚点窗之前 → 时段起点(无锚点时间则无反向窗) ---
+    end_idx = first_group * STRIDE
+    while end_idx > 0:
+        if _deadline_hit():
+            stop_reason = "timeout"
+            break
+        if win_calls >= MAX_WINDOW_CALLS:
+            stop_reason = "max_calls"
+            break
+        if not any(s.active for s in suspects):
+            stop_reason = "all_inactive"
+            break
+        lo = max(end_idx - (WINDOW_FRAMES - 1), 0)
+        res = _execute_window(grid[lo : end_idx + 1], "backward")
+        if res["status"] == "skip":
+            end_idx -= STRIDE
+            continue
+        if res["status"] != "ok":
+            stop_reason = "all_inactive" if res["status"] == "inactive" else "timeout"
+            break
+        end_idx -= STRIDE
+
+    # --- 超时:契约保持 failed:true,但落 run.json 便于观测 ---
+    if stop_reason == "timeout":
+        if out_dir is not None:
+            _write_run_snapshot(
+                out_dir, video_path, anchors, time_range, fps_used, None,
+                tracks=[], events=events_all, stop_reason=stop_reason,
+                suspects=suspects,
+            )
+        return {"failed": True, "failure_reason": "tracking timed out"}
 
     # --- 全部窗口失败 ---
     if n_ok_calls == 0:
         reason = windows_log[-1].get("error") if windows_log else "vlm unavailable"
+        if out_dir is not None:
+            _write_run_snapshot(
+                out_dir, video_path, anchors, time_range, fps_used, None,
+                tracks=[], events=events_all, stop_reason=stop_reason,
+                suspects=suspects,
+            )
         return {"failed": True, "failure_reason": f"all VLM window calls failed ({reason})"}
 
     # --- 参照车缝合与环境流速 ---
@@ -568,6 +725,7 @@ def run_tracking(
     env_flow = compute_env_flow(ref_tracks, meta["fps"], fps_used)
 
     # --- 轨迹装配:去重 → 瞬移断裂 → 取主链 → 平滑 → 档案/互证 ---
+    span_s = max(t1 - t0, 0.0)  # 目标时段总长(coverage 分母)
     tracks: List[Track] = []
     dropped: List[str] = []
     for s in suspects:
@@ -594,7 +752,9 @@ def run_tracking(
                 for q in smoothed
             ],
         )
-        track.profile = compute_profile(track, fps=fps_used, env_flow=env_flow)
+        track.profile = compute_profile(
+            track, fps=fps_used, env_flow=env_flow, span_s=span_s
+        )
         track.side_hint = infer_side_hint(track.description)
         track.direction_verdict = direction_verdict(track)
         ok, why = is_consistent(track)
@@ -608,6 +768,12 @@ def run_tracking(
 
     if not tracks:
         reason = "; ".join(dropped) or "no valid trajectories"
+        if out_dir is not None:
+            _write_run_snapshot(
+                out_dir, video_path, anchors, time_range, fps_used, env_flow,
+                tracks=[], events=events_all, stop_reason=stop_reason,
+                suspects=suspects,
+            )
         return {"failed": True, "failure_reason": f"all suspects lost: {reason}"}
 
     # --- 渲染产物(渲染异常不影响契约主体) ---
@@ -640,7 +806,9 @@ def run_tracking(
         except Exception as exc:
             logger.error("[track_suspects] artifact rendering failed: %s", exc)
         _write_run_snapshot(
-            out_dir, video_path, anchors, time_range, fps_used, env_flow, tracks
+            out_dir, video_path, anchors, time_range, fps_used, env_flow,
+            tracks=tracks, events=events_all, stop_reason=stop_reason,
+            suspects=suspects,
         )
 
     payload_tracks: List[Dict[str, Any]] = []
@@ -684,20 +852,27 @@ def _dedupe_points(points: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [have[k] for k in sorted(have)]
 
 
-def _expected_box(s: _SuspectState) -> Optional[List[float]]:
-    """匀速外推下一时刻的 bbox(以最后两点速度平移最后一个框)。"""
+def _expected_box(s: _SuspectState, direction: str = "forward") -> Optional[List[float]]:
+    """匀速外推下一采样步的 bbox;backward 沿时间负方向用最早两点外推。"""
     if not s.points:
         return None
-    if len(s.points) < 2:
-        return list(s.points[-1]["box"])
-    p1, p2 = s.points[-2], s.points[-1]
-    d_f = int(p2["frame"]) - int(p1["frame"])
-    if d_f <= 0:
-        return list(p2["box"])
-    c1, c2 = bbox_center(p1["box"]), bbox_center(p2["box"])
-    vx, vy = (c2[0] - c1[0]) / d_f, (c2[1] - c1[1]) / d_f
-    cx_next, cy_next = c2[0] + vx, c2[1] + vy
-    w2, h2 = p2["box"][2] - p2["box"][0], p2["box"][3] - p2["box"][1]
+    if direction == "backward":
+        base = s.points[0]
+        other = s.points[1] if len(s.points) >= 2 else None
+        step = -1
+    else:
+        base = s.points[-1]
+        other = s.points[-2] if len(s.points) >= 2 else None
+        step = 1
+    if other is None:
+        return list(base["box"])
+    d_f = int(other["frame"]) - int(base["frame"])
+    if d_f == 0:
+        return list(base["box"])
+    c_b, c_o = bbox_center(base["box"]), bbox_center(other["box"])
+    vx, vy = (c_o[0] - c_b[0]) / d_f, (c_o[1] - c_b[1]) / d_f
+    cx_next, cy_next = c_b[0] + vx * step, c_b[1] + vy * step
+    w2, h2 = base["box"][2] - base["box"][0], base["box"][3] - base["box"][1]
     return [cx_next - w2 / 2, cy_next - h2 / 2, cx_next + w2 / 2, cy_next + h2 / 2]
 
 
@@ -709,13 +884,21 @@ def _absorb_window_result(
     suspect_boxes: Dict[int, List[Dict[str, Any]]],
     expected: Dict[int, Optional[List[float]]],
     events_all: List[Dict[str, Any]],
+    direction: str = "forward",
+    anchor_validations: Optional[Dict[int, List[float]]] = None,
+    window: Optional[int] = None,
 ) -> None:
     """把一窗解析结果并入状态:传播窗追加点,re-anchor 窗校验偏移判跑飞。
 
     帧号换算:窗内局部 frame 经 win_frames 查表 = 原始帧号(采样网格跳号,
     不能用 offset+local 线性换算)。re-anchor 与外推期望 IoU
-    < REANCHOR_MISMATCH_IOU(或未检出)→ 目标标记跑飞、停止跟踪。
+    < REANCHOR_MISMATCH_IOU(或未检出)→ 目标标记跑飞、停止跟踪并记录
+    deactivated {reason, window}。锚点窗校验(anchor_validations)不同:
+    重检与锚框严重不符(或未检出)只记事件(kept_anchor),锚框保留、
+    不失活——锚点是唯一直接可靠的定位;不符时本窗重检整体不吸收。
+    direction="backward" 时按最早点向时间负方向外推与选候选。
     """
+    validations = anchor_validations or {}
     for s in suspects:
         if not s.active:
             continue
@@ -729,6 +912,47 @@ def _absorb_window_result(
             }
             for q in boxes_local
         ]
+        if s.index in validations:
+            a_box = validations[s.index]
+            if not boxes_global:
+                s.events.append(
+                    {"type": "reanchor_not_found", "frame": first_frame, "kept_anchor": True}
+                )
+                events_all.append(
+                    {
+                        "type": "reanchor_not_found",
+                        "frame": first_frame,
+                        "label": "keep-anchor",
+                        "kept_anchor": True,
+                    }
+                )
+                continue
+            score = stitch.iou(
+                _pick_candidate(boxes_global, s.points, direction), a_box
+            )
+            if score < REANCHOR_MISMATCH_IOU:
+                s.events.append(
+                    {
+                        "type": "reanchor_mismatch",
+                        "frame": first_frame,
+                        "iou": round(score, 3),
+                        "kept_anchor": True,
+                    }
+                )
+                events_all.append(
+                    {
+                        "type": "reanchor_mismatch",
+                        "frame": first_frame,
+                        "label": "keep-anchor",
+                        "iou": round(score, 3),
+                        "kept_anchor": True,
+                    }
+                )
+                continue
+            # 校验通过:吸收本窗重检框(锚框所在帧已被种子占据,去重保留锚框)
+            have = {int(q["frame"]) for q in s.points}
+            s.points.extend(q for q in boxes_global if int(q["frame"]) not in have)
+            continue
         if mode != "reanchor":
             have = {int(q["frame"]) for q in s.points}
             s.points.extend(q for q in boxes_global if int(q["frame"]) not in have)
@@ -740,8 +964,9 @@ def _absorb_window_result(
                 {"type": "reanchor_not_found", "frame": first_frame, "label": "lost?"}
             )
             s.active = False
+            s.deactivated = {"reason": "reanchor_not_found", "window": window}
             continue
-        candidate = _pick_candidate(boxes_global, s.points)
+        candidate = _pick_candidate(boxes_global, s.points, direction)
         if exp_box is None:
             # 初始 re-anchor 窗:无外推基准,检出即接续
             have = {int(q["frame"]) for q in s.points}
@@ -760,6 +985,11 @@ def _absorb_window_result(
                 {"type": "reanchor_mismatch", "frame": first_frame, "label": "re-anchor!"}
             )
             s.active = False
+            s.deactivated = {
+                "reason": "reanchor_mismatch",
+                "window": window,
+                "iou": round(score, 3),
+            }
             continue
         have = {int(q["frame"]) for q in s.points}
         s.points.extend(q for q in boxes_global if int(q["frame"]) not in have)
@@ -768,11 +998,18 @@ def _absorb_window_result(
 def _pick_candidate(
     boxes_global: Sequence[Dict[str, Any]],
     points: Sequence[Dict[str, Any]],
+    direction: str = "forward",
 ) -> List[float]:
-    """选与外推目标帧(最后已知点 +1)最接近的候选框;无历史点取首框。"""
+    """选与外推目标帧最接近的候选框;无历史点取首框。
+
+    forward 目标帧 = 最后已知点 +1;backward 目标帧 = 最早已知点 -1。
+    """
     if not points:
         return boxes_global[0]["box"]
-    target = int(points[-1]["frame"]) + 1
+    if direction == "backward":
+        target = int(points[0]["frame"]) - 1
+    else:
+        target = int(points[-1]["frame"]) + 1
     best_q = min(boxes_global, key=lambda q: abs(int(q["frame"]) - target))
     return best_q["box"]
 
@@ -785,8 +1022,15 @@ def _write_run_snapshot(
     fps_used: float,
     env_flow: Optional[float],
     tracks: Sequence[Track] = (),
+    events: Optional[Sequence[Dict[str, Any]]] = None,
+    stop_reason: str = "completed",
+    suspects: Sequence[_SuspectState] = (),
 ) -> None:
-    """运行参数+数值档案快照(run.json):复现/回放一次跟踪所需全部数值。"""
+    """运行参数+数值档案快照(run.json):复现/回放一次跟踪所需全部数值。
+
+    stop_reason: completed/max_calls/timeout/all_inactive;suspects 记录
+    每个目标的失活状态(deactivated);events 为全量编排事件(含 re-anchor)。
+    """
     snapshot = {
         "video": str(video_path),
         "time_range": list(time_range) if time_range else None,
@@ -799,6 +1043,7 @@ def _write_run_snapshot(
         # (None = 服务端默认,vLLM qwen3 默认开启)。
         "enable_thinking": {"propagate": False, "reanchor": None},
         "env_flow": env_flow,
+        "stop_reason": stop_reason,
         "thresholds": {
             "static_displacement_ratio": STATIC_DISPLACEMENT_RATIO,
             "slow_speed_ratio": SLOW_SPEED_RATIO,
@@ -810,6 +1055,18 @@ def _write_run_snapshot(
             {"box": a.box, "timestamp": a.timestamp, "description": a.description}
             for a in anchors
         ],
+        "suspects": [
+            {
+                "index": s.index,
+                "letter": s.letter,
+                "description": s.anchor.description,
+                "anchor_frame": s.anchor_frame,
+                "active": s.active,
+                "deactivated": s.deactivated,
+            }
+            for s in suspects
+        ],
+        "events": list(events or []),
         "tracks": [
             {
                 "id": t.id,

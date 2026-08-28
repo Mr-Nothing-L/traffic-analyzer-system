@@ -187,9 +187,12 @@ class TestContract:
         若错把网格序号当帧号会得到 1/25=0.04s(原 bug)。
         """
         _make_video(tracked_video.parent / "clip25.mp4", n=50, fps=25.0)
+        # mock 重检框与锚框一致(0-1000 归一化)→ 锚点窗校验通过、窗内
+        # 重检框被吸收;旧 mock 框与锚框无重叠,在新语义下会被判为锁错
+        # 对象而不吸收(双向播种修复的正是该旧路径)。
         monkeypatch.setattr(
             "traffic_analyzer.toolserver.server._build_default_engine",
-            lambda: ScriptedEngine(responses=[_window_response("[100,700,400,950]")]),
+            lambda: ScriptedEngine(responses=[_window_response("[60,410,250,580]")]),
         )
         resp = _post(client, client.app.state.tracking_engine, video_rel="clip25.mp4")  # type: ignore[attr-defined]
         assert resp.status_code == 200 and resp.json()["failed"] is False
