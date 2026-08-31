@@ -677,7 +677,9 @@ class TestSceneSide:
         assert result["per_target"][1]["side"] == "going"
         assert "朝镜头" in result["per_target"][0]["rationale"]
 
-    def test_parse_invisible_median_forces_unknown(self) -> None:
+    def test_parse_invisible_median_keeps_flow_verdict(self) -> None:
+        """新语义:中央隔离带不可见时,模型仅凭其他车辆统一流向给出的
+        coming/going 判定保留(单向机位兜底);全部 unknown 才强制 unknown。"""
         from types import SimpleNamespace
 
         resp = SimpleNamespace(
@@ -685,14 +687,27 @@ class TestSceneSide:
             parsed_data={
                 "median_side": "unknown",
                 "per_target": [
-                    {"index": 0, "side": "coming", "rationale": "..."},
+                    {"index": 0, "side": "coming", "rationale": "其他车辆均朝镜头"},
                 ],
             },
             raw_text="json",
         )
         result = parse_scene_response(resp, [0])
         assert result["median_side"] == "unknown"
-        assert result["per_target"][0]["side"] == "unknown"
+        assert result["per_target"][0]["side"] == "coming"
+
+        resp_all_unknown = SimpleNamespace(
+            success=True,
+            parsed_data={
+                "median_side": "unknown",
+                "per_target": [
+                    {"index": 0, "side": "unknown", "rationale": None},
+                ],
+            },
+            raw_text="json",
+        )
+        result2 = parse_scene_response(resp_all_unknown, [0])
+        assert result2["per_target"][0]["side"] == "unknown"
 
     def test_parse_failure_returns_none(self) -> None:
         from types import SimpleNamespace

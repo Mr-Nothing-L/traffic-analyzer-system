@@ -381,7 +381,12 @@ def build_scene_prompt(suspects: Sequence[Any]) -> str:
             "同侧的全部车道)的法定/正常行驶方向**是朝镜头(coming)还是背镜头(going)。",
             "第②问只允许依据道路结构(中央隔离带位置、车道布局)与**其他车辆**的流向"
             "判断,**禁止**用目标车辆自身的朝向或运动方向作答——目标可能是违章车,"
-            "它的朝向不能代表车道方向。中央隔离带不可见时全部回答 unknown。",
+            "它的朝向不能代表车道方向。",
+            "",
+            "如果中央隔离带不可见(画面只拍到单向车道):不要直接答 unknown——"
+            "改为判断**画面内其他车辆的统一流向**:若其他车辆一致朝镜头驶来,整幅画面即"
+            "来向场景(coming);一致背向镜头驶离即去向场景(going);流向不一致或无法"
+            "判断时才回答 unknown,并在 rationale 注明依据(道路结构/其他车辆流向/不可判)。",
             "",
             "以 JSON 对象输出,不要任何解释:",
             '{"median_side": "left|right|unknown", "per_target": ['
@@ -444,8 +449,12 @@ def parse_scene_response(
                 "rationale": (item.get("rationale") or None),
             }
 
-    # 中央隔离带不可见:强制全部 unknown
-    if median_side == "unknown":
+    # 中央隔离带不可见时,仅当模型也没给出任何流向判定才强制全部 unknown;
+    # 单向机位下模型可仅凭其他车辆统一流向给出 coming/going(新兜底路径),
+    # 此时保留其判定(rationale 可审计)。
+    if median_side == "unknown" and all(
+        per_target.get(idx, {}).get("side", "unknown") == "unknown" for idx in idx_set
+    ):
         per_target = {idx: {"side": "unknown", "rationale": None} for idx in idx_set}
 
     return {

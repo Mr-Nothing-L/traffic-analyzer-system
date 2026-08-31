@@ -303,10 +303,17 @@ def classify_motion_state(profile: Dict[str, Any]) -> str:
 
 
 def infer_side_hint(description: str) -> str:
-    """从描述猜测目标所在侧(handoff 先验:左=来向,右=去向)。"""
+    """从描述猜测目标所在侧(仅显式方向词;场景判定 unknown 时的最后兜底)。
+
+    只接受「来向/去向」等**显式方向词**;「左/右」等画面方位词不再参与——
+    画面位置与车道方向没有必然关系(目标在中央隔离带哪一侧才决定来向/
+    去向),用方位词映射方向已被证伪(「最右侧应急车道」误判为去向案例)。
+    匹配不到显式方向词时返回 unknown,交由「车道方位未知,仅凭几何初判」
+    文案如实呈现,不给自信的错误方位。
+    """
     text = (description or "").lower()
-    coming_kw = ("来向", "左", "逆行", "迎面", "对向")
-    going_kw = ("去向", "右", "驶离", "远去", "顺向")
+    coming_kw = ("来向", "逆行", "迎面", "对向", "朝镜头")
+    going_kw = ("去向", "驶离", "远去", "顺向", "背镜头")
     if any(kw in text for kw in coming_kw):
         return "coming"
     if any(kw in text for kw in going_kw):
