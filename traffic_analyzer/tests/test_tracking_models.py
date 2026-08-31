@@ -25,6 +25,8 @@ from traffic_analyzer.toolserver.tracking.models import (
     STATIC_NET_DISTANCE_RATIO,
     K_TRAJECTORY_LENGTH_RATIO,
     SLOW_SPEED_RATIO,
+    CLIP_EDGE,
+    Y_DISPLACEMENT_RATIO,
     SuspectAnchor,
     Track,
     TrackPoint,
@@ -34,8 +36,10 @@ from traffic_analyzer.toolserver.tracking.models import (
     compute_profile,
     direction_verdict,
     infer_side_hint,
+    is_clipped_box,
     is_consistent,
     path_length,
+    _direction_verdict_state,
 )
 from traffic_analyzer.toolserver.tracking import stitch
 from traffic_analyzer.toolserver.tracking.windows import (
@@ -507,6 +511,128 @@ class TestStructuredVerdict:
         verdict = direction_verdict(track, heading=heading)
         assert "疑似倒车" in verdict
         assert "朝镜头" in verdict
+
+
+# ---------------------------------------------------------------------------
+# 双信号方向判定 + 截断识别
+# ---------------------------------------------------------------------------
+
+
+class TestDualSignalDirection:
+    """修复「出画截断导致倒车漏判」:面积+y 位移双信号,冲突判不明。"""
+
+    def _lerp_boxes(self, start: List[float], end: List[float], n: int) -> List[Dict[str, object]]:
+        return [
+            {
+                "frame": f,
+                "t": f * 0.2,
+                "box": [s + (e - s) * f / max(n - 1, 1) for s, e in zip(start, end)],
+            }
+            for f in range(n)
+        ]
+
+    def _piecewise_boxes(
+        self, segments: List[Tuple[List[float], List[float], int]]
+    ) -> List[Dict[str, object]]:
+        """把多段线性插值拼接成一条点序列,frame/t 连续递增。"""
+        points: List[Dict[str, object]] = []
+        frame_base = 0
+        for start, end, n in segments:
+            seg = self._lerp_boxes(start, end, n)
+            for q in seg:
+                q["frame"] = frame_base + int(q["frame"])
+                q["t"] = frame_base * 0.2 + float(q["t"])
+                points.append(q)
+            frame_base += n
+        # 去掉相邻段首尾重复点
+        deduped = [points[0]]
+        for q in points[1:]:
+            if int(q["frame"]) != int(deduped[-1]["frame"]):
+                deduped.append(q)
+        return deduped
+
+    def test_is_clipped_box_boundary(self) -> None:
+        assert is_clipped_box([0.0, 0.0, CLIP_EDGE, 0.5]) is True
+        assert is_clipped_box([0.0, 0.0, CLIP_EDGE - 1e-6, 0.5]) is False
+        assert is_clipped_box([0.0, 0.0, 0.5, CLIP_EDGE]) is True
+        assert is_clipped_box([0.1, 0.1, 0.5, 0.5]) is False
+
+    def test_two_signals_consistent_adopt_area(self) -> None:
+        # bbox 明显增大,但框心 y 几乎不动;面积信号 approaching 应被采信
+        pts = self._lerp_boxes(
+            [0.20, 0.30, 0.30, 0.55],
+            [0.50, 0.30, 0.70, 0.55],
+            10,
+        )
+        track = _mk_track(pts)
+        track.side_hint = "coming"
+        track.profile = compute_profile(track)
+        state = _direction_verdict_state(track)
+        assert state["actual"] == "approaching"
+        assert state["consistent"] is True
+        verdict = direction_verdict(track)
+        assert "靠近镜头" in verdict
+        assert "方向一致" in verdict
+
+    def test_conflict_between_area_and_y_is_unclear(self) -> None:
+        # 面积趋势说 leaving(缩小),但框心 y 大幅下移说 approaching → 方向不明
+        pts = self._lerp_boxes(
+            [0.40, 0.10, 0.60, 0.30],
+            [0.45, 0.70, 0.55, 0.90],
+            10,
+        )
+        track = _mk_track(pts)
+        track.side_hint = "going"
+        track.profile = compute_profile(track)
+        state = _direction_verdict_state(track)
+        assert state["actual"] == "unclear"
+        assert state["consistent"] is None
+        verdict = direction_verdict(track)
+        assert "方向不明(面积与位移矛盾)" in verdict
+        assert "轨迹=远离镜头" not in verdict
+
+    def test_all_clipped_trusts_y_displacement(self) -> None:
+        # 全段被底边截断,面积信号作废;y 下移 → approaching
+        pts = self._lerp_boxes(
+            [0.45, 0.79, 0.55, CLIP_EDGE],
+            [0.45, 0.89, 0.55, CLIP_EDGE],
+            8,
+        )
+        track = _mk_track(pts)
+        track.side_hint = "coming"
+        track.profile = compute_profile(track)
+        state = _direction_verdict_state(track)
+        assert state["clipped_all"] is True
+        assert state["area_signal"] is None
+        assert state["actual"] == "approaching"
+        verdict = direction_verdict(track)
+        assert "靠近镜头" in verdict
+        assert "方向一致" in verdict
+
+    def test_out_of_frame_clipping_backing_not_leaving(self) -> None:
+        """02-08 类案例:前段远离,后段倒车回底边贴边被截断。
+
+        整体可见面积下降(若只看 bbox 会判 leaving),但框心 y 明显下移;
+        双信号矛盾 → 不得判远离,应判方向不明。
+        """
+        pts = self._piecewise_boxes(
+            [
+                # 前段:远离,box 缩小、中心 y 上移
+                ([0.50, 0.20, 0.60, 0.35], [0.50, 0.10, 0.55, 0.25], 8),
+                # 后段:倒车回画面下方,box 重新变大但末帧被底边截断
+                ([0.50, 0.10, 0.55, 0.25], [0.50, 0.78, 0.55, 0.98], 7),
+                ([0.50, 0.78, 0.55, 0.98], [0.50, 0.82, 0.55, CLIP_EDGE], 2),
+            ]
+        )
+        track = _mk_track(pts)
+        track.side_hint = "going"
+        track.profile = compute_profile(track)
+        state = _direction_verdict_state(track)
+        assert state["actual"] in ("approaching", "unclear")
+        assert state["actual"] != "leaving"
+        verdict = direction_verdict(track)
+        assert "轨迹=远离镜头" not in verdict
+        assert "方向不明(面积与位移矛盾)" in verdict
 
 
 # ---------------------------------------------------------------------------

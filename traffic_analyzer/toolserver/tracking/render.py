@@ -28,6 +28,7 @@ from traffic_analyzer.toolserver.tracking.models import (
     TrackPoint,
     bbox_center,
     box_diagonal,
+    is_clipped_box,
 )
 
 # 叠加视频/大图的最大宽度(与旧 visualize.py 一致)
@@ -165,7 +166,8 @@ def overlay_video(
                 ts_s = fi / src_fps if src_fps > 0 else 0.0
                 # cv2.putText 的 Hershey 字体不支持 CJK,描述渲染会变成问号,
                 # 标签只放 ID+时间戳(描述见 tracks.csv/run.json)
-                label = f"#{tid} {ts_s:.1f}s"
+                clipped = is_clipped_box(bb)
+                label = f"#{tid} {ts_s:.1f}s" + (" clip" if clipped else "")
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
                 cv2.putText(
                     frame,
@@ -324,16 +326,18 @@ def best_frame_crops(
 
 
 def export_csv(tracks: Sequence[Track], out_path: Path, video_name: str) -> Path:
-    """tracks.csv:video,track_id,description,frame,time_s,x1,y1,x2,y2。"""
+    """tracks.csv:video,track_id,description,frame,time_s,x1,y1,x2,y2,clipped。"""
     with open(out_path, "w", newline="", encoding="utf-8-sig") as f:
         wr = csv.writer(f)
         wr.writerow(
-            ["video", "track_id", "description", "frame", "time_s", "x1", "y1", "x2", "y2"]
+            ["video", "track_id", "description", "frame", "time_s", "x1", "y1", "x2", "y2", "clipped"]
         )
         for t in tracks:
             for p in t.points:
+                clipped = 1 if is_clipped_box(p.box) else 0
                 wr.writerow(
                     [video_name, t.id, t.description, p.frame_idx, round(p.timestamp, 2)]
                     + [round(v, 4) for v in p.box]
+                    + [clipped]
                 )
     return out_path

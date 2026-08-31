@@ -48,7 +48,10 @@ from traffic_analyzer.toolserver.tracking import (
     infer_side_hint,
     is_consistent,
 )
-from traffic_analyzer.toolserver.tracking.models import _direction_verdict_state
+from traffic_analyzer.toolserver.tracking.models import (
+    _direction_verdict_state,
+    is_clipped_box,
+)
 from traffic_analyzer.toolserver.tracking import stitch
 from traffic_analyzer.toolserver.tracking.render import (
     best_frame_crops,
@@ -789,6 +792,11 @@ def _query_heading(
     }
 
 
+def _clipped_count(track: Track) -> int:
+    """轨迹中贴边(可能被裁断)的采样点数量。"""
+    return sum(1 for p in track.points if is_clipped_box(p.box))
+
+
 # ---------------------------------------------------------------------------
 # 主编排
 # ---------------------------------------------------------------------------
@@ -1239,6 +1247,12 @@ def run_tracking(
         s.side_source = track.side_source
         s.side_rationale = track.side_rationale
 
+        # 贴边/裁断信息入档案(取最简:计数 + 帧号列表)
+        track.profile["clipped_count"] = _clipped_count(track)
+        track.profile["clipped_frames"] = [
+            p.frame_idx for p in track.points if is_clipped_box(p.box)
+        ]
+
         # 方向初判:一致性相反/不明时请求车头朝向旁证(不翻盘)
         state = _direction_verdict_state(track)
         heading_result: Optional[Dict[str, Any]] = None
@@ -1599,6 +1613,8 @@ def _write_run_snapshot(
                 "side_rationale": t.side_rationale,
                 "direction_verdict": t.direction_verdict,
                 "heading": t.heading,
+                "clipped_count": t.profile.get("clipped_count", 0),
+                "clipped_frames": t.profile.get("clipped_frames", []),
             }
             for t in tracks
         ],

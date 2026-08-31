@@ -41,6 +41,10 @@ FLOW_EPSILON = 1e-3
 # 逆行/倒车二分:反向运动须持续足够时长/位移,低于阈值视为倒车(短距离后倒)
 REVERSE_MOTION_MIN_DURATION_S = 0.5  # 秒
 REVERSE_MOTION_MIN_DISTANCE_RATIO = 0.3  # 占 bbox 对角线比例
+# 画面边缘截断:box 任一边 ≥ CLIP_EDGE 视为被画面边缘裁切
+CLIP_EDGE = 0.99
+# 框心 y 位移阈值(按 bbox 对角线归一);图像坐标 y 向下增大,故下移=靠近、上移=远离
+Y_DISPLACEMENT_RATIO = 0.15
 
 
 @dataclass
@@ -97,6 +101,15 @@ def bbox_center(box: Sequence[float]) -> Tuple[float, float]:
 
 def point_center(point: TrackPoint) -> Tuple[float, float]:
     return bbox_center(point.box)
+
+
+def is_clipped_box(box: Sequence[float]) -> bool:
+    """box 任一边 ≥ CLIP_EDGE 时视为被画面边缘裁切。
+
+    点级判定,供方向判定与装配层共用;主要识别「出画截断」导致 bbox
+    可见面积被人为缩小的情形。
+    """
+    return any(c >= CLIP_EDGE for c in box)
 
 
 def path_length(points: Sequence[TrackPoint]) -> float:
@@ -330,7 +343,6 @@ def _direction_verdict_state(track: Track) -> Dict[str, Any]:
         return state
 
     side = track.side_hint or "unknown"
-    trend, change = _bbox_trend_with_change(points)
     diag = float(profile.get("mean_diagonal") or 0.0)
     duration_s = max(points[-1].timestamp - points[0].timestamp, 0.0)
     speed = float(profile.get("avg_speed_norm") or 0.0)
@@ -349,12 +361,52 @@ def _direction_verdict_state(track: Track) -> Dict[str, Any]:
         )
     )
 
+    change = 0.0
+    area_signal: Optional[str] = None
+    y_signal: Optional[str] = None
+    clipped_all = False
+
     if not moving:
         actual = "stationary"
     else:
-        actual = {"increasing": "approaching", "decreasing": "leaving"}.get(
-            trend, "stable"
+        # 面积信号:末段被截断时只用未截断前缀,避免出画 bbox 缩小误读为远离
+        last_unclipped = max(
+            (i for i, p in enumerate(points) if not is_clipped_box(p.box)),
+            default=-1,
         )
+        clipped_all = last_unclipped < 0
+        if clipped_all:
+            trend = "stable"
+            change = 0.0
+            area_signal = None
+        else:
+            usable = points[: last_unclipped + 1]
+            trend, change = _bbox_trend_with_change(usable)
+            area_signal = {"increasing": "approaching", "decreasing": "leaving"}.get(
+                trend, "stable"
+            )
+
+        # y 位移信号:高速固定机位,框心 y 下移=靠近,上移=远离
+        dy = end_c[1] - start_c[1]
+        y_threshold = Y_DISPLACEMENT_RATIO * max(diag, 1e-6)
+        if dy > y_threshold:
+            y_signal = "approaching"
+        elif dy < -y_threshold:
+            y_signal = "leaving"
+        else:
+            y_signal = "stable"
+
+        # 双信号融合:一致采信,矛盾判不明,全段截断时只信 y 位移
+        if clipped_all:
+            actual = y_signal if y_signal != "stable" else "stable"
+        elif y_signal == area_signal:
+            actual = y_signal if y_signal != "stable" else "stable"
+        elif y_signal == "stable":
+            actual = area_signal
+        elif area_signal == "stable":
+            actual = y_signal
+        else:
+            actual = "unclear"
 
     expected = {"coming": "approaching", "going": "leaving"}.get(side)
     if side == "unknown":
@@ -362,7 +414,7 @@ def _direction_verdict_state(track: Track) -> Dict[str, Any]:
     elif actual in ("approaching", "leaving"):
         consistent = expected == actual
     else:
-        consistent = None  # 运动方向不明,无法与先验比对
+        consistent = None  # 运动方向不明/静止,无法与先验比对
 
     cov = profile.get("coverage")
     low_cov = (
@@ -382,6 +434,9 @@ def _direction_verdict_state(track: Track) -> Dict[str, Any]:
         "distance_ratio": distance_ratio,
         "change_pct": round(change * 100, 1),
         "low_cov": low_cov,
+        "area_signal": area_signal,
+        "y_signal": y_signal,
+        "clipped_all": clipped_all,
     }
 
 
@@ -393,7 +448,8 @@ def direction_verdict(
 
     输出格式:「所在车道=...;轨迹=...;结论:...」
     - coming=应靠近镜头, going=应远离镜头。
-    - 实际方向由 bbox 趋势 + 位移矢量综合;先验+轨迹为主判。
+    - 实际方向由 bbox 面积趋势(末段截断时剔除) + 框心 y 位移综合;
+      两信号一致则采信,矛盾时判「方向不明」,不采信面积。
     - 与预期相反时,无朝向旁证按反向运动持续距离/时长阈值二分逆行/倒车;
       有可靠朝向旁证时,朝向优先用于二分。
     - side=unknown 时标注「车道方位未知,仅凭几何初判」。
@@ -426,6 +482,8 @@ def direction_verdict(
         traj = f"轨迹=远离镜头(bbox-{abs(change_pct):.0f}%)"
     elif actual == "stationary":
         traj = "轨迹=基本静止"
+    elif actual == "unclear":
+        traj = "轨迹=方向不明(面积与位移矛盾)"
     else:
         traj = "轨迹=大小稳定(位移方向不明)"
 

@@ -947,3 +947,108 @@ class TestSceneSideVotingRun:
         assert run["scene_side"]["per_target"][0]["scene_side"] == "unknown"
         assert run["scene_side"]["per_target"][0]["source"] == "anchor"
         assert any(e["type"] == "scene_side_split" for e in run["events"])
+
+
+class TestClippedIntegration:
+    """画面边缘裁断(clipped)信息在产物与 verdict 中的集成测试。"""
+
+    def test_clipped_flag_in_csv_and_run_json(
+        self,
+        client: TestClient,
+        tracked_video: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """贴边框(x2=0.999)应在 tracks.csv 与 run.json 中标记 clipped。"""
+        engine = ScriptedEngine(responses=[_window_response("[750,450,999,850]")])
+        monkeypatch.setattr(
+            "traffic_analyzer.toolserver.server._build_default_engine", lambda: engine
+        )
+        resp = _post(client, engine)
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["failed"] is False
+
+        art = body["artifacts"]
+        csv_path = tracked_video.parent / art["csv"]
+        rows = list(csv.DictReader(open(csv_path, encoding="utf-8-sig")))
+        assert rows, "tracks.csv empty"
+        assert all("clipped" in r for r in rows)
+        assert any(int(r["clipped"]) == 1 for r in rows), "expected at least one clipped point"
+
+        run_path = tracked_video.parent / art["dir"] / "run.json"
+        run = json.loads(run_path.read_text(encoding="utf-8"))
+        assert run["tracks"][0]["clipped_count"] >= 1
+        assert len(run["tracks"][0]["clipped_frames"]) == run["tracks"][0]["clipped_count"]
+
+    def test_clipped_conflict_downgrades_verdict_to_unknown(
+        self,
+        client: TestClient,
+        tracked_video: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """贴边 + 面积减小但中心下移 → 面积/位移冲突 → verdict 应为方向不明。"""
+
+        class ClippedShrinkEngine(ScriptedEngine):
+            """目标持续向右下角移动,后段 x2 贴边(999),面积趋势减小,
+            但框心 y 明显下移 → 面积/位移冲突。"""
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.calls = 0
+                self.window_calls = 0
+
+            def call(self, template: Any, images: Any = None, **kwargs: Any) -> Any:
+                from types import SimpleNamespace
+
+                self.calls += 1
+                if getattr(template, "template_id", None) == "track_suspects_scene_side":
+                    data = {
+                        "median_side": "unknown",
+                        "per_target": [{"index": 0, "side": "unknown", "rationale": ""}],
+                    }
+                    return SimpleNamespace(
+                        success=True, parsed_data=data, raw_text=json.dumps(data),
+                        model="mock", provider="mock",
+                    )
+                wi = self.window_calls
+                self.window_calls += 1
+                # 基框序列:总体右移+下移,面积减小,后段 x2 贴边
+                bases = [
+                    [400, 200, 700, 600],
+                    [500, 350, 800, 620],
+                    [600, 500, 900, 700],
+                    [700, 650, 999, 800],
+                    [750, 750, 999, 850],
+                ]
+                base = bases[min(wi, len(bases) - 1)]
+                boxes = [
+                    {
+                        "frame": f,
+                        "bbox": [
+                            base[0] + f * 10,
+                            base[1] + f * 15,
+                            min(base[2] + f * 10, 999),
+                            base[3] + f * 10,
+                        ],
+                    }
+                    for f in range(5)
+                ]
+                data = {"targets": [{"key": "A", "found": True, "boxes": boxes}], "references": []}
+                return SimpleNamespace(
+                    success=True, parsed_data=data,
+                    raw_text=f"```json\n{json.dumps(data)}\n```",
+                    model="mock", provider="mock",
+                )
+
+        engine = ClippedShrinkEngine()
+        monkeypatch.setattr(
+            "traffic_analyzer.toolserver.server._build_default_engine", lambda: engine
+        )
+        resp = _post(client, engine, time_range=[0.0, 4.0])
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["failed"] is False
+        track = body["tracks"][0]
+        assert track["profile"]["clipped_count"] >= 1
+        assert "方向不明" in track["direction_verdict"]
+        assert "面积与位移矛盾" in track["direction_verdict"]
