@@ -229,12 +229,15 @@ def _build_aliyun_payload(
     max_tokens: int,
     temperature: float,
     enable_thinking: Optional[bool] = None,
+    thinking_budget: Optional[int] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """Build Aliyun (OpenAI-compatible) message list and kwargs.
 
     enable_thinking 三态:None=不传(服务端默认);True/False 经 extra_body
     注入 chat_template_kwargs.enable_thinking(vLLM 等 OpenAI 兼容后端的
     非标准字段,OpenAI SDK 未收录,必须走 extra_body 才能落到请求 body)。
+    thinking_budget:思考的独立软预算(qwen3 chat_template_kwargs 支持),
+    防止犹豫循环烧穿 max_tokens;None=不设。
     """
     # Aliyun Qwen-VL supports OpenAI-compatible vision format
     content: List[Dict[str, Any]] = []
@@ -263,10 +266,13 @@ def _build_aliyun_payload(
         "temperature": temperature,
         "messages": messages,
     }
-    if enable_thinking is not None:
-        kwargs["extra_body"] = {
-            "chat_template_kwargs": {"enable_thinking": enable_thinking}
-        }
+    if enable_thinking is not None or thinking_budget is not None:
+        template_kwargs: Dict[str, Any] = {}
+        if enable_thinking is not None:
+            template_kwargs["enable_thinking"] = enable_thinking
+        if thinking_budget is not None:
+            template_kwargs["thinking_budget"] = thinking_budget
+        kwargs["extra_body"] = {"chat_template_kwargs": template_kwargs}
     return messages, kwargs
 
 

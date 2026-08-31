@@ -438,7 +438,7 @@ describe('generate() over mock OpenAI SSE server', () => {
     }
   });
 
-  it('AGENT_ENABLE_THINKING 缺省时 enable_thinking=true(默认开)', async () => {
+  it('AGENT_ENABLE_THINKING 缺省时 enable_thinking=true(默认开)且带默认思考预算', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'llm-thinking-'));
     const envPath = join(dir, '.env');
     writeFileSync(
@@ -451,12 +451,49 @@ describe('generate() over mock OpenAI SSE server', () => {
       ].join('\n'),
     );
     delete process.env.AGENT_ENABLE_THINKING;
+    delete process.env.AGENT_THINKING_BUDGET;
     try {
       const { provider } = createProviderFromEnv(envPath);
       responseChunks = [sseChunk({ content: 'ok' }, 'stop'), USAGE_CHUNK];
       await generate(provider, 'sys', [], [createUserMessage('hi')]);
-      expect(captured[0]?.body['chat_template_kwargs']).toEqual({ enable_thinking: true });
+      expect(captured[0]?.body['chat_template_kwargs']).toEqual({
+        enable_thinking: true,
+        thinking_budget: 4096,
+      });
     } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('AGENT_THINKING_BUDGET 自定义值下发;=0 时不下发预算', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'llm-budget-'));
+    const envPath = join(dir, '.env');
+    writeFileSync(
+      envPath,
+      [
+        'LLM_PROVIDER_0_PROVIDER=vllm',
+        'LLM_PROVIDER_0_API_KEY=EMPTY',
+        'LLM_PROVIDER_0_MODEL=mock-model',
+        `LLM_PROVIDER_0_BASE_URL=${baseUrl}`,
+      ].join('\n'),
+    );
+    process.env.AGENT_THINKING_BUDGET = '2048';
+    try {
+      let { provider } = createProviderFromEnv(envPath);
+      responseChunks = [sseChunk({ content: 'ok' }, 'stop'), USAGE_CHUNK];
+      await generate(provider, 'sys', [], [createUserMessage('hi')]);
+      expect(captured[0]?.body['chat_template_kwargs']).toEqual({
+        enable_thinking: true,
+        thinking_budget: 2048,
+      });
+
+      process.env.AGENT_THINKING_BUDGET = '0';
+      ({ provider } = createProviderFromEnv(envPath));
+      responseChunks = [sseChunk({ content: 'ok' }, 'stop'), USAGE_CHUNK];
+      await generate(provider, 'sys', [], [createUserMessage('hi')]);
+      expect(captured[1]?.body['chat_template_kwargs']).toEqual({ enable_thinking: true });
+    } finally {
+      delete process.env.AGENT_THINKING_BUDGET;
       rmSync(dir, { recursive: true, force: true });
     }
   });

@@ -537,10 +537,17 @@ watch(turnActive, (active) => {
     }
   }
 })
-/** 已进行秒数(超过 15s 才在时间线 loading 行展示)。 */
+/** 已进行秒数(超过 15s 才在时间线 loading 行展示)。
+ * 起点取「最后一条 user 条目」与「ActiveSession 实例创建时刻」的较晚者:
+ * 恢复合并可能把几天前的旧 user 条目排在最后,轮次实际是新发起的,
+ * 秒表从旧条目起算会显示几十万秒的错误值(实测 229907s)。 */
 const turnElapsedSec = computed(() => {
   if (!turnActive.value) return 0
-  const start = lastUserEntryAt(agent.entries) ?? activeSince.value
+  const fromEntry = lastUserEntryAt(agent.entries)
+  const start =
+    fromEntry !== null && activeSince.value !== null
+      ? Math.max(fromEntry, activeSince.value)
+      : (fromEntry ?? activeSince.value)
   if (start === null) return 0
   return Math.max(0, Math.floor((nowTick.value - start) / 1000))
 })

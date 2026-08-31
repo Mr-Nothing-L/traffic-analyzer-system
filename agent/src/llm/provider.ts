@@ -17,6 +17,9 @@ import {
 /** 视为「关闭思考」的 AGENT_ENABLE_THINKING 取值(小写比较)。 */
 const THINKING_OFF_VALUES: ReadonlySet<string> = new Set(['0', 'false', 'no', 'off']);
 
+/** 默认思考 token 预算(qwen3 chat_template_kwargs.thinking_budget)。 */
+const DEFAULT_THINKING_BUDGET = 4096;
+
 /**
  * 读取 AGENT_ENABLE_THINKING(默认 true;0/false/no/off 为关)。
  * qwen3 类 thinking 模型关掉思考后简单问题的 completion 大幅下降,
@@ -26,6 +29,21 @@ export function isThinkingEnabled(env: NodeJS.ProcessEnv = process.env): boolean
   const raw = env.AGENT_ENABLE_THINKING;
   if (raw === undefined) return true;
   return !THINKING_OFF_VALUES.has(raw.trim().toLowerCase());
+}
+
+/**
+ * 读取 AGENT_THINKING_BUDGET(默认 4096;<=0 表示不设预算)。
+ * qwen3 的 thinking_budget 是思考的独立软预算(vLLM chat_template_kwargs
+ * 支持,实测有效):思考到预算即被强制收尾,避免「Let me… Actually…」式
+ * 犹豫循环烧穿与输出共享的 maxTokens(对齐 deepseek-harness 的
+ * thinkingBudgets 分层思路)。
+ */
+export function resolveThinkingBudget(env: NodeJS.ProcessEnv = process.env): number | null {
+  const raw = env.AGENT_THINKING_BUDGET;
+  if (raw === undefined) return DEFAULT_THINKING_BUDGET;
+  const parsed = Number.parseInt(raw.trim(), 10);
+  if (!Number.isFinite(parsed)) return DEFAULT_THINKING_BUDGET;
+  return parsed > 0 ? parsed : null;
 }
 
 /**
@@ -100,9 +118,17 @@ export function createProviderFromEnv(envPath: string = defaultEnvPath()): Provi
     maxTokens,
     generationKwargs: {
       temperature: config.temperature,
-      // qwen3 系走 chat_template_kwargs 显式控制思考开关
-      // (AGENT_ENABLE_THINKING,默认开;vLLM 支持该参数)。
-      chat_template_kwargs: { enable_thinking: isThinkingEnabled() },
+      // qwen3 系走 chat_template_kwargs 显式控制思考开关与思考预算
+      // (AGENT_ENABLE_THINKING 默认开 / AGENT_THINKING_BUDGET 默认 4096,
+      // vLLM 均支持)。预算只在思考开启时下发。
+      chat_template_kwargs: (() => {
+        const enabled = isThinkingEnabled();
+        const budget = enabled ? resolveThinkingBudget() : null;
+        return {
+          enable_thinking: enabled,
+          ...(budget !== null ? { thinking_budget: budget } : {}),
+        };
+      })(),
     },
   });
   return { provider, model: config.model, config };

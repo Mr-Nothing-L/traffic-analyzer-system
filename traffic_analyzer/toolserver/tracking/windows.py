@@ -66,6 +66,9 @@ FAST_SAMPLE_FPS = 10.0
 WINDOW_FRAMES = 5
 STRIDE = 4
 REANCHOR_EVERY = 5          # 每 5 窗强制 re-anchor(第 0 窗本身即初始检测)
+# re-anchor 窗的思考软预算(qwen3 thinking_budget):保留重检测所需推理,
+# 但防止犹豫循环烧穿 max_tokens;传播窗关 thinking,不受影响。
+REANCHOR_THINKING_BUDGET = 1024
 REANCHOR_MISMATCH_IOU = 0.3
 SPAN_MARGIN_S = 2.0         # 锚点前后扩展的上下文秒数
 DEFAULT_SPAN_S = 8.0        # 无 time_range 时锚点之后继续跟踪的时长
@@ -952,8 +955,11 @@ def run_tracking(
                 call_kwargs: Dict[str, Any] = {"template": template, "images": images}
                 if mode == "propagate":
                     # 传播窗是封闭感知任务(接框),关 thinking 换低延迟;
-                    # re-anchor 窗不传,保留服务端默认(qwen3 默认开)。
+                    # re-anchor 窗保留思考但给 1024 软预算,防止犹豫循环
+                    # 烧穿 max_tokens(qwen3 thinking_budget,实测有效)。
                     call_kwargs["enable_thinking"] = False
+                else:
+                    call_kwargs["thinking_budget"] = REANCHOR_THINKING_BUDGET
                 resp = engine.call(**call_kwargs)
                 if getattr(resp, "success", False):
                     response_ok = True

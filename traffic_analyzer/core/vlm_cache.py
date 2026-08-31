@@ -195,6 +195,7 @@ def _compute_cache_key(
     user_prompt: str,
     images: List[Any],
     enable_thinking: Optional[bool] = None,
+    thinking_budget: Optional[int] = None,
 ) -> str:
     """Compute a deterministic cache key for a VLM call.
 

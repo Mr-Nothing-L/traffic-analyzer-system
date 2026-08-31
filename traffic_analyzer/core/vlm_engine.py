@@ -322,6 +322,7 @@ class VLMInferenceEngine:
         context_vars: Optional[Dict[str, Any]] = None,
         response_schema: Optional[Dict[str, Any]] = None,
         enable_thinking: Optional[bool] = None,
+        thinking_budget: Optional[int] = None,
     ) -> LLMResponse:
         """Execute a single VLM call.
 
@@ -344,7 +345,8 @@ class VLMInferenceEngine:
         cache_key = ""
         if self._cache_enabled:
             cache_key = _compute_cache_key(
-                system_prompt, user_prompt, images, enable_thinking=enable_thinking
+                system_prompt, user_prompt, images, enable_thinking=enable_thinking,
+                    thinking_budget=thinking_budget,
             )
             # Resolve the provider that would serve this call (under lock) so a
             # response cached before a failover is not returned for the new one.
@@ -407,6 +409,7 @@ class VLMInferenceEngine:
                 user_prompt=user_prompt,
                 images=images,
                 enable_thinking=enable_thinking,
+                thinking_budget=thinking_budget,
             )
             parsed_data = _extract_json_from_text(raw_text)
             if response_schema:
@@ -522,6 +525,7 @@ class VLMInferenceEngine:
         images: List[Any],
         provider_index: Optional[int] = None,
         enable_thinking: Optional[bool] = None,
+        thinking_budget: Optional[int] = None,
     ) -> Tuple[str, int, int, int]:
         """Execute a single provider-specific API call (no retry).
 
@@ -579,6 +583,7 @@ class VLMInferenceEngine:
                     config.max_tokens,
                     config.temperature,
                     enable_thinking=enable_thinking,
+                    thinking_budget=thinking_budget,
                 )
                 return _call_aliyun(client, kwargs)
             else:
@@ -601,6 +606,7 @@ class VLMInferenceEngine:
         user_prompt: str,
         images: List[Any],
         enable_thinking: Optional[bool] = None,
+        thinking_budget: Optional[int] = None,
     ) -> Tuple[str, int, int, int, int, int]:
         """Execute the API call with per-provider retry and provider failover.
 
@@ -635,6 +641,7 @@ class VLMInferenceEngine:
                         images,
                         provider_index=provider_idx,
                         enable_thinking=enable_thinking,
+                        thinking_budget=thinking_budget,
                     )
                     # Sticky failover: subsequent calls start from the provider
                     # that served this request.
