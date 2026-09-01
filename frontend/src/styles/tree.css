@@ -116,7 +116,15 @@
   white-space: nowrap;
 }
 
-.video-sub { font-size: 12px; color: var(--color-text2); font-variant-numeric: tabular-nums; }
+.video-sub {
+  font-size: 12px;
+  color: var(--color-text2);
+  font-variant-numeric: tabular-nums;
+  /* 窄栏不折行("12 MB"不在空格处断成两行),随文件名一起截断 */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 /* ---------- 状态徽标 ---------- */
 .badge {
@@ -129,6 +137,7 @@
   padding: 2px 7px;
   border-radius: 999px;
   letter-spacing: 0.02em;
+  white-space: nowrap; /* 窄栏徽标文字不折行 */
   transition:
     background-color var(--dur-med) var(--ease-out),
     color var(--dur-med) var(--ease-out);

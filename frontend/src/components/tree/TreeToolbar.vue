@@ -225,6 +225,8 @@ async function runDeleteReports(rels: string[]) {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap; /* 窄栏时整组换行,标题/勾选组各自保持完整 */
+  row-gap: 4px;
   padding: 12px 14px 8px;
 }
 
@@ -232,6 +234,9 @@ async function runDeleteReports(rels: string[]) {
   display: flex;
   align-items: center;
   gap: 10px;
+  flex: 0 0 auto; /* 中文 min-content 仅一字宽,不锁死会被逐字挤成竖排 */
+  white-space: nowrap;
+  margin-left: auto; /* 换行后勾选组仍靠右 */
 }
 
 .side-check-label {
@@ -244,10 +249,13 @@ async function runDeleteReports(rels: string[]) {
   font-weight: 650;
   color: var(--color-text2);
   letter-spacing: 0.06em;
+  flex: 0 0 auto; /* 窄栏不逐字换行,整体换到上一行 */
+  white-space: nowrap;
 }
 
 .side-filter {
   display: flex;
+  flex-wrap: wrap; /* 窄栏时按钮/下拉整项换行,不互相挤压 */
   gap: 6px;
   padding: 0 14px 10px;
   margin-bottom: 8px;
