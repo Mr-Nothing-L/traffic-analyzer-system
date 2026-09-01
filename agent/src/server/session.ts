@@ -19,6 +19,7 @@ import type { Message } from '../llm/kosong';
 
 import type { PermissionMode } from '../permissions/types';
 
+import { gcMediaAfterSessionDelete } from './mediaGc';
 import { repairTailMessages } from './repair';
 import { SessionStorage, type StoredSession, type TimelineEntry } from './storage';
 import { readWorkspaceRegistry } from './workspaceRegistry';
@@ -30,6 +31,8 @@ export interface Session {
   mode: PermissionMode;
   /** 会话标题(首轮用户输入前 30 字,未产生用户输入时为 '')。 */
   title: string;
+  /** 用户自定义标题标记:true 时首条 user 条目不再自动覆盖/清空标题。 */
+  titleCustom: boolean;
   readonly messages: Message[];
   readonly entries: TimelineEntry[];
   readonly createdAt: number;
@@ -104,6 +107,7 @@ export class SessionManager {
       workspaceDir: input.workspaceDir,
       mode: input.mode,
       title: '',
+      titleCustom: false,
       messages: [],
       entries: [],
       createdAt: now,
@@ -238,11 +242,11 @@ export class SessionManager {
     session.entries.push(...entries);
     const storage = this.storages.get(session.workspaceDir);
     const seqs = storage?.appendEntries(id, entries) ?? [];
-    if (session.title === '') {
+    if (session.title === '' && !session.titleCustom) {
       const firstUser = entries.find((e) => e.kind === 'user');
       if (firstUser !== undefined && firstUser.kind === 'user') {
         session.title = firstUser.text.slice(0, TITLE_MAX_CHARS);
-        storage?.updateTitle(id, session.title);
+        storage?.updateTitle(id, session.title, false);
       }
     }
     this.bumpLastActive(session, storage);
@@ -310,32 +314,76 @@ export class SessionManager {
     const storage = this.storages.get(session.workspaceDir);
     storage?.truncateEntries(id, entryIndex);
     storage?.truncateMessages(id, keepMessages);
-    if (entryIndex === 0 && session.title !== '') {
+    if (entryIndex === 0 && !session.titleCustom && session.title !== '') {
       // 标题取自首个 user 条目;它被一并撤回时清空标题(下轮首个 user 条目重算)。
+      // 用户自定义标题(titleCustom)不随撤回清空。
       session.title = '';
-      storage?.updateTitle(id, '');
+      storage?.updateTitle(id, '', false);
     }
     this.bumpLastActive(session, storage);
     return 'ok';
   }
 
-  /** 删除会话:内存 + 磁盘三张表一起清。未知 session 返回 false。 */
+  /**
+   * 设置自定义标题:非空 → titleCustom=true(自动派生不再覆盖);空串 →
+   * 清除自定义标记并清空标题(下轮首个 user 条目重新自动派生)。
+   * 未知 session 返回 false。
+   */
+  setTitle(id: string, rawTitle: string): boolean {
+    const session = this.sessions.get(id);
+    if (session === undefined) return false;
+    const title = rawTitle.trim().slice(0, TITLE_MAX_CHARS);
+    session.title = title;
+    session.titleCustom = title !== '';
+    this.storages.get(session.workspaceDir)?.updateTitle(id, session.title, session.titleCustom);
+    return true;
+  }
+
+  /** 删除会话:内存 + 磁盘三张表一起清,随后做引用计数式媒体 GC(见
+   * mediaGc.ts;GC 失败只记日志,不影响删除结果)。未知 session 返回 false。 */
   delete(id: string): boolean {
     const session = this.sessions.get(id);
     this.sessions.delete(id);
     if (session !== undefined) {
-      this.storages.get(session.workspaceDir)?.deleteSession(id);
+      const storage = this.storages.get(session.workspaceDir);
+      if (storage !== undefined) this.deleteFromStorage(session.workspaceDir, storage, id);
       this.onExpire?.(session);
       return true;
     }
     // 内存未命中(例如已被清扫),仍尝试从各 storage 删盘。
-    for (const storage of this.storages.values()) {
+    for (const [workspaceDir, storage] of this.storages) {
       if (storage.getSession(id) !== undefined) {
-        storage.deleteSession(id);
+        this.deleteFromStorage(workspaceDir, storage, id);
         return true;
       }
     }
     return false;
+  }
+
+  /** 删库 + 媒体 GC:先采集被删会话的 media 引用集,再删三张表,最后 GC
+   * (此时全库扫描已不含被删会话)。任一步 GC 相关失败都只记日志跳过,
+   * 不阻断删除主流程。 */
+  private deleteFromStorage(workspaceDir: string, storage: SessionStorage, id: string): void {
+    let deletedRefs: Set<string> | undefined;
+    try {
+      deletedRefs = storage.collectMediaNames(id);
+    } catch (error) {
+      console.warn(`[media-gc] session ${id}: 引用采集失败,跳过媒体 GC:`, error);
+    }
+    storage.deleteSession(id);
+    if (deletedRefs === undefined) return;
+    try {
+      const result = gcMediaAfterSessionDelete(workspaceDir, storage, deletedRefs);
+      if (result.deleted > 0 || result.failed > 0 || result.orphaned > 0) {
+        console.warn(
+          `[media-gc] session ${id}: 清理 ${result.deleted} 个媒体文件` +
+            (result.failed > 0 ? `,${result.failed} 个删除失败已跳过` : '') +
+            (result.orphaned > 0 ? `,${result.orphaned} 个无引用文件未动` : ''),
+        );
+      }
+    } catch (error) {
+      console.warn(`[media-gc] session ${id}: 媒体 GC 失败(会话已删除):`, error);
+    }
   }
 
   /** 清扫超过 idleMs 未活跃的会话(只清内存不删盘),返回被清扫的数量。 */
@@ -383,6 +431,7 @@ export class SessionManager {
       workspaceDir: row.workspaceDir,
       mode: row.mode,
       title: row.title,
+      titleCustom: row.titleCustom,
       messages: [...repaired],
       entries: storage.loadEntries(row.id),
       createdAt: row.createdAt,

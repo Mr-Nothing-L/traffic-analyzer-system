@@ -5,7 +5,7 @@
  * Ported from MoonshotAI/kimi-code (MIT)
  * packages/agent-core-v2/src/agent/permissionPolicy/types.ts, minus DI.
  */
-import type { RunnableToolExecution } from '../tools/contract';
+import type { RunnableToolExecution, ToolAccesses } from '../tools/contract';
 
 export type PermissionMode = 'yolo' | 'manual' | 'auto';
 
@@ -15,6 +15,10 @@ export interface ApprovalRequest {
   /** Human/rule-readable description of the action, e.g. `write_file(/abs/path)`. */
   action: string;
   description?: string;
+  /** 本次执行声明的资源访问(由 gate 从 execution 填充)。 */
+  accesses?: ToolAccesses;
+  /** 工具调用原始参数(JSON 字符串),供审批桥构造内容预览。 */
+  arguments?: string | null;
 }
 
 export interface ApprovalResponse {

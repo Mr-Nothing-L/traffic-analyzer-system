@@ -45,7 +45,9 @@
  *                                       以磁盘为准,会话内容按需懒恢复;幂等,
  *                                       workspaceDir 非已存在目录 → 400,
  *                                       sessions.db 不存在 → restored:0)
- *   DELETE /sessions/{id}          → {status:'ok'}(同时取消挂起审批、删盘)
+ *   DELETE /sessions/{id}          → {status:'ok'}(同时取消挂起审批、删盘,
+ *                                      并 GC 不再被任何会话引用的 media 文件,
+ *                                      见 mediaGc.ts;GC 失败只记日志不阻断)
  *   POST   /chat                   → SSE 流(text/event-stream,每事件一行 'data: {json}\n\n')
  *   POST   /approval               → 审批回执(见 approvalBridge.ts)
  *
@@ -83,13 +85,13 @@ import { fileURLToPath } from 'node:url';
 
 import type { ContentPart, Message, ChatProvider } from '../llm/kosong';
 
-import { createProviderFromEnv } from '../llm/provider';
+import { createProviderFromEnv, resolveFramesThinkingEffort } from '../llm/provider';
 import { runAgentLoop, type AgentLoopEvent } from '../loop/agentLoop';
 import { createCompactionConfig } from '../loop/compaction';
 import { compactMessagesWithSummary } from '../loop/summarize';
 import { CallbackApprovalService } from '../permissions/approval';
 import { PermissionGate } from '../permissions/gate';
-import type { PermissionMode, PermissionPolicyContext } from '../permissions/types';
+import type { PermissionMode } from '../permissions/types';
 import {
   createSubagentListTool,
   createSubagentReportTool,
@@ -98,9 +100,12 @@ import {
   renderSystemPrompt,
   ToolserverClient,
 } from '../tools/builtin';
-import { createSpawnSubagentTool, createSubagentRunRegistry } from '../tools/builtin/spawnSubagent';
+import {
+  SubagentSemaphore,
+  createSpawnSubagentTool,
+  createSubagentRunRegistry,
+} from '../tools/builtin/spawnSubagent';
 import type { DetectionPayload } from '../tools/builtin/submitDetection';
-import type { ToolAccesses } from '../tools/contract';
 import { ToolRegistry } from '../tools/registry';
 
 import { ApprovalBridge, type ApprovalDecisionInput, type PreviewContent } from './approvalBridge';
@@ -156,7 +161,7 @@ interface QueuedSteer {
 
 interface SessionRuntime {
   readonly registry: ToolRegistry;
-  readonly gate: ExecutionSnapshotGate;
+  readonly gate: PermissionGate;
   readonly bridge: ApprovalBridge;
   /** 同 session 的 /chat 串行锁:true 时有进行中的轮次。 */
   busy: boolean;
@@ -177,34 +182,6 @@ export function defaultSystemPrompt(promptsDir?: string): string {
   const dir = promptsDir ?? fileURLToPath(new URL('../../prompts', import.meta.url));
   const template = readFileSync(`${dir}/chat_system.md`, 'utf8');
   return renderSystemPrompt(template);
-}
-
-/**
- * 快照每次裁决的执行元数据:ApprovalRequest 只带 action/description,
- * SSE 的 approval_request 事件还需要 accesses,这里按 toolCallId 暂存。
- * 快照 Map 由调用方持有,以便 approvalService 闭包在 gate 构造前引用。
- */
-class ExecutionSnapshotGate extends PermissionGate {
-  constructor(
-    options: ConstructorParameters<typeof PermissionGate>[0],
-    private readonly snapshots: Map<string, { accesses: ToolAccesses; arguments: string | null }>,
-  ) {
-    super(options);
-  }
-
-  override async authorize(
-    context: Omit<PermissionPolicyContext, 'mode'>,
-  ): ReturnType<PermissionGate['authorize']> {
-    this.snapshots.set(context.toolCall.id, {
-      accesses: context.execution.accesses ?? [],
-      arguments: context.toolCall.arguments,
-    });
-    try {
-      return await super.authorize(context);
-    } finally {
-      this.snapshots.delete(context.toolCall.id);
-    }
-  }
 }
 
 /** POST /chat 单轮图片附件上限。 */
@@ -380,6 +357,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
     });
 
   const runtimes = new Map<string, SessionRuntime>();
+  const subagentSemaphore = new SubagentSemaphore();
   const sessions = new SessionManager({
     ...(options.sessionIdleMs !== undefined ? { idleMs: options.sessionIdleMs } : {}),
     ...(options.sweepIntervalMs !== undefined
@@ -411,20 +389,14 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
         ? { timeoutMs: options.approvalTimeoutMs }
         : {},
     );
-    const snapshots = new Map<string, { accesses: ToolAccesses; arguments: string | null }>();
-    const gate = new ExecutionSnapshotGate(
-      {
-        mode: session.mode,
-        approvalService: new CallbackApprovalService((request) => {
-          const snapshot = snapshots.get(request.toolCallId);
-          return bridge.requestApproval(request, {
-            accesses: snapshot?.accesses ?? [],
-            preview: buildPreview(request.toolName, snapshot?.arguments, request.action),
-          });
+    const gate = new PermissionGate({
+      mode: session.mode,
+      approvalService: new CallbackApprovalService((request) =>
+        bridge.requestApproval(request, {
+          preview: buildPreview(request.toolName, request.arguments, request.action),
         }),
-      },
-      snapshots,
-    );
+      ),
+    });
     const registry = toolsFactory(session);
     // spawn_subagent / subagent_list / subagent_report 在 server 组装处闭包注入
     // (provider/gate/systemPrompt 与共享 SubagentRunRegistry);自定义 toolsFactory
@@ -441,6 +413,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
           contextTokens,
           toolserverClient: new ToolserverClient({}),
           registry: subagentRegistry,
+          semaphore: subagentSemaphore,
         }),
       );
       registry.register(
@@ -661,6 +634,19 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
     sendJson(res, 200, { status: 'ok' });
   };
 
+  /** 自定义会话标题(空串 = 恢复自动派生);未知 session → 404。 */
+  const handleSetTitle = (res: ServerResponse, sessionId: string, body: unknown): void => {
+    if (!isRecord(body) || typeof body.title !== 'string') {
+      sendError(res, 400, 'invalid_request', 'title is required and must be a string');
+      return;
+    }
+    if (!sessions.setTitle(sessionId, body.title)) {
+      sendError(res, 404, 'session_not_found', `unknown session: ${sessionId}`);
+      return;
+    }
+    sendJson(res, 200, { status: 'ok', title: sessions.get(sessionId)?.title ?? '' });
+  };
+
   /** 切换权限模式:更新 gate(下一轮生效)并持久化到 sessions 表。 */
   const handleSetMode = (res: ServerResponse, sessionId: string, body: unknown): void => {
     if (
@@ -843,11 +829,20 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
 
     let assistantText = '';
     let assistantThink = '';
+    /** 当前步 generate 的壁钟耗时(generate_done 事件暂存),随 assistant 条目落盘。 */
+    let pendingGenerateMs: number | undefined;
     const flushAssistant = (): void => {
       if (assistantText === '' && assistantThink === '') return;
-      persister.pushEntry({ kind: 'assistant', text: assistantText, think: assistantThink, at: Date.now() });
+      persister.pushEntry({
+        kind: 'assistant',
+        text: assistantText,
+        think: assistantThink,
+        ...(pendingGenerateMs !== undefined ? { generateMs: pendingGenerateMs } : {}),
+        at: Date.now(),
+      });
       assistantText = '';
       assistantThink = '';
+      pendingGenerateMs = undefined;
     };
     /** tool_call_start 暂存,tool_result 到达时配对成一条 tool 条目。 */
     const pendingCalls = new Map<string, { name: string; arguments: string | null }>();
@@ -941,6 +936,8 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
           return item.message;
         },
         compaction: { maxContextTokens: contextTokens },
+        // 抽帧(多图)后的 generate 步降思考档位,防逐帧分析烧穿 maxTokens。
+        framesThinkingEffort: resolveFramesThinkingEffort(),
         onStepPersist: (update) => {
           // loop 按消息确定点即时回灌(steer user / assistant / tool 增量,
           // 或压缩后的整体折叠),TurnPersister 统一决定 append 还是重写
@@ -1004,6 +1001,11 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
             case 'step_done':
               flushAssistant();
               persister.flushEntries();
+              break;
+            case 'generate_done':
+              // 暂存本步 generate 耗时,随本条 assistant 条目落盘(flushAssistant);
+              // 事件本身经末尾 emit 透传 SSE,供前端实时展示。
+              pendingGenerateMs = event.generateMs;
               break;
             case 'done': {
               dropUnconsumedSteers();
@@ -1078,6 +1080,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
     handleGetMedia,
     handleCompact,
     handleRecall,
+    handleSetTitle,
     handleSetMode,
     handleCancel,
     handleSteer,

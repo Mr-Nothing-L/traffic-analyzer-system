@@ -207,8 +207,8 @@ export { createWebFetchTool } from './webTools';
 export { createSubmitDetectionTool, crossValidateDetection, loadSubmitDetectionSchema } from './submitDetection';
 export { loadEventContract, renderSystemPrompt } from './eventContract';
 export {
+  SubagentSemaphore,
   createSpawnSubagentTool,
-  MAX_CONCURRENT_SUBAGENTS,
   SPAWN_SUBAGENT_TOOL_NAME,
   SUBAGENT_MAX_STEPS,
   SUBAGENT_TIMEOUT_MS,

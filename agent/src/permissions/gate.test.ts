@@ -166,6 +166,23 @@ describe('PermissionGate', () => {
     });
   });
 
+  it('ApprovalRequest 携带 execution 元数据(accesses/arguments)供审批桥使用', async () => {
+    const handler = vi.fn(autoApprove);
+    const { gate } = gateWith('manual', handler);
+    const exec = execution(accesses.writeFile('/out/f.txt'), 'write_file(/out/f.txt)');
+
+    await gate.authorize(context(exec, 'write_file'));
+
+    const request = handler.mock.calls[0]?.[0];
+    expect(request).toMatchObject({
+      toolCallId: 'call-1',
+      toolName: 'write_file',
+      action: 'write_file(/out/f.txt)',
+      accesses: accesses.writeFile('/out/f.txt'),
+      arguments: '{}',
+    });
+  });
+
   it('manual mode denies on rejection and carries feedback', async () => {
     const handler = vi.fn(() =>
       Promise.resolve<ApprovalResponse>({ decision: 'rejected', feedback: 'do not touch that' }),

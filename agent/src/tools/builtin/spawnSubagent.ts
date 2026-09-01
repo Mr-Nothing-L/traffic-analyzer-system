@@ -7,7 +7,8 @@
  * - 子 loop:同 provider / model / systemPrompt;工具集 = 父 registry 去掉
  *   spawn_subagent(禁递归);maxStepsPerTurn = 12;gate 复用父级(权限裁决
  *   语义一致,manual 模式下子代理的审批同样冒泡到父级审批桥)。
- * - 并发:模块级信号量,最多 4 个子代理并行,第 5 个起排队等待。
+ * - 并发:进程级 SubagentSemaphore(server 组装处注入,默认 4 并行,
+ *   AGENT_MAX_CONCURRENT_SUBAGENTS 可调),超出的排队等待。
  * - 事件:子 loop 事件经 ctx.onSubagentEvent 逐个转发给父 loop(过滤
  *   context_usage / compaction,父级自己的上下文统计不被污染)。
  * - 视频:video_path 经沙盒校验后在 execute 时读文件转成 video_url
@@ -28,6 +29,7 @@ import {
   type Message,
   type ChatProvider,
 } from '../../llm/kosong';
+import { resolveFramesThinkingEffort } from '../../llm/provider';
 import { runAgentLoop, type AgentLoopDoneReason, type AgentLoopResult } from '../../loop/agentLoop';
 import type { PermissionGate } from '../../permissions/gate';
 import type { WorkspaceConfig } from '../../sandbox/path-access';
@@ -49,39 +51,54 @@ export const SPAWN_SUBAGENT_TOOL_NAME = 'spawn_subagent';
 export const SUBAGENT_TIMEOUT_MS = 600_000;
 /** 子代理单 turn 步数上限。 */
 export const SUBAGENT_MAX_STEPS = 12;
-/** 全局(进程级)子代理并发上限。 */
-export const MAX_CONCURRENT_SUBAGENTS = 4;
+/** 缺省全局(进程级)子代理并发上限。 */
+export const DEFAULT_MAX_CONCURRENT_SUBAGENTS = 4;
 
-// ---------------------------------------------------------------------------
-// 模块级并发信号量:最多 MAX_CONCURRENT_SUBAGENTS 个子代理并行,其余排队
-// ---------------------------------------------------------------------------
-
-let activeSubagents = 0;
-const waiters: Array<() => void> = [];
-
-function acquireSubagentSlot(signal: AbortSignal): Promise<void> {
-  if (activeSubagents < MAX_CONCURRENT_SUBAGENTS) {
-    activeSubagents += 1;
-    return Promise.resolve();
-  }
-  return new Promise<void>((resolve, reject) => {
-    const grant = (): void => {
-      activeSubagents += 1;
-      resolve();
-    };
-    const onAbort = (): void => {
-      const index = waiters.indexOf(grant);
-      if (index >= 0) waiters.splice(index, 1);
-      reject(new Error('spawn_subagent cancelled while waiting for a concurrency slot'));
-    };
-    waiters.push(grant);
-    signal.addEventListener('abort', onAbort, { once: true });
-  });
+/** 解析进程级子代理并发上限:AGENT_MAX_CONCURRENT_SUBAGENTS > 0,否则缺省 4。 */
+function resolveMaxConcurrentSubagents(): number {
+  const raw = process.env.AGENT_MAX_CONCURRENT_SUBAGENTS;
+  if (raw === undefined) return DEFAULT_MAX_CONCURRENT_SUBAGENTS;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_MAX_CONCURRENT_SUBAGENTS;
 }
 
-function releaseSubagentSlot(): void {
-  activeSubagents -= 1;
-  waiters.shift()?.();
+// ---------------------------------------------------------------------------
+// 子代理并发信号量:进程级上限,其余排队(原 acquire/release 逻辑逐字保留)
+// ---------------------------------------------------------------------------
+
+export class SubagentSemaphore {
+  private active = 0;
+  private readonly waiters: Array<() => void> = [];
+  readonly maxConcurrent: number;
+
+  constructor(maxConcurrent?: number) {
+    this.maxConcurrent = maxConcurrent ?? resolveMaxConcurrentSubagents();
+  }
+
+  acquire(signal: AbortSignal): Promise<void> {
+    if (this.active < this.maxConcurrent) {
+      this.active += 1;
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve, reject) => {
+      const grant = (): void => {
+        this.active += 1;
+        resolve();
+      };
+      const onAbort = (): void => {
+        const index = this.waiters.indexOf(grant);
+        if (index >= 0) this.waiters.splice(index, 1);
+        reject(new Error('spawn_subagent cancelled while waiting for a concurrency slot'));
+      };
+      this.waiters.push(grant);
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+  }
+
+  release(): void {
+    this.active -= 1;
+    this.waiters.shift()?.();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -202,6 +219,8 @@ export interface SpawnSubagentDeps {
   readonly maxSteps?: number;
   /** 可选子代理运行注册表;提供时 spawn_subagent 执行会登记运行记录。 */
   readonly registry?: SubagentRunRegistry;
+  /** 子代理并发信号量;缺省新建一个(进程级单例应由调用方注入)。 */
+  readonly semaphore?: SubagentSemaphore;
 }
 
 const inputSchema = z.strictObject({
@@ -413,6 +432,7 @@ async function runSubagent(
       gate: deps.gate,
       messages,
       maxStepsPerTurn: deps.maxSteps ?? SUBAGENT_MAX_STEPS,
+      framesThinkingEffort: resolveFramesThinkingEffort(),
       ...(deps.contextTokens !== undefined
         ? { compaction: { maxContextTokens: deps.contextTokens } }
         : {}),
@@ -433,12 +453,13 @@ async function runSubagent(
 }
 
 export function createSpawnSubagentTool(deps: SpawnSubagentDeps): ExecutableTool {
+  const semaphore = deps.semaphore ?? new SubagentSemaphore();
   return {
     name: SPAWN_SUBAGENT_TOOL_NAME,
     description:
       '派生一个子代理执行需要完整载入视频上下文的重度分析任务,等待并返回其最终结论。' +
       '子代理拥有与本代理相同的工具(但不能再次派生子代理),步数上限 12,' +
-      '最多 4 个子代理并行,超出的排队。适用:整段视频的独立深度研判;' +
+      `最多 ${semaphore.maxConcurrent} 个子代理并行,超出的排队。适用:整段视频的独立深度研判;` +
       '不适用:只需抽几帧即可回答的轻量问题(直接用 video 工具更快)。',
     parameters: {
       type: 'object',
@@ -477,11 +498,11 @@ export function createSpawnSubagentTool(deps: SpawnSubagentDeps): ExecutableTool
         approvalRule: `spawn_subagent(${normalizeApprovalRuleTask(input.task)})`,
         timeoutMs: SUBAGENT_TIMEOUT_MS,
         execute: async (ctx: ExecutableToolContext): Promise<ExecutableToolResult> => {
-          await acquireSubagentSlot(ctx.signal);
+          await semaphore.acquire(ctx.signal);
           try {
             return await runSubagent(deps, input.task, videoPath, ctx);
           } finally {
-            releaseSubagentSlot();
+            semaphore.release();
           }
         },
       };

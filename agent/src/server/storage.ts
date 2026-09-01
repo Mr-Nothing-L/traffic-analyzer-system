@@ -24,6 +24,7 @@ import type { PermissionMode } from '../permissions/types';
 import type { DetectionPayload } from '../tools/builtin/submitDetection';
 import type { ExecutableToolOutput, ToolAccesses } from '../tools/contract';
 import type { PreviewContent } from './approvalBridge';
+import { extractMediaNames } from './mediaStore';
 
 /** 时间线条目:/chat 的 SSE 流累积而成,GET /sessions/{id}/history 原样返回。 */
 export type TimelineEntry =
@@ -50,6 +51,8 @@ export type TimelineEntry =
       text: string;
       /** 一轮内聚合的思考内容(无则 '')。 */
       think: string;
+      /** 该条对应 generate 步的 LLM 调用壁钟耗时(ms;旧数据无此字段)。 */
+      generateMs?: number;
       at: number;
     }
   | {
@@ -101,6 +104,8 @@ export interface StoredSession {
   readonly workspaceDir: string;
   readonly mode: PermissionMode;
   readonly title: string;
+  /** 用户自定义标题标记:true 时首条 user 消息不再自动覆盖标题。 */
+  readonly titleCustom: boolean;
   readonly createdAt: number;
   readonly lastActiveAt: number;
 }
@@ -111,6 +116,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   workspace_dir TEXT NOT NULL,
   mode TEXT NOT NULL,
   title TEXT NOT NULL DEFAULT '',
+  title_custom INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL,
   last_active_at INTEGER NOT NULL
 );
@@ -130,7 +136,7 @@ CREATE TABLE IF NOT EXISTS messages (
 `;
 
 /** 当前 schema 版本:建库时写入 PRAGMA user_version,打开已有库时校验/迁移。 */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 /**
  * 迁移兼容(仅读取路径):payload 通道落地前,旧版本在 note 不是合法 JSON 时
@@ -161,14 +167,20 @@ export class SessionStorage {
     const version = Number(versionRow?.user_version ?? 0);
     if (version === 0) {
       // 新库:建表并标记版本。例外:更老版本创建的库可能已有表但从未写过
-      // user_version——SCHEMA 的 IF NOT EXISTS 不会给已有 messages 表补列,
-      // 按 v1 语义补 shadowed。
+      // user_version——SCHEMA 的 IF NOT EXISTS 不会给已有表补列,
+      // 按 v1/v2 语义分别补 shadowed 与 title_custom。
       this.db.exec(SCHEMA);
       const hasShadowed = this.db
         .prepare("SELECT 1 AS found FROM pragma_table_info('messages') WHERE name = 'shadowed'")
         .get();
       if (hasShadowed === undefined) {
         this.db.exec('ALTER TABLE messages ADD COLUMN shadowed INTEGER NOT NULL DEFAULT 0');
+      }
+      const hasTitleCustom = this.db
+        .prepare("SELECT 1 AS found FROM pragma_table_info('sessions') WHERE name = 'title_custom'")
+        .get();
+      if (hasTitleCustom === undefined) {
+        this.db.exec('ALTER TABLE sessions ADD COLUMN title_custom INTEGER NOT NULL DEFAULT 0');
       }
       this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     } else if (version < SCHEMA_VERSION) {
@@ -189,19 +201,25 @@ export class SessionStorage {
       // 已有行默认 0(全部活跃),语义与旧库一致。
       this.db.exec('ALTER TABLE messages ADD COLUMN shadowed INTEGER NOT NULL DEFAULT 0');
     }
+    if (from < 3) {
+      // v2 → v3:sessions 表加 title_custom 列(用户自定义标题标记);
+      // 已有行默认 0(自动派生标题),语义与旧库一致。
+      this.db.exec('ALTER TABLE sessions ADD COLUMN title_custom INTEGER NOT NULL DEFAULT 0');
+    }
     this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
   }
 
   insertSession(session: StoredSession): void {
     this.db
       .prepare(
-        'INSERT INTO sessions (id, workspace_dir, mode, title, created_at, last_active_at) VALUES (?, ?, ?, ?, ?, ?)',
+        'INSERT INTO sessions (id, workspace_dir, mode, title, title_custom, created_at, last_active_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
       )
       .run(
         session.id,
         session.workspaceDir,
         session.mode,
         session.title,
+        session.titleCustom ? 1 : 0,
         session.createdAt,
         session.lastActiveAt,
       );
@@ -219,8 +237,10 @@ export class SessionStorage {
       .map(rowToSession);
   }
 
-  updateTitle(id: string, title: string): void {
-    this.db.prepare('UPDATE sessions SET title = ? WHERE id = ?').run(title, id);
+  updateTitle(id: string, title: string, custom: boolean): void {
+    this.db
+      .prepare('UPDATE sessions SET title = ?, title_custom = ? WHERE id = ?')
+      .run(title, custom ? 1 : 0, id);
   }
 
   updateMode(id: string, mode: PermissionMode): void {
@@ -343,6 +363,34 @@ export class SessionStorage {
     this.db.prepare('DELETE FROM sessions WHERE id = ?').run(id);
   }
 
+  /**
+   * 提取 entries/messages 里引用的 media 文件名集合(删除会话的媒体 GC 用,
+   * 见 mediaGc.ts):直接在原始 JSON 文本上按文件名白名单扫描,不做
+   * JSON.parse(messages 可能含几十 MB 视频 dataURL)。sessionId 缺省时扫描
+   * 全部会话(messages 含 shadowed 遮蔽行:保守保留仍被历史引用的文件)。
+   */
+  collectMediaNames(sessionId?: string): Set<string> {
+    const names = new Set<string>();
+    const scan = (rows: Record<string, unknown>[], column: string): void => {
+      for (const row of rows) {
+        for (const name of extractMediaNames(String(row[column]))) names.add(name);
+      }
+    };
+    scan(
+      sessionId === undefined
+        ? this.db.prepare('SELECT entry_json FROM entries').all()
+        : this.db.prepare('SELECT entry_json FROM entries WHERE session_id = ?').all(sessionId),
+      'entry_json',
+    );
+    scan(
+      sessionId === undefined
+        ? this.db.prepare('SELECT message_json FROM messages').all()
+        : this.db.prepare('SELECT message_json FROM messages WHERE session_id = ?').all(sessionId),
+      'message_json',
+    );
+    return names;
+  }
+
   close(): void {
     this.db.close();
   }
@@ -354,6 +402,7 @@ function rowToSession(row: Record<string, unknown>): StoredSession {
     workspaceDir: String(row.workspace_dir),
     mode: row.mode === 'yolo' || row.mode === 'auto' ? row.mode : 'manual',
     title: String(row.title),
+    titleCustom: Number(row.title_custom ?? 0) === 1,
     createdAt: Number(row.created_at),
     lastActiveAt: Number(row.last_active_at),
   };

@@ -55,6 +55,7 @@ export interface RequestContext {
   readonly handleGetMedia: (res: ServerResponse, sessionId: string, name: string) => void;
   readonly handleCompact: (res: ServerResponse, sessionId: string) => Promise<void>;
   readonly handleRecall: (res: ServerResponse, sessionId: string, body: unknown) => void;
+  readonly handleSetTitle: (res: ServerResponse, sessionId: string, body: unknown) => void;
   readonly handleSetMode: (res: ServerResponse, sessionId: string, body: unknown) => void;
   readonly handleCancel: (res: ServerResponse, sessionId: string) => void;
   readonly handleSteer: (res: ServerResponse, sessionId: string, body: unknown) => void;
@@ -138,6 +139,12 @@ const routes: Route[] = [
     pattern: /^\/sessions\/([^/]+)\/recall$/,
     needsBody: true,
     handler: (ctx, res, params, _url, body) => ctx.handleRecall(res, params[0]!, body),
+  },
+  {
+    method: 'POST',
+    pattern: /^\/sessions\/([^/]+)\/title$/,
+    needsBody: true,
+    handler: (ctx, res, params, _url, body) => ctx.handleSetTitle(res, params[0]!, body),
   },
   {
     method: 'POST',

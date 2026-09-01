@@ -330,16 +330,19 @@ describe('agent server', () => {
 
     const types = events.map((e) => e.type);
     expect(types).toEqual([
+      'generate_done',
       'tool_call_start',
       'tool_result',
       'step_done',
       'text_delta',
+      'generate_done',
       'step_done',
       'done',
     ]);
-    expect(events[1]).toMatchObject({ toolCallId: 'c1', name: 'echo', isError: false });
-    expect(events[3]).toMatchObject({ text: '最终回答' });
-    expect(events[5]).toMatchObject({ reason: 'completed' });
+    expect(events[0]).toMatchObject({ type: 'generate_done', step: 1 });
+    expect(events[2]).toMatchObject({ toolCallId: 'c1', name: 'echo', isError: false });
+    expect(events[4]).toMatchObject({ text: '最终回答' });
+    expect(events[7]).toMatchObject({ reason: 'completed' });
 
     // 用户消息带 videoPath 说明,工具结果已回灌进第二轮历史。
     const firstHistory = provider.histories[0] ?? [];
@@ -422,7 +425,7 @@ describe('agent server', () => {
       toolName: 'write_file',
       approvalRule: 'write_file(/tmp/x)',
     });
-    expect(prefix.map((e) => e.type)).toEqual(['tool_call_start', 'approval_request']);
+    expect(prefix.map((e) => e.type)).toEqual(['generate_done', 'tool_call_start', 'approval_request']);
 
     // 审批通过,流程继续
     const approvalRes = await postJson('/approval', {
@@ -433,7 +436,7 @@ describe('agent server', () => {
 
     const rest = await readUntilDone(next);
     const restTypes = rest.map((e) => e.type);
-    expect(restTypes).toEqual(['tool_result', 'step_done', 'text_delta', 'step_done', 'done']);
+    expect(restTypes).toEqual(['tool_result', 'step_done', 'text_delta', 'generate_done', 'step_done', 'done']);
     expect(rest[0]).toMatchObject({ toolCallId: 'c1', name: 'write_file', isError: false });
     expect(rest.at(-1)).toMatchObject({ reason: 'completed' });
   });
@@ -466,6 +469,7 @@ describe('agent server', () => {
 
     const types = events.map((e) => e.type);
     expect(types).toEqual([
+      'generate_done',
       'tool_call_start',
       'tool_result',
       'step_done',
@@ -473,12 +477,12 @@ describe('agent server', () => {
       'done',
     ]);
     // tool_result 事件原样携带结构化 payload(不经字符串编解码)
-    expect(events[1]).toMatchObject({
+    expect(events[2]).toMatchObject({
       type: 'tool_result',
       result: { output: '检测结果已提交', payload },
     });
-    expect(events[3]).toMatchObject({ type: 'detection', data: payload });
-    expect(events[4]).toMatchObject({ reason: 'stop_turn' });
+    expect(events[4]).toMatchObject({ type: 'detection', data: payload });
+    expect(events[5]).toMatchObject({ reason: 'stop_turn' });
 
     // 落盘:tool 条目带 payload,detection 条目 data = 结构化载荷
     const history = await getJson(`/sessions/${sessionId}/history`);
@@ -868,8 +872,31 @@ describe('agent server', () => {
     const events = await readUntilDone(sseReader(res2.body));
     const types = events.map((e) => e.type);
     expect(types).not.toContain('approval_request');
-    expect(types).toEqual(['tool_call_start', 'tool_result', 'step_done', 'text_delta', 'step_done', 'done']);
-    expect(events[1]).toMatchObject({ toolCallId: 'c2', name: 'write_file', isError: false });
+    expect(types).toEqual(['generate_done', 'tool_call_start', 'tool_result', 'step_done', 'text_delta', 'generate_done', 'step_done', 'done']);
+    expect(events[2]).toMatchObject({ toolCallId: 'c2', name: 'write_file', isError: false });
+  });
+
+  it('POST /sessions/{id}/title:自定义标题并在列表生效;空串恢复自动派生;400/404', async () => {
+    await startServer(new ScriptedProvider({ script: [] }), [echoTool()]);
+    const sessionId = await createSession('yolo');
+
+    const bad = await postJson(`/sessions/${sessionId}/title`, {});
+    expect(bad.status).toBe(400);
+
+    const ok = await postJson(`/sessions/${sessionId}/title`, { title: '  我的检测  ' });
+    expect(ok.status).toBe(200);
+    expect(ok.json).toMatchObject({ status: 'ok', title: '我的检测' });
+
+    const list = await getJson('/sessions');
+    const items = (list.json as { sessions: Record<string, unknown>[] }).sessions;
+    expect(items.find((s) => s.id === sessionId)).toMatchObject({ title: '我的检测' });
+
+    const clear = await postJson(`/sessions/${sessionId}/title`, { title: '' });
+    expect(clear.status).toBe(200);
+    expect((clear.json as { title?: string }).title).toBe('');
+
+    const ghost = await postJson('/sessions/ghost/title', { title: 'x' });
+    expect(ghost.status).toBe(404);
   });
 
   it('POST /sessions/{id}/mode:重启恢复后 mode 保持', async () => {

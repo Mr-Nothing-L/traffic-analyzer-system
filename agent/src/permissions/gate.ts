@@ -87,6 +87,8 @@ export class PermissionGate {
             toolName: fullContext.toolCall.name,
             action: fullContext.execution.approvalRule,
             description: fullContext.execution.description,
+            accesses: fullContext.execution.accesses,
+            arguments: fullContext.toolCall.arguments,
           };
           const response = await this.approvalService.requestToolApproval(request);
           const resolved = result.resolveApproval?.(response);

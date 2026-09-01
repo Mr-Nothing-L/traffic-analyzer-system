@@ -68,3 +68,16 @@ export function mediaContentType(name: string): string | undefined {
   const match = /^([0-9a-f]{64})(\.(jpg|png))$/.exec(name);
   return match === null ? undefined : CONTENT_TYPES[match[2]!];
 }
+
+/** media 文件名白名单模式(与 mediaContentType 同一规则,非锚定,供文本扫描)。 */
+const MEDIA_NAME_PATTERN = /[0-9a-f]{64}\.(?:jpg|png)/g;
+
+/**
+ * 从文本(序列化的条目/消息 JSON)中提取引用的 media 文件名:只按文件名
+ * 白名单扫描,与前缀无关——同时覆盖 /sessions/{id}/media/{name} URL 形态
+ * 与历史数据里可能的裸文件名等相对引用形态。删除会话的媒体 GC 用
+ * (见 mediaGc.ts)。
+ */
+export function extractMediaNames(text: string): string[] {
+  return text.match(MEDIA_NAME_PATTERN) ?? [];
+}

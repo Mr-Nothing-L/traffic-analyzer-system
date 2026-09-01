@@ -44,6 +44,7 @@ import {
 } from '../contract';
 import { ToolRegistry } from '../registry';
 import {
+  SubagentSemaphore,
   createSpawnSubagentTool,
   SUBAGENT_MAX_STEPS,
   SUBAGENT_TIMEOUT_MS,
@@ -189,6 +190,7 @@ function makeHarness(
     providerFactory: () => ({ provider, model: provider.modelName }),
     gate: yoloGate(),
     systemPrompt: 'sys',
+    semaphore: new SubagentSemaphore(),
     ...overrides,
   };
   const tool = createSpawnSubagentTool(deps);
@@ -411,6 +413,71 @@ describe('spawn_subagent', () => {
     if (!isRunnableToolExecution(execution)) {
       expect(execution.isError).toBe(true);
       expect(String(execution.output)).toContain('沙盒');
+    }
+  });
+});
+
+describe('SubagentSemaphore', () => {
+  it('acquire/release 控制并发:达到上限后排队,释放后补位', async () => {
+    const semaphore = new SubagentSemaphore(2);
+    const order: string[] = [];
+
+    await semaphore.acquire(new AbortController().signal);
+    order.push('a1');
+    await semaphore.acquire(new AbortController().signal);
+    order.push('a2');
+
+    const pending = semaphore.acquire(new AbortController().signal).then(() => {
+      order.push('a3');
+    });
+    // 给排队一个事件循环窗口
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(order).toEqual(['a1', 'a2']);
+
+    semaphore.release();
+    await pending;
+    expect(order).toEqual(['a1', 'a2', 'a3']);
+    semaphore.release();
+    semaphore.release();
+  });
+
+  it('abort 时从等待队列移除并 reject', async () => {
+    const semaphore = new SubagentSemaphore(1);
+    await semaphore.acquire(new AbortController().signal);
+
+    const controller = new AbortController();
+    const pending = semaphore.acquire(controller.signal);
+    controller.abort();
+
+    await expect(pending).rejects.toThrow('spawn_subagent cancelled while waiting for a concurrency slot');
+    semaphore.release();
+  });
+
+  it('构造参数可覆盖默认上限', () => {
+    const semaphore = new SubagentSemaphore(7);
+    expect(semaphore.maxConcurrent).toBe(7);
+  });
+
+  it('未传构造参数时读 AGENT_MAX_CONCURRENT_SUBAGENTS,缺省 4', () => {
+    const original = process.env.AGENT_MAX_CONCURRENT_SUBAGENTS;
+    try {
+      delete process.env.AGENT_MAX_CONCURRENT_SUBAGENTS;
+      expect(new SubagentSemaphore().maxConcurrent).toBe(4);
+
+      process.env.AGENT_MAX_CONCURRENT_SUBAGENTS = '8';
+      expect(new SubagentSemaphore().maxConcurrent).toBe(8);
+
+      process.env.AGENT_MAX_CONCURRENT_SUBAGENTS = 'invalid';
+      expect(new SubagentSemaphore().maxConcurrent).toBe(4);
+
+      process.env.AGENT_MAX_CONCURRENT_SUBAGENTS = '0';
+      expect(new SubagentSemaphore().maxConcurrent).toBe(4);
+    } finally {
+      if (original === undefined) {
+        delete process.env.AGENT_MAX_CONCURRENT_SUBAGENTS;
+      } else {
+        process.env.AGENT_MAX_CONCURRENT_SUBAGENTS = original;
+      }
     }
   });
 });

@@ -28,7 +28,7 @@ export interface ApprovalRequestEvent {
   /** 即 ApprovalRequest.action,如 `write_file(/abs/path)`。 */
   readonly approvalRule: string;
   readonly description?: string;
-  /** 执行声明的资源访问(由 gate 层快照,ApprovalRequest 本身不携带)。 */
+  /** 执行声明的资源访问(由 ApprovalRequest 携带,经 gate 填充)。 */
   readonly accesses: ToolAccesses;
   /** 工具调用参数的内容预览(按工具类型构造)。 */
   readonly preview?: PreviewContent;
@@ -81,11 +81,12 @@ export class ApprovalBridge {
 
   /**
    * ApprovalService handler:发 approval_request 事件并挂起,直到
-   * resolveDecision 被调用或超时。accesses 由调用方(gate 快照)提供。
+   * resolveDecision 被调用或超时。accesses 由 ApprovalRequest 携带;preview
+   * 由调用方根据 arguments 构造后传入。
    */
   requestApproval(
     request: ApprovalRequest,
-    extra: { readonly accesses: ToolAccesses; readonly preview?: PreviewContent },
+    extra?: { readonly preview?: PreviewContent },
   ): Promise<ApprovalResponse> {
     const requestId = randomUUID();
     const event: ApprovalRequestEvent = {
@@ -93,8 +94,8 @@ export class ApprovalBridge {
       requestId,
       toolName: request.toolName,
       approvalRule: request.action,
-      accesses: extra.accesses,
-      ...(extra.preview !== undefined ? { preview: extra.preview } : {}),
+      accesses: request.accesses ?? [],
+      ...(extra?.preview !== undefined ? { preview: extra.preview } : {}),
       ...(request.description !== undefined ? { description: request.description } : {}),
     };
     return new Promise<ApprovalResponse>((resolve) => {

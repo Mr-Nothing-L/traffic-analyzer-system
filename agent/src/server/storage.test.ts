@@ -72,6 +72,7 @@ describe('PRAGMA user_version', () => {
       workspaceDir: workspace,
       mode: 'manual',
       title: '',
+      titleCustom: false,
       createdAt: 1,
       lastActiveAt: 1,
     });
@@ -225,7 +226,7 @@ describe('messages 软遮蔽(shadowed)', () => {
     storage.close();
   });
 
-  it('老库迁移(v1 无 shadowed 列):加列默认 0、版本升到 2、旧数据可读可压缩', () => {
+  it('老库迁移(v1 无 shadowed/title_custom 列):加列默认 0、版本升到最新、旧数据可读可压缩', () => {
     // 模拟 v1 旧库:messages 表无 shadowed 列,user_version=1。
     const dir = path.join(workspace, '.agent');
     mkdirSync(dir, { recursive: true });
@@ -243,7 +244,7 @@ describe('messages 软遮蔽(shadowed)', () => {
     db.close();
 
     const storage = new SessionStorage(workspace);
-    expect(userVersion(dbPath)).toBe(2);
+    expect(userVersion(dbPath)).toBe(SCHEMA_VERSION);
     // 旧行默认 shadowed=0:迁移后照常可读
     expect(storage.loadMessages('s1').map((m) => extractText(m))).toEqual(['旧消息']);
     // 迁移后软遮蔽路径正常:旧行被遮蔽,新序列 seq 续接
