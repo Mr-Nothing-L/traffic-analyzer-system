@@ -520,3 +520,23 @@ describe('buildAnalysisFlow(诚实降级)', () => {
     expect(probe[0]!.durationMs).toBeNull(); // 自身缺 at
   });
 });
+
+describe('buildAnalysisFlow(generateMs 透传)', () => {
+  it('assistant 条目的 generateMs 透传到 think 节点;无该字段则缺省', () => {
+    const entries: AgentEntry[] = [
+      user('检测这段视频', 1000),
+      { id: 'a-g', kind: 'assistant', text: '', think: '先看元信息', generateMs: 12000, at: 2000 },
+      tool('video_meta', 3000),
+      assistant('再看帧', 6000),
+      tool('extract_frames', 9000),
+      detection(12000),
+    ];
+    const flow = buildAnalysisFlow(entries, entries.find((e) => e.kind === 'detection')!.id);
+    const thinks = flow.phases
+      .flatMap((p) => p.nodes)
+      .filter((n): n is FlowThink => 'kind' in n && n.kind === 'think');
+    expect(thinks).toHaveLength(2);
+    expect(thinks[0]!.generateMs).toBe(12000);
+    expect(thinks[1]!.generateMs).toBeUndefined();
+  });
+});

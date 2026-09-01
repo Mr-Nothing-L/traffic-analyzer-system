@@ -64,6 +64,8 @@ export interface FlowThink {
   id: string
   /** 思考全文(展开渲染;折叠摘要由渲染层 ThinkLine 从全文推导)。 */
   text: string
+  /** 该步 LLM generate 壁钟耗时(ms;来源 assistant 条目的 generateMs)。 */
+  generateMs?: number
   /** 实时态思考仍在流入(该条目是区间末尾):摘要取末行并横向跟随。 */
   live?: boolean
 }
@@ -426,7 +428,15 @@ export function buildAnalysisFlow(
         pushNode(
           key,
           t!.kind === 'think'
-            ? { kind: 'think', id: t!.entry.id, text: t!.entry.think, ...(live ? { live: true } : {}) }
+            ? {
+                kind: 'think',
+                id: t!.entry.id,
+                text: t!.entry.think,
+                ...(t!.entry.generateMs !== undefined
+                  ? { generateMs: t!.entry.generateMs }
+                  : {}),
+                ...(live ? { live: true } : {}),
+              }
             : { kind: 'text', id: t!.entry.id, text: t!.entry.text, ...(live ? { live: true } : {}) },
         )
       }

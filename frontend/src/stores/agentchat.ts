@@ -102,6 +102,9 @@ export interface AgentAssistantEntry {
   kind: 'assistant'
   text: string
   think: string
+  /** 该条对应 generate 步的 LLM 调用壁钟耗时(ms;实时由 generate_done SSE 写入,
+   * 历史由后端落盘的 assistant 条目恢复;旧数据无此字段)。 */
+  generateMs?: number
   /** 气泡创建时间(epoch ms)。 */
   at?: number
 }
@@ -390,6 +393,7 @@ function mapHistoryEntry(raw: unknown, seq?: number): AgentEntry | null {
       kind: 'assistant',
       text: String(e.text ?? ''),
       think: String(e.think ?? ''),
+      ...(typeof e.generateMs === 'number' ? { generateMs: e.generateMs } : {}),
       ...(typeof e.at === 'number' ? { at: e.at } : {}),
     }
   }
@@ -941,6 +945,21 @@ class ActiveSession {
         const i = entries.value.findIndex((e) => e.id === id)
         if (i >= 0) entries.value.splice(i, 1)
       }
+    } else if (ev.type === 'generate_done') {
+      // 该步 LLM 调用耗时:写到当前步的 assistant 条目(最后一条);本步无
+      // 可见文本/思考(纯工具调用步)则不建空气泡,直接丢弃。
+      const last = entries.value[entries.value.length - 1]
+      const ms = Number(ev.generateMs)
+      if (last?.kind === 'assistant' && Number.isFinite(ms) && ms >= 0) last.generateMs = ms
+    } else if (ev.type === 'generate_retry') {
+      // 服务端工具解析 400 的自动恢复(仅本地提示,不落盘不占 seq)。
+      entries.value.push({
+        id: nextEntryId(),
+        kind: 'system',
+        text: '工具调用参数被服务端解析器拒绝(400),已自动重试',
+        tone: 'warn',
+        at: Date.now(),
+      })
     } else if (ev.type === 'context_usage') {
       const used = Number(ev.usedTokens)
       const max = Number(ev.maxTokens)
@@ -1173,6 +1192,15 @@ export const useAgentChatStore = defineStore('agentchat', () => {
     }
   }
 
+  /** 重命名会话:成功后就地更新列表项标题;空串 = 恢复自动派生(后端语义)。 */
+  async function renameSession(id: string, title: string) {
+    const res = (await postJson(`/api/agent/sessions/${id}/title`, { title })) as {
+      title?: string
+    }
+    const s = sessions.value.find((x) => x.id === id)
+    if (s) s.title = res.title ?? title.trim()
+  }
+
   /** 切换权限模式:有会话走 POST /sessions/{id}/mode 就地切换,成功后更新本地 mode
    * 与列表项;无会话先记在 mode,建会话时带上。失败抛错(调用方提示),本地 mode 不变。 */
   async function setMode(m: AgentMode) {
@@ -1318,6 +1346,7 @@ export const useAgentChatStore = defineStore('agentchat', () => {
     selectSession,
     openSession,
     deleteSession,
+    renameSession,
     setMode,
     newSession,
     send,

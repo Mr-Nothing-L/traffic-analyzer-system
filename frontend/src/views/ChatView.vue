@@ -45,7 +45,7 @@ import { ApiError } from '../api/client'
 import { mdToHtml } from '../utils/markdown'
 import { groupSessionsByWorkspace, wsBasename } from '../utils/sessionGroups'
 import type { SessionGroup } from '../utils/sessionGroups'
-import { copyText, lastUserEntryAt, shouldSendOnEnter, timelineEntries, toolLabel, toolRoundAssistantIds, toolRoundAssistantTextIds, workspaceVideoSrc } from '../utils/chatDisplay'
+import { copyText, lastUserEntryAt, relTime, absTime, shouldSendOnEnter, timelineEntries, toolLabel, toolRoundAssistantIds, toolRoundAssistantTextIds, workspaceVideoSrc } from '../utils/chatDisplay'
 import { buildAnalysisFlow } from '../utils/analysisFlow'
 import type { AnalysisFlow } from '../utils/analysisFlow'
 import UiIcon from '../components/UiIcon.vue'
@@ -123,19 +123,6 @@ function onGroupHeadClick(g: SessionGroup) {
   if (g.collapsible) toggleGroup(g.key)
 }
 
-function relTime(ts?: number): string {
-  if (!ts) return ''
-  const m = Math.floor((Date.now() - ts) / 60000)
-  if (m < 1) return '刚刚'
-  if (m < 60) return `${m} 分钟前`
-  const h = Math.floor(m / 60)
-  if (h < 24) return `${h} 小时前`
-  const d = Math.floor(h / 24)
-  if (d < 7) return `${d} 天前`
-  const dt = new Date(ts)
-  return `${dt.getMonth() + 1}月${dt.getDate()}日`
-}
-
 /** 点击会话条目:跨工作区会话由 openSession 先切工作区再选会话;
  * 工作区切换失败(目录不存在/不在白名单)提示「工作区不可用」,不切换。 */
 async function onSelect(s: AgentSessionInfo) {
@@ -156,6 +143,40 @@ async function onDelete(id: string) {
     message.error(`删除会话失败:${(e as Error).message}`)
   }
 }
+
+/* ---- 会话重命名:hover 显现铅笔 → 标题原位变输入框;Enter/blur 确认,Esc 取消 ---- */
+const renamingId = ref<string | null>(null)
+const renamingText = ref('')
+let renamingOriginal = ''
+
+function onRenameStart(s: AgentSessionInfo) {
+  renamingId.value = s.id
+  renamingOriginal = sessionTitle(s)
+  renamingText.value = renamingOriginal
+}
+async function onRenameConfirm(id: string) {
+  if (renamingId.value !== id) return
+  const title = renamingText.value.trim()
+  renamingId.value = null
+  if (!title || title === renamingOriginal) return
+  try {
+    await agent.renameSession(id, title)
+  } catch (e) {
+    message.error(`重命名失败:${(e as Error).message}`)
+  }
+}
+function onRenameCancel() {
+  renamingId.value = null
+}
+
+/** 重命名输入框自动聚焦并全选(便于直接覆盖输入)。 */
+const renameInputEl = ref<HTMLInputElement | null>(null)
+watch(renamingId, async (id) => {
+  if (id === null) return
+  await nextTick()
+  renameInputEl.value?.focus()
+  renameInputEl.value?.select()
+})
 
 /* ---- 消息底部行:HH:MM 时间 + hover/focus-within 显现的操作(复制;user 另有撤回) ---- */
 function fmtTime(ts?: number): string {
@@ -712,8 +733,8 @@ onUnmounted(() => {
   <div class="chat-page">
     <!-- 历史会话栏:工作区分组渲染为独立卡片纵列(当前工作区卡最上恒展开;其他
          工作区/未分组卡默认折叠,点击卡头展开,悬停卡头显示完整路径);条目
-         title + 相对时间,点击切换(跨工作区先切工作区),悬停出删除(点击即删,
-         store 乐观移除 + 失败回滚) -->
+         title + 相对时间(最近活跃)· 绝对发起时间(createdAt),点击切换(跨工作区
+         先切工作区),悬停出删除(trash 图标,点击即删,store 乐观移除 + 失败回滚) -->
     <aside class="session-col">
       <div class="session-head">
         <UiIcon name="chat" :size="14" />
@@ -753,15 +774,35 @@ onUnmounted(() => {
               @click="onSelect(s)"
               @keydown.enter="onSelect(s)"
             >
-              <div class="session-item-title" :title="sessionTitle(s)">{{ sessionTitle(s) }}</div>
-              <div class="session-item-meta">
-                <span class="session-item-meta-left">
-                  <span class="session-item-time">{{ relTime(s.lastActiveAt) }}</span>
-                </span>
-                <button class="session-del" title="删除会话" @click.stop="onDelete(s.id)">
-                  <UiIcon name="close" :size="10" />
-                </button>
+              <div v-if="renamingId === s.id" class="session-item-rename" @click.stop>
+                <input
+                  ref="renameInputEl"
+                  v-model="renamingText"
+                  class="session-rename-input"
+                  maxlength="30"
+                  placeholder="会话名称"
+                  @keydown.enter.prevent="onRenameConfirm(s.id)"
+                  @keydown.esc.prevent="onRenameCancel"
+                  @blur="onRenameConfirm(s.id)"
+                />
               </div>
+              <template v-else>
+                <div class="session-item-title" :title="sessionTitle(s)">{{ sessionTitle(s) }}</div>
+                <div class="session-item-meta">
+                  <span class="session-item-meta-left">
+                    <span class="session-item-time">{{ relTime(s.lastActiveAt) }}</span>
+                    <span v-if="s.createdAt" class="session-item-time session-item-time-abs">
+                      {{ absTime(s.createdAt) }}
+                    </span>
+                  </span>
+                  <button class="session-edit" title="重命名会话" @click.stop="onRenameStart(s)">
+                    <UiIcon name="edit" :size="11" />
+                  </button>
+                  <button class="session-del" title="删除会话" @click.stop="onDelete(s.id)">
+                    <UiIcon name="trash" :size="11" />
+                  </button>
+                </div>
+              </template>
             </div>
           </div>
         </section>
@@ -1268,6 +1309,15 @@ button.session-card-head:focus-visible {
   font-family: var(--font-mono);
 }
 
+/* 绝对发起时间:与相对时间同行,前置分隔点、再弱一档(透明度),不占第二行 */
+.session-item-time-abs {
+  opacity: 0.65;
+}
+
+.session-item-time-abs::before {
+  content: '·\00a0';
+}
+
 /* 删除按钮:点击即删(store 乐观移除 + 失败回滚);默认淡隐,悬停/聚焦条目或自身时出现 */
 .session-del {
   display: inline-flex;
@@ -1298,6 +1348,55 @@ button.session-card-head:focus-visible {
   opacity: 1;
   outline: 2px solid var(--color-accent);
   outline-offset: 1px;
+}
+
+/* 重命名按钮:与删除按钮同款淡隐/显现,hover 用强调色而非危险色 */
+.session-edit {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  color: var(--color-text2);
+  cursor: pointer;
+  opacity: 0;
+}
+
+.session-item:hover .session-edit,
+.session-item:focus-within .session-edit {
+  opacity: 1;
+}
+
+.session-edit:hover {
+  color: var(--color-accent);
+}
+
+.session-edit:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+/* 重命名原位输入框:替换标题与 meta 行,沿用条目内边距 */
+.session-item-rename {
+  padding: 2px 0;
+}
+
+.session-rename-input {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  font-size: var(--text-sm);
+  color: var(--color-text);
+  background: var(--color-card);
+  border: 1px solid var(--color-accent);
+  border-radius: calc(var(--radius) / 2);
+  padding: 4px 6px;
+  outline: none;
 }
 
 /* ---- 对话卡 ---- */

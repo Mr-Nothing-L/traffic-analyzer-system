@@ -7,10 +7,13 @@
 // - textPreviewLines:说明节点折叠预览(前两个非空行);
 // - toolRoundAssistantIds:有工具调用的轮次里的 assistant 条目(气泡不再渲染其 thinking);
 // - toolRoundAssistantTextIds:同口径的正文气泡隐藏(detection 之后收尾文本除外);
+// - relTime / absTime:会话列表时间(相对「刚刚/N 分钟前」+ 绝对发起时间 今天 HH:MM、更早 MM-DD HH:MM);
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
+  absTime,
   copyText,
   lastUserEntryAt,
+  relTime,
   shouldSendOnEnter,
   thinkSummaryLine,
   textPreviewLines,
@@ -435,5 +438,58 @@ describe('trackSuspectsView(track_suspects 取证产物行解析)', () => {
     expect(view?.videoSrc).toBeNull();
     expect(view?.dir).toBe('/other/x');
     expect(view?.clip).toBe('/other/x/track_overlay.mp4');
+  });
+});
+
+describe('relTime(会话列表相对时间)', () => {
+  // 固定“现在”:2026-08-31 15:30 本地时间(构造函数走本地时区,测试与运行环境无关)
+  const now = new Date(2026, 7, 31, 15, 30).getTime();
+
+  it('缺时间返回空串', () => {
+    expect(relTime(undefined, now)).toBe('');
+  });
+
+  it('1 分钟内「刚刚」', () => {
+    expect(relTime(now - 30 * 1000, now)).toBe('刚刚');
+  });
+
+  it('分钟级「N 分钟前」', () => {
+    expect(relTime(now - 2 * 60000, now)).toBe('2 分钟前');
+    expect(relTime(now - 59 * 60000, now)).toBe('59 分钟前');
+  });
+
+  it('小时级「N 小时前」', () => {
+    expect(relTime(now - 3 * 3600000, now)).toBe('3 小时前');
+  });
+
+  it('天级「N 天前」(7 天内)', () => {
+    expect(relTime(now - 2 * 86400000, now)).toBe('2 天前');
+    expect(relTime(now - 6 * 86400000, now)).toBe('6 天前');
+  });
+
+  it('≥7 天落「M月D日」', () => {
+    expect(relTime(new Date(2026, 7, 20, 8, 0).getTime(), now)).toBe('8月20日');
+  });
+});
+
+describe('absTime(会话列表绝对发起时间)', () => {
+  const now = new Date(2026, 7, 31, 15, 30).getTime();
+
+  it('缺时间返回空串', () => {
+    expect(absTime(undefined, now)).toBe('');
+  });
+
+  it('今天只给 HH:MM(补零)', () => {
+    expect(absTime(new Date(2026, 7, 31, 9, 5).getTime(), now)).toBe('09:05');
+  });
+
+  it('昨天及更早给 MM-DD HH:MM', () => {
+    expect(absTime(new Date(2026, 7, 30, 14, 5).getTime(), now)).toBe('08-30 14:05');
+    expect(absTime(new Date(2026, 0, 2, 3, 4).getTime(), now)).toBe('01-02 03:04');
+  });
+
+  it('跨月边界:上月末尾不算今天', () => {
+    const monthStart = new Date(2026, 8, 1, 0, 30).getTime();
+    expect(absTime(new Date(2026, 7, 31, 23, 59).getTime(), monthStart)).toBe('08-31 23:59');
   });
 });

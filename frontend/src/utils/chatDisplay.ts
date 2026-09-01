@@ -1,4 +1,5 @@
-/** 对话视图展示纯函数:工具名中文映射 / Enter 发送判定 / 工作区视频预览地址推导。
+/** 对话视图展示纯函数:工具名中文映射 / Enter 发送判定 / 工作区视频预览地址推导 /
+ * 会话时间格式化(相对 + 绝对)。
  * 抽成纯函数便于 vitest 直测;ChatView 只接线调用。 */
 
 /** 工具名 → 中文名;未知工具不在表内,显示时回退原名。 */
@@ -267,4 +268,36 @@ export function trackSuspectsView(
     csv,
     videoSrc: clip ? workspaceVideoSrc(clip, undefined, workspaceDir ?? null) : null,
   }
+}
+
+/** 相对时间(会话列表「最近活跃」):<1 分钟「刚刚」,逐级升分钟/小时/天,
+ * ≥7 天落「M月D日」。now 可注入便于测试。 */
+export function relTime(ts: number | undefined, now = Date.now()): string {
+  if (!ts) return ''
+  const m = Math.floor((now - ts) / 60000)
+  if (m < 1) return '刚刚'
+  if (m < 60) return `${m} 分钟前`
+  const h = Math.floor(m / 60)
+  if (h < 24) return `${h} 小时前`
+  const d = Math.floor(h / 24)
+  if (d < 7) return `${d} 天前`
+  const dt = new Date(ts)
+  return `${dt.getMonth() + 1}月${dt.getDate()}日`
+}
+
+/** 绝对时间(会话列表「发起时间」):今天 HH:MM;昨天及更早 MM-DD HH:MM。
+ * now 可注入便于测试。 */
+export function absTime(ts: number | undefined, now = Date.now()): string {
+  if (!ts) return ''
+  const d = new Date(ts)
+  const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+  const n = new Date(now)
+  if (
+    d.getFullYear() === n.getFullYear() &&
+    d.getMonth() === n.getMonth() &&
+    d.getDate() === n.getDate()
+  ) {
+    return hm
+  }
+  return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${hm}`
 }

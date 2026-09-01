@@ -61,7 +61,7 @@ interface Row {
   retried: boolean
 }
 type Item =
-  | { t: 'think'; id: string; text: string; live: boolean }
+  | { t: 'think'; id: string; text: string; live: boolean; dur: string }
   | { t: 'text'; id: string; text: string; live: boolean }
   | { t: 'step'; row: Row; entry?: AgentToolEntry }
   | { t: 'par'; rows: Row[]; entries: Array<AgentToolEntry | undefined> }
@@ -101,7 +101,13 @@ const phaseViews = computed(() =>
     icon: ph.icon,
     items: ph.nodes.map((n): Item => {
       if ('kind' in n && n.kind === 'think') {
-        return { t: 'think', id: n.id, text: n.text, live: n.live === true }
+        return {
+          t: 'think',
+          id: n.id,
+          text: n.text,
+          live: n.live === true,
+          dur: n.generateMs !== undefined ? fmtDur(n.generateMs) : '',
+        }
       }
       if ('kind' in n && n.kind === 'text') {
         return { t: 'text', id: n.id, text: n.text, live: n.live === true }
@@ -273,6 +279,7 @@ function toggleAll(open: boolean) {
                 >
                   <span class="aflow-caret" :class="{ open: isThinkOpen(it.id) }">▸</span>
                   <span class="aflow-think-lbl">思考过程:</span>
+                  <span v-if="it.dur" class="aflow-dur">生成 {{ it.dur }}</span>
                   <ThinkLine v-if="!isThinkOpen(it.id)" :think="it.text" :live="it.live" />
                 </button>
                 <button

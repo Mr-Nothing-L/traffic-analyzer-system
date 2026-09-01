@@ -504,6 +504,44 @@ describe('SSE 流式事件', () => {
     expect(agent.status).toBe('done');
   });
 
+  it('generate_done 把该步 generate 耗时写到当前 assistant 条目;纯工具步丢弃;generate_retry 插本地警示', async () => {
+    const { agent } = await load();
+    agent.sessionId = 's1';
+    stubChatStream([
+      { type: 'think_delta', text: '想一下' },
+      { type: 'generate_done', step: 1, generateMs: 12000, serverMs: 11000 },
+      { type: 'tool_call_start', call: { id: 'c1', name: 'echo', arguments: '{}' } },
+      // 纯工具调用步:无 assistant 条目可写,耗时丢弃(不建空气泡)
+      { type: 'generate_done', step: 2, generateMs: 3000 },
+      {
+        type: 'tool_result',
+        toolCallId: 'c1',
+        name: 'echo',
+        result: { output: 'ok' },
+        isError: false,
+      },
+      { type: 'generate_retry', step: 2, error: '400 Unterminated string' },
+      { type: 'text_delta', text: '答' },
+      { type: 'generate_done', step: 3, generateMs: 500 },
+      { type: 'done', reason: 'completed' },
+    ]);
+    await agent.send('测试');
+    vi.unstubAllGlobals();
+
+    const kinds = agent.entries.map((e) => e.kind);
+    expect(kinds).toEqual(['user', 'assistant', 'tool', 'system', 'assistant']);
+    const a1 = agent.entries[1];
+    const a2 = agent.entries[4];
+    if (a1?.kind !== 'assistant' || a2?.kind !== 'assistant') {
+      throw new Error('expected assistant entries');
+    }
+    expect(a1.generateMs).toBe(12000);
+    expect(a2.generateMs).toBe(500);
+    const warn = agent.entries[3];
+    expect(warn).toMatchObject({ kind: 'system', tone: 'warn' });
+    expect(agent.status).toBe('done');
+  });
+
   it('load_video 工具结果:video part 只置 hasVideo,images 为空,result 取文本部分', async () => {
     const { agent } = await load();
     agent.sessionId = 's1';
@@ -1380,5 +1418,41 @@ describe('快速跨工作区切换会话', () => {
     expect(ws.path).toBe('/ws/a');
     expect(agent.entries).toHaveLength(1);
     expect(agent.entries[0]).toMatchObject({ kind: 'user', text: 'A 会话' });
+  });
+});
+
+// renameSession:POST /sessions/{id}/title 成功后就地更新列表项标题;
+// 失败抛错且本地列表不变(调用方负责提示)。
+describe('renameSession 自定义标题', () => {
+  it('成功:更新列表项标题为后端返回值(trim 后)', async () => {
+    const { agent } = await load();
+    agent.sessions = [{ id: 's1', workspaceDir: '/ws/a', title: '分析视频', lastActiveAt: 1 }];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: unknown) => {
+        const url = String(input);
+        if (url.endsWith('/title')) return jsonResponse({ status: 'ok', title: '倒车复检' });
+        return jsonResponse({});
+      }),
+    );
+
+    await agent.renameSession('s1', '  倒车复检  ');
+    vi.unstubAllGlobals();
+
+    expect(agent.sessions[0]?.title).toBe('倒车复检');
+  });
+
+  it('失败:抛错且本地标题不变', async () => {
+    const { agent } = await load();
+    agent.sessions = [{ id: 's1', workspaceDir: '/ws/a', title: '分析视频', lastActiveAt: 1 }];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ error: { message: 'boom' } }), { status: 500 })),
+    );
+
+    await expect(agent.renameSession('s1', 'x')).rejects.toThrow();
+    vi.unstubAllGlobals();
+
+    expect(agent.sessions[0]?.title).toBe('分析视频');
   });
 });

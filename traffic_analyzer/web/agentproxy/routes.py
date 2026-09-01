@@ -13,6 +13,7 @@
 - GET  /sessions/{id}/history     透传(entries 时间线)。
 - POST /sessions/{id}/compact     透传(手动压缩上下文;进行中 → 409)。
 - POST /sessions/{id}/recall      透传(撤回某条用户消息及其后内容)。
+- POST /sessions/{id}/title       透传(自定义会话标题,空串恢复自动派生)。
 - POST /sessions/{id}/mode        透传(切换会话权限模式 manual|auto|yolo)。
 - DELETE /sessions/{id}           透传(删除 session)。
 - POST /uploads                   对话文件上传(落盘 <workspace>/.agent/uploads/,
@@ -190,6 +191,12 @@ _PASS_THROUGH_ROUTES: List[_PassThroughRoute] = [
         "/sessions/{session_id}/recall",
         body="raw",
         description="透传 POST /sessions/{id}/recall(撤回某条用户消息及其后内容)。",
+    ),
+    _PassThroughRoute(
+        ("POST",),
+        "/sessions/{session_id}/title",
+        body="raw",
+        description="透传 POST /sessions/{id}/title(自定义会话标题,空串恢复自动派生)。",
     ),
     _PassThroughRoute(
         ("POST",),
