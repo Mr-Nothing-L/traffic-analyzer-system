@@ -126,6 +126,25 @@ class EventCandidate(BaseModel):
             "raw_vlm_response": self.raw_vlm_response,
         }
 
+    def is_abnormal(self) -> bool:
+        """Return True if this candidate looks malformed and should be re-run.
+
+        A candidate is considered abnormal when:
+        - It carries an explicit ExpertAgent error summary;
+        - It has neither structured nor raw VLM response text;
+        - It claims detection but lacks a summary; or
+        - It claims detection but has no instances.
+        """
+        if self.summary and self.summary.startswith("ExpertAgent error"):
+            return True
+        if not self.raw_vlm_response and not self.raw_vlm_text:
+            return True
+        if self.detected and not self.summary:
+            return True
+        if self.detected and not self.instances:
+            return True
+        return False
+
 
 class AuditEntry(BaseModel):
     """Single exclusion/inclusion decision record from adjudication."""

@@ -112,7 +112,9 @@ class AnalysisOrchestrator:
 
         # Create pipeline steps
         expert_layer = ExpertAgentLayer(config_manager, vlm_engine)
-        adj_step = AdjudicationStep(config_manager, vlm_engine)
+        adj_step = AdjudicationStep(
+            config_manager, vlm_engine, expert_agent_layer=expert_layer
+        )
 
         return cls(
             config_manager=config_manager,

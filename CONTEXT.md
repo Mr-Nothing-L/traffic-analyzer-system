@@ -40,6 +40,10 @@ _Avoid_: detection result, raw output
 流水线的第二层审查。接收全部事件专家的候选,通过单次 VLM 调用进行跨事件冲突裁决——哪些候选应保留、哪些应排除,依据业务规则(如"应急车道静止→双事件")。裁决产出事件结果。
 _Avoid_: post-processing, filtering
 
+**裁决补偿 (Adjudication Recovery)**:
+裁决 VLM 输出遗漏事件类别时的补偿策略(ADR-0003):缺失检测 → 异常候选重跑专家 → 达重试上限后降级回填。策略决策集中于 `core/adjudication_recovery.py`(纯决策器,可单测);VLM 调用与执行仍在裁决步骤,专家重跑能力由 `ExpertAgentLayer.rerun()` 唯一归属,不再各处内联构造 ExpertAgent。
+_Avoid_: retry logic, error handling
+
 **事件结果 (Event Result)**:
 裁决后的单事件判定,包含是否检出、实例详情、裁决推理过程。仍可能被锚定核验推翻(`grounding_overturned`)。
 _Avoid_: final result(锚定核验后才是最终判定)

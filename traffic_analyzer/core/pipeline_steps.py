@@ -30,6 +30,7 @@ from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional
 
+from traffic_analyzer.core.adjudication_recovery import AdjudicationRecovery
 from traffic_analyzer.core.config_manager import ConfigManager
 from traffic_analyzer.core.expert_agent import ExpertAgent
 from traffic_analyzer.core.vlm_engine import FatalAPIError, VLMInferenceEngine
@@ -284,14 +285,72 @@ class ExpertAgentLayer(PipelineStep):
 
         return candidates
 
+    def rerun(
+        self, event_id: int, context: AnalysisContext
+    ) -> Optional[EventCandidate]:
+        """Re-run a single expert agent for *event_id* and return its candidate.
+
+        This is the single place that knows how to construct an ExpertAgent for
+        a re-run, so that AdjudicationStep does not duplicate construction logic.
+        Returns None when the category cannot be found or the re-run fails with
+        a non-fatal error. Fatal API errors are propagated.
+        """
+        category: Optional[Any] = None
+        try:
+            for cat in self.config_manager.get_event_categories():
+                if cat.event_id == event_id:
+                    category = cat
+                    break
+        except Exception as exc:
+            logger.error(
+                "[pipeline_steps:ExpertAgentLayer] RERUN_GET_CATEGORY_ERROR | event_id=%d | %s",
+                event_id,
+                exc,
+                exc_info=True,
+            )
+            return None
+
+        if category is None:
+            logger.warning(
+                "[pipeline_steps:ExpertAgentLayer] RERUN_CATEGORY_NOT_FOUND | event_id=%d",
+                event_id,
+            )
+            return None
+
+        agent = ExpertAgent(
+            category=category,
+            vlm_engine=self.vlm_engine,
+            config_manager=self.config_manager,
+        )
+        try:
+            return agent.detect(context)
+        except FatalAPIError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "[pipeline_steps:ExpertAgentLayer] RERUN_ERROR | event_id=%d event_name=%s | %s",
+                event_id,
+                category.name_zh,
+                exc,
+                exc_info=True,
+            )
+            return None
+
 
 class AdjudicationStep(PipelineStep):
     """Step 3: Single VLM call to adjudicate all expert candidates."""
 
-    def __init__(self, config_manager, vlm_engine, max_retries=0):
+    def __init__(
+        self,
+        config_manager,
+        vlm_engine,
+        expert_agent_layer: Optional[ExpertAgentLayer] = None,
+        max_retries: int = 0,
+    ):
         super().__init__("adjudication", max_retries=max_retries, fallback_enabled=True)
         self.config_manager = config_manager
         self.vlm_engine = vlm_engine
+        self.expert_agent_layer = expert_agent_layer
 
     def _execute(self, context: AnalysisContext) -> AdjudicationResult:
         candidates = list(context.event_candidates.values())
@@ -354,6 +413,7 @@ class AdjudicationStep(PipelineStep):
         previously_missing_event_ids: List[int] = []
         last_response: Optional[Any] = None
         last_parsed_data: Dict[str, Any] = {}
+        recovery = AdjudicationRecovery(max_retries=MAX_ADJUDICATION_RETRIES)
 
         for attempt in range(1, MAX_ADJUDICATION_RETRIES + 1):
             candidates = list(context.event_candidates.values())
@@ -411,7 +471,14 @@ class AdjudicationStep(PipelineStep):
             expected_event_ids = set(context.event_candidates.keys())
             missing_event_ids = sorted(expected_event_ids - present_event_ids)
 
-            if not missing_event_ids:
+            decision = recovery.decide(
+                expected_event_ids=expected_event_ids,
+                present_event_ids=present_event_ids,
+                candidates=context.event_candidates,
+                attempt=attempt,
+            )
+
+            if decision.action == "complete":
                 logger.info(
                     "[pipeline_steps:AdjudicationStep] COMPLETE | attempt=%d event_results=%d",
                     attempt,
@@ -425,87 +492,47 @@ class AdjudicationStep(PipelineStep):
                 missing_event_ids,
             )
 
-            abnormal_event_ids = [
-                eid for eid in missing_event_ids
-                if self._is_abnormal_candidate(context.event_candidates.get(eid))
-            ]
-
-            if abnormal_event_ids:
+            if decision.action == "rerun":
                 logger.info(
                     "[pipeline_steps:AdjudicationStep] RERUN_ABNORMAL_EXPERTS | attempt=%d event_ids=%s",
                     attempt,
-                    abnormal_event_ids,
+                    decision.event_ids,
                 )
-                for eid in abnormal_event_ids:
-                    category = self._get_category_for_event_id(eid)
-                    if category is None:
-                        logger.warning(
-                            "[pipeline_steps:AdjudicationStep] CATEGORY_NOT_FOUND | event_id=%d",
-                            eid,
-                        )
-                        continue
-                    try:
-                        agent = ExpertAgent(
-                            category=category,
-                            vlm_engine=self.vlm_engine,
-                            config_manager=self.config_manager,
-                        )
-                        new_candidate = agent.detect(context)
-                        context.event_candidates[eid] = new_candidate
-                        logger.info(
-                            "[pipeline_steps:AdjudicationStep] EXPERT_RERUN_SUCCESS | attempt=%d event_id=%d detected=%s",
-                            attempt,
-                            eid,
-                            new_candidate.detected,
-                        )
-                    except FatalAPIError:
-                        raise
-                    except Exception as exc:
-                        logger.error(
-                            "[pipeline_steps:AdjudicationStep] EXPERT_RERUN_ERROR | attempt=%d event_id=%d | %s",
-                            attempt,
-                            eid,
-                            exc,
-                            exc_info=True,
-                        )
+                if self.expert_agent_layer is not None:
+                    for eid in decision.event_ids:
+                        new_candidate = self.expert_agent_layer.rerun(eid, context)
+                        if new_candidate is not None:
+                            context.event_candidates[eid] = new_candidate
+                            logger.info(
+                                "[pipeline_steps:AdjudicationStep] EXPERT_RERUN_SUCCESS | attempt=%d event_id=%d detected=%s",
+                                attempt,
+                                eid,
+                                new_candidate.detected,
+                            )
+                else:
+                    logger.warning(
+                        "[pipeline_steps:AdjudicationStep] NO_EXPERT_LAYER_FOR_RERUN | attempt=%d event_ids=%s",
+                        attempt,
+                        decision.event_ids,
+                    )
                 previously_missing_event_ids = []
                 continue
 
-            previously_missing_event_ids = missing_event_ids
+            if decision.action == "fallback":
+                logger.warning(
+                    "[pipeline_steps:AdjudicationStep] MAX_RETRIES_REACHED | missing_event_ids=%s | filling from candidates",
+                    decision.missing_event_ids,
+                )
+                return self._build_adjudication_result_with_fallback(context, data, response)
+
+            # decision.action == "retry"
+            previously_missing_event_ids = decision.missing_event_ids
 
         logger.warning(
             "[pipeline_steps:AdjudicationStep] MAX_RETRIES_REACHED | missing_event_ids=%s | filling from candidates",
             previously_missing_event_ids,
         )
         return self._build_adjudication_result_with_fallback(context, last_parsed_data, last_response)
-
-    @staticmethod
-    def _is_abnormal_candidate(candidate: Optional[EventCandidate]) -> bool:
-        if candidate is None:
-            return True
-        if candidate.summary and candidate.summary.startswith("ExpertAgent error"):
-            return True
-        if not candidate.raw_vlm_response and not candidate.raw_vlm_text:
-            return True
-        if candidate.detected and not candidate.summary:
-            return True
-        if candidate.detected and not candidate.instances:
-            return True
-        return False
-
-    def _get_category_for_event_id(self, event_id: int) -> Optional[Any]:
-        try:
-            for cat in self.config_manager.get_event_categories():
-                if cat.event_id == event_id:
-                    return cat
-        except Exception as exc:
-            logger.error(
-                "[pipeline_steps:AdjudicationStep] GET_CATEGORY_ERROR | event_id=%d | %s",
-                event_id,
-                exc,
-                exc_info=True,
-            )
-        return None
 
     def _build_adjudication_result(
         self,
