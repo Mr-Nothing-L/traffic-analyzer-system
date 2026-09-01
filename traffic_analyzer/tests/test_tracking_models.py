@@ -27,6 +27,7 @@ from traffic_analyzer.toolserver.tracking.models import (
     SLOW_SPEED_RATIO,
     CLIP_EDGE,
     Y_DISPLACEMENT_RATIO,
+    DirectionAssessment,
     SuspectAnchor,
     Track,
     TrackPoint,
@@ -35,10 +36,12 @@ from traffic_analyzer.toolserver.tracking.models import (
     classify_motion_state,
     compute_profile,
     direction_verdict,
+    evaluate_direction,
     infer_side_hint,
     is_clipped_box,
     is_consistent,
     path_length,
+    render_direction,
     _direction_verdict_state,
 )
 from traffic_analyzer.toolserver.tracking import stitch
@@ -511,6 +514,94 @@ class TestStructuredVerdict:
         verdict = direction_verdict(track, heading=heading)
         assert "疑似倒车" in verdict
         assert "朝镜头" in verdict
+
+
+# ---------------------------------------------------------------------------
+# 方向裁决深模块公开 API
+# ---------------------------------------------------------------------------
+
+
+class TestDirectionAssessment:
+    """evaluate_direction + render_direction 与旧 direction_verdict 行为等价。"""
+
+    def _lerp_boxes(self, start: List[float], end: List[float], n: int) -> List[Dict[str, object]]:
+        return [
+            {
+                "frame": f,
+                "t": f * 0.2,
+                "box": [s + (e - s) * f / max(n - 1, 1) for s, e in zip(start, end)],
+            }
+            for f in range(n)
+        ]
+
+    def test_evaluate_direction_carries_state_and_heading_flag(self) -> None:
+        pts = self._lerp_boxes(
+            [0.20, 0.30, 0.30, 0.55],
+            [0.50, 0.50, 0.70, 0.80],
+            10,
+        )
+        track = _mk_track(pts)
+        track.side_hint = "coming"
+        track.profile = compute_profile(track)
+        assessment = evaluate_direction(track)
+        assert isinstance(assessment, DirectionAssessment)
+        assert assessment.empty is False
+        assert assessment.actual == "approaching"
+        assert assessment.consistent is True
+        # 方向一致 → 不需要 heading
+        assert assessment.needs_heading is False
+
+    def test_render_direction_matches_direction_verdict(self) -> None:
+        pts = self._lerp_boxes(
+            [0.60, 0.50, 0.80, 0.80],
+            [0.20, 0.20, 0.30, 0.40],
+            10,
+        )
+        track = _mk_track(pts)
+        track.side_hint = "coming"
+        track.profile = compute_profile(track)
+        heading = {"accepted": "away", "n_total": 2, "n_consistent": 2}
+        old_verdict = direction_verdict(track, heading=heading)
+        assessment = evaluate_direction(track)
+        new_verdict = render_direction(assessment, heading=heading)
+        assert new_verdict == old_verdict
+
+    def test_needs_heading_rules(self) -> None:
+        # consistent=False → needs_heading
+        pts = self._lerp_boxes(
+            [0.60, 0.50, 0.80, 0.80],
+            [0.20, 0.20, 0.30, 0.40],
+            10,
+        )
+        track = _mk_track(pts)
+        track.side_hint = "coming"
+        track.profile = compute_profile(track)
+        assert evaluate_direction(track).needs_heading is True
+
+        # side=unknown 且 moving → needs_heading
+        track2 = _mk_track(pts)
+        track2.side_hint = "unknown"
+        track2.profile = compute_profile(track2)
+        assert evaluate_direction(track2).needs_heading is True
+
+        # consistent=True → 不需要 heading
+        track3 = _mk_track(
+            self._lerp_boxes(
+                [0.20, 0.30, 0.30, 0.55],
+                [0.50, 0.50, 0.70, 0.80],
+                10,
+            )
+        )
+        track3.side_hint = "coming"
+        track3.profile = compute_profile(track3)
+        assert evaluate_direction(track3).needs_heading is False
+
+    def test_empty_track_returns_no_valid_trajectory(self) -> None:
+        track = Track(id=1, description="空")
+        assessment = evaluate_direction(track)
+        assert assessment.empty is True
+        assert render_direction(assessment) == "无有效轨迹"
+        assert direction_verdict(track) == "无有效轨迹"
 
 
 # ---------------------------------------------------------------------------

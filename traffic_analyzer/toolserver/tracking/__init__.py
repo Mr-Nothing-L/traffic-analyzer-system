@@ -21,8 +21,10 @@ from traffic_analyzer.toolserver.tracking.models import (
     box_diagonal,
     compute_profile,
     direction_verdict,
+    evaluate_direction,
     infer_side_hint,
     is_consistent,
+    render_direction,
 )
 
 __all__ = [
@@ -35,6 +37,8 @@ __all__ = [
     "box_diagonal",
     "compute_profile",
     "direction_verdict",
+    "evaluate_direction",
     "infer_side_hint",
     "is_consistent",
+    "render_direction",
 ]

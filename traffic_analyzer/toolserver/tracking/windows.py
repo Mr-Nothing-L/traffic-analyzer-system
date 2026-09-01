@@ -28,6 +28,7 @@ import logging
 import math
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -44,14 +45,12 @@ from traffic_analyzer.toolserver.tracking import (
     box_diagonal,
     bbox_center,
     compute_profile,
-    direction_verdict,
+    evaluate_direction,
     infer_side_hint,
     is_consistent,
+    render_direction,
 )
-from traffic_analyzer.toolserver.tracking.models import (
-    _direction_verdict_state,
-    is_clipped_box,
-)
+from traffic_analyzer.toolserver.tracking.models import is_clipped_box
 from traffic_analyzer.toolserver.tracking import stitch
 from traffic_analyzer.toolserver.tracking.render import (
     best_frame_crops,
@@ -69,13 +68,11 @@ FAST_SAMPLE_FPS = 10.0
 WINDOW_FRAMES = 5
 STRIDE = 4
 REANCHOR_EVERY = 5          # 每 5 窗强制 re-anchor(第 0 窗本身即初始检测)
-# re-anchor 窗的思考软预算(qwen3 thinking_budget):保留重检测所需推理,
-# 但防止犹豫循环烧穿 max_tokens;传播窗关 thinking,不受影响。
-REANCHOR_THINKING_BUDGET = 1024
 REANCHOR_MISMATCH_IOU = 0.3
 SPAN_MARGIN_S = 2.0         # 锚点前后扩展的上下文秒数
 DEFAULT_SPAN_S = 8.0        # 无 time_range 时锚点之后继续跟踪的时长
 MAX_WINDOW_CALLS = 40       # 单次请求 VLM 调用硬上限(控成本/兜底超时)
+TRACKING_MAX_WORKERS = 4    # 并发 VLM 调用上限(场景判定帧/车头朝向旁证)
 _JPEG_QUALITY = 80
 _SCALE_HINT_MAX = 2.0       # 坐标 <= 该值视为 0-1 输出,否则按 0-1000 解析
 
@@ -712,20 +709,6 @@ def compute_env_flow(
 # ---------------------------------------------------------------------------
 
 
-def _needs_heading(state: Dict[str, Any]) -> bool:
-    """一致性初判为「相反」或「不明」时才请求车头朝向旁证。"""
-    if state.get("empty"):
-        return False
-    if state["consistent"] is False:
-        return True
-    if state["side"] == "unknown" and state["moving"]:
-        return True
-    # 运动但 bbox 趋势无法区分靠近/远离 → 方向不明
-    if state["actual"] == "stable" and state["moving"]:
-        return True
-    return False
-
-
 def _parse_heading(raw_text: str) -> str:
     """从模型输出提取车头朝向:朝镜头/背镜头/难以判断。"""
     text = (raw_text or "").strip()
@@ -809,11 +792,16 @@ def run_tracking(
     time_range: Optional[Sequence[float]] = None,
     out_dir: Optional[Path] = None,
     deadline: Optional[float] = None,
+    max_workers: int = TRACKING_MAX_WORKERS,
 ) -> Dict[str, Any]:
     """执行定向跟踪,返回端点契约所需的载荷(server 补 artifacts 相对路径)。
 
     运行级问题不抛异常,返回 {"failed": True, "failure_reason": ...};
     只有视频不可读这类致命问题抛 TrackingFailure。
+
+    Args:
+        max_workers: 并发 VLM 调用上限(场景 side 判定 3 帧、车头朝向旁证
+            按 suspect 并发)。默认 TRACKING_MAX_WORKERS;设为 1 可退回串行。
     """
     if out_dir is not None:
         out_dir = Path(out_dir)
@@ -868,17 +856,28 @@ def run_tracking(
     anchored_groups = [s.anchor_group for s in suspects if s.anchor_group is not None]
     first_group = min(anchored_groups) if anchored_groups else 0
 
-    # --- 场景级中央隔离带方位判定(首/中/尾 3 帧多数表决) ---
+    # --- 场景级中央隔离带方位判定(首/中/尾 3 帧多数表决,帧间可并发) ---
     scene_sample_frames = _scene_sample_frames(grid, meta, t0, t1)
     scene_frame_index = scene_sample_frames[0] if scene_sample_frames else None
     scene_side_result: Optional[Dict[str, Any]] = None
     scene_frame_results: List[Dict[str, Any]] = []
     if scene_sample_frames:
         scene_jpegs = extract_window_jpegs(video_path, scene_sample_frames)
-        for jpeg, frame in zip(scene_jpegs, scene_sample_frames):
-            scene_frame_results.append(
-                {"frame": frame, "result": _query_scene_side(engine, jpeg, suspects)}
-            )
+        if max_workers == 1:
+            for jpeg, frame in zip(scene_jpegs, scene_sample_frames):
+                scene_frame_results.append(
+                    {"frame": frame, "result": _query_scene_side(engine, jpeg, suspects)}
+                )
+        else:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [
+                    executor.submit(_query_scene_side, engine, jpeg, suspects)
+                    for jpeg in scene_jpegs
+                ]
+                scene_frame_results = [
+                    {"frame": frame, "result": future.result()}
+                    for frame, future in zip(scene_sample_frames, futures)
+                ]
     if scene_frame_results:
         scene_side_result = _vote_scene_side(
             scene_frame_results, suspects, events_all
@@ -971,12 +970,9 @@ def run_tracking(
                 win_calls += 1
                 call_kwargs: Dict[str, Any] = {"template": template, "images": images}
                 if mode == "propagate":
-                    # 传播窗是封闭感知任务(接框),关 thinking 换低延迟;
-                    # re-anchor 窗保留思考但给 1024 软预算,防止犹豫循环
-                    # 烧穿 max_tokens(qwen3 thinking_budget,实测有效)。
+                    # 传播窗是封闭感知任务(接框),关 thinking 换低延迟。
                     call_kwargs["enable_thinking"] = False
-                else:
-                    call_kwargs["thinking_budget"] = REANCHOR_THINKING_BUDGET
+                # re-anchor 窗使用引擎默认 reasoning_effort(medium),不额外覆盖。
                 resp = engine.call(**call_kwargs)
                 if getattr(resp, "success", False):
                     response_ok = True
@@ -1169,6 +1165,9 @@ def run_tracking(
     span_s = max(t1 - t0, 0.0)  # 目标时段总长(coverage 分母)
     tracks: List[Track] = []
     dropped: List[str] = []
+
+    # 第一阶段:装配 Track 并一次性评估方向(状态机只算一次)
+    pending: List[Tuple[_SuspectState, Track, DirectionAssessment]] = []
     for s in suspects:
         ordered = _dedupe_points(s.points)
         if not ordered:
@@ -1182,7 +1181,7 @@ def run_tracking(
         main = stitch.longest_chain(chains)
         smoothed = stitch.smooth_chain(main)
         track = Track(
-            id=len(tracks) + 1,
+            id=0,  # 占位;通过互证后再按 tracks 顺序赋真实 id
             description=s.anchor.description,
             points=[
                 TrackPoint(
@@ -1253,20 +1252,38 @@ def run_tracking(
             p.frame_idx for p in track.points if is_clipped_box(p.box)
         ]
 
-        # 方向初判:一致性相反/不明时请求车头朝向旁证(不翻盘)
-        state = _direction_verdict_state(track)
-        heading_result: Optional[Dict[str, Any]] = None
-        if _needs_heading(state):
-            heading_result = _query_heading(engine, video_path, track)
+        assessment = evaluate_direction(track)
+        pending.append((s, track, assessment))
+
+    # 第二阶段:按 suspect 并发请求车头朝向旁证(仅 needs_heading 的目标)
+    def _fetch_heading(
+        item: Tuple[_SuspectState, Track, DirectionAssessment]
+    ) -> Optional[Dict[str, Any]]:
+        _s, track, assessment = item
+        if assessment.needs_heading:
+            return _query_heading(engine, video_path, track)
+        return None
+
+    if max_workers == 1 or len(pending) <= 1:
+        headings: List[Optional[Dict[str, Any]]] = [
+            _fetch_heading(item) for item in pending
+        ]
+    else:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            headings = list(executor.map(_fetch_heading, pending))
+
+    # 第三阶段:渲染 verdict 并做互证跑飞检查
+    for (s, track, assessment), heading_result in zip(pending, headings):
         track.heading = heading_result
-        track.direction_verdict = direction_verdict(track, heading=heading_result)
+        track.direction_verdict = render_direction(assessment, heading=heading_result)
         ok, why = is_consistent(track)
         if not ok:
             dropped.append(f"suspect {s.letter}({s.anchor.description}): {why}")
             events_all.append(
-                {"type": "mutual_check_fail", "frame": ordered[0]["frame"], "label": "drift"}
+                {"type": "mutual_check_fail", "frame": track.points[0].frame_idx, "label": "drift"}
             )
             continue
+        track.id = len(tracks) + 1
         tracks.append(track)
 
     if not tracks:
@@ -1568,7 +1585,7 @@ def _write_run_snapshot(
         "reanchor_every": REANCHOR_EVERY,
         "reanchor_mismatch_iou": REANCHOR_MISMATCH_IOU,
         # thinking 口径:propagate 窗关 thinking(低延迟);reanchor 窗不传参
-        # (None = 服务端默认,vLLM qwen3 默认开启);场景判定 also False。
+        # (使用引擎默认 reasoning_effort=medium);场景判定 also False。
         "enable_thinking": {"propagate": False, "reanchor": None, "scene_side": False},
         "env_flow": env_flow,
         "stop_reason": stop_reason,

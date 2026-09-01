@@ -15,6 +15,8 @@ from __future__ import annotations
 import base64
 import csv
 import json
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
@@ -25,9 +27,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from traffic_analyzer.toolserver import create_app
+from traffic_analyzer.toolserver.tracking.models import SuspectAnchor
 from traffic_analyzer.toolserver.tracking.windows import (
     REANCHOR_EVERY,
     REANCHOR_MISMATCH_IOU,
+    run_tracking,
 )
 
 _FPS = 5.0
@@ -76,7 +80,10 @@ def _window_response(target_box_frame0: str) -> Dict[str, Any]:
 
 
 class ScriptedEngine:
-    """mock VLMInferenceEngine:按脚本逐窗返回 LLMResponse 形状的对象。"""
+    """mock VLMInferenceEngine:按脚本逐窗返回 LLMResponse 形状的对象。
+
+    支持并发调用:计数器/列表用锁保护,但响应计算可并行。
+    """
 
     def __init__(
         self,
@@ -95,12 +102,14 @@ class ScriptedEngine:
         self.calls = 0
         self.window_calls = 0
         self.prompts: List[str] = []
+        self._lock = threading.Lock()
 
     def call(self, template: Any, images: Any = None, **kwargs: Any) -> Any:
         from types import SimpleNamespace
 
-        self.calls += 1
-        self.prompts.append(template.user_prompt)
+        with self._lock:
+            self.calls += 1
+            self.prompts.append(template.user_prompt)
         if getattr(template, "template_id", None) == "track_suspects_scene_side":
             if self.fail_all:
                 return SimpleNamespace(
@@ -111,14 +120,16 @@ class ScriptedEngine:
             return SimpleNamespace(
                 success=True, parsed_data=data, raw_text=text, model="mock", provider="mock"
             )
-        self.window_calls += 1
-        if self.fail_all or self.window_calls > len(self.responses):
+        with self._lock:
+            self.window_calls += 1
+            window_idx = self.window_calls
+        if self.fail_all or window_idx > len(self.responses):
             if self.fail_all:
                 return SimpleNamespace(
                     success=False, error_message="provider down", parsed_data={}, raw_text=""
                 )
             # 脚本耗尽后默认重复最后一个成功响应
-        data = self.responses[min(self.window_calls, len(self.responses)) - 1]
+        data = self.responses[min(window_idx, len(self.responses)) - 1]
         text = f"```json\n{json.dumps(data)}\n```"
         return SimpleNamespace(
             success=True, parsed_data=data, raw_text=text, model="mock", provider="mock"
@@ -571,7 +582,11 @@ class TestThinkingPropagation:
 
 
 class ProgressiveEngine:
-    """按窗序号生成持续移动的脚本化框,避免 5 点滑动平均把运动抹平。"""
+    """按窗序号生成持续移动的脚本化框,避免 5 点滑动平均把运动抹平。
+
+    支持并发调用:计数器用锁保护,但响应计算可并行;heading 始终返回固定
+    答案,不依赖调用顺序。
+    """
 
     def __init__(self, mode: str = "stable", heading_answer: str = "朝镜头") -> None:
         self.mode = mode
@@ -579,13 +594,16 @@ class ProgressiveEngine:
         self.calls = 0
         self.heading_calls = 0
         self.window_calls = 0
+        self._lock = threading.Lock()
 
     def call(self, template: Any, images: Any = None, **kwargs: Any) -> Any:
         from types import SimpleNamespace
 
-        self.calls += 1
+        with self._lock:
+            self.calls += 1
         if getattr(template, "template_id", None) == "vehicle_heading":
-            self.heading_calls += 1
+            with self._lock:
+                self.heading_calls += 1
             return SimpleNamespace(
                 success=True,
                 raw_text=self.heading_answer,
@@ -602,8 +620,9 @@ class ProgressiveEngine:
                 model="mock",
                 provider="mock",
             )
-        wi = self.window_calls
-        self.window_calls += 1
+        with self._lock:
+            wi = self.window_calls
+            self.window_calls += 1
         boxes: List[Dict[str, Any]] = []
         for f in range(5):
             x = 60 + wi * 80 + f * 20
@@ -656,10 +675,12 @@ class TestHeading:
             def call(self, template: Any, images: Any = None, **kwargs: Any) -> Any:
                 from types import SimpleNamespace
 
-                self.calls += 1
+                with self._lock:
+                    self.calls += 1
                 if getattr(template, "template_id", None) == "vehicle_heading":
-                    self.heading_calls += 1
-                    answer = "朝镜头" if self.heading_calls == 1 else "背镜头"
+                    with self._lock:
+                        self.heading_calls += 1
+                        answer = "朝镜头" if self.heading_calls == 1 else "背镜头"
                     return SimpleNamespace(
                         success=True,
                         raw_text=answer,
@@ -1052,3 +1073,73 @@ class TestClippedIntegration:
         assert track["profile"]["clipped_count"] >= 1
         assert "方向不明" in track["direction_verdict"]
         assert "面积与位移矛盾" in track["direction_verdict"]
+
+
+class ConcurrencyTrackingEngine(ScriptedEngine):
+    """记录 scene side VLM 调用峰值并发数的 mock engine。
+
+    提供无限重复的窗口响应,使 run_tracking 能正常完成轨迹装配。
+    """
+
+    def __init__(self, delay: float = 0.05, **kwargs: Any) -> None:
+        super().__init__(responses=[_window_response("[100,700,400,950]")], **kwargs)
+        self.delay = delay
+        self._active = 0
+        self._max_active = 0
+        self._active_lock = threading.Lock()
+
+    def call(self, template: Any, images: Any = None, **kwargs: Any) -> Any:
+        tid = getattr(template, "template_id", None)
+        if tid == "track_suspects_scene_side":
+            with self._active_lock:
+                self._active += 1
+                self._max_active = max(self._max_active, self._active)
+            try:
+                time.sleep(self.delay)
+                return super().call(template, images, **kwargs)
+            finally:
+                with self._active_lock:
+                    self._active -= 1
+        return super().call(template, images, **kwargs)
+
+
+class TestConcurrency:
+    """并发上限与并发安全单元测试。"""
+
+    _ANCHOR = SuspectAnchor(
+        box=[0.1, 0.4, 0.28, 0.62],
+        timestamp=0.2,
+        description="左侧来向的白色轿车",
+        side="coming",
+    )
+
+    def test_scene_side_queries_run_concurrently(self, tmp_path: Path) -> None:
+        """max_workers>=3 时,3 帧场景 side 调用应并发执行。"""
+        video = _make_video(tmp_path / "clip.mp4", n=40, fps=5.0)
+        engine = ConcurrencyTrackingEngine(delay=0.05)
+        result = run_tracking(
+            engine,
+            video,
+            [self._ANCHOR],
+            time_range=[0.0, 6.0],
+            out_dir=None,
+            max_workers=3,
+        )
+        assert result["failed"] is False
+        # 3 帧并发上限应达到 3
+        assert engine._max_active >= 3, f"expected concurrent scene calls, got max={engine._max_active}"
+
+    def test_max_workers_one_serializes_scene_side(self, tmp_path: Path) -> None:
+        """max_workers=1 时,场景 side 调用完全串行,峰值并发为 1。"""
+        video = _make_video(tmp_path / "clip.mp4", n=40, fps=5.0)
+        engine = ConcurrencyTrackingEngine(delay=0.01)
+        result = run_tracking(
+            engine,
+            video,
+            [self._ANCHOR],
+            time_range=[0.0, 6.0],
+            out_dir=None,
+            max_workers=1,
+        )
+        assert result["failed"] is False
+        assert engine._max_active == 1, f"expected serial calls, got max={engine._max_active}"

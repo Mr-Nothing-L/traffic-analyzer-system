@@ -75,7 +75,12 @@ def _interp_bbox(
 
 
 def _segment_speed_state(p1: Dict[str, Any], p2: Dict[str, Any]) -> str:
-    """相邻两点的局部速度状态:按 bbox 对角线比例归一口径分档。"""
+    """相邻两点的局部速度状态:按 bbox 对角线比例归一口径分档。
+
+    口径:仅看相邻两点的瞬时位移,用于轨迹逐段颜色染色(红=静止/黄=缓行/
+    绿=正常)。注意:models.py::classify_motion_state 是对整段轨迹求平均的
+    档案口径,用于 JSON 输出;两者语义不同、不合并,阈值统一引用 models 常量。
+    """
     c1 = bbox_center(p1["box"])  # type: ignore[arg-type]
     c2 = bbox_center(p2["box"])  # type: ignore[arg-type]
     disp = ((c2[0] - c1[0]) ** 2 + (c2[1] - c1[1]) ** 2) ** 0.5

@@ -85,6 +85,33 @@ class Track:
     heading: Optional[Dict[str, Any]] = None
 
 
+@dataclass
+class DirectionAssessment:
+    """方向一致性评估中间态。
+
+    由 evaluate_direction() 对状态机一次性求值产出,携带 render_direction()
+    格式化 verdict 所需的全部字段,以及决定是否请求车头朝向旁证的
+    needs_heading 标志。
+    """
+
+    empty: bool
+    side: str = "unknown"
+    expected: Optional[str] = None
+    actual: str = "stationary"
+    consistent: Optional[bool] = None
+    moving: bool = False
+    duration_s: float = 0.0
+    distance_ratio: float = 0.0
+    change_pct: float = 0.0
+    low_cov: str = ""
+    area_signal: Optional[str] = None
+    y_signal: Optional[str] = None
+    clipped_all: bool = False
+    needs_heading: bool = False
+    env_flow_norm: Optional[float] = None
+    side_rationale: Optional[str] = None
+
+
 # ---------------------------------------------------------------------------
 # 几何小工具
 # ---------------------------------------------------------------------------
@@ -295,9 +322,11 @@ def is_consistent(track: Track) -> Tuple[bool, Optional[str]]:
 def classify_motion_state(profile: Dict[str, Any]) -> str:
     """按档案把运动状态分为 red(静止)/yellow(缓行)/green(正常)。
 
-    render.py 速度染色与 JSON 输出共用该口径。静止判定以净位移为主:
-    速度低于阈值 **且** 净位移不足 0.5 × 对角线才是静止——低速蠕行
-    (全程净位移大)不再误判为静止。
+    口径:对整条轨迹求平均速度 / 净位移,用于数值档案的红黄绿分档。
+    注意:render.py::_segment_speed_state 是相邻两点的局部速度口径,
+    仅用于轨迹染色,两者语义不同、不合并; thresholds 统一引用本文件常量。
+    静止判定以净位移为主:速度低于阈值 **且** 净位移不足 0.5 × 对角线
+    才是静止——低速蠕行(全程净位移大)不再误判为静止。
     """
     diag = float(profile.get("mean_diagonal") or 0.0)
     speed = float(profile.get("avg_speed_norm") or 0.0)
@@ -440,38 +469,71 @@ def _direction_verdict_state(track: Track) -> Dict[str, Any]:
     }
 
 
-def direction_verdict(
-    track: Track,
-    heading: Optional[Dict[str, Any]] = None,
-) -> str:
-    """方向一致性结构化 verdict(中文,供 agent 裁决引用)。
+def evaluate_direction(track: Track) -> DirectionAssessment:
+    """方向一致性状态机一次性求值。
 
-    输出格式:「所在车道=...;轨迹=...;结论:...」
-    - coming=应靠近镜头, going=应远离镜头。
-    - 实际方向由 bbox 面积趋势(末段截断时剔除) + 框心 y 位移综合;
-      两信号一致则采信,矛盾时判「方向不明」,不采信面积。
-    - 与预期相反时,无朝向旁证按反向运动持续距离/时长阈值二分逆行/倒车;
-      有可靠朝向旁证时,朝向优先用于二分。
-    - side=unknown 时标注「车道方位未知,仅凭几何初判」。
-    - 轨迹覆盖率 coverage < 0.5 时追加「证据不足」限定。
+    返回 DirectionAssessment,包含 verdict 渲染所需全部字段以及
+    needs_heading 触发标志(原 _needs_heading 的四条规则内聚到此模块)。
     """
     state = _direction_verdict_state(track)
     if state.get("empty"):
+        return DirectionAssessment(empty=True, needs_heading=False)
+
+    # 一致性初判为「相反」或「不明」/车道方位未知时才请求车头朝向旁证。
+    needs_heading = False
+    if state["consistent"] is False:
+        needs_heading = True
+    elif state["side"] == "unknown" and state["moving"]:
+        needs_heading = True
+    # 运动但 bbox 趋势无法区分靠近/远离 → 方向不明
+    elif state["actual"] == "stable" and state["moving"]:
+        needs_heading = True
+
+    return DirectionAssessment(
+        empty=False,
+        side=state["side"],
+        expected=state["expected"],
+        actual=state["actual"],
+        consistent=state["consistent"],
+        moving=state["moving"],
+        duration_s=state["duration_s"],
+        distance_ratio=state["distance_ratio"],
+        change_pct=state["change_pct"],
+        low_cov=state["low_cov"],
+        area_signal=state["area_signal"],
+        y_signal=state["y_signal"],
+        clipped_all=state["clipped_all"],
+        needs_heading=needs_heading,
+        env_flow_norm=(track.profile or {}).get("env_flow_norm"),
+        side_rationale=track.side_rationale,
+    )
+
+
+def render_direction(
+    assessment: DirectionAssessment,
+    heading: Optional[Dict[str, Any]] = None,
+) -> str:
+    """由 DirectionAssessment 格式化方向一致性结构化 verdict(中文)。
+
+    输出与 direction_verdict() 逐字等价,供装配层在状态机只算一次的前提下
+    复用已有评估结果。
+    """
+    if assessment.empty:
         return "无有效轨迹"
 
-    side = state["side"]
-    expected = state["expected"]
-    actual = state["actual"]
-    consistent = state["consistent"]
-    change_pct = state["change_pct"]
-    low_cov = state["low_cov"]
-    profile = track.profile or {}
+    side = assessment.side
+    expected = assessment.expected
+    actual = assessment.actual
+    consistent = assessment.consistent
+    change_pct = assessment.change_pct
+    low_cov = assessment.low_cov
+    env_flow = assessment.env_flow_norm
 
     # 车道侧/预期
     if side == "coming":
-        lane = f"所在车道=来向侧({track.side_rationale or '应靠近镜头'})"
+        lane = f"所在车道=来向侧({assessment.side_rationale or '应靠近镜头'})"
     elif side == "going":
-        lane = f"所在车道=去向侧({track.side_rationale or '应远离镜头'})"
+        lane = f"所在车道=去向侧({assessment.side_rationale or '应远离镜头'})"
     else:
         lane = "所在车道=车道方位未知,仅凭几何初判"
 
@@ -496,7 +558,6 @@ def direction_verdict(
 
     # 结论
     if actual == "stationary":
-        env_flow = profile.get("env_flow_norm")
         if env_flow is not None and env_flow >= FLOW_EPSILON:
             conclusion = "目标静止且环境正常流动(疑似违停)"
         elif env_flow is not None and env_flow < FLOW_EPSILON:
@@ -520,8 +581,8 @@ def direction_verdict(
         else:
             # 无可靠朝向旁证:按反向运动持续距离/时长阈值默认二分
             if (
-                state["distance_ratio"] >= REVERSE_MOTION_MIN_DISTANCE_RATIO
-                and state["duration_s"] >= REVERSE_MOTION_MIN_DURATION_S
+                assessment.distance_ratio >= REVERSE_MOTION_MIN_DISTANCE_RATIO
+                and assessment.duration_s >= REVERSE_MOTION_MIN_DURATION_S
             ):
                 conclusion = "疑似逆行"
             else:
@@ -555,3 +616,16 @@ def direction_verdict(
             )
 
     return f"{lane};{traj};结论:{conclusion}{heading_evidence}{low_cov}"
+
+
+def direction_verdict(
+    track: Track,
+    heading: Optional[Dict[str, Any]] = None,
+) -> str:
+    """方向一致性结构化 verdict(中文,供 agent 裁决引用)。
+
+    保留为 evaluate_direction + render_direction 的薄封装,兼容既有调用方
+    (tests/__init__/windows.py)。
+    """
+    assessment = evaluate_direction(track)
+    return render_direction(assessment, heading)
