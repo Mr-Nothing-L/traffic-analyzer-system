@@ -9,6 +9,9 @@ import {
   createToolMessage,
   createUserMessage,
   extractText,
+  APIStatusError,
+  type ContentPart,
+  type ChatProvider,
   type Message,
   type ToolCall,
   type FinishReason,
@@ -156,6 +159,152 @@ describe('runAgentLoop', () => {
 
     const toolResult = h.events.find((e) => e.type === 'tool_result');
     expect(toolResult).toMatchObject({ toolCallId: 'c1', name: 'echo', isError: false });
+  });
+
+  describe('抽帧步骤思考降档(framesThinkingEffort)', () => {
+    const frameParts = (n: number): ContentPart[] => {
+      const parts: ContentPart[] = [{ type: 'text', text: '帧列表' }];
+      for (let i = 0; i < n; i += 1) {
+        parts.push({ type: 'image_url', imageUrl: { url: `data:image/jpeg;base64,f${i}` } });
+      }
+      return parts;
+    };
+
+    class BudgetProbeProvider extends ScriptedProvider {
+      readonly budgetKwargs: Record<string, unknown>[] = [];
+      withGenerationKwargs(kwargs: Record<string, unknown>): ChatProvider {
+        this.budgetKwargs.push(kwargs);
+        return this;
+      }
+    }
+
+    function framesRun(
+      provider: BudgetProbeProvider,
+      tool: ExecutableTool,
+      overrides: Partial<AgentLoopOptions> = {},
+    ) {
+      const registry = new ToolRegistry();
+      registry.register(tool);
+      return runAgentLoop({
+        provider,
+        systemPrompt: 'sys',
+        registry,
+        gate: yoloGate(),
+        messages: [createUserMessage('开始')],
+        ...overrides,
+      });
+    }
+
+    it('上一条工具结果含 ≥4 张图时,该步 generate 用降档档位', async () => {
+      const extractTool = echoTool(
+        () => Promise.resolve({ output: frameParts(4) }),
+        'extract_frames',
+      );
+      const provider = new BudgetProbeProvider({
+        script: [[toolCall('c1', 'extract_frames', {})], [text('结论')]],
+      });
+
+      const result = await framesRun(provider, extractTool, { framesThinkingEffort: 'low' });
+
+      expect(result.reason).toBe('completed');
+      expect(provider.budgetKwargs).toEqual([
+        { chat_template_kwargs: { enable_thinking: true, reasoning_effort: 'low' } },
+      ]);
+    });
+
+    it('图片不足阈值时不降档', async () => {
+      const provider = new BudgetProbeProvider({
+        script: [[toolCall('c1', 'echo', {})], [text('结论')]],
+      });
+
+      await framesRun(provider, echoTool(), { framesThinkingEffort: 'low' });
+
+      expect(provider.budgetKwargs).toHaveLength(0);
+    });
+
+    it('未配置 framesThinkingEffort 时不降档', async () => {
+      const extractTool = echoTool(
+        () => Promise.resolve({ output: frameParts(6) }),
+        'extract_frames',
+      );
+      const provider = new BudgetProbeProvider({
+        script: [[toolCall('c1', 'extract_frames', {})], [text('结论')]],
+      });
+
+      await framesRun(provider, extractTool);
+
+      expect(provider.budgetKwargs).toHaveLength(0);
+    });
+  });
+
+  describe('服务端工具解析 400 自动恢复', () => {
+    const toolParse400 = (): APIStatusError =>
+      new APIStatusError(
+        400,
+        '400 Unterminated string starting at: line 1 column 2725 (char 2724)',
+      );
+
+    it('命中特征时自动续一轮并成功', async () => {
+      const h = harness([toolParse400(), [text('结论')]], [echoTool()]);
+
+      const result = await h.run();
+
+      expect(result.reason).toBe('completed');
+      expect(h.provider.histories).toHaveLength(2);
+      // nudge 以 user 消息回灌进第二次调用的历史
+      const second = h.provider.histories[1] ?? [];
+      const nudge = second.find(
+        (m) => m.role === 'user' && extractText(m).includes('参数 JSON 未闭合'),
+      );
+      expect(nudge).toBeDefined();
+      expect(h.events.some((e) => e.type === 'generate_retry')).toBe(true);
+    });
+
+    it('连续达到上限后按 error 收尾', async () => {
+      const h = harness(
+        [toolParse400(), toolParse400(), toolParse400(), [text('不应到达')]],
+        [echoTool()],
+      );
+
+      const result = await h.run();
+
+      expect(result.reason).toBe('error');
+      expect(result.error).toContain('Unterminated');
+      // 首次 + 2 次恢复,共 3 次 generate;第 4 个脚本条目不消耗
+      expect(h.provider.histories).toHaveLength(3);
+    });
+
+    it('非匹配 400(请求侧校验失败)不恢复', async () => {
+      const h = harness(
+        [
+          new APIStatusError(
+            400,
+            'Unexpected reasoning effort high. Supported types are xhigh (default), medium, and low.',
+          ),
+        ],
+        [echoTool()],
+      );
+
+      const result = await h.run();
+
+      expect(result.reason).toBe('error');
+      expect(h.provider.histories).toHaveLength(1);
+    });
+  });
+
+  it('每步 generate 成功后发出 generate_done 计时事件', async () => {
+    const h = harness(
+      [[toolCall('c1', 'echo', {})], [text('答')]],
+      [echoTool()],
+    );
+
+    await h.run();
+
+    const gd = h.events.filter((e) => e.type === 'generate_done');
+    expect(gd).toHaveLength(2);
+    expect(gd[0]?.step).toBe(1);
+    expect(gd[1]?.step).toBe(2);
+    expect(typeof gd[0]?.generateMs).toBe('number');
   });
 
   it('工具结果 stopTurn=true 时结束循环并携带该结果', async () => {

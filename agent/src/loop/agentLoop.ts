@@ -11,6 +11,8 @@ import {
   isAbortError,
   generate,
   createToolMessage,
+  createUserMessage,
+  APIStatusError,
   type Message,
   type ToolCall,
   type ChatProvider,
@@ -39,6 +41,34 @@ export const DEFAULT_TOOL_TIMEOUT_MS = 120_000;
 /** 截断残块 tool call 回灌给模型的提示(要求缩小单次输出重试)。 */
 export const TRUNCATED_TOOL_CALL_MESSAGE =
   '输出达到 token 上限被截断,该工具调用参数不完整,请重试并缩小单次输出(如减少事件实例数或分次提交)';
+
+/**
+ * 服务端工具解析 400 自动恢复的 nudge:模型生成的工具参数 JSON 未闭合
+ * (通常是思考烧穿 maxTokens 导致参数截断),vLLM qwen3_xml 解析器整请求
+ * 报 400,客户端收不到任何 tool call,只能靠提示重试。
+ */
+export const TOOL_PARSE_400_MESSAGE =
+  '上一次工具调用的参数 JSON 未闭合,被服务端解析器拒绝(400),调用未生效。' +
+  '通常是输出过长被截断:请缩短 reasoning 与 report 长度(或减少单次的实例/事件数)' +
+  '后重新发起该工具调用。';
+
+/** 每轮 400 自动恢复的次数上限(连续,防无限重试烧 token)。 */
+export const TOOL_PARSE_400_MAX_RECOVERIES = 2;
+
+/**
+ * 识别「响应侧」工具解析 400:vLLM 工具解析器对截断/畸形参数 JSON 的报错
+ * (Unterminated string / JSONDecodeError 等)。请求侧 400(参数校验失败,
+ * 如非法 reasoning_effort)不匹配——那种重试无意义。
+ */
+export function isToolParse400(error: unknown): boolean {
+  return (
+    error instanceof APIStatusError &&
+    error.statusCode === 400 &&
+    /unterminated string|jsondecodeerror|invalid json|failed to parse|expecting .*(delimiter|value|property)/i.test(
+      error.message,
+    )
+  );
+}
 
 export type AgentLoopDoneReason =
   | 'completed'
@@ -98,6 +128,25 @@ export type AgentLoopEvent =
       readonly event: AgentLoopEvent;
     }
   | {
+      /** 每步 generate 成功后发出:该步 LLM 调用耗时(壁钟 + 服务端解码)。 */
+      readonly type: 'generate_done';
+      readonly step: number;
+      /** 壁钟耗时(ms,generate 调用到流结束,含网络与服务端排队)。 */
+      readonly generateMs: number;
+      /** 其中服务端流式解码耗时(ms,kosong StreamDecodeStats.serverDecodeMs)。 */
+      readonly serverMs?: number;
+    }
+  | {
+      /**
+       * 服务端工具解析 400 的自动恢复通知:generate 因「工具参数 JSON 未闭合」
+       * (vLLM qwen3_xml 解析器对截断/畸形参数的 400)失败后,loop 追加 nudge
+       * 并重试该步时发出;仅通知,不改变消息流。
+       */
+      readonly type: 'generate_retry';
+      readonly step: number;
+      readonly error: string;
+    }
+  | {
       readonly type: 'done';
       readonly reason: AgentLoopDoneReason;
       readonly stopResult?: ExecutableToolResult;
@@ -123,6 +172,13 @@ export interface AgentLoopOptions {
   readonly toolTimeoutMs?: number;
   /** 比率触发压缩配置;缺省不压缩。 */
   readonly compaction?: { readonly maxContextTokens: number } & CompactionOverrides;
+  /**
+   * 抽帧步骤的思考降档(可选;null/缺省不降档):上一条消息为图片数
+   * ≥4 的工具结果(extract_frames 批量抽帧)时,该步 generate 改用此思考
+   * 档位(qwen3.8 reasoning_effort:low/medium/xhigh)克隆 provider。逐帧
+   * 分析倾向强,高档位容易把 maxTokens 烧穿成 think-only 响应(整轮失败)。
+   */
+  readonly framesThinkingEffort?: string | null;
   readonly signal?: AbortSignal;
   readonly onEvent?: (event: AgentLoopEvent) => void | Promise<void>;
   /**
@@ -163,6 +219,34 @@ export interface AgentLoopResult {
   readonly error?: string;
 }
 
+/** 上一条工具结果含 ≥4 张图时,当前步视为「看帧分析」步(抽帧后总结)。 */
+const FRAME_STEP_IMAGE_THRESHOLD = 4;
+
+function isFrameAnalysisStep(messages: readonly Message[]): boolean {
+  const last = messages[messages.length - 1];
+  if (last === undefined || last.role !== 'tool' || !Array.isArray(last.content)) {
+    return false;
+  }
+  let images = 0;
+  for (const part of last.content) {
+    if (part.type === 'image_url') images += 1;
+  }
+  return images >= FRAME_STEP_IMAGE_THRESHOLD;
+}
+
+/** 以指定思考档位克隆 provider;provider 不支持按调用覆盖时原样返回(不降档)。 */
+function withReasoningEffort(provider: ChatProvider, effort: string): ChatProvider {
+  const capable = provider as ChatProvider & {
+    withGenerationKwargs?: (kwargs: Record<string, unknown>) => ChatProvider;
+  };
+  if (typeof capable.withGenerationKwargs !== 'function') return provider;
+  // chat_template_kwargs 形状与 llm/provider.ts 的 qwen3 配置对齐;浅合并
+  // 整体替换该子对象,enable_thinking 需一并带上。
+  return capable.withGenerationKwargs({
+    chat_template_kwargs: { enable_thinking: true, reasoning_effort: effort },
+  });
+}
+
 export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoopResult> {
   const maxSteps = options.maxStepsPerTurn ?? DEFAULT_MAX_STEPS_PER_TURN;
   const maxConsecutiveToolErrors = options.maxConsecutiveToolErrors ?? 5;
@@ -180,6 +264,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   let lastUsedTokens: number | undefined;
   let errorStreak: { name: string; count: number; output: ExecutableToolResult['output'] | undefined } =
     { name: '', count: 0, output: undefined };
+  /** 服务端工具解析 400 的连续恢复次数(成功 generate 后清零)。 */
+  let toolParse400Recoveries = 0;
   /** sticky 截断标记:任一步 finishReason==='truncated' 后整个 turn 的
    * done 事件与返回值都带 truncated(参照 deepseek-harness 的粘性 max-tokens)。 */
   let turnTruncated = false;
@@ -339,8 +425,17 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     let assistant: Message;
     let stepTruncated = false;
     try {
+      // 抽帧步降档:上一条为多图工具结果时用低档思考克隆 provider。
+      const stepProvider =
+        options.framesThinkingEffort != null &&
+        options.framesThinkingEffort !== '' &&
+        isFrameAnalysisStep(messages)
+          ? withReasoningEffort(options.provider, options.framesThinkingEffort)
+          : options.provider;
+      const generateStartMs = Date.now();
+      let serverDecodeMs: number | undefined;
       const generated = await generate(
-        options.provider,
+        stepProvider,
         options.systemPrompt,
         tools,
         messages,
@@ -353,9 +448,21 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
             }
           },
         },
-        { signal: options.signal },
+        {
+          signal: options.signal,
+          onStreamEnd: (stats) => {
+            serverDecodeMs = stats?.serverDecodeMs;
+          },
+        },
       );
       assistant = generated.message;
+      toolParse400Recoveries = 0;
+      await emit({
+        type: 'generate_done',
+        step: steps,
+        generateMs: Date.now() - generateStartMs,
+        ...(serverDecodeMs !== undefined ? { serverMs: serverDecodeMs } : {}),
+      });
       // 本步被 token 上限截断:sticky 置位;本步 tool calls 中 arguments
       // 无法 JSON.parse 的残块不执行,合成 isError 结果回灌提示重试。
       stepTruncated = generated.finishReason === 'truncated';
@@ -374,6 +481,23 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     } catch (error) {
       if (isAbortError(error) || isAborted()) {
         return finish('cancelled');
+      }
+      // 服务端工具解析 400(参数 JSON 未闭合/畸形):追加 nudge 自动重试本步,
+      // 每轮最多 TOOL_PARSE_400_MAX_RECOVERIES 次,超出按原路径报错。
+      if (
+        isToolParse400(error) &&
+        toolParse400Recoveries < TOOL_PARSE_400_MAX_RECOVERIES
+      ) {
+        toolParse400Recoveries += 1;
+        const nudge = createUserMessage(TOOL_PARSE_400_MESSAGE);
+        messages = [...messages, nudge];
+        await persistAppended([nudge]);
+        await emit({
+          type: 'generate_retry',
+          step: steps,
+          error: errorMessage(error),
+        });
+        continue;
       }
       return finish('error', { error: errorMessage(error) });
     }

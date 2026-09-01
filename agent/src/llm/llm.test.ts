@@ -33,7 +33,11 @@ import {
   mergeDotenvIntoProcessEnv,
   parseDotenv,
 } from './env.ts';
-import { createProviderFromEnv, withThinkingDisabled } from './provider.ts';
+import {
+  createProviderFromEnv,
+  resolveFramesThinkingEffort,
+  withThinkingDisabled,
+} from './provider.ts';
 
 // ---------------------------------------------------------------------------
 // env.ts
@@ -438,7 +442,7 @@ describe('generate() over mock OpenAI SSE server', () => {
     }
   });
 
-  it('AGENT_ENABLE_THINKING 缺省时 enable_thinking=true(默认开)且带默认思考预算', async () => {
+  it('AGENT_ENABLE_THINKING 缺省时 enable_thinking=true(默认开)且带默认思考档位', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'llm-thinking-'));
     const envPath = join(dir, '.env');
     writeFileSync(
@@ -452,20 +456,21 @@ describe('generate() over mock OpenAI SSE server', () => {
     );
     delete process.env.AGENT_ENABLE_THINKING;
     delete process.env.AGENT_THINKING_BUDGET;
+    delete process.env.AGENT_REASONING_EFFORT;
     try {
       const { provider } = createProviderFromEnv(envPath);
       responseChunks = [sseChunk({ content: 'ok' }, 'stop'), USAGE_CHUNK];
       await generate(provider, 'sys', [], [createUserMessage('hi')]);
       expect(captured[0]?.body['chat_template_kwargs']).toEqual({
         enable_thinking: true,
-        thinking_budget: 4096,
+        reasoning_effort: 'medium',
       });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it('AGENT_THINKING_BUDGET 自定义值下发;=0 时不下发预算', async () => {
+  it('AGENT_THINKING_BUDGET 显式设置才下发软预算(默认不下发);=0 时不下发', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'llm-budget-'));
     const envPath = join(dir, '.env');
     writeFileSync(
@@ -477,6 +482,7 @@ describe('generate() over mock OpenAI SSE server', () => {
         `LLM_PROVIDER_0_BASE_URL=${baseUrl}`,
       ].join('\n'),
     );
+    delete process.env.AGENT_REASONING_EFFORT;
     process.env.AGENT_THINKING_BUDGET = '2048';
     try {
       let { provider } = createProviderFromEnv(envPath);
@@ -484,6 +490,7 @@ describe('generate() over mock OpenAI SSE server', () => {
       await generate(provider, 'sys', [], [createUserMessage('hi')]);
       expect(captured[0]?.body['chat_template_kwargs']).toEqual({
         enable_thinking: true,
+        reasoning_effort: 'medium',
         thinking_budget: 2048,
       });
 
@@ -491,10 +498,28 @@ describe('generate() over mock OpenAI SSE server', () => {
       ({ provider } = createProviderFromEnv(envPath));
       responseChunks = [sseChunk({ content: 'ok' }, 'stop'), USAGE_CHUNK];
       await generate(provider, 'sys', [], [createUserMessage('hi')]);
-      expect(captured[1]?.body['chat_template_kwargs']).toEqual({ enable_thinking: true });
+      expect(captured[1]?.body['chat_template_kwargs']).toEqual({
+        enable_thinking: true,
+        reasoning_effort: 'medium',
+      });
     } finally {
       delete process.env.AGENT_THINKING_BUDGET;
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('resolveFramesThinkingEffort:默认 low,可覆盖,off 关闭降档', () => {
+    delete process.env.AGENT_REASONING_EFFORT_FRAMES;
+    expect(resolveFramesThinkingEffort()).toBe('low');
+    process.env.AGENT_REASONING_EFFORT_FRAMES = 'medium';
+    try {
+      expect(resolveFramesThinkingEffort()).toBe('medium');
+      process.env.AGENT_REASONING_EFFORT_FRAMES = '0';
+      expect(resolveFramesThinkingEffort()).toBeNull();
+      process.env.AGENT_REASONING_EFFORT_FRAMES = 'abc';
+      expect(resolveFramesThinkingEffort()).toBe('low');
+    } finally {
+      delete process.env.AGENT_REASONING_EFFORT_FRAMES;
     }
   });
 
