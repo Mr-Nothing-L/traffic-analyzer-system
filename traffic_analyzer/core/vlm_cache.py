@@ -196,6 +196,7 @@ def _compute_cache_key(
     images: List[Any],
     enable_thinking: Optional[bool] = None,
     thinking_budget: Optional[int] = None,
+    reasoning_effort: Optional[str] = None,
 ) -> str:
     """Compute a deterministic cache key for a VLM call.
 
@@ -211,6 +212,9 @@ def _compute_cache_key(
         enable_thinking: Thinking 开关取值参与键(不同取值必须得到不同
             key,否则关 thinking 的请求会命中开 thinking 的旧缓存,反之
             亦然);None 不追加字段,与历史键保持一致。
+        thinking_budget: 思考软预算参与键;None 不追加字段。
+        reasoning_effort: 思考档位(low/medium/xhigh)参与键;None 不追加
+            字段。防止 xhigh 旧缓存污染 medium 新结果。
 
     Returns:
         Hex digest string suitable as a cache key.
@@ -246,5 +250,11 @@ def _compute_cache_key(
     if enable_thinking is not None:
         hasher.update(b"\x00")
         hasher.update(f"enable_thinking={enable_thinking}".encode("utf-8"))
+    if thinking_budget is not None:
+        hasher.update(b"\x00")
+        hasher.update(f"thinking_budget={thinking_budget}".encode("utf-8"))
+    if reasoning_effort is not None:
+        hasher.update(b"\x00")
+        hasher.update(f"reasoning_effort={reasoning_effort}".encode("utf-8"))
 
     return hasher.hexdigest()

@@ -230,6 +230,7 @@ def _build_aliyun_payload(
     temperature: float,
     enable_thinking: Optional[bool] = None,
     thinking_budget: Optional[int] = None,
+    reasoning_effort: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """Build Aliyun (OpenAI-compatible) message list and kwargs.
 
@@ -238,7 +239,10 @@ def _build_aliyun_payload(
     非标准字段,OpenAI SDK 未收录,必须走 extra_body 才能落到请求 body)。
     thinking_budget:思考的独立软预算(qwen3 chat_template_kwargs 支持),
     防止犹豫循环烧穿 max_tokens;None=不设。
+    reasoning_effort:qwen3 chat_template_kwargs 支持的思考档位
+    (low/medium/xhigh);enable_thinking=False 时会被抑制,避免矛盾 kwargs。
     """
+
     # Aliyun Qwen-VL supports OpenAI-compatible vision format
     content: List[Dict[str, Any]] = []
     if user_prompt:
@@ -266,13 +270,16 @@ def _build_aliyun_payload(
         "temperature": temperature,
         "messages": messages,
     }
-    if enable_thinking is not None or thinking_budget is not None:
+    if enable_thinking is not None or thinking_budget is not None or reasoning_effort is not None:
         template_kwargs: Dict[str, Any] = {}
         if enable_thinking is not None:
             template_kwargs["enable_thinking"] = enable_thinking
         if thinking_budget is not None:
             template_kwargs["thinking_budget"] = thinking_budget
-        kwargs["extra_body"] = {"chat_template_kwargs": template_kwargs}
+        if reasoning_effort is not None and enable_thinking is not False:
+            template_kwargs["reasoning_effort"] = reasoning_effort
+        if template_kwargs:
+            kwargs["extra_body"] = {"chat_template_kwargs": template_kwargs}
     return messages, kwargs
 
 

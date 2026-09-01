@@ -103,3 +103,36 @@ def test_cache_key_none_thinking_matches_legacy_key() -> None:
     """不传参(None)不追加字段 → 与历史键一致,旧缓存条目继续命中。"""
     legacy = _compute_cache_key("sys", "user", [])
     assert legacy == _compute_cache_key("sys", "user", [], enable_thinking=None)
+
+
+def test_cache_key_distinguishes_reasoning_effort() -> None:
+    """reasoning_effort 不同取值必须隔离,防止 xhigh 旧缓存污染 medium 结果。"""
+    args = ("sys prompt", "user prompt", [b"fake-jpeg-bytes"])
+    keys = {
+        _compute_cache_key(*args),
+        _compute_cache_key(*args, reasoning_effort="low"),
+        _compute_cache_key(*args, reasoning_effort="medium"),
+        _compute_cache_key(*args, reasoning_effort="xhigh"),
+    }
+    assert len(keys) == 4
+
+
+def test_cache_key_distinguishes_thinking_budget() -> None:
+    args = ("sys prompt", "user prompt", [b"fake-jpeg-bytes"])
+    keys = {
+        _compute_cache_key(*args),
+        _compute_cache_key(*args, thinking_budget=512),
+        _compute_cache_key(*args, thinking_budget=1024),
+    }
+    assert len(keys) == 3
+
+
+def test_cache_key_combines_thinking_params() -> None:
+    args = ("sys prompt", "user prompt", [b"fake-jpeg-bytes"])
+    base = _compute_cache_key(*args)
+    with_effort = _compute_cache_key(*args, reasoning_effort="medium")
+    with_budget = _compute_cache_key(*args, thinking_budget=1024)
+    with_both = _compute_cache_key(
+        *args, reasoning_effort="medium", thinking_budget=1024
+    )
+    assert len({base, with_effort, with_budget, with_both}) == 4

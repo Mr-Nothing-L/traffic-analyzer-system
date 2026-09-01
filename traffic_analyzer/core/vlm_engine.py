@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import os
 import threading
 import time
 import uuid
@@ -84,6 +85,18 @@ from traffic_analyzer.core.vlm_provider_clients import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _get_default_reasoning_effort() -> str:
+    """Return the default reasoning_effort from env, normalizing to medium."""
+    value = os.getenv("LLM_REASONING_EFFORT", "medium").strip().lower()
+    if value in ("low", "medium", "xhigh"):
+        return value
+    logger.warning(
+        "[vlm_engine] Invalid LLM_REASONING_EFFORT '%s', using 'medium'",
+        os.getenv("LLM_REASONING_EFFORT", ""),
+    )
+    return "medium"
 
 
 # ---------------------------------------------------------------------------
@@ -323,6 +336,7 @@ class VLMInferenceEngine:
         response_schema: Optional[Dict[str, Any]] = None,
         enable_thinking: Optional[bool] = None,
         thinking_budget: Optional[int] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> LLMResponse:
         """Execute a single VLM call.
 
@@ -335,11 +349,19 @@ class VLMInferenceEngine:
                 backends (vLLM qwen3 等):None=服务端默认;True/False 经
                 extra_body 传 chat_template_kwargs.enable_thinking。参与
                 cache key 计算。anthropic/google 分支不支持该参数,忽略。
+            reasoning_effort: OpenAI-compatible (vLLM qwen3) thinking effort
+                (low/medium/xhigh). When omitted, the engine falls back to the
+                ``LLM_REASONING_EFFORT`` environment variable (default medium).
+                Suppressed in the payload when ``enable_thinking=False``.
 
         Returns:
             LLMResponse with parsed data, token usage, and latency.
         """
         system_prompt, user_prompt = self.render_prompt(template, context_vars)
+
+        # Resolve engine default so callers get medium unless they override.
+        if reasoning_effort is None:
+            reasoning_effort = _get_default_reasoning_effort()
 
         # --- Cache lookup (memory first, then disk) ---
         cache_key = ""
@@ -347,6 +369,7 @@ class VLMInferenceEngine:
             cache_key = _compute_cache_key(
                 system_prompt, user_prompt, images, enable_thinking=enable_thinking,
                     thinking_budget=thinking_budget,
+                    reasoning_effort=reasoning_effort,
             )
             # Resolve the provider that would serve this call (under lock) so a
             # response cached before a failover is not returned for the new one.
@@ -410,6 +433,7 @@ class VLMInferenceEngine:
                 images=images,
                 enable_thinking=enable_thinking,
                 thinking_budget=thinking_budget,
+                reasoning_effort=reasoning_effort,
             )
             parsed_data = _extract_json_from_text(raw_text)
             if response_schema:
@@ -526,6 +550,7 @@ class VLMInferenceEngine:
         provider_index: Optional[int] = None,
         enable_thinking: Optional[bool] = None,
         thinking_budget: Optional[int] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> Tuple[str, int, int, int]:
         """Execute a single provider-specific API call (no retry).
 
@@ -538,6 +563,8 @@ class VLMInferenceEngine:
                 explicitly so a concurrent failover cannot swap provider,
                 config, and client mid-call.
             enable_thinking: 仅 OpenAI 兼容(aliyun)分支支持;anthropic/google
+                分支不支持该参数,忽略。
+            reasoning_effort: 仅 OpenAI 兼容(aliyun)分支支持;anthropic/google
                 分支不支持该参数,忽略。
         """
         if provider_index is None:
@@ -584,6 +611,7 @@ class VLMInferenceEngine:
                     config.temperature,
                     enable_thinking=enable_thinking,
                     thinking_budget=thinking_budget,
+                    reasoning_effort=reasoning_effort,
                 )
                 return _call_aliyun(client, kwargs)
             else:
@@ -607,11 +635,13 @@ class VLMInferenceEngine:
         images: List[Any],
         enable_thinking: Optional[bool] = None,
         thinking_budget: Optional[int] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> Tuple[str, int, int, int, int, int]:
         """Execute the API call with per-provider retry and provider failover.
 
         Args:
             enable_thinking: 仅 OpenAI 兼容(aliyun)分支支持,原样下传。
+            reasoning_effort: 仅 OpenAI 兼容(aliyun)分支支持,原样下传。
 
         Returns:
             Tuple of (raw_text, prompt_tokens, completion_tokens, total_tokens,
@@ -642,6 +672,7 @@ class VLMInferenceEngine:
                         provider_index=provider_idx,
                         enable_thinking=enable_thinking,
                         thinking_budget=thinking_budget,
+                        reasoning_effort=reasoning_effort,
                     )
                     # Sticky failover: subsequent calls start from the provider
                     # that served this request.

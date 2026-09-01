@@ -477,7 +477,8 @@ def test_in_flight_call_immune_to_concurrent_provider_index_flip(
     system_prompt, user_prompt = VLMInferenceEngine.render_prompt(
         simple_template, {"description": "race"}
     )
-    cache_key = _compute_cache_key(system_prompt, user_prompt, [])
+    # 引擎默认 reasoning_effort=medium(LLM_REASONING_EFFORT 缺省)参与缓存键。
+    cache_key = _compute_cache_key(system_prompt, user_prompt, [], reasoning_effort="medium")
     assert engine._disk_cache is not None
     assert engine._disk_cache.get(cache_key, "aliyun", "qwen-vl-max") is not None
     assert engine._disk_cache.get(cache_key, "anthropic", "claude-sonnet-4-6") is None

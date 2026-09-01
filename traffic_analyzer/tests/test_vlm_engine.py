@@ -844,11 +844,12 @@ def test_call_aliyun_enable_thinking_false_reaches_extra_body(
 
 
 @patch("traffic_analyzer.core.vlm_engine.openai.OpenAI")
-def test_call_aliyun_default_sends_no_thinking_override(
+def test_call_aliyun_default_sends_medium_reasoning_effort(
     mock_openai_cls: MagicMock,
     aliyun_config: LLMProviderConfig,
     simple_template: PromptTemplate,
 ) -> None:
+    """调用方不传 reasoning_effort 时,引擎默认 medium 并下传到 extra_body。"""
     mock_client = MagicMock()
     mock_openai_cls.return_value = mock_client
     mock_client.chat.completions.create.return_value = _mock_aliyun_response("default")
@@ -858,7 +859,9 @@ def test_call_aliyun_default_sends_no_thinking_override(
 
     assert resp.success is True
     create_kwargs = mock_client.chat.completions.create.call_args.kwargs
-    assert "extra_body" not in create_kwargs
+    assert create_kwargs["extra_body"] == {
+        "chat_template_kwargs": {"reasoning_effort": "medium"}
+    }
 
 
 @patch("traffic_analyzer.core.vlm_engine.openai.OpenAI")

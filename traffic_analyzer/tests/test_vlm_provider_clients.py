@@ -170,3 +170,48 @@ def test_build_aliyun_payload_default_has_no_extra_body() -> None:
     """不传参保持原请求形状(服务端默认),不引入额外字段。"""
     _, kwargs = _build_aliyun_payload("sys", "user", [], "qwen3.8-27b-fp8", 1024, 0.1)
     assert "extra_body" not in kwargs
+
+
+def test_build_aliyun_payload_reasoning_effort_injects_extra_body() -> None:
+    _, kwargs = _build_aliyun_payload(
+        "sys", "user", [], "qwen3.8-27b-fp8", 1024, 0.1, reasoning_effort="medium"
+    )
+    assert kwargs["extra_body"] == {
+        "chat_template_kwargs": {"reasoning_effort": "medium"}
+    }
+
+
+def test_build_aliyun_payload_reasoning_effort_suppressed_when_thinking_disabled() -> None:
+    """enable_thinking=False 时 reasoning_effort 被抑制,避免矛盾 kwargs。"""
+    _, kwargs = _build_aliyun_payload(
+        "sys",
+        "user",
+        [],
+        "qwen3.8-27b-fp8",
+        1024,
+        0.1,
+        enable_thinking=False,
+        reasoning_effort="medium",
+    )
+    assert kwargs["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
+
+
+def test_build_aliyun_payload_all_thinking_kwargs_together() -> None:
+    _, kwargs = _build_aliyun_payload(
+        "sys",
+        "user",
+        [],
+        "qwen3.8-27b-fp8",
+        1024,
+        0.1,
+        enable_thinking=True,
+        thinking_budget=1024,
+        reasoning_effort="xhigh",
+    )
+    assert kwargs["extra_body"] == {
+        "chat_template_kwargs": {
+            "enable_thinking": True,
+            "thinking_budget": 1024,
+            "reasoning_effort": "xhigh",
+        }
+    }
