@@ -1,98 +1,27 @@
-"""On-demand video frame extraction with a small LRU cache.
+"""On-demand video frame extraction routes.
 
 [文件说明]
-作用:按需抽帧接口。read_frame_jpeg 用 OpenCV 读取指定帧并 JPEG 编码,带 128 项 LRU
-缓存(key 含 mtime,防视频替换后返回陈旧帧);read_video_meta 返回帧数/fps/分辨率。
-提供 /api/videos/{stem}/meta|frame 与 /api/workspace/meta|frame(嵌套目录视频)路由。
+作用:按需抽帧路由。read_frame_jpeg/read_video_meta 的实际实现已收敛到
+    utils/video_io.py(单帧带 LRU 缓存,key 含 mtime 防视频替换后返回陈旧帧),
+    本模块只做 re-export 以保持既有调用方签名,并挂载
+    /api/videos/{stem}/meta|frame 与 /api/workspace/meta|frame(嵌套目录视频)路由。
 上游:web/app.py(挂载路由);frontend/dist 前端(逐帧步进浏览与元信息展示)。
-下游:web/workspace.py(视频路径解析);cv2(OpenCV)。
+下游:utils/video_io.py(抽帧/元信息);web/workspace.py(视频路径解析)。
 """
 
 from __future__ import annotations
 
-import threading
-from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict
 
-import cv2
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 
+from traffic_analyzer.utils.video_io import read_frame_jpeg, read_video_meta
 from traffic_analyzer.web import workspace as workspace_mod
 
+__all__ = ["read_frame_jpeg", "read_video_meta"]
+
 router = APIRouter()
-
-_CACHE_SIZE = 128
-# Key: (path, frame_index, mtime) — mtime included so a replaced video file
-# never serves stale frames (same convention as video_stream's probe cache).
-_cache: "OrderedDict[Tuple[str, int, float], bytes]" = OrderedDict()
-_cache_lock = threading.Lock()
-
-
-def _cached(key: Tuple[str, int, float]) -> Optional[bytes]:
-    with _cache_lock:
-        data = _cache.get(key)
-        if data is not None:
-            _cache.move_to_end(key)
-        return data
-
-
-def _store(key: Tuple[str, int, float], data: bytes) -> None:
-    with _cache_lock:
-        _cache[key] = data
-        _cache.move_to_end(key)
-        while len(_cache) > _CACHE_SIZE:
-            _cache.popitem(last=False)
-
-
-def read_frame_jpeg(video_path: Path, index: int) -> Optional[bytes]:
-    """Return the JPEG-encoded frame at ``index``, or None when out of range."""
-    key = (str(video_path), index, video_path.stat().st_mtime)
-    cached = _cached(key)
-    if cached is not None:
-        return cached
-
-    cap = cv2.VideoCapture(str(video_path))
-    try:
-        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        if index < 0 or index >= total:
-            return None
-        cap.set(cv2.CAP_PROP_POS_FRAMES, index)
-        ok, frame = cap.read()
-        if not ok or frame is None:
-            return None
-        ok, buf = cv2.imencode(".jpg", frame)
-        if not ok:
-            return None
-        data = buf.tobytes()
-    finally:
-        cap.release()
-
-    _store(key, data)
-    return data
-
-
-def read_video_meta(video_path: Path) -> Optional[Dict[str, Any]]:
-    """Return frame/fps/size metadata, or None when the video can't be opened."""
-    cap = cv2.VideoCapture(str(video_path))
-    try:
-        if not cap.isOpened():
-            return None
-        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        if frame_count <= 0:
-            return None
-        fps = float(cap.get(cv2.CAP_PROP_FPS))
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    finally:
-        cap.release()
-    return {
-        "frame_count": frame_count,
-        "fps": fps,
-        "duration_sec": frame_count / fps if fps > 0 else None,
-        "width": width,
-        "height": height,
-    }
 
 
 def _resolve_stem_video(request: Request, stem: str) -> Path:

@@ -9,7 +9,8 @@ import { computed, reactive, ref, watch } from 'vue'
 import type { AgentToolEntry } from '../../stores/agentchat'
 import UiIcon from '../UiIcon.vue'
 import ThinkLine from './ThinkLine.vue'
-import { copyText, toolLabel, trackSuspectsView } from '../../utils/chatDisplay'
+import { toolLabel, trackSuspectsView } from '../../utils/chatDisplay'
+import { useCopyFeedback } from '../../composables/useCopyFeedback'
 
 const props = defineProps<{
   entry: AgentToolEntry
@@ -35,22 +36,12 @@ watch(
 )
 
 /** 取证目录点击复制:成功图标变 ✓ 一秒,失败静默保持原样(低调调试辅助)。 */
-const dirCopied = ref(false)
-let dirCopiedTimer: ReturnType<typeof setTimeout> | null = null
+const { copiedKey: dirCopiedKey, copyWithFeedback: copyDirWithFeedback } = useCopyFeedback()
+const dirCopied = computed(() => dirCopiedKey.value !== null)
 async function onCopyArtifactsDir(): Promise<void> {
   const dir = trackView.value?.dir
   if (!dir || dirCopied.value) return
-  try {
-    await copyText(dir)
-  } catch {
-    return
-  }
-  dirCopied.value = true
-  if (dirCopiedTimer !== null) clearTimeout(dirCopiedTimer)
-  dirCopiedTimer = setTimeout(() => {
-    dirCopied.value = false
-    dirCopiedTimer = null
-  }, 1000)
+  await copyDirWithFeedback('artifacts-dir', dir)
 }
 
 function argsSummary(args: string): string {
@@ -75,21 +66,7 @@ function toggleSub(key: string) {
 }
 
 /** 子代理思考全文复制:成功图标变 ✓ 一秒,失败静默(同取证目录复制口径)。 */
-const copiedKey = ref<string | null>(null)
-let copiedTimer: ReturnType<typeof setTimeout> | null = null
-async function onCopyText(key: string, text: string): Promise<void> {
-  try {
-    await copyText(text)
-  } catch {
-    return
-  }
-  copiedKey.value = key
-  if (copiedTimer !== null) clearTimeout(copiedTimer)
-  copiedTimer = setTimeout(() => {
-    copiedKey.value = null
-    copiedTimer = null
-  }, 1000)
-}
+const { copiedKey, copyWithFeedback } = useCopyFeedback()
 </script>
 
 <template>
@@ -117,7 +94,7 @@ async function onCopyText(key: string, text: string): Promise<void> {
           <button
             class="row-copy"
             title="复制思考内容"
-            @click="onCopyText(`${entry.id}:${j}`, c.text)"
+            @click="copyWithFeedback(`${entry.id}:${j}`, c.text)"
           >
             <UiIcon :name="copiedKey === `${entry.id}:${j}` ? 'check' : 'copy'" :size="11" />
           </button>

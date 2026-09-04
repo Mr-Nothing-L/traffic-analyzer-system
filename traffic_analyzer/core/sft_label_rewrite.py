@@ -36,12 +36,10 @@ from __future__ import annotations
 
 import json
 import logging
-from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
 
-import yaml
-
+from traffic_analyzer.config.event_options import event_options_index
 from traffic_analyzer.core.pipeline_steps import PipelineStep
 from traffic_analyzer.core.verdict_format import (
     build_event_definitions_json,
@@ -134,35 +132,10 @@ _SFT_REWRITE_RESPONSE_SCHEMA: Dict[str, Any] = {
 # 结构化属性:封闭枚举(event_options.yaml)、别名归一、骨架句、attr_mentions 校验
 # ---------------------------------------------------------------------------
 
-_EVENT_OPTIONS_PATH = (
-    Path(__file__).resolve().parents[1] / "config" / "event_options.yaml"
-)
-
-
-@lru_cache(maxsize=1)
-def _event_options_index() -> Dict[int, List[Dict[str, Any]]]:
-    """event_options.yaml 的封闭枚举定义:{event_id: [属性组, ...]}(保持声明顺序)。
-
-    与 web/evidence_api._event_options_index 同口径,生成侧归一/校验复用同一
-    事实源,保证产出的 event_attributes 一定能通过 PUT 的严格枚举校验。
-    """
-    data = yaml.safe_load(_EVENT_OPTIONS_PATH.read_text(encoding="utf-8")) or {}
-    index: Dict[int, List[Dict[str, Any]]] = {}
-    for ev in data.get("event_options") or []:
-        groups = [
-            {
-                "key": str(g["key"]),
-                "label": str(g.get("label") or g["key"]),
-                "options": [str(o) for o in g.get("options") or []],
-                "required": bool(g.get("required", False)),
-                "multi": bool(g.get("multi", False)),
-            }
-            for g in ev.get("groups") or []
-            if "key" in g
-        ]
-        if "event_id" in ev:
-            index[int(ev["event_id"])] = groups
-    return index
+# 封闭枚举索引的唯一事实源在 config/event_options.py(与 web 侧同口径,
+# 生成侧归一/校验复用同一实现,保证产出的 event_attributes 一定能通过
+# PUT 的严格枚举校验);在此按内部惯用名重新绑定。
+_event_options_index = event_options_index
 
 
 # 属性值别名表(与 frontend/src/sft/spans.ts 的 SFT_ATTR_ALIASES 保持一致):

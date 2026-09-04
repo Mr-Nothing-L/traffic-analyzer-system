@@ -56,30 +56,18 @@ import os
 import re
 import sys
 
-import yaml
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
-from traffic_analyzer.evaluation import extract_gt_from_filename
+from traffic_analyzer.core.config_manager import ConfigManager
+from traffic_analyzer.evaluation import EVENT_NAMES, extract_gt_from_filename
 
 
 # ---------------------------------------------------------------------------
-# Event metadata (aligned with event_categories.yaml)
+# Event metadata
 # ---------------------------------------------------------------------------
-# event_id 全局采用标注文档 v4.5 的 action 编号；9 = 正常占位，不对应任何事件。
-EVENT_NAMES: Dict[int, str] = {
-    1: "违法停车",
-    2: "应急车道占用",
-    3: "交通事故",
-    4: "高速公路行人出现",
-    5: "摩托车出现",
-    6: "严重拥堵",
-    7: "道路施工",
-    8: "车辆逆行/倒车",
-    10: "抛洒物",
-    11: "实线变道",
-}
-
+# EVENT_NAMES 由 traffic_analyzer.evaluation 从 event_categories.yaml(SSOT)
+# 懒加载派生;event_id 全局采用标注文档 v4.5 的 action 编号,9 = 正常占位。
 # 位宽：event_id 取值范围 1..11（含占位 9），数组按 0..11 开 12 格。
 NUM_EVENTS = 12
 
@@ -251,16 +239,9 @@ def load_active_events_from_config(config_dir: Path) -> Set[int]:
     -------
         Set of event IDs where is_active is true.
     """
-    config_path = config_dir / "event_categories.yaml"
-    if not config_path.exists():
-        raise FileNotFoundError(f"event_categories.yaml not found: {config_path}")
-
-    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    active_events: Set[int] = set()
-    for cat in data.get("event_categories", []):
-        if cat.get("is_active", True):
-            active_events.add(int(cat["event_id"]))
-    return active_events
+    manager = ConfigManager(str(config_dir))
+    manager.load_all()
+    return {cat.event_id for cat in manager.get_active_event_categories()}
 
 
 # ---------------------------------------------------------------------------

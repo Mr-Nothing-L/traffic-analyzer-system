@@ -7,6 +7,7 @@ import type { AgentEntry, AgentDetectionEntry, DetectionPayload } from '../../st
 import { mdToHtml } from '../../utils/markdown'
 import type { AnalysisFlow } from '../../utils/analysisFlow'
 import ChatAnalysisFlow from './ChatAnalysisFlow.vue'
+import MarkdownBody from './MarkdownBody.vue'
 
 const props = defineProps<{
   entry: AgentEntry
@@ -96,10 +97,10 @@ const payload = computed(() => asPayload(entry.value.data))
                     <span v-else class="detection-event-note unlocated">未定位</span>
                   </div>
                 </div>
-                <div
+                <MarkdownBody
                   v-if="payload!.report_markdown"
-                  class="detection-report bubble-md"
-                  v-html="mdToHtml(payload!.report_markdown!)"
+                  class="detection-report"
+                  :html="mdToHtml(payload!.report_markdown!)"
                 />
               </template>
               <pre v-else class="detection-raw">{{ String(entry.data ?? '') }}</pre>
@@ -212,81 +213,5 @@ const payload = computed(() => asPayload(entry.value.data))
   font-family: var(--font-mono);
   font-size: var(--text-sm);
   color: var(--color-text2);
-}
-/* ---- markdown 正文(mdToHtml 输出的 .md 容器) ---- */
-.bubble-md {
-  white-space: normal;
-}
-
-.bubble-md :deep(.md) > :first-child {
-  margin-top: 0;
-}
-
-.bubble-md :deep(.md) > :last-child {
-  margin-bottom: 0;
-}
-
-.bubble-md :deep(.md p),
-.bubble-md :deep(.md ul),
-.bubble-md :deep(.md ol),
-.bubble-md :deep(.md blockquote),
-.bubble-md :deep(.md pre),
-.bubble-md :deep(.md table) {
-  margin: var(--space-xs) 0;
-}
-
-.bubble-md :deep(.md h1),
-.bubble-md :deep(.md h2),
-.bubble-md :deep(.md h3),
-.bubble-md :deep(.md h4) {
-  margin: var(--space-sm) 0 var(--space-xs);
-  font-size: var(--text-md);
-}
-
-.bubble-md :deep(.md ul),
-.bubble-md :deep(.md ol) {
-  padding-left: var(--space-lg);
-}
-
-.bubble-md :deep(.md code) {
-  padding: 0 4px;
-  border-radius: var(--radius-sm);
-  background: var(--color-surface-2);
-  border: 1px solid var(--color-border);
-  font-size: var(--text-sm);
-}
-
-.bubble-md :deep(.md pre) {
-  padding: var(--space-sm);
-  border-radius: var(--radius-sm);
-  background: var(--color-surface-2);
-  border: 1px solid var(--color-border);
-  overflow-x: auto;
-}
-
-.bubble-md :deep(.md pre code) {
-  padding: 0;
-  border: none;
-  background: none;
-}
-
-.bubble-md :deep(.md a) {
-  color: var(--color-accent);
-}
-
-.bubble-md :deep(.md blockquote) {
-  padding-left: var(--space-sm);
-  border-left: 2px solid var(--color-border);
-  color: var(--color-text2);
-}
-
-.bubble-md :deep(.md table) {
-  border-collapse: collapse;
-}
-
-.bubble-md :deep(.md th),
-.bubble-md :deep(.md td) {
-  padding: 2px var(--space-sm);
-  border: 1px solid var(--color-border);
 }
 </style>

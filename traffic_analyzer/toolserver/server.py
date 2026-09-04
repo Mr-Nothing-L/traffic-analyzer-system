@@ -11,7 +11,7 @@
     允许根:启动 --workspace 为初始根,运行期可经 POST /config/roots
     热注册新工作区(web 层切换工作区时调用,免重启)。
 上游:toolserver/__init__.py(create_app 导出);__main__.py(uvicorn 启动)。
-下游:web/frames.read_video_meta/read_frame_jpeg(CV 复用);
+下游:utils/video_io.read_video_meta/read_frame_jpeg(CV 复用);
     utils/image_drawing(load_image/_draw_text_with_background/_load_scaled_font);
     utils/bbox_geometry._norm_to_px;tracking/(track_suspects 编排与缓存)。
 """
@@ -46,7 +46,7 @@ from traffic_analyzer.utils.image_drawing import (
     _load_scaled_font,
     load_image,
 )
-from traffic_analyzer.web.frames import read_frame_jpeg, read_video_meta
+from traffic_analyzer.utils.video_io import read_frame_jpeg, read_video_meta
 
 logger = logging.getLogger(__name__)
 

@@ -16,11 +16,12 @@
  * 阶段标题/步骤标签/按钮为骨架 → 像素字体;思考摘要/全文与子结论为说明文字
  * → sans;耗时数值 → mono。颜色全部 tokens 变量(design.md §8 禁 inline 色);
  * 图标一律 UiIcon(§8 禁 emoji)。 */
-import { computed, reactive, ref } from 'vue'
+import { computed, reactive } from 'vue'
 import UiIcon from '../UiIcon.vue'
 import type { AnalysisFlow, FlowNode, FlowStep, FlowSubagent } from '../../utils/analysisFlow'
 import type { AgentToolEntry } from '../../stores/agentchat'
-import { copyText, textPreviewLines } from '../../utils/chatDisplay'
+import { textPreviewLines } from '../../utils/chatDisplay'
+import { useCopyFeedback } from '../../composables/useCopyFeedback'
 import ChatToolDetail from './ChatToolDetail.vue'
 import MdStream from './MdStream.vue'
 import ThinkLine from './ThinkLine.vue'
@@ -179,21 +180,7 @@ function toggleText(id: string) {
 /** 节点全文复制(思考/说明共用):面板内自管(与 ChatToolDetail 取证目录复制
  * 同款低调交互),成功图标变 ✓ 一秒,失败静默。copiedKey 以 kind:id 区分同一条目
  * 的思考与说明两处复制按钮。 */
-const copiedKey = ref<string | null>(null)
-let copiedTimer: ReturnType<typeof setTimeout> | null = null
-async function copyNode(kind: 'think' | 'text', id: string, text: string) {
-  try {
-    await copyText(text)
-  } catch {
-    return
-  }
-  copiedKey.value = `${kind}:${id}`
-  if (copiedTimer !== null) clearTimeout(copiedTimer)
-  copiedTimer = setTimeout(() => {
-    copiedKey.value = null
-    copiedTimer = null
-  }, 1000)
-}
+const { copiedKey, copyWithFeedback } = useCopyFeedback()
 
 /** 可展开节点条目 id 清单(全部展开/全部折叠按钮用)。 */
 const expandableIds = computed(() => {
@@ -286,7 +273,7 @@ function toggleAll(open: boolean) {
                   type="button"
                   class="aflow-think-copy"
                   title="复制思考内容"
-                  @click="copyNode('think', it.id, it.text)"
+                  @click="copyWithFeedback(`think:${it.id}`, it.text)"
                 >
                   <UiIcon :name="copiedKey === `think:${it.id}` ? 'check' : 'copy'" :size="11" />
                 </button>
@@ -312,13 +299,13 @@ function toggleAll(open: boolean) {
                   type="button"
                   class="aflow-text-copy"
                   title="复制说明内容"
-                  @click="copyNode('text', it.id, it.text)"
+                  @click="copyWithFeedback(`text:${it.id}`, it.text)"
                 >
                   <UiIcon :name="copiedKey === `text:${it.id}` ? 'check' : 'copy'" :size="11" />
                 </button>
               </div>
               <div v-if="isTextOpen(it.id)" class="aflow-text-text">
-                <MdStream :text="it.text" :streaming="it.live" />
+                <MdStream :text="it.text" :streaming="it.live" compact />
               </div>
             </div>
             <!-- 主干步骤:点击展开/收起调用明细 -->
@@ -717,78 +704,6 @@ function toggleAll(open: boolean) {
   font-size: var(--text-xs);
   line-height: 1.6;
   min-width: 0;
-}
-
-.aflow-text-text :deep(.md) > :first-child {
-  margin-top: 0;
-}
-
-.aflow-text-text :deep(.md) > :last-child {
-  margin-bottom: 0;
-}
-
-.aflow-text-text :deep(.md p),
-.aflow-text-text :deep(.md ul),
-.aflow-text-text :deep(.md ol),
-.aflow-text-text :deep(.md blockquote),
-.aflow-text-text :deep(.md pre),
-.aflow-text-text :deep(.md table) {
-  margin: var(--space-xs) 0;
-}
-
-.aflow-text-text :deep(.md h1),
-.aflow-text-text :deep(.md h2),
-.aflow-text-text :deep(.md h3),
-.aflow-text-text :deep(.md h4) {
-  margin: var(--space-sm) 0 var(--space-xs);
-  font-size: var(--text-sm);
-}
-
-.aflow-text-text :deep(.md ul),
-.aflow-text-text :deep(.md ol) {
-  padding-left: var(--space-lg);
-}
-
-.aflow-text-text :deep(.md code) {
-  padding: 0 4px;
-  border-radius: var(--radius-sm);
-  background: var(--color-surface-2);
-  border: 1px solid var(--color-border);
-  font-size: var(--text-sm);
-}
-
-.aflow-text-text :deep(.md pre) {
-  padding: var(--space-sm);
-  border-radius: var(--radius-sm);
-  background: var(--color-surface-2);
-  border: 1px solid var(--color-border);
-  overflow-x: auto;
-}
-
-.aflow-text-text :deep(.md pre code) {
-  padding: 0;
-  border: none;
-  background: none;
-}
-
-.aflow-text-text :deep(.md a) {
-  color: var(--color-accent);
-}
-
-.aflow-text-text :deep(.md blockquote) {
-  padding-left: var(--space-sm);
-  border-left: 2px solid var(--color-border);
-  color: var(--color-text2);
-}
-
-.aflow-text-text :deep(.md table) {
-  border-collapse: collapse;
-}
-
-.aflow-text-text :deep(.md th),
-.aflow-text-text :deep(.md td) {
-  padding: 2px var(--space-sm);
-  border: 1px solid var(--color-border);
 }
 
 /* ---- 并行批:引导线分叉点(中性灰)+ 横排小 chips ---- */

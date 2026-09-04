@@ -16,7 +16,7 @@
     逐目标 deactivated 与全部 events。
 上游:toolserver/server.py(端点调用);tests/test_track_windows.py(mock 引擎)。
 下游:models/stitch/render 本包协作;core/vlm_engine(PromptTemplate 渲染入口);
-    cv2(抽帧)。
+    utils/video_io(抽帧与元信息)。
 """
 
 from __future__ import annotations
@@ -32,8 +32,6 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
-
-import cv2
 
 from traffic_analyzer.models.llm import PromptTemplate
 from traffic_analyzer.toolserver.tracking import (
@@ -58,6 +56,7 @@ from traffic_analyzer.toolserver.tracking.render import (
     overlay_video,
     speed_colored_image,
 )
+from traffic_analyzer.utils.video_io import extract_window_jpegs, read_video_meta
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +72,6 @@ SPAN_MARGIN_S = 2.0         # 锚点前后扩展的上下文秒数
 DEFAULT_SPAN_S = 8.0        # 无 time_range 时锚点之后继续跟踪的时长
 MAX_WINDOW_CALLS = 40       # 单次请求 VLM 调用硬上限(控成本/兜底超时)
 TRACKING_MAX_WORKERS = 4    # 并发 VLM 调用上限(场景判定帧/车头朝向旁证)
-_JPEG_QUALITY = 80
 _SCALE_HINT_MAX = 2.0       # 坐标 <= 该值视为 0-1 输出,否则按 0-1000 解析
 
 _TEMPLATE_ID = "track_suspects_window"
@@ -124,26 +122,9 @@ class _SuspectState:
 # ---------------------------------------------------------------------------
 
 
-def read_video_meta(video_path: Path) -> Dict[str, Any]:
-    """读取 fps/帧数/分辨率;打不开或元数据非法时抛 TrackingFailure。"""
-    cap = cv2.VideoCapture(str(video_path))
-    try:
-        if not cap.isOpened():
-            raise TrackingFailure(f"video unreadable: {video_path}")
-        fps = float(cap.get(cv2.CAP_PROP_FPS))
-        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    finally:
-        cap.release()
-    if fps <= 0 or total <= 0:
-        raise TrackingFailure(f"invalid video metadata: {video_path}")
-    return {"fps": fps, "total": total, "width": w, "height": h}
-
-
 def sampling_grid(meta: Dict[str, Any], t0: float, t1: float, fps: float) -> List[int]:
     """时间区间内的采样帧号网格(round 时间戳去重升序,尾帧钳制)。"""
-    total = meta["total"]
+    total = meta["frame_count"]
     src_fps = meta["fps"]
     if t1 <= t0:
         return []
@@ -154,26 +135,6 @@ def sampling_grid(meta: Dict[str, Any], t0: float, t1: float, fps: float) -> Lis
         if not frames or idx > frames[-1]:
             frames.append(idx)
     return frames
-
-
-def extract_window_jpegs(video_path: Path, frames: Sequence[int]) -> List[bytes]:
-    """按帧号顺序抽取 JPEG 字节序列(读不到的帧跳过)。"""
-    cap = cv2.VideoCapture(str(video_path))
-    out: List[bytes] = []
-    try:
-        for fi in frames:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, fi)
-            ok, frame = cap.read()
-            if not ok or frame is None:
-                continue
-            ok, buf = cv2.imencode(
-                ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, _JPEG_QUALITY]
-            )
-            if ok:
-                out.append(buf.tobytes())
-    finally:
-        cap.release()
-    return out
 
 
 # ---------------------------------------------------------------------------
@@ -807,7 +768,9 @@ def run_tracking(
         out_dir = Path(out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
     meta = read_video_meta(video_path)
-    duration = meta["total"] / meta["fps"]
+    if meta is None or not meta["fps"] or meta["fps"] <= 0:
+        raise TrackingFailure(f"invalid video metadata: {video_path}")
+    duration = meta["frame_count"] / meta["fps"]
 
     # --- 可疑时段 ---
     if time_range and len(time_range) == 2:
@@ -1313,7 +1276,7 @@ def run_tracking(
                 tracks,
                 out_dir / "track_overlay.mp4",
                 start_frame=grid[0],
-                end_frame=min(grid[-1], meta["total"] - 1),
+                end_frame=min(grid[-1], meta["frame_count"] - 1),
                 fps_hint=meta["fps"],
                 event_marks=event_marks,
             )
