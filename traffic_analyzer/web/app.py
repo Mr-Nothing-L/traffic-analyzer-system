@@ -7,8 +7,8 @@ forward arguments).
 
 [文件说明]
 作用:FastAPI 应用工厂 create_app():装配 workspace/fs/jobs/evidence_api/frames/
-keyframes/video_stream/dashboard/auth/presence/realtime/llm_settings/agentproxy
-各路由,提供 /api/expert-phases
+keyframes/video_stream/dashboard/auth/presence/realtime/llm_settings/agentproxy/
+rag 各路由,提供 /api/expert-phases
 专家阶段定义接口,挂载 frontend/dist(/,Vue 3 SPA 构建产物,未构建时跳过)
 并为其禁用缓存,/v2/* 旧书签 301 重定向到对应 / 路径,在 no-cache 之后注册
 auth middleware(未配置 TRAFFIC_ANALYZER_USERS 时认证完全关闭),注册
@@ -50,6 +50,7 @@ from traffic_analyzer.web import (
     keyframes,
     llm_settings,
     presence,
+    rag,
     realtime,
     video_stream,
     workspace as workspace_mod,
@@ -145,6 +146,7 @@ def create_app(workspace: Optional[str] = None) -> FastAPI:
     app.include_router(dashboard.router)
     app.include_router(llm_settings.router)
     app.include_router(agentproxy.router)
+    app.include_router(rag.router)
     app.include_router(auth.router)
     app.include_router(presence.router)
     app.include_router(realtime.router)

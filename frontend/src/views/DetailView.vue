@@ -11,6 +11,7 @@ import ExpertPanel from '../components/detail/expert/ExpertPanel.vue'
 import ReportCard from '../components/detail/ReportCard.vue'
 import SftEditor from '../components/detail/sft/SftEditor.vue'
 import VideoPlayer from '../components/detail/VideoPlayer.vue'
+import SimilarVideos from '../components/tree/SimilarVideos.vue'
 import { useVSplitter } from '../composables/useVSplitter'
 import { useEvidenceStore } from '../stores/evidence'
 import { useJobsStore } from '../stores/jobs'
@@ -28,6 +29,10 @@ const message = useMessage()
 const stem = computed(() => String(route.params.stem || ''))
 const rel = computed(() => (route.query.rel ? String(route.query.rel) : null))
 const source = computed(() => videoSourceOf(stem.value, rel.value))
+/** 「相似视频」检索用的当前视频文件名:有 rel 取 basename,无则按 .mp4 兜底。 */
+const videoName = computed(() =>
+  rel.value ? (rel.value.split('/').pop() ?? rel.value) : `${stem.value}.mp4`,
+)
 
 const colRef = ref<HTMLElement | null>(null)
 const { ratio, dragging, onPointerDown, reset } = useVSplitter(colRef)
@@ -126,6 +131,7 @@ const emptyNote = computed(() => {
       <n-card v-else class="card-preview">
         <template #header>
           <span class="card-head">视频预览</span><span class="card-sub">{{ stem }}</span>
+          <SimilarVideos :video="videoName" />
         </template>
         <VideoPlayer :source="source" />
       </n-card>

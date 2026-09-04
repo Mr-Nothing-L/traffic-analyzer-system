@@ -1,11 +1,14 @@
 """FastAPI application factory and /tools/* endpoints.
 
 [文件说明]
-作用:五个 POST JSON 端点:/tools/video_meta、/tools/extract_frames、
+作用:六个 POST JSON 端点:/tools/video_meta、/tools/extract_frames、
     /tools/draw_boxes、/tools/prepare_video(视频大小守门:超过 max_mb
-    用 ffmpeg 阶梯降帧转码,产物放 <允许根>/.agent/transcoded/)与
+    用 ffmpeg 阶梯降帧转码,产物放 <允许根>/.agent/transcoded/)、
     /tools/track_suspects(疑似目标定向跟踪,VLM 滑窗编排,产物放
-    <允许根>/.agent/tracks/<stem>/<ts>/,结果带磁盘缓存)。
+    <允许根>/.agent/tracks/<stem>/<ts>/,结果带磁盘缓存)与
+    /tools/search_videos(RAG 库四种检索,库在 <工作区>/.agent/rag/vectors.db,
+    不存在返回 404 rag_index_missing;workspace 缺省初始根,显式传入
+    必须落在允许根内)。
     所有 video_path 解析后必须落在允许根(allowed_roots)之内,
     越界返回 403;错误统一为 {"error": {"code", "message"}}。
     允许根:启动 --workspace 为初始根,运行期可经 POST /config/roots
@@ -13,7 +16,8 @@
 上游:toolserver/__init__.py(create_app 导出);__main__.py(uvicorn 启动)。
 下游:utils/video_io.read_video_meta/read_frame_jpeg(CV 复用);
     utils/image_drawing(load_image/_draw_text_with_background/_load_scaled_font);
-    utils/bbox_geometry._norm_to_px;tracking/(track_suspects 编排与缓存)。
+    utils/bbox_geometry._norm_to_px;tracking/(track_suspects 编排与缓存);
+    rag/query.py(search_videos 检索逻辑)。
 """
 
 from __future__ import annotations
@@ -37,6 +41,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, model_validator
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from traffic_analyzer.rag import query as rag_query
 from traffic_analyzer.toolserver.tracking import SuspectAnchor
 from traffic_analyzer.toolserver.tracking import cache as tracking_cache
 from traffic_analyzer.toolserver.tracking import windows as tracking_windows
@@ -155,6 +160,32 @@ class TrackSuspectsRequest(BaseModel):
     def _check_time_range(self) -> "TrackSuspectsRequest":
         if self.time_range is not None and len(self.time_range) != 2:
             raise ValueError("time_range must be [start_s, end_s]")
+        return self
+
+
+class SearchVideosRequest(BaseModel):
+    """search_videos:RAG 库四种检索;site 模式的桩号经 query 传入。"""
+
+    mode: Literal["text", "related", "adjacent", "site"]
+    query: Optional[str] = None
+    video: Optional[str] = None
+    k: int = Field(default=10, ge=1, le=100)
+    alpha: float = Field(default=0.6, ge=0.0, le=1.0)
+    only_confirmed: bool = False
+    human_edited: bool = False
+    gap_s: float = Field(default=600.0, ge=0.0)
+    direction: Optional[str] = None
+    before: Optional[Any] = None  # epoch 秒或 ISO 时间
+    after: Optional[Any] = None
+    # RAG 库所在工作区;缺省为 toolserver 初始根,显式传入须落在允许根内。
+    workspace: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _check_mode_params(self) -> "SearchVideosRequest":
+        if self.mode in ("text", "site") and not self.query:
+            raise ValueError(f"mode={self.mode} requires query")
+        if self.mode in ("related", "adjacent") and not self.video:
+            raise ValueError(f"mode={self.mode} requires video")
         return self
 
 
@@ -557,6 +588,45 @@ def create_app(workspace: Path | str) -> FastAPI:
         if not payload["failed"] and payload["tracks"]:
             tracking_cache.store_cached(cache_dir, key, payload)
         return payload
+
+    # --- /tools/search_videos:RAG 库检索 -----------------------------------
+
+    def _resolve_rag_workspace(request: Request, workspace: Optional[str]) -> Path:
+        """RAG 库所在工作区;缺省初始根,显式传入解析后必须落在允许根内。"""
+        if workspace is None:
+            return request.app.state.workspace
+        resolved = Path(workspace).expanduser().resolve()
+        roots: List[Path] = request.app.state.allowed_roots
+        if not any(resolved.is_relative_to(root) for root in roots):
+            raise _error(
+                403,
+                "path_outside_workspace",
+                f"workspace resolves outside allowed roots: {workspace}",
+            )
+        return resolved
+
+    @app.post("/tools/search_videos")
+    def search_videos(body: SearchVideosRequest, request: Request) -> Dict[str, Any]:
+        workspace = _resolve_rag_workspace(request, body.workspace)
+        try:
+            return rag_query.run_search(
+                workspace,
+                body.mode,
+                query=body.query,
+                video=body.video,
+                k=body.k,
+                alpha=body.alpha,
+                only_confirmed=body.only_confirmed,
+                human_edited=body.human_edited,
+                gap_s=body.gap_s,
+                direction=body.direction,
+                before=body.before,
+                after=body.after,
+            )
+        except rag_query.RagIndexNotFound as exc:
+            raise _error(404, "rag_index_missing", str(exc))
+        except rag_query.RagQueryError as exc:
+            raise _error(exc.status_code, "rag_query_error", str(exc))
 
     return app
 

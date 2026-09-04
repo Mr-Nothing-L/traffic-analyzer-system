@@ -1,16 +1,24 @@
 <script setup lang="ts">
-/** 侧栏工具条:标题 + 全选 + 全选待推理 + 过滤框 + 排序下拉 + 批量关键帧
- * + 批量删除报告(迁移自 legacy index.html side-head/side-filter;
- * 批量关键帧为 v4.6 新增,删除报告同批次新增)。 */
-import { computed, h, ref } from 'vue'
+/** 侧栏工具条:标题 + 全选 + 全选待推理 + 两行操作区
+ * (第一行:检索模式切换(文件名/语义检索)+过滤/检索框;
+ *  第二行:排序下拉 + 更新向量库 + 批量关键帧 + 批量删除报告,按钮固定靠右;
+ * 迁移自 legacy index.html side-head/side-filter;
+ * 批量关键帧为 v4.6 新增,删除报告同批次新增;语义检索见 stores/rag.ts;
+ * 更新向量库走 rag store 的 build 状态机(running 轮询 2s),pending=0 禁用,
+ * 取消/冲突由后端契约兜底)。 */
+import { computed, h, onMounted, onUnmounted, ref, watch } from 'vue'
 import { NButton, NCheckbox, NInput, NSelect, useDialog, useMessage } from 'naive-ui'
 import type { SortKey } from '../../stores/workspace'
 import { useWorkspaceStore } from '../../stores/workspace'
+import type { SideSearchMode } from '../../stores/rag'
+import { useRagStore } from '../../stores/rag'
 import { useTreeView } from '../../composables/useTree'
 import { getKfBatch, startKfBatch } from '../../api/keyframes'
 import type { BatchStatus } from '../../api/keyframes'
+import { fmtTs } from '../../api/rag'
 
 const ws = useWorkspaceStore()
+const rag = useRagStore()
 const { pendingRels, setPendingChecked } = useTreeView()
 const message = useMessage()
 const dialog = useDialog()
@@ -38,11 +46,128 @@ const sortOptions: { label: string; value: SortKey }[] = [
   { label: '状态', value: 'status' },
 ]
 
+const modeOptions: { label: string; value: SideSearchMode }[] = [
+  { label: '文件名', value: 'name' },
+  { label: '语义检索', value: 'semantic' },
+]
+
+/** 语义模式输入草稿:回车才提交检索,不写 ws.filter(文件名模式维持现状本地过滤)。 */
+const queryInput = ref('')
+
+function onFilterInput(v: string) {
+  if (rag.mode === 'name') {
+    ws.setFilter(v)
+    return
+  }
+  queryInput.value = v
+  if (!v.trim()) rag.clear() // 清空即恢复文件树
+}
+
+/** 语义模式回车提交;文件名模式不响应(本地即时过滤)。 */
+function onSearchSubmit() {
+  if (rag.mode === 'semantic') void rag.search(queryInput.value)
+}
+
 /** 勾选 rel → stem(取 basename 去扩展名,与后端 video.stem 口径一致)。 */
 function stemOf(rel: string): string {
   const base = rel.split('/').pop() ?? rel
   return base.replace(/\.[^.]+$/, '')
 }
+
+/* ---- 更新向量库:状态机在 rag store(running 轮询);此处只管确认弹窗、取消入口与终态提示 ---- */
+
+const buildRunning = computed(() => rag.buildState === 'running')
+
+/** 无可更新内容(库已建且 pending=0)时禁用:点击必然空转,不如明示已最新;
+ * 库未建/pending 未知(扫描失败)时保持可点。 */
+const buildUpToDate = computed(
+  () => rag.library?.exists === true && rag.buildPending === 0,
+)
+
+/** 按钮文案:running 时带进度(如「建库中 120/440」)。 */
+const buildBtnText = computed(() =>
+  buildRunning.value ? `建库中 ${rag.buildDone}/${rag.buildTotal}` : '更新向量库',
+)
+
+/** tooltip:running 给进度与取消入口说明;否则给库概况与待更新数(未建库引导)。 */
+const buildBtnTitle = computed(() => {
+  if (buildRunning.value)
+    return `向量库构建中(${rag.buildDone}/${rag.buildTotal},失败 ${rag.buildFailed});右侧「取消」可中止`
+  const lib = rag.library
+  if (lib?.exists) {
+    if (buildUpToDate.value)
+      return `向量库:${lib.count} 条,建于 ${fmtTs(lib.built_at ?? 0)};已是最新(无新视频或标注变更)`
+    const pend = rag.buildPending
+    return `向量库:${lib.count} 条,建于 ${fmtTs(lib.built_at ?? 0)};待更新 ${pend ?? '?'} 条(新视频/标注变更),点击增量更新`
+  }
+  return '尚未建库;点击对当前工作区全部视频构建向量库'
+})
+
+/** 空闲点击 → 确认后启动;running 时按钮 loading 吞点击,取消走旁边的「取消」按钮。 */
+function onBuildRag() {
+  if (buildRunning.value || buildUpToDate.value) return
+  const lib = rag.library
+  dialog.warning({
+    title: lib?.exists ? '增量更新向量库' : '构建向量库',
+    content: lib?.exists
+      ? `将处理 ${rag.buildPending ?? '?'} 条待更新视频(新视频 + 标注变更),耗时取决于数量,期间占用 GPU 推理资源。`
+      : '将对当前工作区全部视频构建向量库,耗时较长(数百视频约数十分钟),期间占用 GPU 推理资源。',
+    positiveText: lib?.exists ? '开始更新' : '开始构建',
+    negativeText: '取消',
+    onPositiveClick: runBuild,
+  })
+}
+
+/** 「取消」入口:再确认后 POST cancel(已建部分保留,可增量续建)。 */
+function onCancelBuild() {
+  if (!buildRunning.value) return
+  dialog.warning({
+    title: '取消向量库构建',
+    content: `构建进行中(${rag.buildDone}/${rag.buildTotal})。取消后已构建部分保留,可随时重新增量构建。`,
+    positiveText: '取消构建',
+    negativeText: '继续构建',
+    onPositiveClick: runCancelBuild,
+  })
+}
+
+async function runBuild() {
+  try {
+    await rag.startBuild()
+    message.info('向量库构建已启动')
+  } catch (e) {
+    message.error(`向量库构建启动失败:${e instanceof Error ? e.message : String(e)}`)
+  }
+}
+
+async function runCancelBuild() {
+  try {
+    await rag.cancelBuild()
+    message.info('已请求取消,等待当前视频处理完…')
+  } catch (e) {
+    message.error(`取消向量库构建失败:${e instanceof Error ? e.message : String(e)}`)
+  }
+}
+
+/** 终态汇总:done 报成功/失败数(partial 注明已取消);error 报 last_error。 */
+watch(
+  () => rag.buildState,
+  (s, prev) => {
+    if (prev !== 'running') return
+    if (s === 'done') {
+      const ok = rag.buildDone - rag.buildFailed
+      const summary = `向量库构建完成:成功 ${ok},失败 ${rag.buildFailed}`
+      if (rag.buildPartial) message.warning(`${summary}(已取消,部分完成)`)
+      else if (rag.buildFailed) message.warning(summary)
+      else message.success(summary)
+    } else if (s === 'error') {
+      message.error(`向量库构建失败:${rag.buildError || '未知原因'}`)
+    }
+  },
+)
+
+onMounted(() => void rag.refreshBuildStatus()) // 进页面拉一次:恢复进行中构建的进度/库概况
+onUnmounted(() => rag.stopBuild()) // 页面卸载:退出轮询循环
+watch(() => ws.path, () => void rag.resetBuild()) // 切工作区:重置并按新工作区拉 status
 
 function onBatchKeyframes() {
   if (!ws.checked.size || batchRunning.value) return
@@ -178,45 +303,80 @@ async function runDeleteReports(rels: string[]) {
     </span>
   </div>
   <div class="side-filter">
-    <n-input
-      :value="ws.filter"
-      size="small"
-      clearable
-      spellcheck="false"
-      placeholder="过滤视频…"
-      aria-label="过滤视频"
-      @update:value="ws.setFilter"
-    />
-    <n-select
-      :value="ws.sort"
-      :options="sortOptions"
-      size="small"
-      class="sort-sel"
-      aria-label="排序方式"
-      @update:value="ws.setSort"
-    />
-    <n-button
-      size="small"
-      secondary
-      class="kf-batch-btn"
-      title="对选中的视频运行智能挑选关键帧(无标注的跳过)"
-      :disabled="!ws.checked.size || batchRunning"
-      :loading="batchRunning"
-      @click="onBatchKeyframes"
-    >
-      批量关键帧
-    </n-button>
-    <n-button
-      size="small"
-      secondary
-      class="report-del-btn"
-      title="删除选中视频的分析报告(仅有报告的条目会删除)"
-      :disabled="!checkedWithResults.length || deleteRunning"
-      :loading="deleteRunning"
-      @click="onDeleteReports"
-    >
-      删除报告
-    </n-button>
+    <div class="filter-row">
+      <n-select
+        :value="rag.mode"
+        :options="modeOptions"
+        size="small"
+        class="mode-sel"
+        aria-label="检索模式"
+        @update:value="rag.setMode"
+      />
+      <n-input
+        :value="rag.mode === 'name' ? ws.filter : queryInput"
+        size="small"
+        clearable
+        spellcheck="false"
+        :placeholder="rag.mode === 'name' ? '过滤视频…' : '描述画面或事件…'"
+        :aria-label="rag.mode === 'name' ? '过滤视频' : '语义检索'"
+        @update:value="onFilterInput"
+        @keyup.enter="onSearchSubmit"
+      />
+    </div>
+    <div class="filter-row action-row">
+      <n-select
+        :value="ws.sort"
+        :options="sortOptions"
+        size="small"
+        class="sort-sel"
+        aria-label="排序方式"
+        @update:value="ws.setSort"
+      />
+      <span class="action-spacer" />
+      <n-button
+        size="small"
+        secondary
+        class="rag-build-btn"
+        :title="buildBtnTitle"
+        :disabled="!ws.hasWorkspace || buildUpToDate"
+        :loading="buildRunning"
+        @click="onBuildRag"
+      >
+        {{ buildBtnText }}
+      </n-button>
+      <n-button
+        v-if="buildRunning"
+        size="small"
+        secondary
+        class="rag-build-cancel-btn"
+        title="取消向量库构建(已构建部分保留)"
+        @click="onCancelBuild"
+      >
+        取消
+      </n-button>
+      <n-button
+        size="small"
+        secondary
+        class="kf-batch-btn"
+        title="对选中的视频运行智能挑选关键帧(无标注的跳过)"
+        :disabled="!ws.checked.size || batchRunning"
+        :loading="batchRunning"
+        @click="onBatchKeyframes"
+      >
+        批量关键帧
+      </n-button>
+      <n-button
+        size="small"
+        secondary
+        class="report-del-btn"
+        title="删除选中视频的分析报告(仅有报告的条目会删除)"
+        :disabled="!checkedWithResults.length || deleteRunning"
+        :loading="deleteRunning"
+        @click="onDeleteReports"
+      >
+        删除报告
+      </n-button>
+    </div>
   </div>
 </template>
 
@@ -255,14 +415,21 @@ async function runDeleteReports(rels: string[]) {
 
 .side-filter {
   display: flex;
-  flex-wrap: wrap; /* 窄栏时按钮/下拉整项换行,不互相挤压 */
+  flex-direction: column;
   gap: 6px;
   padding: 0 14px 10px;
   margin-bottom: 8px;
   border-bottom: 1px solid var(--color-border);
 }
 
-.side-filter :deep(.n-input) {
+/* 两行布局:第一行=模式切换+检索框(主操作),第二行=排序+批量动作(辅助)。 */
+.filter-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.filter-row :deep(.n-input) {
   flex: 1;
   min-width: 0;
 }
@@ -271,11 +438,40 @@ async function runDeleteReports(rels: string[]) {
   flex: 0 0 96px;
 }
 
+.mode-sel {
+  flex: 0 0 96px;
+}
+
+.action-spacer {
+  flex: 1;
+  min-width: 0;
+}
+
+.rag-build-btn {
+  flex: none;
+}
+
+.rag-build-cancel-btn {
+  flex: none;
+}
+
 .kf-batch-btn {
   flex: none;
 }
 
 .report-del-btn {
   flex: none;
+}
+
+/* 极窄侧栏:第二行按钮文字截断而非换行挤压。 */
+@media (max-width: 260px) {
+  .rag-build-btn,
+  .kf-batch-btn,
+  .report-del-btn {
+    max-width: 96px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
 }
 </style>

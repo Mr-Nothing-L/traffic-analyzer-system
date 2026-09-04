@@ -4,6 +4,7 @@
 import { computed, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import TreeNode from '../components/tree/TreeNode.vue'
+import RagResultList from '../components/tree/RagResultList.vue'
 import TreeToolbar from '../components/tree/TreeToolbar.vue'
 import { useEvents } from '../composables/useEvents'
 import { useSplitter } from '../composables/useSplitter'
@@ -11,11 +12,13 @@ import { useTreeView } from '../composables/useTree'
 import type { Job } from '../stores/jobs'
 import { useJobsStore } from '../stores/jobs'
 import { usePresenceStore } from '../stores/presence'
+import { useRagStore } from '../stores/rag'
 import { useWorkspaceStore } from '../stores/workspace'
 
 const ws = useWorkspaceStore()
 const jobs = useJobsStore()
 const presence = usePresenceStore()
+const rag = useRagStore()
 const route = useRoute()
 const { subscribe } = useEvents()
 const { width, dragging, onPointerDown, reset } = useSplitter()
@@ -55,11 +58,25 @@ const isDetail = computed(() => route.name === 'detail')
     <aside class="app-sidebar tree-sidebar" :style="{ width: width + 'px', flexBasis: width + 'px' }">
       <TreeToolbar />
       <div class="video-list">
-        <div v-if="!ws.hasWorkspace" class="side-empty">设置工作区后列出文件</div>
-        <div v-else-if="!ws.loaded" class="side-empty">尚未加载:请点击主区「加载工作区」</div>
-        <div v-else-if="!ws.root.length" class="side-empty">工作区目录为空</div>
-        <div v-else-if="noMatch" class="side-empty">无匹配视频</div>
-        <TreeNode v-else :entries="ws.root" :depth="0" />
+        <!-- 语义检索态:结果列表接管侧栏;清空查询恢复文件树(stores/rag.ts) -->
+        <template v-if="rag.active">
+          <div v-if="rag.status === 'loading'" class="side-empty">检索中…</div>
+          <div v-else-if="rag.status === 'missing'" class="side-empty">
+            {{ rag.error }};可点击工具条「更新向量库」按钮在线构建
+          </div>
+          <div v-else-if="rag.status === 'error'" class="side-empty">
+            检索失败:{{ rag.error }}
+          </div>
+          <div v-else-if="rag.status === 'empty'" class="side-empty">无匹配视频</div>
+          <RagResultList v-else :results="rag.results" />
+        </template>
+        <template v-else>
+          <div v-if="!ws.hasWorkspace" class="side-empty">设置工作区后列出文件</div>
+          <div v-else-if="!ws.loaded" class="side-empty">尚未加载:请点击主区「加载工作区」</div>
+          <div v-else-if="!ws.root.length" class="side-empty">工作区目录为空</div>
+          <div v-else-if="noMatch" class="side-empty">无匹配视频</div>
+          <TreeNode v-else :entries="ws.root" :depth="0" />
+        </template>
       </div>
     </aside>
     <div
