@@ -15,7 +15,8 @@
  * 进行中禁用)/ 审批(approval_request 到达时 composer 输入区整体替换为审批面板
  * (拒绝/批准一次/本会话都批准),时间线里的审批卡只读留档;历史未决显示「已失效」)/
  * 检测结果卡(11 位编码等宽高亮 + 检出事件(逐事件标注图进画廊,无框/画框失败显示
- * 降级小字)+ markdown 报告))/ 失败条(错误 + 重试)/
+ * 降级小字)+ markdown 报告))/ 正常问答轮次(无 detection)工具产物图在该轮最后一条
+ * assistant 气泡下渲染缩略图条(点击进画廊;面板承接轮次不重复渲染)/ 失败条(错误 + 重试)/
  * 恢复条(刷新/断网后服务端轮次仍在跑:常驻「分析仍在进行中」,5s 自动轮询补齐)/
  * 工具调用不在时间线单独渲染:链路节点即工具条目(实时态底部生长的分析链路树与
  * 检测卡内冻结链路共用 ChatAnalysisFlow,节点默认折叠 label+耗时+状态,点击展开
@@ -45,7 +46,7 @@ import { ApiError } from '../api/client'
 import { mdToHtml } from '../utils/markdown'
 import { groupSessionsByWorkspace, wsBasename } from '../utils/sessionGroups'
 import type { SessionGroup } from '../utils/sessionGroups'
-import { copyText, lastUserEntryAt, relTime, absTime, shouldSendOnEnter, timelineEntries, toolLabel, toolRoundAssistantIds, toolRoundAssistantTextIds, workspaceVideoSrc } from '../utils/chatDisplay'
+import { copyText, lastUserEntryAt, relTime, absTime, shouldSendOnEnter, timelineEntries, toolLabel, toolRoundAssistantIds, toolRoundAssistantTextIds, toolRoundImages, workspaceVideoSrc } from '../utils/chatDisplay'
 import { buildAnalysisFlow } from '../utils/analysisFlow'
 import type { AnalysisFlow } from '../utils/analysisFlow'
 import UiIcon from '../components/UiIcon.vue'
@@ -289,6 +290,12 @@ const hideTextIds = computed(() =>
 
 /** 时间线渲染条目:tool 条目不单独渲染(链路节点即工具条目)。 */
 const timeline = computed(() => timelineEntries(agent.entries))
+
+/** 正常问答轮次(无 detection)工具产物图:轮内最后一条 assistant 条目 id →
+ * 该轮产物图片(与 hideThink/hideText 同口径的轮次边界);该气泡下方渲染缩略图条,
+ * 点击进画廊。检测轮次与纯文本轮不出条目;历史会话恢复后 tool.images 由
+ * store 映射保留,同样命中。 */
+const roundImageStrips = computed(() => toolRoundImages(agent.entries))
 
 /* ---- 流式渲染态:最后一个 assistant 条目在对话进行中走增量渲染;
  * 思考折叠行仅在「思考仍在流入」(该条目还没有正文)时取末行并横向跟随 ---- */
@@ -795,12 +802,14 @@ onUnmounted(() => {
                       {{ absTime(s.createdAt) }}
                     </span>
                   </span>
-                  <button class="session-edit" title="重命名会话" @click.stop="onRenameStart(s)">
-                    <UiIcon name="edit" :size="11" />
-                  </button>
-                  <button class="session-del" title="删除会话" @click.stop="onDelete(s.id)">
-                    <UiIcon name="trash" :size="11" />
-                  </button>
+                  <span class="session-item-actions">
+                    <button class="session-edit" title="重命名会话" @click.stop="onRenameStart(s)">
+                      <UiIcon name="edit" :size="11" />
+                    </button>
+                    <button class="session-del" title="删除会话" @click.stop="onDelete(s.id)">
+                      <UiIcon name="trash" :size="11" />
+                    </button>
+                  </span>
                 </div>
               </template>
             </div>
@@ -874,6 +883,25 @@ onUnmounted(() => {
               @toggle-all-texts="setAllTextNodes"
               @preview="openPreview"
             />
+            <!-- 正常问答轮次工具产物图(无 detection 轮):缩略图条贴在该轮最后一条
+                 assistant 气泡下,点击进画廊;面板承接的轮次(进行中/hideText)不重复渲染 -->
+            <div
+              v-if="
+                e.kind === 'assistant' &&
+                !hideTextIds.has(e.id) &&
+                roundImageStrips.get(e.id)?.length
+              "
+              class="round-images"
+            >
+              <img
+                v-for="(u, i) in roundImageStrips.get(e.id)"
+                :key="i"
+                class="round-thumb"
+                :src="u"
+                alt=""
+                @click="openPreview(u)"
+              />
+            </div>
           </template>
           <!-- 分析链路实时态:分析中随 entries 生长的完整阶段树(W6,当前步脉冲);
                节点即工具条目,思考/说明按时间序插为思考/说明节点,展开态与检测卡
@@ -1291,15 +1319,27 @@ button.session-card-head:focus-visible {
   margin-top: 2px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: var(--space-xs);
 }
 
+/* 时间文本区弹性伸缩(过长省略号),操作按钮组固定推到行最右,各条目按钮横向对齐 */
 .session-item-meta-left {
+  flex: 1;
+  min-width: 0;
   display: inline-flex;
   align-items: center;
   gap: var(--space-xs);
-  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.session-item-actions {
+  flex: 0 0 auto;
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
 }
 
 /* 相对时间是时间戳 → 等宽 */
@@ -1501,6 +1541,24 @@ button.session-card-head:focus-visible {
   color: var(--color-text2);
   font-size: var(--text-md);
   font-family: var(--font-pixel); /* 空态 → 像素 */
+}
+
+/* ---- 问答轮工具产物缩略图条:横排小图(尺寸同 attach-thumb),左缘与气泡对齐
+   (avatar 36px + gap),点击进画廊 ---- */
+.round-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  margin: var(--space-xs) 0 var(--space-sm) calc(36px + var(--space-sm));
+}
+
+.round-thumb {
+  width: 64px;
+  height: 48px;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  cursor: zoom-in;
 }
 
 

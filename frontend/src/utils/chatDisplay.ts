@@ -49,10 +49,12 @@ interface ToolRound {
   afterDetectionIds: string[]
   hasTool: boolean
   hasDetection: boolean
+  /** 轮内 tool 条目的产物图片(按序;无 images 字段的历史数据按无图计)。 */
+  toolImages: string[]
 }
 
 function scanToolRounds(
-  entries: ReadonlyArray<{ kind: string; id: string }>,
+  entries: ReadonlyArray<{ kind: string; id: string; images?: string[] }>,
   visit: (round: ToolRound, isLast: boolean) => void,
 ): void {
   const empty = (): ToolRound => ({
@@ -60,6 +62,7 @@ function scanToolRounds(
     afterDetectionIds: [],
     hasTool: false,
     hasDetection: false,
+    toolImages: [],
   })
   let round = empty()
   for (const e of entries) {
@@ -71,6 +74,7 @@ function scanToolRounds(
       if (round.hasDetection) round.afterDetectionIds.push(e.id)
     } else if (e.kind === 'tool') {
       round.hasTool = true
+      if (e.images?.length) round.toolImages.push(...e.images)
     } else if (e.kind === 'detection') {
       round.hasDetection = true
     }
@@ -123,6 +127,22 @@ export function toolRoundAssistantTextIds(
     }
   })
   return ids
+}
+
+/** 正常问答轮次(无 detection)的工具产物图片归组:轮内最后一条 assistant 条目 id
+ * → 该轮 tool 条目产物图片按序。检测轮次(图片由检测卡/链路面板承接)、无图轮次、
+ * 轮内无 assistant 条目的轮次均不出现;调用方在该 assistant 气泡下方渲染缩略图条。
+ * 轮次边界与 toolRoundAssistantIds 同口径(相邻 user 条目之间)。 */
+export function toolRoundImages(
+  entries: ReadonlyArray<{ kind: string; id: string; images?: string[] }>,
+): Map<string, string[]> {
+  const m = new Map<string, string[]>()
+  scanToolRounds(entries, (round) => {
+    if (round.hasDetection || !round.toolImages.length) return
+    const last = round.assistantIds[round.assistantIds.length - 1]
+    if (last) m.set(last, round.toolImages)
+  })
+  return m
 }
 
 /** 本轮真实起点:最后一条 user 条目的 at(轮次秒表从提问时刻起算,切出再切回

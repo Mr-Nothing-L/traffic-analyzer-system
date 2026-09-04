@@ -7,6 +7,7 @@
 // - textPreviewLines:说明节点折叠预览(前两个非空行);
 // - toolRoundAssistantIds:有工具调用的轮次里的 assistant 条目(气泡不再渲染其 thinking);
 // - toolRoundAssistantTextIds:同口径的正文气泡隐藏(detection 之后收尾文本除外);
+// - toolRoundImages:正常问答轮次(无 detection)工具产物图挂到轮内最后一条 assistant 条目;
 // - relTime / absTime:会话列表时间(相对「刚刚/N 分钟前」+ 绝对发起时间 今天 HH:MM、更早 MM-DD HH:MM);
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
@@ -22,6 +23,7 @@ import {
   toolLabel,
   toolRoundAssistantIds,
   toolRoundAssistantTextIds,
+  toolRoundImages,
   trackSuspectsView,
   workspaceVideoSrc,
 } from '../chatDisplay';
@@ -217,6 +219,70 @@ describe('toolRoundAssistantTextIds(有工具轮次的正文气泡隐藏)', () =
 
   it('空时间线返回空集', () => {
     expect(toolRoundAssistantTextIds([]).size).toBe(0);
+  });
+});
+
+describe('toolRoundImages(正常问答轮次工具产物图归组)', () => {
+  it('无 detection 的工具轮:轮内产物图按序挂到最后一条 assistant 条目', () => {
+    const m = toolRoundImages([
+      { id: 'u1', kind: 'user' },
+      { id: 't1', kind: 'tool', images: ['/sessions/s/media/a.png'] },
+      { id: 'a1', kind: 'assistant' },
+      { id: 't2', kind: 'tool', images: ['/sessions/s/media/b.png', '/sessions/s/media/c.png'] },
+      { id: 'a2', kind: 'assistant' },
+    ]);
+    expect(m.size).toBe(1);
+    expect(m.get('a2')).toEqual([
+      '/sessions/s/media/a.png',
+      '/sessions/s/media/b.png',
+      '/sessions/s/media/c.png',
+    ]);
+  });
+
+  it('检测轮次不产出(图片由检测卡/链路面板承接)', () => {
+    const m = toolRoundImages([
+      { id: 'u1', kind: 'user' },
+      { id: 't1', kind: 'tool', images: ['/sessions/s/media/a.png'] },
+      { id: 'd1', kind: 'detection' },
+      { id: 'a1', kind: 'assistant' },
+    ]);
+    expect(m.size).toBe(0);
+  });
+
+  it('纯问答轮次(无工具图片)不产出', () => {
+    const m = toolRoundImages([
+      { id: 'u1', kind: 'user' },
+      { id: 't1', kind: 'tool' },
+      { id: 'a1', kind: 'assistant' },
+    ]);
+    expect(m.size).toBe(0);
+  });
+
+  it('按 user 条目切轮:各轮只挂本轮的图;检测轮不影响相邻问答轮', () => {
+    const m = toolRoundImages([
+      { id: 'u1', kind: 'user' },
+      { id: 't1', kind: 'tool', images: ['/a.png'] },
+      { id: 'd1', kind: 'detection' },
+      { id: 'u2', kind: 'user' },
+      { id: 't2', kind: 'tool', images: ['/b.png'] },
+      { id: 'a2', kind: 'assistant' },
+      { id: 'u3', kind: 'user' },
+      { id: 'a3', kind: 'assistant' },
+    ]);
+    expect(m.size).toBe(1);
+    expect(m.get('a2')).toEqual(['/b.png']);
+  });
+
+  it('轮内无 assistant 条目(工具图无人可挂)不产出', () => {
+    const m = toolRoundImages([
+      { id: 'u1', kind: 'user' },
+      { id: 't1', kind: 'tool', images: ['/a.png'] },
+    ]);
+    expect(m.size).toBe(0);
+  });
+
+  it('空时间线返回空表', () => {
+    expect(toolRoundImages([]).size).toBe(0);
   });
 });
 
