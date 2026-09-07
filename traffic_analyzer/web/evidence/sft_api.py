@@ -13,8 +13,8 @@ dashboard 据此计算 edited/edit_missing/edit_extra;重推理成功由 jobs
 删除);last_edited_by 只落盘不进响应;tmp+os.replace 原子写(写后
 fsync);落盘后看板/视频缓存失效;响应回传新 file_sig 供前端下一次
 保存作 base_sig。
-上游:web/evidence/__init__.py(共享 router、JSON IO 与差异比对
-helper);web/evidence/locks.py(_put_locks 与 _reject_active_infer)。
+上游:web/evidence/__init__.py(共享 router、JSON IO、差异比对 helper 与
+sft_json_path 路径解析);web/evidence/locks.py(_put_locks 与 _reject_active_infer)。
 下游:web/workspace.py(路径与 stem 校验、缓存失效)、
 web/evidence_schema.py(SftSample 请求体模型与封闭枚举校验)。
 """
@@ -35,6 +35,7 @@ from traffic_analyzer.web.evidence import (
     _read_json,
     _strip_sft_editable,
     router,
+    sft_json_path,
 )
 from traffic_analyzer.web.evidence.locks import _put_locks, _reject_active_infer
 from traffic_analyzer.web.evidence_schema import SftSample
@@ -44,7 +45,13 @@ from traffic_analyzer.web.evidence_schema import SftSample
 def put_sft(stem: str, body: SftSample, request: Request) -> Dict[str, Any]:
     workspace = workspace_mod.require_workspace(request)
     workspace_mod.validate_stem(stem)
-    sft_path = workspace_mod.analysis_dir(workspace, stem) / f"{stem}.json"
+    out_dir = workspace_mod.analysis_dir(workspace, stem)
+    # 读取经 sft_json_path 解析(顶层优先,quarantine 回退):grounding 核验
+    # 不过被隔离的样本,编辑器能打开就一定能保存。写入固定顶层——「人工编辑
+    # 并保存」即裁决通过(转正),隔离副本随之删除;未被人工碰过的可疑样本
+    # 继续留在 quarantine,兜底价值不变。
+    sft_path = sft_json_path(out_dir, stem)
+    target = out_dir / f"{stem}.json"
     with _put_locks[stem]:
         # 锁内复查 409:检查与写文件之间不能再插入新的 infer 任务(TOCTOU)。
         _reject_active_infer(request, stem)
@@ -92,19 +99,23 @@ def put_sft(stem: str, body: SftSample, request: Request) -> Dict[str, Any]:
         if body.base_sig is not None and body.base_sig != _file_sig(sft_path):
             raise HTTPException(status_code=409, detail="conflict")
 
-        # 原始输出冻结:首次人工编辑落盘前,把推理原始输出复制为
-        # <stem>_raw.json(dashboard 据此计算 edited/edit_missing/edit_extra);
-        # 已存在则不覆盖(保持「首次编辑前的原始输出」语义);重推理成功时由
-        # jobs 删除该快照。
-        raw_path = sft_path.with_name(f"{stem}_raw.json")
+        # 原始输出冻结:首次人工编辑落盘前,把推理原始输出复制为顶层
+        # <stem>_raw.json(dashboard 只读顶层,故固定写顶层不随隔离位置漂移;
+        # 已存在则不覆盖,保持「首次编辑前的原始输出」语义);重推理成功时
+        # 由 jobs 删除该快照。
+        raw_path = out_dir / f"{stem}_raw.json"
         if not raw_path.exists():
             shutil.copy(sft_path, raw_path)
         # 追溯字段只落盘;响应仍返回用户提交的 payload 本身。
         to_write = dict(new_payload)
         to_write["last_edited_by"] = getattr(request.state, "user", "local")
         to_write["last_edited_at"] = datetime.now(timezone.utc).isoformat()
-        _atomic_write_json(sft_path, to_write)
+        _atomic_write_json(target, to_write)
+        # 保存即转正:源在 quarantine 时删除隔离副本,防止双份漂移
+        # (下一次 GET 经 sft_json_path 直接命中顶层)。
+        if sft_path != target:
+            sft_path.unlink(missing_ok=True)
     # SFT 落盘 → 看板/视频缓存失效(pred_ids / edited / has_results 可能变化)
     workspace_mod.invalidate_caches()
     # 回传写入后的新指纹,前端下一次保存以此为 base_sig,无需再 GET。
-    return dict(new_payload, file_sig=_file_sig(sft_path))
+    return dict(new_payload, file_sig=_file_sig(target))

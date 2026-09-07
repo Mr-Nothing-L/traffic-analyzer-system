@@ -119,6 +119,20 @@ def _file_sig(path: Path) -> Optional[str]:
         return None
 
 
+def sft_json_path(out_dir: Path, stem: str) -> Path:
+    """SFT 样本 JSON 路径:顶层优先,缺失回退 ``quarantine/``(单一真相源)。
+
+    推理时 grounding 核验不过的阳性样本由 core/sft_label_rewrite 隔离进
+    ``quarantine/`` 等待人工裁决。GET / PUT / 看板 / 关键帧端点必须共用
+    本函数——回退逻辑一旦分叉,就会出现「编辑器打得开、保存 404」这类
+    只进不出的死数据(2026-09 实际发生过)。
+    """
+    top = out_dir / f"{stem}.json"
+    if top.is_file():
+        return top
+    return out_dir / "quarantine" / f"{stem}.json"
+
+
 def _atomic_write_json(path: Path, payload: Any) -> None:
     """Write JSON via a same-dir ``.tmp`` file + ``os.replace``.
 
@@ -201,4 +215,5 @@ __all__ = [
     "get_results",
     "put_evidence",
     "put_sft",
+    "sft_json_path",
 ]
