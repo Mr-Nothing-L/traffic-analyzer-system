@@ -2,9 +2,9 @@
 /** 分析详情页:上栏视频预览 + 可拖拽分隔条 + 下栏结果卡
  * (SFT 编辑 / 分析报告 / 证据编辑;推理中显示专家泳道面板)。
  * 编排迁移自 legacy preview.js selectVideo + renderResults。 */
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, h, onMounted, onUnmounted, ref, watch } from 'vue'
 import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute } from 'vue-router'
-import { NCard, useDialog, useMessage } from 'naive-ui'
+import { NButton, NCard, useDialog, useMessage } from 'naive-ui'
 import { videoSourceOf } from '../api/results'
 import EvidenceCard from '../components/detail/EvidenceCard.vue'
 import ExpertPanel from '../components/detail/expert/ExpertPanel.vue'
@@ -90,17 +90,50 @@ watch(
 )
 onUnmounted(() => ev.clear())
 
-// 离开详情页/切换视频时 dirty 未保存 → 确认后丢弃(legacy 为静默丢弃,v2 按要求加提示)
+// 离开详情页/切换视频时 dirty 未保存 → 三选一:保存并离开 / 丢弃并离开 / 继续编辑(v2 按要求加提示)
 function confirmDiscardIfDirty(): boolean | Promise<boolean> {
   if (!sft.dirty) return true
   return new Promise<boolean>((resolve) => {
-    dialog.warning({
+    // 自定义 action 按钮不会自动关弹窗,各分支手动 destroy(等价原正/负按钮点击即关闭)
+    const dlg = dialog.warning({
       title: '未保存的修改',
       content: '当前视频的 SFT 标注有未保存的修改,离开将丢弃这些修改。',
-      positiveText: '丢弃并离开',
-      negativeText: '继续编辑',
-      onPositiveClick: () => resolve(true),
-      onNegativeClick: () => resolve(false),
+      action: () => [
+        h(
+          NButton,
+          {
+            type: 'primary',
+            size: 'small',
+            onClick: async () => {
+              if (sft.saving) return // 保存中防重复点击(save 内部同款守卫)
+              const r = await sft.save()
+              if (r.ok) {
+                dlg.destroy()
+                resolve(true)
+                return
+              }
+              message.error(
+                r.conflict
+                  ? '保存冲突:该视频的标注已被他人修改,请回「SFT 标注」卡处理后重试'
+                  : `保存失败(${r.status ?? 0}):${r.message || '未知错误'}`,
+              )
+              dlg.destroy() // 保存失败留在本页,回编辑卡处理(同原「继续编辑」的关闭行为)
+              resolve(false)
+            },
+          },
+          { default: () => '保存并离开' },
+        ),
+        h(
+          NButton,
+          { size: 'small', onClick: () => { dlg.destroy(); resolve(true) } },
+          { default: () => '丢弃并离开' },
+        ),
+        h(
+          NButton,
+          { size: 'small', onClick: () => { dlg.destroy(); resolve(false) } },
+          { default: () => '继续编辑' },
+        ),
+      ],
       onClose: () => resolve(false),
     })
   })

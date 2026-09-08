@@ -28,6 +28,7 @@ export interface VideoInfo {
   size: number
   mtime: number
   has_results: boolean
+  review?: string | null // 审核态,后端 list_videos 下发,仅 has_results 时有值
 }
 
 export type SortKey = 'name' | 'mtime' | 'size' | 'status'
