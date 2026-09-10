@@ -344,7 +344,9 @@ class TestGenerate:
             video_meta=video_meta,
             usage_stats=usage_stats,
         )
-        assert report.binary_encoding.encoding_string == "_".join(["_"] * 11)
+        # 异常兜底位宽 = 传入 total_categories 或从结果推断的最大 event_id(不硬编码)
+        expected_width = max(r.event_id for r in event_results)
+        assert report.binary_encoding.encoding_string == "_".join(["_"] * expected_width)
         assert report.binary_encoding.event_count == 0
         assert report.binary_encoding.detected_events == []
         assert "报告生成失败" in report.final_classification
@@ -622,7 +624,8 @@ class TestToBinaryEncoding:
     ) -> None:
         """The except-branch placeholder must satisfy the BinaryEncoding validator."""
         be = generator.to_binary_encoding([object()], total_categories=3)
-        assert be.encoding_string == "_".join(["_"] * 11)
+        # 兜底位宽随 total_categories 派生(不硬编码 11)
+        assert be.encoding_string == "_".join(["_"] * 3)
         assert be.event_count == 0
         assert be.detected_events == []
 

@@ -116,12 +116,18 @@ class ReportGenerator:
                 exc,
                 exc_info=True,
             )
+            # 异常兜底的占位编码同样按配置位宽生成(与正常路径同源派生,不硬编码)
+            fallback_width = (
+                total_categories
+                if total_categories is not None and total_categories > 0
+                else self._infer_total_categories(event_results)
+            )
             return Report(
                 **common_kwargs,
                 overall_traffic_description=f"报告生成过程中发生错误: {exc}",
                 event_results=[],
                 binary_encoding=BinaryEncoding(
-                    encoding_string="_".join(["_"] * 11),
+                    encoding_string="_".join(["_"] * fallback_width),
                     event_count=0,
                     detected_events=[],
                 ),
@@ -234,8 +240,13 @@ class ReportGenerator:
                 exc,
                 exc_info=True,
             )
+            fallback_width = (
+                total_categories
+                if total_categories > 0
+                else self._infer_total_categories(event_results)
+            )
             return BinaryEncoding(
-                encoding_string="_".join(["_"] * 11),
+                encoding_string="_".join(["_"] * fallback_width),
                 event_count=0,
                 detected_events=[],
             )

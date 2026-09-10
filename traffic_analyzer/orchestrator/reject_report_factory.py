@@ -49,8 +49,11 @@ def generate_reject_report(
         total_categories=total_categories,
     )
     report.rejected = True
+    # 全下划线编码 = 未分析(rejected 契约)。宽度复用 generate 已按配置产出的
+    # 编码位宽(含其异常兜底路径),total_categories 形参不再被写死 11 的覆盖作废。
+    generated_width = len(report.binary_encoding.encoding_string.split("_")) if report.binary_encoding.encoding_string else 0
     report.binary_encoding = BinaryEncoding(
-        encoding_string="_".join(["_"] * 11),
+        encoding_string="_".join(["_"] * generated_width),
         event_count=0,
         detected_events=[],
     )
