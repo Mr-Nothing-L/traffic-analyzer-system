@@ -262,14 +262,18 @@ class VideoPreprocessor:
         self,
         keyframes: List[Keyframe],
         threshold: float = 0.99,
-        min_time_gap_sec: float = 0.5,
+        min_time_gap_sec: float = 2.0,
     ) -> List[Keyframe]:
         """
-        Remove visually similar consecutive keyframes.
+        Remove visually similar keyframes.
 
         Uses histogram correlation as a lightweight similarity metric.
         A frame is kept if it is either visually different enough OR
-        sufficiently far in time from the last kept frame.
+        sufficiently far in time from the last KEPT frame.
+
+        min_time_gap_sec 缺省必须大于典型采样间隔(coarse_fps=1.0 → 1s):
+        旧缺省 0.5 使「时间足够远」恒真,去重近乎空转;相似度比较基准也
+        从相邻帧订正为上一个保留帧(缓慢渐变不再逐帧通过)。
         """
         if len(keyframes) <= 1:
             return keyframes
@@ -302,14 +306,15 @@ class VideoPreprocessor:
             if prev_hist is not None:
                 similarity = cv2.compareHist(prev_hist, hist, cv2.HISTCMP_CORREL)
                 # Keep frame if it's visually different OR far enough in time
+                # (与上一个保留帧比较,而非相邻帧)
                 if similarity < threshold or time_gap >= min_time_gap_sec:
                     filtered.append(kf)
                     last_kept_ts = kf.timestamp_sec
+                    prev_hist = hist
             else:
                 filtered.append(kf)
                 last_kept_ts = kf.timestamp_sec
-
-            prev_hist = hist
+                prev_hist = hist
 
         # Remove exact duplicates if any
         seen_ids = set()
