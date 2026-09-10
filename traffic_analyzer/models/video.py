@@ -41,14 +41,12 @@ class Keyframe(BaseModel):
     image_path: Optional[str] = None
     image_data: Optional[bytes] = None
     quality_score: float = 0.0
-    is_precision: bool = False
 
 
 class KeyframeSequence(BaseModel):
     """A sequence of keyframes extracted from video."""
     coarse_frames: List[Keyframe] = Field(default_factory=list)
     precision_frames: List[Keyframe] = Field(default_factory=list)
-    segment_frames: Dict[str, List[Keyframe]] = Field(default_factory=dict)
 
 
 class PrefilterResult(BaseModel):

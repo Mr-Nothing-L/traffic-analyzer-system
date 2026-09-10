@@ -1,15 +1,14 @@
 """
 VideoPreprocessor module for the traffic analyzer framework.
 
-Extracts keyframes from video using a two-pass sampling strategy:
-1. Coarse sampling at low FPS for global coverage.
-2. Motion analysis to detect high-motion or stationary-vehicle regions.
-3. Precision sampling at higher FPS for detected motion segments.
-4. Quality scoring and deduplication.
+Extracts keyframes from video using single-pass fixed-FPS sampling:
+1. Uniform sampling at the configured FPS for global coverage.
+2. Quality scoring and deduplication.
 
 [文件说明]
-作用:视频预处理器(VideoPreprocessor),两段式抽帧(粗采样+运动分析+精细采样)、
-     质量评分与去重、缩略图网格生成,为 VLM 检测准备关键帧序列。
+作用:视频预处理器(VideoPreprocessor),定点 FPS 均匀抽帧、质量评分与去重、
+     缩略图网格生成,为 VLM 检测准备关键帧序列(两段式粗/精采样已退化为
+     单遍,coarse/precision 双列表仅为兼容下游契约的同源引用)。
 上游:orchestrator/analysis_orchestrator.py(分析流程 step 1 视频预处理)。
 下游:cv2(OpenCV)读取视频与抽帧,numpy/PIL 处理图像;采样参数来自
      models/schemas.py 的 SamplingConfig(由 ConfigManager 注入)。
@@ -57,8 +56,8 @@ class VideoPreprocessor:
     """
     Preprocesses video files for VLM-based traffic event detection.
 
-    Supports two-pass sampling (coarse + precision), motion analysis,
-    quality scoring, deduplication, and thumbnail grid generation.
+    Supports single-pass fixed-FPS sampling, quality scoring, deduplication,
+    and thumbnail grid generation.
     """
 
     def __init__(
@@ -164,7 +163,6 @@ class VideoPreprocessor:
         metadata: VideoMetadata,
         output_dir: str,
         prefix: str,
-        is_precision: bool = False,
         start_sec: Optional[float] = None,
         end_sec: Optional[float] = None,
     ) -> List[Keyframe]:
@@ -172,13 +170,12 @@ class VideoPreprocessor:
         Extract frames from a video at a target FPS.
 
         Args:
-            cap: OpenCV VideoCapture (will be repositioned if start_sec given).
+            cap: OpenCV VideoCapture.
             target_fps: Desired sampling rate.
             metadata: Video metadata.
             output_dir: Directory to save frames if saving enabled.
             prefix: Filename prefix for saved frames.
-            is_precision: Whether these are precision keyframes.
-            start_sec: Optional segment start in seconds.
+            start_sec: Optional segment start in seconds (extract_segment 用).
             end_sec: Optional segment end in seconds.
 
         Returns:
@@ -235,7 +232,6 @@ class VideoPreprocessor:
                         image_path=image_path,
                         image_data=image_data,
                         quality_score=quality,
-                        is_precision=is_precision,
                     )
                 )
 
@@ -255,93 +251,6 @@ class VideoPreprocessor:
                 exc_info=True,
             )
             return []
-
-    def _detect_motion_segments(
-        self,
-        cap: cv2.VideoCapture,
-        metadata: VideoMetadata,
-        coarse_frames: List[Keyframe],
-    ) -> List[Tuple[float, float]]:
-        """
-        Detect time segments with significant motion.
-
-        Uses frame differencing between consecutive coarse frames.
-        Returns a list of (start_sec, end_sec) tuples for precision sampling.
-        """
-        if len(coarse_frames) < 2:
-            return []
-
-        segments: List[Tuple[float, float]] = []
-        motion_flags: List[bool] = []
-
-        for i in range(len(coarse_frames) - 1):
-            ts1 = coarse_frames[i].timestamp_sec
-            ts2 = coarse_frames[i + 1].timestamp_sec
-
-            cap.set(cv2.CAP_PROP_POS_MSEC, ts1 * 1000)
-            ret1, frame1 = cap.read()
-            cap.set(cv2.CAP_PROP_POS_MSEC, ts2 * 1000)
-            ret2, frame2 = cap.read()
-
-            if not ret1 or not ret2:
-                logger.error(
-                    "[video_preprocessor:_detect_motion_segments] FRAME_READ_ERROR | pair=%d ts1=%.1f ts2=%.1f",
-                    i,
-                    ts1,
-                    ts2,
-                )
-                motion_flags.append(False)
-                continue
-
-            gray1 = cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY)
-            gray2 = cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY)
-            diff = cv2.absdiff(gray1, gray2)
-            # Threshold to reduce noise
-            _, thresh = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
-            motion_ratio = np.count_nonzero(thresh) / thresh.size
-            motion_flags.append(motion_ratio > 0.02)
-
-        # Convert per-pair motion flags into contiguous segments
-        in_segment = False
-        seg_start = 0.0
-        for i, has_motion in enumerate(motion_flags):
-            ts = coarse_frames[i].timestamp_sec
-            next_ts = coarse_frames[i + 1].timestamp_sec if i + 1 < len(coarse_frames) else metadata.duration_sec
-            if has_motion and not in_segment:
-                in_segment = True
-                seg_start = max(0.0, ts - self.config.segment_padding_sec)
-            elif not has_motion and in_segment:
-                in_segment = False
-                seg_end = min(metadata.duration_sec, next_ts + self.config.segment_padding_sec)
-                segments.append((seg_start, seg_end))
-
-        if in_segment:
-            seg_end = min(
-                metadata.duration_sec,
-                coarse_frames[-1].timestamp_sec + self.config.segment_padding_sec,
-            )
-            segments.append((seg_start, seg_end))
-
-        # Merge overlapping segments
-        if not segments:
-            return []
-
-        merged: List[Tuple[float, float]] = [segments[0]]
-        for start, end in segments[1:]:
-            prev_start, prev_end = merged[-1]
-            if start <= prev_end:
-                merged[-1] = (prev_start, max(prev_end, end))
-            else:
-                merged.append((start, end))
-
-        # Limit number of segments
-        if len(merged) > self.config.max_precision_segments:
-            # Keep segments with largest duration
-            merged.sort(key=lambda s: s[1] - s[0], reverse=True)
-            merged = merged[: self.config.max_precision_segments]
-            merged.sort(key=lambda s: s[0])
-
-        return merged
 
     def _deduplicate_keyframes(
         self,
@@ -574,7 +483,6 @@ class VideoPreprocessor:
                     metadata=metadata,
                     output_dir=output_dir,
                     prefix="frame",
-                    is_precision=False,
                 )
                 all_frames = [
                     kf for kf in all_frames

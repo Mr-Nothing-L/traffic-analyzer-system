@@ -21,11 +21,7 @@ logger = logging.getLogger(__name__)
 class SamplingConfig(BaseModel):
     """Video sampling configuration."""
     coarse_fps: float = Field(default_factory=lambda: float(os.getenv("SAMPLING_FPS", "1.0")))
-    precision_fps: float = Field(default_factory=lambda: float(os.getenv("SAMPLING_FPS", "1.0")))
     coarse_quality_threshold: float = 0.05
-    precision_quality_threshold: float = 0.1
-    max_precision_segments: int = 10
-    segment_padding_sec: float = 2.0
     prefilter_enabled: bool = Field(default_factory=lambda: os.getenv("PREFILTER_ENABLE", "false").lower() == "true")
     prefilter_brightness_threshold: float = Field(default_factory=lambda: float(os.getenv("PREFILTER_BRIGHTNESS_THRESHOLD", "50.0")))
     prefilter_min_bitrate: int = Field(default_factory=lambda: int(os.getenv("PREFILTER_MIN_BITRATE", "10000")))

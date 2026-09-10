@@ -78,11 +78,7 @@ def preprocessor() -> VideoPreprocessor:
     return VideoPreprocessor(
         config=SamplingConfig(
             coarse_fps=1.0,
-            precision_fps=4.0,
             coarse_quality_threshold=0.0,
-            precision_quality_threshold=0.0,
-            max_precision_segments=10,
-            segment_padding_sec=0.5,
             prefilter_enabled=False,
         ),
         save_debug_frames=False,
@@ -113,8 +109,6 @@ class TestVideoPreprocessor:
         result = preprocessor.process(synthetic_video_path)
         assert len(result.precision_frames) > 0
         assert result.precision_frames == result.coarse_frames
-        for kf in result.precision_frames:
-            assert kf.is_precision is False
 
     def test_process_static_video_no_precision(
         self,
@@ -146,9 +140,7 @@ class TestVideoPreprocessor:
             proc = VideoPreprocessor(
                 config=SamplingConfig(
                     coarse_fps=1.0,
-                    precision_fps=4.0,
                     coarse_quality_threshold=0.0,
-                    precision_quality_threshold=0.0,
                     prefilter_enabled=False,
                 ),
                 output_dir=outdir,
@@ -178,9 +170,7 @@ class TestVideoPreprocessor:
         proc = VideoPreprocessor(
             config=SamplingConfig(
                 coarse_fps=1.0,
-                precision_fps=4.0,
                 coarse_quality_threshold=0.0,
-                precision_quality_threshold=0.0,
                 prefilter_enabled=False,
             ),
             save_debug_frames=False,
@@ -279,27 +269,6 @@ class TestVideoPreprocessor:
         for frame_list in (result.coarse_frames, result.precision_frames):
             timestamps = [kf.timestamp_sec for kf in frame_list]
             assert timestamps == sorted(timestamps)
-
-    def test_max_precision_segments_respected(
-        self,
-        synthetic_video_path: str,
-    ) -> None:
-        """Config max_precision_segments should limit precision segments."""
-        proc = VideoPreprocessor(
-            config=SamplingConfig(
-                coarse_fps=1.0,
-                precision_fps=4.0,
-                max_precision_segments=1,
-                segment_padding_sec=0.5,
-                coarse_quality_threshold=0.0,
-                precision_quality_threshold=0.0,
-                prefilter_enabled=False,
-            ),
-            save_debug_frames=False,
-        )
-        result = proc.process(synthetic_video_path)
-        # Precision frames should exist but be limited by segment count
-        assert isinstance(result.precision_frames, list)
 
     def test_check_bitrate_unknown_bitrate_passes(self) -> None:
         """bitrate <= 0 (unknown for file streams) should pass the bitrate check."""
