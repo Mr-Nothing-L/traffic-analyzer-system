@@ -9,7 +9,6 @@ Supports Anthropic, OpenAI, Google GenAI, and Aliyun (OpenAI-compatible).
   Google GenAI / 阿里云(OpenAI 兼容)各自的格式组装消息与参数(支持文本
   标签与图像交错);_call_* 系列发起请求并统一返回
   (text, prompt_tokens, completion_tokens, total_tokens),
-  其中 _call_anthropic_with_tools 额外返回 tool_use 块。
 上游:core/vlm_engine.py(_execute_once 调用本模块的
   payload 构造与 caller 函数)。
 下游:各 provider 的 HTTP API 端点(经 anthropic / openai / google.generativeai
@@ -137,47 +136,6 @@ def _build_anthropic_payload(
     return messages, kwargs
 
 
-def _build_openai_payload(
-    system_prompt: str,
-    user_prompt: str,
-    images: List[Any],
-    model: str,
-    max_tokens: int,
-    temperature: float,
-) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    """Build OpenAI message list and kwargs.
-
-    Supports interleaving text labels with images (see _build_anthropic_payload).
-    """
-    content: List[Dict[str, Any]] = []
-    if user_prompt:
-        content.append({"type": "text", "text": user_prompt})
-    for img in images:
-        if isinstance(img, str) and not _is_image_path(img):
-            content.append({"type": "text", "text": img})
-            continue
-        b64_uri = _encode_image_to_base64(img)
-        content.append(
-            {
-                "type": "image_url",
-                "image_url": {"url": b64_uri, "detail": "auto"},
-            }
-        )
-
-    messages: List[Dict[str, Any]] = []
-    if system_prompt:
-        messages.append({"role": "system", "content": system_prompt})
-    messages.append({"role": "user", "content": content})
-
-    kwargs: Dict[str, Any] = {
-        "model": model,
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-        "messages": messages,
-    }
-    return messages, kwargs
-
-
 def _build_google_payload(
     system_prompt: str,
     user_prompt: str,
@@ -229,7 +187,6 @@ def _build_aliyun_payload(
     max_tokens: int,
     temperature: float,
     enable_thinking: Optional[bool] = None,
-    thinking_budget: Optional[int] = None,
     reasoning_effort: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """Build Aliyun (OpenAI-compatible) message list and kwargs.
@@ -237,8 +194,6 @@ def _build_aliyun_payload(
     enable_thinking 三态:None=不传(服务端默认);True/False 经 extra_body
     注入 chat_template_kwargs.enable_thinking(vLLM 等 OpenAI 兼容后端的
     非标准字段,OpenAI SDK 未收录,必须走 extra_body 才能落到请求 body)。
-    thinking_budget:思考的独立软预算(qwen3 chat_template_kwargs 支持),
-    防止犹豫循环烧穿 max_tokens;None=不设。
     reasoning_effort:qwen3 chat_template_kwargs 支持的思考档位
     (low/medium/xhigh);enable_thinking=False 时会被抑制,避免矛盾 kwargs。
     """
@@ -270,12 +225,10 @@ def _build_aliyun_payload(
         "temperature": temperature,
         "messages": messages,
     }
-    if enable_thinking is not None or thinking_budget is not None or reasoning_effort is not None:
+    if enable_thinking is not None or reasoning_effort is not None:
         template_kwargs: Dict[str, Any] = {}
         if enable_thinking is not None:
             template_kwargs["enable_thinking"] = enable_thinking
-        if thinking_budget is not None:
-            template_kwargs["thinking_budget"] = thinking_budget
         if reasoning_effort is not None and enable_thinking is not False:
             template_kwargs["reasoning_effort"] = reasoning_effort
         if template_kwargs:
@@ -353,60 +306,6 @@ def _call_anthropic(
     completion_tokens = getattr(usage, "output_tokens", 0)
     total_tokens = prompt_tokens + completion_tokens
     return text, prompt_tokens, completion_tokens, total_tokens
-
-
-def _call_anthropic_with_tools(
-    client: Any,
-    kwargs: Dict[str, Any],
-) -> Tuple[str, List[Dict[str, Any]], int, int, int]:
-    """
-    Call Anthropic with tool support.
-
-    Returns:
-        (text, tool_use_blocks, prompt_tokens, completion_tokens, total_tokens)
-        tool_use_blocks: list of {"name": str, "id": str, "input": dict}
-    """
-    response = _try_anthropic_create(client, kwargs)
-    text_parts: List[str] = []
-    thinking_parts: List[str] = []
-    tool_uses: List[Dict[str, Any]] = []
-
-    if response.content:
-        for block in response.content:
-            block_type = getattr(block, "type", None)
-            if block_type == "text":
-                text_parts.append(block.text)
-            elif block_type == "thinking":
-                thinking_parts.append(getattr(block, "thinking", ""))
-            elif block_type == "tool_use":
-                tool_uses.append({
-                    "name": getattr(block, "name", ""),
-                    "id": getattr(block, "id", ""),
-                    "input": getattr(block, "input", {}),
-                })
-
-    if text_parts:
-        text = "".join(text_parts)
-    elif thinking_parts:
-        text = (
-            "[THINKING_ONLY_RESPONSE]\n"
-            + "\n".join(thinking_parts)
-            + "\n[END_THINKING_ONLY_RESPONSE]"
-        )
-        logger.warning(
-            "Anthropic response contained only thinking blocks (no text); "
-            "stop_reason=%s output_tokens=%s",
-            getattr(response, "stop_reason", None),
-            getattr(response.usage, "output_tokens", None) if response.usage else None,
-        )
-    else:
-        text = ""
-
-    usage = response.usage
-    prompt_tokens = getattr(usage, "input_tokens", 0)
-    completion_tokens = getattr(usage, "output_tokens", 0)
-    total_tokens = prompt_tokens + completion_tokens
-    return text, tool_uses, prompt_tokens, completion_tokens, total_tokens
 
 
 def _call_openai(

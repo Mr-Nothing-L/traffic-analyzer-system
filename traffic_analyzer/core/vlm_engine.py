@@ -38,7 +38,6 @@ import httpx
 import openai
 
 from traffic_analyzer.models.schemas import (
-    LLMCallRecord,
     LLMProviderConfig,
     LLMResponse,
     PromptTemplate,
@@ -75,7 +74,6 @@ from traffic_analyzer.core.vlm_provider_clients import (
     _build_aliyun_payload,
     _build_anthropic_payload,
     _build_google_payload,
-    _build_openai_payload,
     _call_aliyun,
     _call_anthropic,
     _call_google,
@@ -335,7 +333,6 @@ class VLMInferenceEngine:
         context_vars: Optional[Dict[str, Any]] = None,
         response_schema: Optional[Dict[str, Any]] = None,
         enable_thinking: Optional[bool] = None,
-        thinking_budget: Optional[int] = None,
         reasoning_effort: Optional[str] = None,
     ) -> LLMResponse:
         """Execute a single VLM call.
@@ -368,7 +365,6 @@ class VLMInferenceEngine:
         if self._cache_enabled:
             cache_key = _compute_cache_key(
                 system_prompt, user_prompt, images, enable_thinking=enable_thinking,
-                    thinking_budget=thinking_budget,
                     reasoning_effort=reasoning_effort,
             )
             # Resolve the provider that would serve this call (under lock) so a
@@ -432,23 +428,12 @@ class VLMInferenceEngine:
                 user_prompt=user_prompt,
                 images=images,
                 enable_thinking=enable_thinking,
-                thinking_budget=thinking_budget,
                 reasoning_effort=reasoning_effort,
             )
             parsed_data = _extract_json_from_text(raw_text)
             if response_schema:
                 _validate_schema_basic(parsed_data, response_schema)
             success = True
-        except PromptRenderError as exc:
-            error_message = str(exc)
-            logger.error(
-                "[vlm_engine:call] PROMPT_RENDER_ERROR | template_id=%s images=%d schema=%s | %s",
-                template_id,
-                len(images),
-                "yes" if response_schema else "no",
-                exc,
-                exc_info=True,
-            )
         except ResponseParseError as exc:
             error_message = str(exc)
             logger.error(
@@ -549,7 +534,6 @@ class VLMInferenceEngine:
         images: List[Any],
         provider_index: Optional[int] = None,
         enable_thinking: Optional[bool] = None,
-        thinking_budget: Optional[int] = None,
         reasoning_effort: Optional[str] = None,
     ) -> Tuple[str, int, int, int]:
         """Execute a single provider-specific API call (no retry).
@@ -610,7 +594,6 @@ class VLMInferenceEngine:
                     config.max_tokens,
                     config.temperature,
                     enable_thinking=enable_thinking,
-                    thinking_budget=thinking_budget,
                     reasoning_effort=reasoning_effort,
                 )
                 return _call_aliyun(client, kwargs)
@@ -634,7 +617,6 @@ class VLMInferenceEngine:
         user_prompt: str,
         images: List[Any],
         enable_thinking: Optional[bool] = None,
-        thinking_budget: Optional[int] = None,
         reasoning_effort: Optional[str] = None,
     ) -> Tuple[str, int, int, int, int, int]:
         """Execute the API call with per-provider retry and provider failover.
@@ -671,8 +653,7 @@ class VLMInferenceEngine:
                         images,
                         provider_index=provider_idx,
                         enable_thinking=enable_thinking,
-                        thinking_budget=thinking_budget,
-                        reasoning_effort=reasoning_effort,
+                            reasoning_effort=reasoning_effort,
                     )
                     # Sticky failover: subsequent calls start from the provider
                     # that served this request.
@@ -782,102 +763,6 @@ class VLMInferenceEngine:
             ) from last_error
         raise RuntimeError("Unknown error during VLM call")
 
-    # ------------------------------------------------------------------
-    # Batch call
-    # ------------------------------------------------------------------
-
-    def batch_call(
-        self,
-        requests: List[Dict[str, Any]],
-        parallel: bool = False,
-        max_workers: int = 4,
-    ) -> List[LLMResponse]:
-        """Execute multiple VLM calls.
-
-        Args:
-            requests: List of request dicts, each containing:
-                - template (PromptTemplate)
-                - images (List[Any])
-                - context_vars (Optional[Dict[str, Any]])
-                - response_schema (Optional[Dict[str, Any]])
-            parallel: If True, execute calls in parallel using ThreadPoolExecutor.
-            max_workers: Maximum number of threads for parallel execution.
-
-        Returns:
-            List of LLMResponse objects in the same order as requests.
-        """
-        if parallel:
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-
-            def _submit(req: Dict[str, Any]) -> LLMResponse:
-                return self.call(
-                    template=req["template"],
-                    images=req.get("images", []),
-                    context_vars=req.get("context_vars"),
-                    response_schema=req.get("response_schema"),
-                )
-
-            responses: List[LLMResponse] = [LLMResponse(success=False)] * len(requests)
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                future_to_index = {
-                    executor.submit(_submit, req): idx
-                    for idx, req in enumerate(requests)
-                }
-                for future in as_completed(future_to_index):
-                    idx = future_to_index[future]
-                    try:
-                        responses[idx] = future.result()
-                    except Exception as exc:
-                        template_id = getattr(requests[idx].get("template"), "template_id", "unknown")
-                        logger.error(
-                            "[vlm_engine:batch_call] FUTURE_ERROR | idx=%d template_id=%s | %s",
-                            idx,
-                            template_id,
-                            exc,
-                            exc_info=True,
-                        )
-                        responses[idx] = LLMResponse(
-                            success=False,
-                            raw_text="",
-                            error_message=str(exc),
-                        )
-            return responses
-
-        # Sequential execution
-        results: List[LLMResponse] = []
-        for idx, req in enumerate(requests):
-            try:
-                resp = self.call(
-                    template=req["template"],
-                    images=req.get("images", []),
-                    context_vars=req.get("context_vars"),
-                    response_schema=req.get("response_schema"),
-                )
-                results.append(resp)
-            except Exception as exc:
-                template_id = getattr(req.get("template"), "template_id", "unknown")
-                logger.error(
-                    "[vlm_engine:batch_call] CALL_ERROR | idx=%d template_id=%s images=%d schema=%s | %s",
-                    idx,
-                    template_id,
-                    len(req.get("images", [])),
-                    "yes" if req.get("response_schema") else "no",
-                    exc,
-                    exc_info=True,
-                )
-                results.append(
-                    LLMResponse(
-                        success=False,
-                        raw_text="",
-                        error_message=str(exc),
-                    )
-                )
-        return results
-
-    # ------------------------------------------------------------------
-    # Usage stats
-    # ------------------------------------------------------------------
-
     def get_usage_stats(self) -> Dict[str, Any]:
         """Return cumulative usage statistics.
 
@@ -915,38 +800,3 @@ class VLMInferenceEngine:
         if self._disk_cache is not None:
             stats.update(self._disk_cache.get_stats())
         return stats
-
-    # ------------------------------------------------------------------
-    # Audit helper
-    # ------------------------------------------------------------------
-
-    def create_call_record(
-        self,
-        template_id: str,
-        response: LLMResponse,
-    ) -> LLMCallRecord:
-        """Create an audit record from an LLMResponse.
-
-        Args:
-            template_id: Identifier of the prompt template used.
-            response: The response object returned by call().
-
-        Returns:
-            LLMCallRecord suitable for logging in AnalysisContext.
-        """
-        return LLMCallRecord(
-            call_id=str(uuid.uuid4()),
-            template_id=template_id,
-            model=response.model or self.config.model,
-            provider=response.provider or self.provider,
-            prompt_tokens=response.prompt_tokens,
-            completion_tokens=response.completion_tokens,
-            total_tokens=response.total_tokens,
-            latency_ms=response.latency_ms,
-            success=response.success,
-            error_message=(
-                None
-                if response.success
-                else response.error_message or response.raw_text or "Unknown error"
-            ),
-        )

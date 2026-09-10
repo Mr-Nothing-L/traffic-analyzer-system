@@ -165,9 +165,6 @@ def test_failover_when_primary_rate_limited(
     assert response.provider == "anthropic"
     assert response.parsed_data == {"failover": True}
 
-    record = engine.create_call_record("failover_test", response)
-    assert record.provider == "anthropic"
-
     assert "FAILOVER" in caplog.text
     assert mock_aliyun_client.chat.completions.create.call_count == 1
     assert mock_anthropic_client.messages.create.call_count == 1

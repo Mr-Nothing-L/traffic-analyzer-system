@@ -83,9 +83,6 @@ def test_disk_cache_get_non_dict_json_returns_none_and_deletes(tmp_path: Path) -
 
 
 # ---------------------------------------------------------------------------
-# _compute_cache_key: enable_thinking 必须参与键
-# ---------------------------------------------------------------------------
-
 
 def test_cache_key_distinguishes_enable_thinking() -> None:
     """enable_thinking 三个取值必须得到三个不同 key,否则互相串缓存
@@ -117,22 +114,12 @@ def test_cache_key_distinguishes_reasoning_effort() -> None:
     assert len(keys) == 4
 
 
-def test_cache_key_distinguishes_thinking_budget() -> None:
-    args = ("sys prompt", "user prompt", [b"fake-jpeg-bytes"])
-    keys = {
-        _compute_cache_key(*args),
-        _compute_cache_key(*args, thinking_budget=512),
-        _compute_cache_key(*args, thinking_budget=1024),
-    }
-    assert len(keys) == 3
-
-
 def test_cache_key_combines_thinking_params() -> None:
     args = ("sys prompt", "user prompt", [b"fake-jpeg-bytes"])
     base = _compute_cache_key(*args)
+    with_toggle = _compute_cache_key(*args, enable_thinking=True)
     with_effort = _compute_cache_key(*args, reasoning_effort="medium")
-    with_budget = _compute_cache_key(*args, thinking_budget=1024)
     with_both = _compute_cache_key(
-        *args, reasoning_effort="medium", thinking_budget=1024
+        *args, enable_thinking=True, reasoning_effort="medium"
     )
-    assert len({base, with_effort, with_budget, with_both}) == 4
+    assert len({base, with_toggle, with_effort, with_both}) == 4

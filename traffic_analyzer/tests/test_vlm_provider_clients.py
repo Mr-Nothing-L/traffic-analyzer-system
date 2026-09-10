@@ -18,7 +18,6 @@ import pytest
 from traffic_analyzer.core.vlm_provider_clients import (
     _build_aliyun_payload,
     _call_anthropic,
-    _call_anthropic_with_tools,
     _call_google,
 )
 
@@ -70,44 +69,6 @@ def test_call_anthropic_thinking_only(caplog: pytest.LogCaptureFixture) -> None:
     assert "thinking blocks (no text)" in caplog.text
     assert "max_tokens" in caplog.text
     assert "4096" in caplog.text
-
-
-def test_call_anthropic_with_tools_prefers_text_over_thinking() -> None:
-    client = MagicMock()
-    client.messages.create.return_value = _make_response(
-        [
-            {"type": "thinking", "thinking": "internal reasoning"},
-            {"type": "text", "text": "final answer"},
-        ],
-        input_tokens=20,
-        output_tokens=8,
-    )
-
-    text, tool_uses, prompt_tokens, completion_tokens, total_tokens = _call_anthropic_with_tools(
-        client, {}
-    )
-
-    assert text == "final answer"
-    assert tool_uses == []
-    assert total_tokens == 28
-
-
-def test_call_anthropic_with_tools_thinking_only() -> None:
-    client = MagicMock()
-    client.messages.create.return_value = _make_response(
-        [{"type": "thinking", "thinking": "no text produced"}],
-        input_tokens=20,
-        output_tokens=100,
-    )
-
-    text, tool_uses, prompt_tokens, completion_tokens, total_tokens = _call_anthropic_with_tools(
-        client, {}
-    )
-
-    assert "[THINKING_ONLY_RESPONSE]" in text
-    assert "no text produced" in text
-    assert tool_uses == []
-    assert total_tokens == 120
 
 
 def _make_google_response(text: str = "{}") -> MagicMock:
@@ -205,13 +166,11 @@ def test_build_aliyun_payload_all_thinking_kwargs_together() -> None:
         1024,
         0.1,
         enable_thinking=True,
-        thinking_budget=1024,
         reasoning_effort="xhigh",
     )
     assert kwargs["extra_body"] == {
         "chat_template_kwargs": {
             "enable_thinking": True,
-            "thinking_budget": 1024,
             "reasoning_effort": "xhigh",
         }
     }
