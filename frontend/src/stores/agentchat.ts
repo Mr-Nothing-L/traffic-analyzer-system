@@ -731,7 +731,10 @@ class ActiveSession {
       })
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) {
-        // 恢复态下轮次已结束:停轮询收尾,随后走正常 /chat 重连实时流
+        // 恢复态下轮次已结束:先拉齐 events——最后一轮 poll 与 409 之间落盘的
+        // 尾巴(最终 assistant 文本/detection)再无渠道到达,且陈旧水位会让
+        // runTurn 的 recallFrom 删错条目;随后停轮询收尾恢复态。
+        await this.pollEvents()
         this.stopPolling()
         recovering.value = false
         return false
