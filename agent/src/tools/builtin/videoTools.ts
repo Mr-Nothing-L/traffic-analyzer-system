@@ -115,10 +115,10 @@ export function createVideoMetaTool(
       return {
         accesses: ToolAccesses.readFile(videoPath),
         approvalRule: `video_meta(${videoPath})`,
-        execute: async (): Promise<ExecutableToolResult> => {
+        execute: async (ctx): Promise<ExecutableToolResult> => {
           const result = await client.post<VideoMetaResponse>('/tools/video_meta', {
             video_path: videoPath,
-          });
+          }, undefined, ctx.signal);
           if (!result.ok) return toolserverErrorResult(result.error);
           return { output: JSON.stringify(result.data) };
         },
@@ -148,13 +148,13 @@ export function createExtractFramesTool(
       return {
         accesses: ToolAccesses.readFile(videoPath),
         approvalRule: `extract_frames(${videoPath})`,
-        execute: async (): Promise<ExecutableToolResult> => {
+        execute: async (ctx): Promise<ExecutableToolResult> => {
           const body: Record<string, unknown> = { video_path: videoPath };
           if (input.timestamps !== undefined) body['timestamps'] = input.timestamps;
           if (input.fps !== undefined) body['fps'] = input.fps;
           if (input.count !== undefined) body['count'] = input.count;
           if (input.max_frames !== undefined) body['max_frames'] = input.max_frames;
-          const result = await client.post<ExtractFramesResponse>('/tools/extract_frames', body);
+          const result = await client.post<ExtractFramesResponse>('/tools/extract_frames', body, undefined, ctx.signal);
           if (!result.ok) return toolserverErrorResult(result.error);
           const frames = result.data.frames ?? [];
           if (frames.length === 0) {
@@ -200,12 +200,12 @@ export function createDrawBoxesTool(
       return {
         accesses: ToolAccesses.readFile(videoPath),
         approvalRule: `draw_boxes(${videoPath} @ ${input.timestamp}s)`,
-        execute: async (): Promise<ExecutableToolResult> => {
+        execute: async (ctx): Promise<ExecutableToolResult> => {
           const result = await client.post<DrawBoxesResponse>('/tools/draw_boxes', {
             video_path: videoPath,
             timestamp: input.timestamp,
             boxes: input.boxes,
-          });
+          }, undefined, ctx.signal);
           if (!result.ok) return toolserverErrorResult(result.error);
           return {
             output: [

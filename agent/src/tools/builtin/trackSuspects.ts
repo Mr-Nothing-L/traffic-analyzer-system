@@ -150,7 +150,7 @@ export function createTrackSuspectsTool(
         accesses: ToolAccesses.readFile(videoPath),
         approvalRule: `track_suspects(${videoPath})`,
         timeoutMs: TRACK_SUSPECTS_TIMEOUT_MS,
-        execute: async (): Promise<ExecutableToolResult> => {
+        execute: async (ctx): Promise<ExecutableToolResult> => {
           // time_range 未提供时不发送:默认时段的单一权威在 toolserver。
           const body: Record<string, unknown> = {
             video_path: videoPath,
@@ -161,6 +161,7 @@ export function createTrackSuspectsTool(
             '/tools/track_suspects',
             body,
             TRACK_SUSPECTS_TIMEOUT_MS,
+            ctx.signal, // /cancel 与工具超时都能中止 15 分钟上限的 HTTP 请求
           );
           if (!result.ok) return toolserverErrorResult(result.error);
 

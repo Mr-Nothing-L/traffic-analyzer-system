@@ -71,11 +71,11 @@ export function createLoadVideoTool(
       return {
         accesses: ToolAccesses.readFile(videoPath),
         approvalRule: `load_video(${videoPath})`,
-        execute: async (): Promise<ExecutableToolResult> => {
+        execute: async (ctx): Promise<ExecutableToolResult> => {
           // max_mb 未提供时不发送,由 toolserver 取默认值(server.py 单一权威)。
           const body: Record<string, unknown> = { video_path: videoPath };
           if (parsed.data.max_mb !== undefined) body['max_mb'] = parsed.data.max_mb;
-          const result = await client.post<PrepareVideoResponse>('/tools/prepare_video', body);
+          const result = await client.post<PrepareVideoResponse>('/tools/prepare_video', body, undefined, ctx.signal);
           if (!result.ok) return toolserverErrorResult(result.error);
           const prepared = result.data;
 

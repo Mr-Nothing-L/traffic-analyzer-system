@@ -58,11 +58,13 @@ export class ToolserverClient {
   }
 
   /** POST JSON to a toolserver endpoint, e.g. post('/tools/video_meta', {...}).
-   * timeoutMs 为 per-call 兜底超时(AbortSignal),不传则只靠 dispatcher 长超时。 */
+   * timeoutMs 为 per-call 兜底超时,signal 为外部取消(/cancel、工具超时、
+   * 父轮次 abort):两者任一触发即中止请求;都不传则只靠 dispatcher 长超时。 */
   async post<T>(
     endpoint: string,
     body: unknown,
     timeoutMs?: number,
+    signal?: AbortSignal,
   ): Promise<ToolserverResult<T>> {
     let response: Response;
     try {
@@ -70,7 +72,9 @@ export class ToolserverClient {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(body),
-        ...(timeoutMs !== undefined ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
+        ...(timeoutMs !== undefined || signal !== undefined
+          ? { signal: mergedAbortSignal(timeoutMs, signal) }
+          : {}),
       });
     } catch (error) {
       return {
@@ -130,6 +134,16 @@ function tryParseJson(text: string): unknown {
   } catch {
     return undefined;
   }
+}
+
+/** 合并兜底超时与外部取消信号:任一触发即中止(二者都缺省时不该被调用)。 */
+function mergedAbortSignal(timeoutMs: number | undefined, external: AbortSignal | undefined): AbortSignal {
+  if (timeoutMs === undefined) {
+    if (external === undefined) throw new Error('mergedAbortSignal requires at least one input');
+    return external;
+  }
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  return external === undefined ? timeoutSignal : AbortSignal.any([external, timeoutSignal]);
 }
 
 function extractErrorContract(payload: unknown): { code: string; message: string } | undefined {
