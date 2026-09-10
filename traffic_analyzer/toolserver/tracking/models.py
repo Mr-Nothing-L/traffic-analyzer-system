@@ -319,30 +319,6 @@ def is_consistent(track: Track) -> Tuple[bool, Optional[str]]:
     return True, None
 
 
-def classify_motion_state(profile: Dict[str, Any]) -> str:
-    """按档案把运动状态分为 red(静止)/yellow(缓行)/green(正常)。
-
-    口径:对整条轨迹求平均速度 / 净位移,用于数值档案的红黄绿分档。
-    注意:render.py::_segment_speed_state 是相邻两点的局部速度口径,
-    仅用于轨迹染色,两者语义不同、不合并; thresholds 统一引用本文件常量。
-    静止判定以净位移为主:速度低于阈值 **且** 净位移不足 0.5 × 对角线
-    才是静止——低速蠕行(全程净位移大)不再误判为静止。
-    """
-    diag = float(profile.get("mean_diagonal") or 0.0)
-    speed = float(profile.get("avg_speed_norm") or 0.0)
-    net_diag = profile.get("net_displacement_diag")
-    slow = diag <= 0 or speed < STATIC_DISPLACEMENT_RATIO * max(diag, 1e-6)
-    if net_diag is not None:
-        # 有净位移字段:速度低且哪儿也没去才算静止
-        if slow and float(net_diag) < STATIC_NET_DISTANCE_RATIO:
-            return "red"
-    elif slow:
-        # 旧档案无该字段,退回速度口径
-        return "red"
-    if speed < SLOW_SPEED_RATIO * max(diag, 1e-6):
-        return "yellow"
-    return "green"
-
 
 def infer_side_hint(description: str) -> str:
     """从描述猜测目标所在侧(仅显式方向词;场景判定 unknown 时的最后兜底)。
@@ -618,14 +594,3 @@ def render_direction(
     return f"{lane};{traj};结论:{conclusion}{heading_evidence}{low_cov}"
 
 
-def direction_verdict(
-    track: Track,
-    heading: Optional[Dict[str, Any]] = None,
-) -> str:
-    """方向一致性结构化 verdict(中文,供 agent 裁决引用)。
-
-    保留为 evaluate_direction + render_direction 的薄封装,兼容既有调用方
-    (tests/__init__/windows.py)。
-    """
-    assessment = evaluate_direction(track)
-    return render_direction(assessment, heading)

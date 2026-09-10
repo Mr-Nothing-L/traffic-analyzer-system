@@ -3,7 +3,6 @@
 [文件说明]
 作用:轨迹段后处理四件套(代码抄自旧 pipeline 并适配本包,不跨目录 import):
     - segment-stitch/track.py 的 ``_iou`` 重叠帧 IoU 段间缝合;
-    - merge_gaps/merge_tracks.py 的匀速外推合并(gap ≤ 20 帧且距离
       < 1.5 × bbox 对角线);
     - teleport_break:相邻点中心跳变 > 1.5 × 对角线立即断裂(计划新增);
     - smooth/smooth.py 的断裂感知居中滑动平均(窗 5,gap > 20 不跨)。
@@ -23,7 +22,6 @@ IOU_TH = 0.25
 # merge_tracks.py 的允许最大间隔(原始帧数)
 MAX_GAP_FRAMES = 20
 # 合并距离阈值(× 对角线;旧代码像素空间额外 max(d,1px),归一化空间不需要)
-MERGE_DIST_RATIO = 1.5
 # 瞬移断裂阈值(× 对角线)
 TELEPORT_RATIO = 1.5
 # smooth.py 滑动平均窗口与断裂判定
@@ -87,60 +85,6 @@ def stitch_overlapping(segments: List[Segment], iou_th: float = IOU_TH) -> List[
         gt.sort(key=lambda q: q["frame"])  # type: ignore[arg-type,return-value,operator]
         out.append(gt)
     return [gt for gt in out if gt]
-
-
-def predict_center(points: Segment, at_frame: int) -> "tuple[float, float]":
-    """merge_tracks.py 的匀速外推:最后两个点求速度预测 at_frame 处中心。"""
-    if len(points) >= 2:
-        p1, p2 = points[-2], points[-1]
-        dt = int(p2["frame"]) - int(p1["frame"])  # type: ignore[arg-type]
-        if dt > 0:
-            c1 = _center(p1["box"])  # type: ignore[arg-type]
-            c2 = _center(p2["box"])  # type: ignore[arg-type]
-            vx, vy = (c2[0] - c1[0]) / dt, (c2[1] - c1[1]) / dt
-            d = at_frame - int(p2["frame"])
-            return (c2[0] + vx * d, c2[1] + vy * d)
-    return _center(points[-1]["box"])  # type: ignore[arg-type]
-
-
-def merge_gaps(
-    chains: List[Segment], max_gap: int = MAX_GAP_FRAMES
-) -> List[Segment]:
-    """merge_tracks.py 的匀速外推段间合并,适配归一化坐标。
-
-    chains 需按起始帧升序;对每个后续段找满足 gap ≤ max_gap 且外推距离
-    < MERGE_DIST_RATIO × max(两侧对角线) 的最近前段并接入(同一帧重复点
-    保留前段的),否则自成新段。输入的链不修改,返回新列表。
-    """
-    merged: List[Segment] = []
-    for chain in chains:
-        if not chain:
-            continue
-        t_start = int(chain[0]["frame"])  # type: ignore[arg-type]
-        c_start = _center(chain[0]["box"])  # type: ignore[arg-type]
-        best: Optional[Segment] = None
-        best_d: Optional[float] = None
-        for m in merged:
-            m_end = int(m[-1]["frame"])  # type: ignore[arg-type]
-            gap = t_start - m_end
-            if gap < 0 or gap > max_gap:
-                continue
-            pred = predict_center(m, t_start)
-            d = math.dist(pred, c_start)
-            th = MERGE_DIST_RATIO * max(
-                _diag(m[-1]["box"]),  # type: ignore[arg-type]
-                _diag(chain[0]["box"]),  # type: ignore[arg-type]
-            )
-            if d < th and (best_d is None or d < best_d):
-                best, best_d = m, d
-        if best is not None:
-            have = {int(q["frame"]) for q in best}  # type: ignore[misc]
-            best.extend(q for q in chain if int(q["frame"]) not in have)  # type: ignore[arg-type,misc]
-        else:
-            merged.append(list(chain))
-    for m in merged:
-        m.sort(key=lambda q: int(q["frame"]))  # type: ignore[arg-type,return-value,operator]
-    return merged
 
 
 def teleport_break(chain: Segment, ratio: float = TELEPORT_RATIO) -> List[Segment]:

@@ -27,7 +27,8 @@ from traffic_analyzer.toolserver.tracking.models import (
     Track,
     TrackPoint,
     compute_profile,
-    direction_verdict,
+    evaluate_direction,
+    render_direction,
 )
 
 _ANCHOR_BBOX = "[400,400,500,500]"  # 0-1000,归一化 [0.4,0.4,0.5,0.5]
@@ -313,13 +314,13 @@ class TestVerdictCoverageQualifier:
         return track
 
     def test_low_coverage_appends_insufficient_evidence(self) -> None:
-        verdict = direction_verdict(self._static_track(span_s=4.0))
+        verdict = render_direction(evaluate_direction(self._static_track(span_s=4.0)))
         assert "违停" in verdict
         assert "证据不足" in verdict
         assert "轨迹仅覆盖 20%" in verdict
 
     def test_sufficient_coverage_has_no_qualifier(self) -> None:
-        verdict = direction_verdict(self._static_track(span_s=1.0))
+        verdict = render_direction(evaluate_direction(self._static_track(span_s=1.0)))
         assert "违停" in verdict
         assert "证据不足" not in verdict
 

@@ -33,9 +33,9 @@ from traffic_analyzer.toolserver.tracking.models import (
     TrackPoint,
     bbox_center,
     box_diagonal,
-    classify_motion_state,
     compute_profile,
-    direction_verdict,
+    evaluate_direction,
+    render_direction,
     evaluate_direction,
     infer_side_hint,
     is_clipped_box,
@@ -109,7 +109,8 @@ class TestProfile:
         assert profile["avg_speed_norm"] == pytest.approx(
             STATIC_DISPLACEMENT_RATIO * diag * 0, abs=1e-9
         )
-        assert classify_motion_state(profile) == "red"
+        # 静止口径:净位移(对角线倍数)低于静止阈(分档函数已随死代码删除)
+        assert profile["net_displacement_diag"] < STATIC_NET_DISTANCE_RATIO
         assert profile["bbox_trend"] == "stable"
         assert profile["stationary_duration_s"] == pytest.approx(1.0)
 
@@ -137,8 +138,8 @@ class TestProfile:
         # 净位移超过门槛
         assert profile["net_displacement_diag"] >= STATIC_NET_DISTANCE_RATIO
         # 核心断言:不是静止
-        assert classify_motion_state(profile) != "red"
-        verdict = direction_verdict(track)
+        assert profile["net_displacement_diag"] >= STATIC_NET_DISTANCE_RATIO
+        verdict = render_direction(evaluate_direction(track))
         assert "基本静止" not in verdict
         assert "疑似违停" not in verdict
 
@@ -153,7 +154,6 @@ class TestProfile:
         assert profile["avg_speed_norm"] > 0
         expected_dir = 0.0  # 纯 +x 方向 → 方向角 0°
         assert profile["direction_deg"] == pytest.approx(expected_dir, abs=1e-6)
-        assert classify_motion_state(profile) in ("yellow", "green")
 
     def test_slow_is_yellow_fast_is_green(self) -> None:
         diag0 = 0.18  # sqrt(0.12²+0.15²)≈0.192,取接近值即可
@@ -165,9 +165,8 @@ class TestProfile:
         prof_slow = compute_profile(_mk_track(slow_pts))
         ratio_slow = prof_slow["avg_speed_norm"] / box_diagonal(slow_pts[0]["box"])  # type: ignore[arg-type]
         assert SLOW_SPEED_RATIO > ratio_slow > STATIC_DISPLACEMENT_RATIO * 0.5 or True
-        # 直接用分档函数验证边界口径,不猜具体数值
         prof_zero = compute_profile(_mk_track([{"frame": f, "box": [0.1, 0.1, 0.2, 0.2]} for f in range(4)]))
-        assert classify_motion_state(prof_zero) == "red"
+        assert prof_zero["net_displacement_diag"] < STATIC_NET_DISTANCE_RATIO
         assert diag0 > 0
 
     def test_far_small_object_threshold_normalized(self) -> None:
@@ -281,21 +280,6 @@ class TestStitching:
         merged = stitch.stitch_overlapping([seg1, seg2])
         assert len(merged) == 2
 
-    def test_merge_gap_uniform_velocity(self) -> None:
-        # 链 A 在帧 0-2 以每帧 +0.05 右移;链 B 从帧 6 起以同样速度继续
-        chain_a = [_pt(f, [0.05 * f, 0.4, 0.05 * f + 0.1, 0.5]) for f in range(3)]
-        chain_b = [_pt(f, [0.05 * f, 0.4, 0.05 * f + 0.1, 0.5]) for f in range(6, 9)]
-        merged = stitch.merge_gaps([chain_a, chain_b])
-        assert len(merged) == 1
-        frames = sorted(int(q["frame"]) for q in merged[0])  # type: ignore[union-attr]
-        assert frames == [0, 1, 2, 6, 7, 8]
-
-    def test_merge_gap_too_large_keeps_split(self) -> None:
-        chain_a = [_pt(0, [0.0, 0.4, 0.1, 0.5]), _pt(1, [0.05, 0.4, 0.15, 0.5])]
-        chain_b = [_pt(100, [0.5, 0.4, 0.6, 0.5]), _pt(101, [0.55, 0.4, 0.65, 0.5])]
-        merged = stitch.merge_gaps([chain_a, chain_b])
-        assert len(merged) == 2
-
     def test_teleport_break(self) -> None:
         # 第三点瞬移到画面另一端(> 1.5 × 对角线)
         chain = [
@@ -402,7 +386,7 @@ class TestSideAndVerdict:
         track = _mk_track(pts)
         track.side_hint = "coming"
         track.profile = compute_profile(track, env_flow=0.05)
-        verdict = direction_verdict(track)
+        verdict = render_direction(evaluate_direction(track))
         assert "违停" in verdict
 
     def test_direction_verdict_coming_wrong_trend(self) -> None:
@@ -410,7 +394,7 @@ class TestSideAndVerdict:
         track = _mk_track(shrink)
         track.side_hint = "coming"
         track.profile = compute_profile(track)
-        verdict = direction_verdict(track)
+        verdict = render_direction(evaluate_direction(track))
         assert ("逆行" in verdict) or ("倒车" in verdict)
 
 
@@ -435,7 +419,7 @@ class TestStructuredVerdict:
         track = _mk_track(pts)
         track.side_hint = "coming"
         track.profile = compute_profile(track)
-        verdict = direction_verdict(track)
+        verdict = render_direction(evaluate_direction(track))
         assert "方向一致" in verdict
         assert "与预期一致" in verdict
         assert "来向侧" in verdict
@@ -450,7 +434,7 @@ class TestStructuredVerdict:
         track = _mk_track(pts)
         track.side_hint = "coming"
         track.profile = compute_profile(track)
-        verdict = direction_verdict(track)
+        verdict = render_direction(evaluate_direction(track))
         assert "与预期相反" in verdict
         assert "疑似逆行" in verdict
 
@@ -467,7 +451,7 @@ class TestStructuredVerdict:
         for p in track.points:
             p.timestamp = p.frame_idx * 0.05
         track.profile = compute_profile(track)
-        verdict = direction_verdict(track)
+        verdict = render_direction(evaluate_direction(track))
         assert "与预期相反" in verdict
         assert "疑似倒车" in verdict
 
@@ -480,7 +464,7 @@ class TestStructuredVerdict:
         track = _mk_track(pts)
         track.side_hint = "unknown"
         track.profile = compute_profile(track)
-        verdict = direction_verdict(track)
+        verdict = render_direction(evaluate_direction(track))
         assert "车道方位未知" in verdict
         assert "仅凭几何初判" in verdict
 
@@ -495,7 +479,7 @@ class TestStructuredVerdict:
         track.side_hint = "coming"
         track.profile = compute_profile(track)
         heading = {"accepted": "away", "n_total": 2, "n_consistent": 2}
-        verdict = direction_verdict(track, heading=heading)
+        verdict = render_direction(evaluate_direction(track), heading)
         assert "疑似逆行" in verdict
         assert "车头朝向(2/2帧一致):背镜头" in verdict
         assert "与移动方向一致" in verdict
@@ -511,7 +495,7 @@ class TestStructuredVerdict:
         track.side_hint = "coming"
         track.profile = compute_profile(track)
         heading = {"accepted": "toward", "n_total": 2, "n_consistent": 2}
-        verdict = direction_verdict(track, heading=heading)
+        verdict = render_direction(evaluate_direction(track), heading)
         assert "疑似倒车" in verdict
         assert "朝镜头" in verdict
 
@@ -551,7 +535,7 @@ class TestDirectionAssessment:
         # 方向一致 → 不需要 heading
         assert assessment.needs_heading is False
 
-    def test_render_direction_matches_direction_verdict(self) -> None:
+    def test_render_direction_structured_verdict(self) -> None:
         pts = self._lerp_boxes(
             [0.60, 0.50, 0.80, 0.80],
             [0.20, 0.20, 0.30, 0.40],
@@ -561,10 +545,9 @@ class TestDirectionAssessment:
         track.side_hint = "coming"
         track.profile = compute_profile(track)
         heading = {"accepted": "away", "n_total": 2, "n_consistent": 2}
-        old_verdict = direction_verdict(track, heading=heading)
-        assessment = evaluate_direction(track)
-        new_verdict = render_direction(assessment, heading=heading)
-        assert new_verdict == old_verdict
+        verdict = render_direction(evaluate_direction(track), heading)
+        assert "结论:" in verdict
+        assert "车头朝向(2/2帧一致)" in verdict
 
     def test_needs_heading_rules(self) -> None:
         # consistent=False → needs_heading
@@ -601,7 +584,7 @@ class TestDirectionAssessment:
         assessment = evaluate_direction(track)
         assert assessment.empty is True
         assert render_direction(assessment) == "无有效轨迹"
-        assert direction_verdict(track) == "无有效轨迹"
+        assert render_direction(evaluate_direction(track)) == "无有效轨迹"
 
 
 # ---------------------------------------------------------------------------
@@ -661,7 +644,7 @@ class TestDualSignalDirection:
         state = _direction_verdict_state(track)
         assert state["actual"] == "approaching"
         assert state["consistent"] is True
-        verdict = direction_verdict(track)
+        verdict = render_direction(evaluate_direction(track))
         assert "靠近镜头" in verdict
         assert "方向一致" in verdict
 
@@ -678,7 +661,7 @@ class TestDualSignalDirection:
         state = _direction_verdict_state(track)
         assert state["actual"] == "unclear"
         assert state["consistent"] is None
-        verdict = direction_verdict(track)
+        verdict = render_direction(evaluate_direction(track))
         assert "方向不明(面积与位移矛盾)" in verdict
         assert "轨迹=远离镜头" not in verdict
 
@@ -696,7 +679,7 @@ class TestDualSignalDirection:
         assert state["clipped_all"] is True
         assert state["area_signal"] is None
         assert state["actual"] == "approaching"
-        verdict = direction_verdict(track)
+        verdict = render_direction(evaluate_direction(track))
         assert "靠近镜头" in verdict
         assert "方向一致" in verdict
 
@@ -721,7 +704,7 @@ class TestDualSignalDirection:
         state = _direction_verdict_state(track)
         assert state["actual"] in ("approaching", "unclear")
         assert state["actual"] != "leaving"
-        verdict = direction_verdict(track)
+        verdict = render_direction(evaluate_direction(track))
         assert "轨迹=远离镜头" not in verdict
         assert "方向不明(面积与位移矛盾)" in verdict
 
@@ -953,7 +936,7 @@ class TestSceneSide:
         track.side_source = "scene"
         track.side_rationale = _build_scene_rationale("left", "coming", None)
         track.profile = compute_profile(track)
-        verdict = direction_verdict(track)
+        verdict = render_direction(evaluate_direction(track))
         assert "所在车道=来向侧(" in verdict
         assert "中央隔离带在画面左侧" in verdict
         assert "应靠近镜头" in verdict
@@ -966,7 +949,7 @@ class TestSceneSide:
         track = _mk_track(pts)
         track.side_hint = "unknown"
         track.profile = compute_profile(track)
-        verdict = direction_verdict(track)
+        verdict = render_direction(evaluate_direction(track))
         assert "所在车道=车道方位未知,仅凭几何初判" in verdict
         assert "中央隔离带" not in verdict
 
