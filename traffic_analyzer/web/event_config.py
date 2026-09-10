@@ -86,6 +86,24 @@ def _event_name_index_cached(path: str, mtime_ns: int) -> Dict[str, int]:
     }
 
 
+def _active_event_ids_cached(path: str, mtime: int) -> frozenset:
+    data = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+    return frozenset(
+        int(cat["event_id"])
+        for cat in data.get("event_categories") or []
+        if cat.get("is_active", False) and "event_id" in cat
+    )
+
+
+def active_event_ids(path: Optional[Path] = None) -> frozenset:
+    """全部 is_active 事件的编号集合(合法 action 编号从此派生,P3-31)。
+
+    与 event_options_index 同口径:按 (路径, mtime) 缓存,yaml 变更自动失效。
+    """
+    path = path or _EVENT_CATEGORIES_YAML
+    return _active_event_ids_cached(str(path), _yaml_mtime_ns(path))
+
+
 def event_name_index(path: Optional[Path] = None) -> Dict[str, int]:
     """事件中文名 → event_id(用于在 description 的 think 段落中定位事件文本)。
 

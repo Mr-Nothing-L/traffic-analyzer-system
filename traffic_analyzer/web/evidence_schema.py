@@ -130,8 +130,13 @@ class Evidence(BaseModel):
 # SFT sample (only description / action / event_attributes / attr_mentions are user-editable)
 # ---------------------------------------------------------------------------
 
-# 标注文档 v4.5 的合法 action 编号(action 9 = 正常占位,不出现)。
-_ALLOWED_ACTION_IDS = frozenset({1, 2, 3, 4, 5, 6, 7, 8, 10, 11})
+def _allowed_action_ids() -> frozenset:
+    """合法 action 编号 = 全部活跃事件(从 event_categories.yaml 派生)。
+
+    此前硬编码 {1..8,10,11},YAML 新激活事件会被静默拒绝;派生后自动放行
+    (action 9 = 正常占位,不出现)。校验时取值,YAML 变更即时生效(P3-31)。
+    """
+    return event_config.active_event_ids()
 
 
 def _check_event_attributes(value: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
@@ -275,9 +280,10 @@ class SftSample(BaseModel):
     @field_validator("action")
     @classmethod
     def _check_action_ids(cls, value: List[int]) -> List[int]:
-        if not all(a in _ALLOWED_ACTION_IDS for a in value):
+        allowed = _allowed_action_ids()
+        if not all(a in allowed for a in value):
             raise ValueError(
-                f"action ids must be a subset of {sorted(_ALLOWED_ACTION_IDS)}"
+                f"action ids must be a subset of {sorted(allowed)}"
             )
         return value
 
