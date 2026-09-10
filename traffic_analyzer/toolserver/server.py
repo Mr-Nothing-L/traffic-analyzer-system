@@ -450,25 +450,32 @@ def create_app(workspace: Path | str) -> FastAPI:
                 # rc==0 后原子改名;失败显式清残件,避免半截 mp4 被后续请求
                 # 当作有效产物复用(同 evidence 原子写模式)
                 tmp_out = out.with_name(f"{out.stem}.tmp{out.suffix}")
-                proc = subprocess.run(
-                    [
-                        "ffmpeg",
-                        "-y",
-                        "-i",
-                        str(video),
-                        "-vf",
-                        f"fps={tag}",
-                        "-c:v",
-                        "libx264",
-                        "-preset",
-                        "veryfast",
-                        "-crf",
-                        "28",
-                        "-an",
-                        str(tmp_out),
-                    ],
-                    capture_output=True,
-                )
+                try:
+                    # 超时守卫:坏源/网络盘卡死时同步端点线程会被永久占用,
+                    # 多个挂死请求可拖垮整个 toolserver(含 /health)。
+                    proc = subprocess.run(
+                        [
+                            "ffmpeg",
+                            "-y",
+                            "-i",
+                            str(video),
+                            "-vf",
+                            f"fps={tag}",
+                            "-c:v",
+                            "libx264",
+                            "-preset",
+                            "veryfast",
+                            "-crf",
+                            "28",
+                            "-an",
+                            str(tmp_out),
+                        ],
+                        capture_output=True,
+                        timeout=_TRANSCODE_TIMEOUT_S,
+                    )
+                except subprocess.TimeoutExpired:
+                    tmp_out.unlink(missing_ok=True)
+                    continue
                 if proc.returncode == 0 and tmp_out.is_file():
                     os.replace(tmp_out, out)
                 else:
@@ -569,6 +576,7 @@ def create_app(workspace: Path | str) -> FastAPI:
 
 
 _TRACK_TIMEOUT_S = 900.0  # track_suspects 同步执行总超时(秒)
+_TRANSCODE_TIMEOUT_S = 300.0  # prepare_video 单次 ffmpeg 转码超时(秒)
 
 
 def _timestamp_tag() -> str:

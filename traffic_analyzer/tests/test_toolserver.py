@@ -460,6 +460,30 @@ def test_prepare_video_reuses_cached_output(
     assert body["fps"] == _TINY_FPS
 
 
+def test_prepare_video_ffmpeg_timeout_422(
+    video_client: Tuple[TestClient, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ffmpeg 挂死触发 TimeoutExpired:按转码失败处理且不留残件。"""
+
+    def fake_run(cmd: List[str], **kwargs: object) -> subprocess.CompletedProcess:
+        assert "timeout" in kwargs, "subprocess.run 必须传 timeout"
+        Path(cmd[-1]).write_bytes(b"x" * 10)
+        raise subprocess.TimeoutExpired(cmd, 300)
+
+    monkeypatch.setattr(
+        "traffic_analyzer.toolserver.server.subprocess.run", fake_run
+    )
+    tc, video = video_client
+    resp = tc.post(
+        "/tools/prepare_video",
+        json={"video_path": "clip.mp4", "max_mb": _TINY_MAX_MB},
+    )
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["error"]["code"] == "transcode_failed"
+    transcode_dir = video.parent / ".agent" / "transcoded"
+    assert not transcode_dir.exists() or not any(transcode_dir.iterdir())
+
+
 def test_prepare_video_ffmpeg_missing_500(
     video_client: Tuple[TestClient, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
