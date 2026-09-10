@@ -409,6 +409,30 @@ def test_prepare_video_ladder_all_fail_422(
     assert resp.json()["error"]["code"] == "transcode_failed"
 
 
+def test_prepare_video_failure_leaves_no_partial_output(
+    video_client: Tuple[TestClient, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ffmpeg 中途死掉(半写文件后非零退出)不得留下可被复用的半成品。"""
+    tc, video = video_client
+
+    def fake_run(cmd: List[str], **kwargs: object) -> subprocess.CompletedProcess:
+        Path(cmd[-1]).write_bytes(b"x" * 50)  # 模拟半写后崩溃
+        return subprocess.CompletedProcess(cmd, 1)
+
+    monkeypatch.setattr(
+        "traffic_analyzer.toolserver.server.subprocess.run", fake_run
+    )
+    resp = tc.post(
+        "/tools/prepare_video",
+        json={"video_path": "clip.mp4", "max_mb": _TINY_MAX_MB},
+    )
+    assert resp.status_code == 422, resp.text
+    transcode_dir = video.parent / ".agent" / "transcoded"
+    assert not transcode_dir.exists() or not any(transcode_dir.iterdir()), (
+        "失败后不得残留转码产物(含 .tmp)"
+    )
+
+
 def test_prepare_video_reuses_cached_output(
     video_client: Tuple[TestClient, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:

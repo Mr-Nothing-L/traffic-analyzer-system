@@ -446,6 +446,10 @@ def create_app(workspace: Path | str) -> FastAPI:
             tag = f"{fps:g}"
             out = out_dir / f"{video.stem}_fps{tag}.mp4"
             if not (out.is_file() and out.stat().st_size < max_bytes):
+                # 转码写 .tmp.mp4 临时名(保留 mp4 扩展供 ffmpeg 推断封装格式),
+                # rc==0 后原子改名;失败显式清残件,避免半截 mp4 被后续请求
+                # 当作有效产物复用(同 evidence 原子写模式)
+                tmp_out = out.with_name(f"{out.stem}.tmp{out.suffix}")
                 proc = subprocess.run(
                     [
                         "ffmpeg",
@@ -461,11 +465,14 @@ def create_app(workspace: Path | str) -> FastAPI:
                         "-crf",
                         "28",
                         "-an",
-                        str(out),
+                        str(tmp_out),
                     ],
                     capture_output=True,
                 )
-                if proc.returncode != 0:
+                if proc.returncode == 0 and tmp_out.is_file():
+                    os.replace(tmp_out, out)
+                else:
+                    tmp_out.unlink(missing_ok=True)
                     continue
             if out.is_file() and out.stat().st_size < max_bytes:
                 return {
