@@ -99,6 +99,20 @@ describe('loadEntriesAfter', () => {
     expect(storage.loadEntriesAfter('s1', 3)).toEqual([]);
     storage.close();
   });
+
+  it('多会话交错写:appendEntries 返回各自 session 的 seq(P2-10 回归)', () => {
+    const storage = new SessionStorage(workspace);
+    const entry = (text: string): TimelineEntry => ({ kind: 'user', text, images: [], at: 1 });
+    // s1 先写 2 条,s2 再写 1 条:s2 的 rowid=3 但本 session seq 应为 1
+    const seqs1a = storage.appendEntries('s1', [entry('a1'), entry('a2')]);
+    const seqs2 = storage.appendEntries('s2', [entry('b1')]);
+    const seqs1b = storage.appendEntries('s1', [entry('a3')]);
+    expect(seqs1a).toEqual([1, 2]);
+    expect(seqs2).toEqual([1]); // 旧实现返回表级 rowid=3,审批回填会落错行
+    expect(seqs1b).toEqual([3]);
+    expect(storage.loadEntriesAfter('s2', 0).map((r) => r.seq)).toEqual([1]);
+    storage.close();
+  });
 });
 
 describe('detection 条目兼容读取(迁移)', () => {

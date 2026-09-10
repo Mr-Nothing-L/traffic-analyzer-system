@@ -252,13 +252,16 @@ export class SessionStorage {
   }
 
   appendEntries(sessionId: string, entries: readonly TimelineEntry[]): number[] {
-    const seqs: number[] = [];
+    // RETURNING seq:entries 主键是 (session_id, seq),lastInsertRowid 是表级
+    // 隐式 rowid——同 workspace 多会话交错写时与本 session 的 seq 发散,
+    // 唯一消费者 settleApproval 会按错的 seq 回填审批 decision。
     const stmt = this.db.prepare(
-      'INSERT INTO entries (session_id, seq, entry_json) VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM entries WHERE session_id = ?), ?)',
+      'INSERT INTO entries (session_id, seq, entry_json) VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM entries WHERE session_id = ?), ?) RETURNING seq',
     );
+    const seqs: number[] = [];
     for (const entry of entries) {
-      const info = stmt.run(sessionId, sessionId, JSON.stringify(entry));
-      seqs.push(Number(info.lastInsertRowid));
+      const row = stmt.get(sessionId, sessionId, JSON.stringify(entry));
+      seqs.push(Number((row as { seq: number | bigint }).seq));
     }
     return seqs;
   }
