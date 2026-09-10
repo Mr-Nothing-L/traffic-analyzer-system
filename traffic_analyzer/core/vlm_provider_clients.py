@@ -32,14 +32,33 @@ logger = logging.getLogger(__name__)
 # Image encoding helper
 # ---------------------------------------------------------------------------
 
+def _sniff_image_mime(data: bytes) -> str:
+    """按字节魔数推断图片 MIME;无法识别时保守回退 png。
+
+    bytes/文件路径输入原样透传(PIL 分支已统一转 PNG),内存帧实为 JPEG——
+    恒标 image/png 与真实字节不符,严格校验的 provider(如 Anthropic 官方
+    API)会直接 400(P3-10)。"""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith(b"GIF87a") or data.startswith(b"GIF89a"):
+        return "image/gif"
+    if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data.startswith(b"BM"):
+        return "image/bmp"
+    return "image/png"
+
+
 def _encode_image_to_base64(image: Any) -> str:
-    """Convert an image to a base64-encoded PNG string.
+    """Convert an image to a base64-encoded data URI (MIME sniffed from bytes).
 
     Args:
         image: PIL Image, bytes, or file path (str/Path).
 
     Returns:
-        Base64-encoded PNG data URI.
+        Base64-encoded data URI; PIL inputs are normalized to PNG.
     """
     try:
         try:
@@ -66,7 +85,7 @@ def _encode_image_to_base64(image: Any) -> str:
             )
 
         b64 = base64.b64encode(data).decode("utf-8")
-        return f"data:image/png;base64,{b64}"
+        return f"data:{_sniff_image_mime(data)};base64,{b64}"
     except Exception as exc:
         image_type = type(image).__name__
         logger.error(
@@ -111,14 +130,16 @@ def _build_anthropic_payload(
             content.append({"type": "text", "text": img})
             continue
         b64_uri = _encode_image_to_base64(img)
-        # Anthropic expects base64 data without the data URI prefix
-        b64_data = b64_uri.split(",", 1)[1]
+        # Anthropic expects base64 data without the data URI prefix;
+        # media_type 从 data URI 前缀取(已按字节魔数嗅探,P3-10)。
+        mime_prefix, b64_data = b64_uri.split(",", 1)
+        media_type = mime_prefix.split(":", 1)[1].split(";", 1)[0]
         content.append(
             {
                 "type": "image",
                 "source": {
                     "type": "base64",
-                    "media_type": "image/png",
+                    "media_type": media_type,
                     "data": b64_data,
                 },
             }

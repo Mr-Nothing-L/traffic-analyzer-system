@@ -174,3 +174,19 @@ def test_build_aliyun_payload_all_thinking_kwargs_together() -> None:
             "reasoning_effort": "xhigh",
         }
     }
+
+
+# ---------------------------------------------------------------------------
+# _sniff_image_mime / _encode_image_to_base64:MIME 按字节魔数推断(P3-10)
+# ---------------------------------------------------------------------------
+
+def test_encode_image_bytes_sniffs_jpeg_mime() -> None:
+    """内存帧实为 JPEG:不得恒标 image/png(严格校验的 provider 会 400)。"""
+    from traffic_analyzer.core.vlm_provider_clients import _encode_image_to_base64
+
+    jpeg_magic = b"\xff\xd8\xff" + b"\x00" * 16
+    uri = _encode_image_to_base64(jpeg_magic)
+    assert uri.startswith("data:image/jpeg;base64,")
+
+    png_magic = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+    assert _encode_image_to_base64(png_magic).startswith("data:image/png;base64,")
