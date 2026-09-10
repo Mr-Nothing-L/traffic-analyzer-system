@@ -669,6 +669,35 @@
       ]
     },
     {
+      "name": "spawn_subagent",
+      "description": "派生一个子代理执行需要完整载入视频上下文的重度分析任务,等待并返回其最终结论。子代理拥有与本代理相同的工具(但不能再次派生子代理),步数上限 12,最多 {{MAX_CONCURRENT}} 个子代理并行,超出的排队。适用:整段视频的独立深度研判;不适用:只需抽几帧即可回答的轻量问题(直接用 video 工具更快)。",
+      "when_to_use": "需要整段视频完整时序上下文的独立深度分析时调用;轻量问题直接用视频抽帧工具更快。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "task": {
+            "type": "string",
+            "description": "给子代理的完整任务描述(自包含:背景、目标、输出要求),子代理看不到父级对话历史。"
+          },
+          "video_path": {
+            "type": "string",
+            "description": "可选。视频文件路径(沙盒工作区内);提供时整段视频直传给子代理。"
+          }
+        },
+        "required": [
+          "task"
+        ],
+        "additionalProperties": false
+      },
+      "returns": "子代理最终结论文本;失败/超时/取消时返回 isError 说明",
+      "limits": [
+        "子代理不能再派生子代理(禁递归)",
+        "步数上限 12,单步工具超时与父级相同",
+        "并发上限 {{MAX_CONCURRENT}},超出排队",
+        "总超时 600s"
+      ]
+    },
+    {
       "name": "subagent_list",
       "description": "列出当前会话派生的所有子代理运行记录及其状态。",
       "when_to_use": "派生多个子代理后,用它查看各子代理是否完成。",

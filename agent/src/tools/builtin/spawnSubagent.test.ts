@@ -481,3 +481,36 @@ describe('SubagentSemaphore', () => {
     }
   });
 });
+
+// P2-16:spawn_subagent 的模型可见描述/参数以 toolset.json 为单一来源,
+// {{MAX_CONCURRENT}} 按实际并发上限插值(与 builtin.test.ts 的 verbatim 守护对称)。
+describe('spawn_subagent toolset 契约', () => {
+  it('描述/参数来自 toolset.json 且 MAX_CONCURRENT 已插值', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { fileURLToPath } = await import('node:url');
+    const { createSpawnSubagentTool, SubagentSemaphore } = await import('./spawnSubagent');
+    const toolset = JSON.parse(
+      readFileSync(
+        fileURLToPath(new URL('../../../config/toolset.json', import.meta.url)),
+        'utf8',
+      ),
+    ) as { tools: Array<{ name: string; description: string; parameters: unknown; limits?: string[] }> };
+    const entry = toolset.tools.find((t) => t.name === 'spawn_subagent');
+    expect(entry).toBeDefined();
+
+    const semaphore = new SubagentSemaphore(7);
+    const tool = createSpawnSubagentTool({
+      workspace: { workspaceDir: '/tmp/ws', additionalDirs: [] },
+      providerFactory: () => {
+        throw new Error('unused');
+      },
+      gate: undefined as never,
+      systemPrompt: 'sys',
+      registry: undefined,
+      semaphore,
+    });
+    expect(tool.description).toBe(entry!.description.replaceAll('{{MAX_CONCURRENT}}', '7'));
+    expect(tool.parameters).toEqual(entry!.parameters);
+    expect(tool.description).not.toContain('{{');
+  });
+});

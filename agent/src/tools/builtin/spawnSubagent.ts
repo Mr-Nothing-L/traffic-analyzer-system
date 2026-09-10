@@ -43,6 +43,7 @@ import {
 import { ToolRegistry } from '../registry';
 import { resolveWorkspacePath } from './fileTools';
 import type { ToolserverClient } from './httpToolserver';
+import { loadToolsetEntrySpec } from './index';
 import { PREPARED_VIDEO_HARD_MAX_BYTES } from './loadVideo';
 import { invalidInputResult, toolserverErrorResult } from './utils';
 
@@ -454,28 +455,17 @@ async function runSubagent(
 
 export function createSpawnSubagentTool(deps: SpawnSubagentDeps): ExecutableTool {
   const semaphore = deps.semaphore ?? new SubagentSemaphore();
+  // 模型可见描述/参数以 toolset.json 为单一来源;{{MAX_CONCURRENT}} 占位符
+  // 按实际并发上限插值(此前硬编码在 TS,游离于 toolset 之外,漂移测试看不见)。
+  const spec = loadToolsetEntrySpec(SPAWN_SUBAGENT_TOOL_NAME);
+  const description = spec.description.replaceAll(
+    '{{MAX_CONCURRENT}}',
+    String(semaphore.maxConcurrent),
+  );
   return {
     name: SPAWN_SUBAGENT_TOOL_NAME,
-    description:
-      '派生一个子代理执行需要完整载入视频上下文的重度分析任务,等待并返回其最终结论。' +
-      '子代理拥有与本代理相同的工具(但不能再次派生子代理),步数上限 12,' +
-      `最多 ${semaphore.maxConcurrent} 个子代理并行,超出的排队。适用:整段视频的独立深度研判;` +
-      '不适用:只需抽几帧即可回答的轻量问题(直接用 video 工具更快)。',
-    parameters: {
-      type: 'object',
-      properties: {
-        task: {
-          type: 'string',
-          description:
-            '给子代理的完整任务描述(自包含:背景、目标、输出要求),子代理看不到父级对话历史。',
-        },
-        video_path: {
-          type: 'string',
-          description: '可选。视频文件路径(沙盒工作区内);提供时整段视频直传给子代理。',
-        },
-      },
-      required: ['task'],
-    },
+    description,
+    parameters: spec.parameters,
     resolveExecution(rawInput: unknown) {
       const parsed = inputSchema.safeParse(rawInput);
       if (!parsed.success) return invalidInputResult(SPAWN_SUBAGENT_TOOL_NAME, parsed.error);

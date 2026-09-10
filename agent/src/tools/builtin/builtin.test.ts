@@ -1170,9 +1170,14 @@ describe('registerBuiltinTools', () => {
       ),
     ) as { tools: Array<{ name: string; description: string; parameters: Record<string, unknown> }> };
     for (const entry of toolset.tools) {
-      if (entry.name === 'subagent_list' || entry.name === 'subagent_report') {
-        // 这两个工具由 server/app.ts 按 session 注入,registerBuiltinTools 不注册,
-        // 但 toolset.json 仍保留它们的描述/参数契约,保证 app.ts 加载时可用。
+      if (
+        entry.name === 'subagent_list' ||
+        entry.name === 'subagent_report' ||
+        entry.name === 'spawn_subagent'
+      ) {
+        // 这三个工具由 server/app.ts 按 session 注入,registerBuiltinTools 不注册,
+        // 但 toolset.json 仍保留它们的描述/参数契约,保证加载时可用;
+        // spawn_subagent 的占位符插值由 spawnSubagent.test.ts 对称守护。
         continue;
       }
       const tool = registry.resolve(entry.name);
