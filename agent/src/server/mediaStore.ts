@@ -13,7 +13,7 @@
  * 校验防路径穿越。
  */
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 /** media 相对 workspace 的固定目录(与 sessions.db 同在 .agent 下)。 */
@@ -45,15 +45,25 @@ function parseDataUrlImage(dataUrl: string): DataUrlImage | undefined {
  * dataURL → 内容寻址文件:写入 <workspaceDir>/.agent/media/<sha256><ext>
  * (已存在则跳过,幂等),返回落盘文件名;解析失败返回 undefined。
  */
-export function saveMediaFile(workspaceDir: string, dataUrl: string): string | undefined {
+export async function saveMediaFile(
+  workspaceDir: string,
+  dataUrl: string,
+): Promise<string | undefined> {
   const image = parseDataUrlImage(dataUrl);
   if (image === undefined) return undefined;
   const hash = createHash('sha256').update(image.bytes).digest('hex');
   const name = `${hash}${image.ext}`;
-  const file = path.join(workspaceDir, ...MEDIA_DIR_SEGMENTS, name);
-  if (!existsSync(file)) {
-    mkdirSync(path.join(workspaceDir, ...MEDIA_DIR_SEGMENTS), { recursive: true });
-    writeFileSync(file, image.bytes);
+  const dir = path.join(workspaceDir, ...MEDIA_DIR_SEGMENTS);
+  const file = path.join(dir, name);
+  // 异步写:媒体可达 MB 级,writeFileSync 会卡住整个事件循环(P3-25)。
+  // wx 排他创建天然幂等(EEXIST = 已写过同内容);首次目录缺失则补建重试。
+  try {
+    await writeFile(file, image.bytes, { flag: 'wx' });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      await mkdir(dir, { recursive: true });
+      await writeFile(file, image.bytes, { flag: 'wx' }).catch(() => undefined);
+    }
   }
   return name;
 }

@@ -53,8 +53,8 @@ function mediaPath(name: string): string {
 }
 
 describe('媒体 GC(DELETE 会话连带清理)', () => {
-  it('两个会话引用同一图片:删其一文件保留,删其二文件消失(引用也存在于消息体)', () => {
-    const name = saveMediaFile(workspace, pngDataUrl);
+  it('两个会话引用同一图片:删其一文件保留,删其二文件消失(引用也存在于消息体)', async () => {
+    const name = await saveMediaFile(workspace, pngDataUrl);
     expect(name).toBeDefined();
     const a = createSession();
     const b = createSession();
@@ -75,8 +75,8 @@ describe('媒体 GC(DELETE 会话连带清理)', () => {
     expect(existsSync(mediaPath(name!))).toBe(false);
   });
 
-  it('独占引用:删除会话后文件消失;无引用的孤儿文件不动', () => {
-    const name = saveMediaFile(workspace, pngDataUrl);
+  it('独占引用:删除会话后文件消失;无引用的孤儿文件不动', async () => {
+    const name = await saveMediaFile(workspace, pngDataUrl);
     expect(name).toBeDefined();
     // 孤儿文件:合法 media 文件名但任何会话都不引用(本次 GC 不动)。
     const orphan = `${'f'.repeat(64)}.jpg`;
@@ -90,7 +90,7 @@ describe('媒体 GC(DELETE 会话连带清理)', () => {
     expect(existsSync(mediaPath(orphan))).toBe(true);
   });
 
-  it('.agent/media 不存在时静默通过(会话正常删除)', () => {
+  it('.agent/media 不存在时静默通过(会话正常删除)', async () => {
     const a = createSession();
     // 引用一个从未落盘的文件名:media 目录不存在,GC 应静默跳过。
     manager?.appendEntries(a, [toolEntryWithImage(a, `${'a'.repeat(64)}.png`)]);

@@ -21,6 +21,7 @@ import type { PermissionMode } from '../permissions/types';
 
 import { gcMediaAfterSessionDelete } from './mediaGc';
 import { repairTailMessages } from './repair';
+import { extractMediaNames } from './mediaStore';
 import { SessionStorage, type StoredSession, type TimelineEntry } from './storage';
 import { readWorkspaceRegistry } from './workspaceRegistry';
 
@@ -377,8 +378,17 @@ export class SessionManager {
     }
     storage.deleteSession(id);
     if (deletedRefs === undefined) return;
+    // 其余会话「仍在内存、尚未落盘」的条目引用的媒体一并保护:
+    // 磁盘行扫描看不到它们,不保护会误删共享图(P3-25)。
+    const inFlightRefs = new Set<string>();
+    for (const other of this.sessions.values()) {
+      if (other.id === id) continue;
+      for (const entry of other.entries) {
+        for (const name of extractMediaNames(JSON.stringify(entry))) inFlightRefs.add(name);
+      }
+    }
     try {
-      const result = gcMediaAfterSessionDelete(workspaceDir, storage, deletedRefs);
+      const result = gcMediaAfterSessionDelete(workspaceDir, storage, deletedRefs, inFlightRefs);
       if (result.deleted > 0 || result.failed > 0 || result.orphaned > 0) {
         console.warn(
           `[media-gc] session ${id}: 清理 ${result.deleted} 个媒体文件` +

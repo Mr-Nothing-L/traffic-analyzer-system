@@ -33,8 +33,10 @@ export function sendError(res: ServerResponse, status: number, code: string, mes
   sendJson(res, status, { error: { code, message } });
 }
 
-export function writeSseEvent(res: ServerResponse, event: unknown): void {
-  res.write(`data: ${JSON.stringify(event)}\n\n`);
+/** 写入一条 SSE 事件;返回底层 res.write 的结果(false = 高于高水位,
+ * 调用方可据此做背压处理)。 */
+export function writeSseEvent(res: ServerResponse, event: unknown): boolean {
+  return res.write(`data: ${JSON.stringify(event)}\n\n`);
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {

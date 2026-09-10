@@ -291,26 +291,30 @@ function enrichPendingApprovalEntry(
  * 仅影响 SSE 事件与 entries 落盘,loop 内 messages 仍持原始内容(模型照常
  * 收到真实图片);写盘失败或非白名单图片类型时保留原 part(回退为旧行为)。
  */
-function sanitizeToolOutputForTransport(
+async function sanitizeToolOutputForTransport(
   output: string | ContentPart[],
   media: { sessionId: string; workspaceDir: string },
-): string | ContentPart[] {
+): Promise<string | ContentPart[]> {
   if (!Array.isArray(output)) return output;
-  return output.map((part): ContentPart => {
+  const out: ContentPart[] = [];
+  for (const part of output) {
     if (part.type === 'video_url') {
-      return { type: 'text', text: '[完整视频已发送给模型,不在此展示]' };
+      out.push({ type: 'text', text: '[完整视频已发送给模型,不在此展示]' });
+      continue;
     }
     if (part.type === 'image_url') {
       const url = part.imageUrl.url;
       if (url.startsWith('data:image/')) {
-        const name = saveMediaFile(media.workspaceDir, url);
+        const name = await saveMediaFile(media.workspaceDir, url);
         if (name !== undefined) {
-          return { ...part, imageUrl: { ...part.imageUrl, url: mediaUrl(media.sessionId, name) } };
+          out.push({ ...part, imageUrl: { ...part.imageUrl, url: mediaUrl(media.sessionId, name) } });
+          continue;
         }
       }
     }
-    return part;
-  });
+    out.push(part);
+  }
+  return out;
 }
 
 /**
@@ -319,21 +323,26 @@ function sanitizeToolOutputForTransport(
  * tool 条目的 payload、detection 事件与 detection 条目共用这一道转换。
  * 非 dataURL(已转换的 URL 引用/旧条目)与解析失败的原值原样保留。
  */
-function sanitizeDetectionPayloadForTransport(
+async function sanitizeDetectionPayloadForTransport(
   payload: unknown,
   media: { sessionId: string; workspaceDir: string },
-): unknown {
+): Promise<unknown> {
   if (!isRecord(payload) || !Array.isArray(payload['events'])) return payload;
-  return {
-    ...payload,
-    events: (payload['events'] as unknown[]).map((event) => {
-      if (!isRecord(event) || typeof event['annotated_image'] !== 'string') return event;
-      const url = event['annotated_image'];
-      if (!url.startsWith('data:image/')) return event;
-      const name = saveMediaFile(media.workspaceDir, url);
-      return name === undefined ? event : { ...event, annotated_image: mediaUrl(media.sessionId, name) };
-    }),
-  };
+  const events: unknown[] = [];
+  for (const event of payload['events'] as unknown[]) {
+    if (!isRecord(event) || typeof event['annotated_image'] !== 'string') {
+      events.push(event);
+      continue;
+    }
+    const url = event['annotated_image'];
+    if (!url.startsWith('data:image/')) {
+      events.push(event);
+      continue;
+    }
+    const name = await saveMediaFile(media.workspaceDir, url);
+    events.push(name === undefined ? event : { ...event, annotated_image: mediaUrl(media.sessionId, name) });
+  }
+  return { ...payload, events };
 }
 
 /** 解析可选 images 字段:接受 dataURL 或裸 base64,统一为 dataURL,最多 4 张。 */
@@ -832,17 +841,40 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
 
     // SSE 事件带 seq:发出时已落盘 entries 的水位(= 当前最大落盘 seq),
     // 前端刷新后以最后收到的 seq 调 GET /sessions/{id}/events?fromSeq=N 补齐。
+    // 背压感知写链:res.write 返回 false(内部缓冲超高水位)时挂起后续事件
+    // 等 drain(1s 封顶防慢客户端挂死收尾),不再无限堆积(P3-25);
+    // 轮次 finally 先冲刷写链再 res.end()。
+    let writeChain: Promise<void> = Promise.resolve();
     const emit = (event: unknown): void => {
       if (clientDisconnected) return;
       // 终态守卫:res 已 end/销毁后任何写入都是 write-after-end('close' 在
       // 正常完成时也触发,clientDisconnected 可能仍为 false)。
       if (res.writableEnded || res.destroyed) return;
       const payload = isRecord(event) ? { ...event, seq: session.entries.length } : event;
-      try {
-        writeSseEvent(res, payload);
-      } catch {
-        clientDisconnected = true;
-      }
+      writeChain = writeChain.then(
+        () =>
+          new Promise<void>((resolveWrite) => {
+            if (clientDisconnected || res.writableEnded || res.destroyed) {
+              resolveWrite();
+              return;
+            }
+            try {
+              if (writeSseEvent(res, payload)) {
+                resolveWrite();
+                return;
+              }
+              // 高于高水位:等 drain 或 1s 超时(慢客户端不得挂死轮次收尾)
+              const timer = setTimeout(resolveWrite, 1_000);
+              res.once('drain', () => {
+                clearTimeout(timer);
+                resolveWrite();
+              });
+            } catch {
+              clientDisconnected = true;
+              resolveWrite();
+            }
+          }),
+      );
     };
 
     // ---- 轮次持久化:条目/消息双水位与压缩回写统一由 TurnPersister 持有 ----
@@ -979,7 +1011,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
             // (sqlite 同步写,在 onEvent 同一调用栈内完成,不引入异步积压)。
             persister.onStepPersist(update);
           },
-          onEvent: (event: AgentLoopEvent) => {
+          onEvent: async (event: AgentLoopEvent): Promise<void> => {
             // 迟到事件守卫:轮次已收尾(controller 已清空或被新轮次接管)时,
             // 仍在运行的子代理事件不再进入本轮回调——res 已 end,转发既无意义
             // 还会在落盘 finalized 之后继续 pushEntry。
@@ -1009,12 +1041,12 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
                 // dataURL 写盘为 media 引用 URL(见 sanitizeToolOutputForTransport)。
                 // 模型侧 messages 不受影响(loop 内部仍持原始 output)。
                 const media = { sessionId: session.id, workspaceDir: session.workspaceDir };
-                const safeOutput = sanitizeToolOutputForTransport(event.result.output, media);
+                const safeOutput = await sanitizeToolOutputForTransport(event.result.output, media);
                 // 成功结果的结构化附件(submit_detection 的检测载荷)进条目前
                 // 同样把 annotated_image dataURL 转为 media 引用 URL。
                 const resultPayload =
                   'payload' in event.result
-                    ? sanitizeDetectionPayloadForTransport(event.result.payload, media)
+                    ? await sanitizeDetectionPayloadForTransport(event.result.payload, media)
                     : undefined;
                 persister.pushEntry({
                   kind: 'tool',
@@ -1058,7 +1090,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
                     : undefined;
                 if (event.reason === 'stop_turn' && stopPayload !== undefined) {
                   // annotated_image dataURL 先转 media 引用 URL 再进 SSE 与落盘。
-                  const safePayload = sanitizeDetectionPayloadForTransport(
+                  const safePayload = await sanitizeDetectionPayloadForTransport(
                     stopPayload,
                     { sessionId: session.id, workspaceDir: session.workspaceDir },
                   );
@@ -1102,6 +1134,8 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       runtime.controller = null;
       runtime.busy = false;
       try {
+        // 先冲刷背压写链(封顶等待),再 end:排队中的事件不丢
+        await Promise.race([writeChain, new Promise((r) => setTimeout(r, 1_500))]);
         res.end();
       } catch {
         // 客户端已断开:忽略写回错误。

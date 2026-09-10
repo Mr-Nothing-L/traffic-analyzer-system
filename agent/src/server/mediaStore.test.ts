@@ -28,8 +28,8 @@ const jpegDataUrl = `data:image/jpeg;base64,${JPEG_BYTES.toString('base64')}`;
 const pngDataUrl = `data:image/png;base64,${PNG_BYTES.toString('base64')}`;
 
 describe('saveMediaFile', () => {
-  it('按 sha256 内容寻址写盘 .agent/media/<hash>.jpg;同字节重复写幂等', () => {
-    const name1 = saveMediaFile(workspace, jpegDataUrl);
+  it('按 sha256 内容寻址写盘 .agent/media/<hash>.jpg;同字节重复写幂等', async () => {
+    const name1 = await saveMediaFile(workspace, jpegDataUrl);
     expect(name1).toBe(
       `${createHash('sha256').update(JPEG_BYTES).digest('hex')}.jpg`,
     );
@@ -38,32 +38,32 @@ describe('saveMediaFile', () => {
     expect(readFileSync(file).equals(JPEG_BYTES)).toBe(true);
 
     // 同字节 → 同 hash → 同文件,不重复落盘(内容存在即跳过)。
-    const name2 = saveMediaFile(workspace, jpegDataUrl);
+    const name2 = await saveMediaFile(workspace, jpegDataUrl);
     expect(name2).toBe(name1);
   });
 
-  it('png 落 .png;jpeg 与 png 字节相同也因扩展名区分', () => {
-    const jpg = saveMediaFile(workspace, jpegDataUrl);
-    const png = saveMediaFile(workspace, pngDataUrl);
+  it('png 落 .png;jpeg 与 png 字节相同也因扩展名区分', async () => {
+    const jpg = await saveMediaFile(workspace, jpegDataUrl);
+    const png = await saveMediaFile(workspace, pngDataUrl);
     expect(png).toBe(`${createHash('sha256').update(PNG_BYTES).digest('hex')}.png`);
     expect(jpg).not.toBe(png);
   });
 
-  it('非 dataURL / 非白名单类型 → undefined,不写盘', () => {
-    expect(saveMediaFile(workspace, 'https://example.com/a.jpg')).toBeUndefined();
-    expect(saveMediaFile(workspace, 'data:image/webp;base64,AAAA')).toBeUndefined();
-    expect(saveMediaFile(workspace, 'data:image/jpeg,AAAA')).toBeUndefined();
-    expect(saveMediaFile(workspace, 'data:text/plain;base64,AAAA')).toBeUndefined();
+  it('非 dataURL / 非白名单类型 → undefined,不写盘', async () => {
+    expect(await saveMediaFile(workspace, 'https://example.com/a.jpg')).toBeUndefined();
+    expect(await saveMediaFile(workspace, 'data:image/webp;base64,AAAA')).toBeUndefined();
+    expect(await saveMediaFile(workspace, 'data:image/jpeg,AAAA')).toBeUndefined();
+    expect(await saveMediaFile(workspace, 'data:text/plain;base64,AAAA')).toBeUndefined();
     expect(existsSync(path.join(workspace, '.agent', 'media'))).toBe(false);
   });
 });
 
 describe('mediaUrl / mediaContentType', () => {
-  it('URL 形态:/sessions/{id}/media/{name}', () => {
+  it('URL 形态:/sessions/{id}/media/{name}', async () => {
     expect(mediaUrl('s-1', 'abcd.jpg')).toBe('/sessions/s-1/media/abcd.jpg');
   });
 
-  it('文件名白名单:64 位 hex + jpg/png 合法,其余拒绝', () => {
+  it('文件名白名单:64 位 hex + jpg/png 合法,其余拒绝', async () => {
     const hash = 'a'.repeat(64);
     expect(mediaContentType(`${hash}.jpg`)).toBe('image/jpeg');
     expect(mediaContentType(`${hash}.png`)).toBe('image/png');

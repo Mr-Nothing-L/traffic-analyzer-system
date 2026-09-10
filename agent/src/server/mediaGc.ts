@@ -35,6 +35,9 @@ export function gcMediaAfterSessionDelete(
   workspaceDir: string,
   storage: SessionStorage,
   deletedRefs: ReadonlySet<string>,
+  /** 额外保护名单(其他会话未落盘条目引用的媒体):仍在内存、尚未写进
+   * entries/messages 表的引用扫描不到,共享图会被误删(P3-25)。 */
+  protectExtra?: ReadonlySet<string>,
 ): MediaGcResult {
   const mediaDir = path.join(workspaceDir, ...MEDIA_DIR_SEGMENTS);
   let files: string[];
@@ -48,6 +51,7 @@ export function gcMediaAfterSessionDelete(
     return { deleted: 0, failed: 0, orphaned: files.length };
   }
   const stillReferenced = storage.collectMediaNames();
+  for (const name of protectExtra ?? []) stillReferenced.add(name);
   let deleted = 0;
   let failed = 0;
   for (const name of deletedRefs) {

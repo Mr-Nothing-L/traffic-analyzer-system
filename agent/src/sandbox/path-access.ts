@@ -15,10 +15,14 @@ export interface WorkspaceConfig {
 
 const SENSITIVE_BASENAMES = new Set<string>([
   '.env',
+  '.netrc',
   'id_rsa',
   'id_ed25519',
   'id_ecdsa',
   'credentials',
+  'credentials.json',
+  // 云服务账号密钥(GCP service account / 各类 client secret)
+  'serviceaccount.json',
 ]);
 
 const SENSITIVE_PATH_SUFFIXES = [
@@ -29,7 +33,13 @@ const SENSITIVE_PATH_SUFFIXES = [
 const ENV_PREFIX = '.env.';
 const ENV_EXEMPTIONS = new Set<string>(['.env.example', '.env.sample', '.env.template']);
 
-const SENSITIVE_BASENAME_PREFIXES = ['id_rsa', 'id_ed25519', 'id_ecdsa', 'credentials'];
+const SENSITIVE_BASENAME_PREFIXES = [
+  'id_rsa',
+  'id_ed25519',
+  'id_ecdsa',
+  'credentials',
+  'serviceaccount', // serviceAccount*.json(GCP 服务账号密钥)
+];
 const PUBLIC_KEY_BASENAMES = new Set<string>(['id_rsa.pub', 'id_ed25519.pub', 'id_ecdsa.pub']);
 const SENSITIVE_DOT_VARIANT_SUFFIXES = new Set<string>([
   '.bak',
@@ -56,6 +66,9 @@ export function isSensitiveFile(filePath: string): boolean {
       if (next === '.' && SENSITIVE_DOT_VARIANT_SUFFIXES.has(suffix)) return true;
     }
   }
+
+  // 任意 .pem 结尾:证书/私钥(公钥惯例是 .pub,不在其中)
+  if (comparableName.endsWith('.pem')) return true;
 
   for (const suffixParts of SENSITIVE_PATH_SUFFIXES) {
     const suffix = suffixParts.join('/').toLowerCase();
