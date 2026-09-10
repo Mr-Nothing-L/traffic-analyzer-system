@@ -330,7 +330,7 @@ def _install_fake_cv2(monkeypatch: pytest.MonkeyPatch) -> None:
         CAP_PROP_FRAME_HEIGHT=6,
         imencode=lambda ext, frame: (True, _FakeBuf(f"jpeg:{frame}".encode())),
     )
-    monkeypatch.setattr("traffic_analyzer.web.frames.cv2", fake)
+    monkeypatch.setattr("traffic_analyzer.utils.video_io.cv2", fake)
 
 
 # ---------------------------------------------------------------------------

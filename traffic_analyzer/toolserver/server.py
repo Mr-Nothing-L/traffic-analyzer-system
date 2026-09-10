@@ -48,7 +48,8 @@ from traffic_analyzer.utils.image_drawing import (
     _load_scaled_font,
     load_image,
 )
-from traffic_analyzer.web.frames import read_frame_jpeg, read_video_meta
+# CV 底座走 utils(不再反向依赖 web,P3-23)
+from traffic_analyzer.utils.video_io import read_frame_jpeg, read_video_meta
 
 logger = logging.getLogger(__name__)
 
@@ -515,8 +516,8 @@ def create_app(workspace: Path | str) -> FastAPI:
     @app.post("/tools/track_suspects")
     def track_suspects(body: TrackSuspectsRequest, request: Request) -> Dict[str, Any]:
         video = _resolve(request, body.video_path)
-        meta = _meta_or_error(video)
-        del meta
+        # 视频元信息由 windows.run_tracking 内部读取(不可读抛 TrackingFailure
+        # → failed:true);此前这里预读一遍只为校验,纯冗余 IO(P3-23)。
         anchors = [
             SuspectAnchor(
                 box=[s.box.x1, s.box.y1, s.box.x2, s.box.y2],

@@ -23,7 +23,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from traffic_analyzer.toolserver import create_app
-from traffic_analyzer.web.frames import read_video_meta
+from traffic_analyzer.utils.video_io import read_video_meta
 
 WORKSPACE = Path(__file__).resolve().parents[2]
 VIDEO_REL = "演示区/01-02_Event_129_1755579215119_1.mp4"
