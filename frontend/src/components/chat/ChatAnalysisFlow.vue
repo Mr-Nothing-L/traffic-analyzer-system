@@ -81,9 +81,13 @@ function fmtDur(ms: number | null): string {
   return `${Math.round(ms / 1000)}s`
 }
 
-function mkRow(s: FlowStep): Row {
+/** mkRow 入参:label/retried 仅顶层步骤有(子代理节点无标签,渲染也不用其 label)。 */
+type RowSource = Pick<FlowStep, 'durationMs' | 'ok'> &
+  Partial<Pick<FlowStep, 'label' | 'active' | 'retried'>>
+
+function mkRow(s: RowSource): Row {
   return {
-    label: s.label,
+    label: s.label ?? '',
     dur: fmtDur(s.durationMs),
     state: stateOf(s.ok, s.active),
     retried: s.retried === true,

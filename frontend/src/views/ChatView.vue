@@ -839,7 +839,7 @@ onUnmounted(() => {
               :entry="e"
               :copied="copiedKey === e.id"
               :busy="busy"
-              :video-src="workspaceVideoSrc(e.videoPath, e.videoSrc, ws.path)"
+              :video-src="workspaceVideoSrc(e.videoPath, e.videoSrc, ws.path) ?? undefined"
               :time="fmtTime(e.at)"
               @copy="onCopy(e.id, $event)"
               @recall="onRecall(e)"
