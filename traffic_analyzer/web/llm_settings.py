@@ -18,6 +18,7 @@ traffic_analyzer/config/.env 或项目根 .env(python-dotenv set_key/unset_key)�
 from __future__ import annotations
 
 import logging
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -28,6 +29,10 @@ from pydantic import BaseModel
 from traffic_analyzer.core.config_manager import ConfigManager
 
 logger = logging.getLogger(__name__)
+
+# .env 读-改-写互斥:save/delete/activate/settings 四个写端点并发时
+# 不再互相丢失行(P3-20)。
+_env_write_lock = threading.Lock()
 
 router = APIRouter()
 
@@ -214,102 +219,106 @@ def get_llm_providers() -> Dict[str, Any]:
 
 @router.post("/api/llm/providers/save")
 def save_llm_provider(req: SaveRequest) -> Dict[str, Any]:
-    """Append (index=null) or overwrite (index=i) a provider row."""
-    name = req.provider.strip().lower()
-    if name not in SUPPORTED_PROVIDERS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported provider '{name}'; must be one of {SUPPORTED_PROVIDERS}",
+    with _env_write_lock:
+        """Append (index=null) or overwrite (index=i) a provider row."""
+        name = req.provider.strip().lower()
+        if name not in SUPPORTED_PROVIDERS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported provider '{name}'; must be one of {SUPPORTED_PROVIDERS}",
+            )
+
+        env_path, env = _locate_env()
+        rows = _read_rows(env)
+
+        existing_key = ""
+        if req.index is not None:
+            _check_index(req.index, rows)
+            existing_key = rows[req.index]["api_key"]
+
+        # Key resolution: request > existing row > provider-specific/generic env.
+        api_key = (
+            (req.api_key or "").strip()
+            or existing_key
+            or env.get(f"{name.upper()}_API_KEY")
+            or env.get("LLM_API_KEY")
+            or ""
         )
+        if not api_key:
+            raise HTTPException(
+                status_code=400,
+                detail=f"No API key available for provider '{name}'",
+            )
 
-    env_path, env = _locate_env()
-    rows = _read_rows(env)
+        row = {
+            "provider": name,
+            # Overwrite semantics: omitted model/base_url keep the existing row's
+            # values (the UI toggles `enabled` without resending them).
+            "model": (req.model or "").strip() or (rows[req.index]["model"] if req.index is not None else None),
+            "base_url": (req.base_url or "").strip() or (rows[req.index]["base_url"] if req.index is not None else None),
+            "api_key": api_key,
+            "enabled": req.enabled,
+        }
+        if req.index is None:
+            rows.append(row)
+        else:
+            rows[req.index] = row
 
-    existing_key = ""
-    if req.index is not None:
-        _check_index(req.index, rows)
-        existing_key = rows[req.index]["api_key"]
-
-    # Key resolution: request > existing row > provider-specific/generic env.
-    api_key = (
-        (req.api_key or "").strip()
-        or existing_key
-        or env.get(f"{name.upper()}_API_KEY")
-        or env.get("LLM_API_KEY")
-        or ""
-    )
-    if not api_key:
-        raise HTTPException(
-            status_code=400,
-            detail=f"No API key available for provider '{name}'",
+        _write_providers(env_path, rows, _flag_enabled(env.get("LLM_AUTO_SWITCH")))
+        logger.info(
+            "LLM provider saved: index=%s provider=%s enabled=%s env=%s",
+            req.index if req.index is not None else len(rows) - 1,
+            name,
+            req.enabled,
+            env_path,
         )
-
-    row = {
-        "provider": name,
-        # Overwrite semantics: omitted model/base_url keep the existing row's
-        # values (the UI toggles `enabled` without resending them).
-        "model": (req.model or "").strip() or (rows[req.index]["model"] if req.index is not None else None),
-        "base_url": (req.base_url or "").strip() or (rows[req.index]["base_url"] if req.index is not None else None),
-        "api_key": api_key,
-        "enabled": req.enabled,
-    }
-    if req.index is None:
-        rows.append(row)
-    else:
-        rows[req.index] = row
-
-    _write_providers(env_path, rows, _flag_enabled(env.get("LLM_AUTO_SWITCH")))
-    logger.info(
-        "LLM provider saved: index=%s provider=%s enabled=%s env=%s",
-        req.index if req.index is not None else len(rows) - 1,
-        name,
-        req.enabled,
-        env_path,
-    )
-    return _state_response(env_path, dotenv_values(env_path))
+        return _state_response(env_path, dotenv_values(env_path))
 
 
 @router.post("/api/llm/providers/delete")
 def delete_llm_provider(req: IndexRequest) -> Dict[str, Any]:
-    """Delete a provider row; following rows shift up (empty list allowed)."""
-    env_path, env = _locate_env()
-    rows = _read_rows(env)
-    _check_index(req.index, rows)
-    removed = rows.pop(req.index)
-    _write_providers(env_path, rows, _flag_enabled(env.get("LLM_AUTO_SWITCH")))
-    logger.info(
-        "LLM provider deleted: index=%d provider=%s remaining=%d env=%s",
-        req.index,
-        removed["provider"],
-        len(rows),
-        env_path,
-    )
-    return _state_response(env_path, dotenv_values(env_path))
+    with _env_write_lock:
+        """Delete a provider row; following rows shift up (empty list allowed)."""
+        env_path, env = _locate_env()
+        rows = _read_rows(env)
+        _check_index(req.index, rows)
+        removed = rows.pop(req.index)
+        _write_providers(env_path, rows, _flag_enabled(env.get("LLM_AUTO_SWITCH")))
+        logger.info(
+            "LLM provider deleted: index=%d provider=%s remaining=%d env=%s",
+            req.index,
+            removed["provider"],
+            len(rows),
+            env_path,
+        )
+        return _state_response(env_path, dotenv_values(env_path))
 
 
 @router.post("/api/llm/providers/active")
 def activate_llm_provider(req: IndexRequest) -> Dict[str, Any]:
-    """Move the given row to index 0 (primary)."""
-    env_path, env = _locate_env()
-    rows = _read_rows(env)
-    _check_index(req.index, rows)
-    rows.insert(0, rows.pop(req.index))
-    _write_providers(env_path, rows, _flag_enabled(env.get("LLM_AUTO_SWITCH")))
-    logger.info(
-        "LLM provider activated: index=%d provider=%s env=%s",
-        req.index,
-        rows[0]["provider"],
-        env_path,
-    )
-    return _state_response(env_path, dotenv_values(env_path))
+    with _env_write_lock:
+        """Move the given row to index 0 (primary)."""
+        env_path, env = _locate_env()
+        rows = _read_rows(env)
+        _check_index(req.index, rows)
+        rows.insert(0, rows.pop(req.index))
+        _write_providers(env_path, rows, _flag_enabled(env.get("LLM_AUTO_SWITCH")))
+        logger.info(
+            "LLM provider activated: index=%d provider=%s env=%s",
+            req.index,
+            rows[0]["provider"],
+            env_path,
+        )
+        return _state_response(env_path, dotenv_values(env_path))
 
 
 @router.post("/api/llm/providers/settings")
 def save_llm_settings(req: SettingsRequest) -> Dict[str, Any]:
-    """Only flip LLM_AUTO_SWITCH; provider rows are untouched."""
-    env_path, env = _locate_env()
-    env_path.parent.mkdir(parents=True, exist_ok=True)
-    env_path.touch(exist_ok=True)
-    set_key(str(env_path), "LLM_AUTO_SWITCH", "1" if req.auto_switch else "0")
-    logger.info("LLM auto_switch=%s env=%s", req.auto_switch, env_path)
-    return _state_response(env_path, dotenv_values(env_path))
+    with _env_write_lock:
+        """Only flip LLM_AUTO_SWITCH; provider rows are untouched."""
+        env_path, env = _locate_env()
+        env_path.parent.mkdir(parents=True, exist_ok=True)
+        env_path.touch(exist_ok=True)
+        set_key(str(env_path), "LLM_AUTO_SWITCH", "1" if req.auto_switch else "0")
+        logger.info("LLM auto_switch=%s env=%s", req.auto_switch, env_path)
+        return _state_response(env_path, dotenv_values(env_path))

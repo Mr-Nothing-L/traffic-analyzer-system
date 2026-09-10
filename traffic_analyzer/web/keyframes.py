@@ -646,9 +646,20 @@ def start_batch(body: _BatchRequest, request: Request) -> Dict[str, Any]:
         "items": {s: {"status": "pending", "message": ""} for s in body.stems},
     }
     with _batch_lock:
-        # 只保留最近 N 批,防长驻进程内存无限增长
+        # 只保留最近 N 批,防长驻进程内存无限增长;running 批次不逐出
+        # (逐出后 _batch_item 对它的状态更新会静默丢失,P3-20)。
         while len(_batches) >= _MAX_BATCHES_KEPT:
-            _batches.pop(next(iter(_batches)))
+            evictable = next(
+                (
+                    bid
+                    for bid, st in _batches.items()
+                    if not any(i["status"] == "running" for i in st["items"].values())
+                ),
+                None,
+            )
+            if evictable is None:
+                break  # 全部在跑:本轮不逐出
+            _batches.pop(evictable)
         _batches[batch_id] = state
     threading.Thread(
         target=_run_batch,
