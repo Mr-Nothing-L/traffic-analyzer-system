@@ -82,9 +82,15 @@ class VideoPreprocessor:
 
     def _ensure_output_dir(self, video_path: str) -> str:
         """Ensure an output directory exists for the given video."""
+        if not self.save_debug_frames:
+            # 内存帧模式:帧字节直接留在 Keyframe 里,不落盘也不建目录
+            # (此前每次分析都白建一个空临时目录,无人清理)。
+            return ""
         if self.output_dir:
             base = Path(self.output_dir)
         else:
+            # 调试落盘但未指定目录:临时目录承载,进程退出由 TemporaryDirectory
+            # 终结器清理(上下文管理器路径见 __exit__,test_context_manager_cleanup)。
             if self._temp_dir is None:
                 self._temp_dir = tempfile.TemporaryDirectory(prefix="video_preprocessor_")
             base = Path(self._temp_dir.name)

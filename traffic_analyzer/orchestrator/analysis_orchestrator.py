@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from traffic_analyzer.core.config_manager import ConfigManager
+from traffic_analyzer.models.config import SystemConfig
 from traffic_analyzer.core.evidence_exporter import export_evidence
 from traffic_analyzer.core.grounding_verification import GroundingVerificationStep
 from traffic_analyzer.core.pipeline_steps import (
@@ -76,6 +77,10 @@ class AnalysisOrchestrator:
             adjudication_step: Optional custom adjudication step.
         """
         self.config_manager = config_manager
+        # 首次 analyze 时加载一次并复用:此前每个视频都重读全部 YAML +
+        # prompt 目录 glob + load_dotenv(P3-8);需要感知磁盘变更时重建
+        # orchestrator 或显式 load_all。
+        self._system_config: Optional[SystemConfig] = None
         self.video_preprocessor = video_preprocessor
         self.vlm_engine = vlm_engine
         self.report_generator = report_generator
@@ -83,6 +88,12 @@ class AnalysisOrchestrator:
         # Pipeline steps (created lazily if not provided)
         self._expert_agent_layer = expert_agent_layer
         self._adjudication_step = adjudication_step
+
+    def _cached_system_config(self) -> "SystemConfig":
+        """加载一次系统配置并缓存(每个视频不再重读全部 YAML)。"""
+        if self._system_config is None:
+            self._system_config = self.config_manager.load_all()
+        return self._system_config
 
     # ------------------------------------------------------------------
     # Factory
@@ -153,7 +164,7 @@ class AnalysisOrchestrator:
         analysis_start = time.perf_counter()
         step_times: Dict[str, float] = {}
         context = AnalysisContext(
-            config=self.config_manager.load_all(),
+            config=self._cached_system_config(),
             output_dir=output_dir,
         )
 
