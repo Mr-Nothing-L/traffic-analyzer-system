@@ -164,6 +164,15 @@ export function buildProviderConfig(
  * 本层保留多 provider 解析仅为了与 Python 配置格式对齐,后续扩展时可遍历
  * 返回列表。不再处理 LLM_AUTO_SWITCH / LLM_PROVIDER_{i}_ENABLED 过滤语义。
  */
+/**
+ * Primary provider 的重试上限(loop 级 LLM 退避重试消费,P3-24)。
+ * `.env` 的 LLM_PROVIDER_0_MAX_RETRIES 解析后此前无任何消费方。
+ */
+export function resolveLLMMaxRetries(envPath: string = defaultEnvPath()): number {
+  const config = loadEnvLLMProviders(envPath)[0];
+  return config?.maxRetries ?? DEFAULTS.maxRetries;
+}
+
 export function loadEnvLLMProviders(envPath: string): EnvLLMProviderConfig[] {
   const env = loadDotenvFile(envPath);
 

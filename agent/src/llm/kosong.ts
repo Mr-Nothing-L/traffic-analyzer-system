@@ -42,4 +42,4 @@ export type { TokenUsage } from '#/usage';
 export { generate } from '#/generate';
 
 // Errors
-export { isAbortError, APIStatusError } from '#/errors';
+export { isAbortError, isRetryableGenerateError, APIConnectionError, APIStatusError, ChatProviderError } from '#/errors';

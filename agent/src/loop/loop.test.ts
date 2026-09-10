@@ -1067,3 +1067,43 @@ describe('子代理事件转发(subagent_event)', () => {
     expect(toolResult).toMatchObject({ name: 'slow', isError: false });
   });
 });
+
+// ---------------------------------------------------------------------------
+// LLM 瞬态错误退避重试(P3-24):429/5xx/连接类错误指数退避后重试本步
+// ---------------------------------------------------------------------------
+describe('LLM 瞬态错误退避重试', () => {
+  it('429 类瞬态错误:退避重试后成功完成,发出 generate_retry 事件', async () => {
+    const { APIConnectionError } = await import('../llm/kosong');
+    const h = harness(
+      [
+        new APIConnectionError('upstream 503: connection reset') as unknown as StreamedMessagePart[],
+        [text('恢复后的回答')],
+      ],
+      [echoTool()],
+    );
+    const result = await h.run();
+    expect(result.reason).toBe('completed');
+    const retries = h.events.filter((e) => e.type === 'generate_retry');
+    expect(retries).toHaveLength(1);
+    expect(retries[0]).toMatchObject({ type: 'generate_retry', step: 1 });
+    expect((retries[0] as { error?: string }).error).toContain('瞬态错误');
+  });
+
+  it('超出重试上限后按 error 收尾', async () => {
+    const { APIConnectionError } = await import('../llm/kosong');
+    const errors = Array.from({ length: 8 }, () => new APIConnectionError('down'));
+    const h = harness(errors as unknown as StreamedMessagePart[][], [echoTool()]);
+    const result = await h.run();
+    expect(result.reason).toBe('error');
+    expect(result.error).toContain('down');
+    // 1 次原始尝试 + LLM_MAX_RETRIES 次重试(default 3)
+    expect(h.events.filter((e) => e.type === 'generate_retry')).toHaveLength(3);
+  });
+
+  it('非 provider 错误(普通 Error)不重试,直接失败', async () => {
+    const h = harness([new Error('boom') as unknown as StreamedMessagePart[]], [echoTool()]);
+    const result = await h.run();
+    expect(result.reason).toBe('error');
+    expect(h.events.some((e) => e.type === 'generate_retry')).toBe(false);
+  });
+});

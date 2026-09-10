@@ -9,6 +9,7 @@
  */
 import {
   isAbortError,
+  isRetryableGenerateError,
   generate,
   createToolMessage,
   createUserMessage,
@@ -17,6 +18,7 @@ import {
   type ToolCall,
   type ChatProvider,
 } from '../llm/kosong';
+import { resolveLLMMaxRetries } from '../llm/env';
 
 import type { PermissionGate } from '../permissions/gate';
 import {
@@ -54,6 +56,24 @@ export const TOOL_PARSE_400_MESSAGE =
 
 /** 每轮 400 自动恢复的次数上限(连续,防无限重试烧 token)。 */
 export const TOOL_PARSE_400_MAX_RECOVERIES = 2;
+/** LLM 瞬态错误(429/5xx/连接/超时)的步内退避重试上限:
+ * .env 的 LLM_PROVIDER_0_MAX_RETRIES 接线处(此前解析后无消费方,P3-24)。 */
+const LLM_MAX_RETRIES = resolveLLMMaxRetries();
+const LLM_RETRY_BASE_DELAY_MS = 1_000;
+const LLM_RETRY_MAX_DELAY_MS = 30_000;
+
+/** 可中断的退避等待:/cancel 等信号到达即提前返回。 */
+function sleepWithAbort(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  return new Promise((resolveSleep) => {
+    const timer = setTimeout(done, ms);
+    function done(): void {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', done);
+      resolveSleep();
+    }
+    signal?.addEventListener('abort', done, { once: true });
+  });
+}
 
 /**
  * 识别「响应侧」工具解析 400:vLLM 工具解析器对截断/畸形参数 JSON 的报错
@@ -266,6 +286,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     { name: '', count: 0, output: undefined };
   /** 服务端工具解析 400 的连续恢复次数(成功 generate 后清零)。 */
   let toolParse400Recoveries = 0;
+  /** 本步 LLM 瞬态错误的退避重试计数(成功 generate 后清零)。 */
+  let llmRetries = 0;
   /** sticky 截断标记:任一步 finishReason==='truncated' 后整个 turn 的
    * done 事件与返回值都带 truncated(参照 deepseek-harness 的粘性 max-tokens)。 */
   let turnTruncated = false;
@@ -457,6 +479,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       );
       assistant = generated.message;
       toolParse400Recoveries = 0;
+      llmRetries = 0;
       await emit({
         type: 'generate_done',
         step: steps,
@@ -481,6 +504,23 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     } catch (error) {
       if (isAbortError(error) || isAborted()) {
         return finish('cancelled');
+      }
+      // LLM 瞬态错误(429/5xx/连接/超时):指数退避后重试本步 generate
+      // (kosong 的 isRetryableGenerateError 已排除配额耗尽与确定性 4xx)。
+      if (llmRetries < LLM_MAX_RETRIES && isRetryableGenerateError(error)) {
+        llmRetries += 1;
+        const delayMs = Math.min(
+          LLM_RETRY_BASE_DELAY_MS * 2 ** (llmRetries - 1),
+          LLM_RETRY_MAX_DELAY_MS,
+        );
+        await emit({
+          type: 'generate_retry',
+          step: steps,
+          error: `瞬态错误,退避 ${delayMs}ms 后重试(${llmRetries}/${LLM_MAX_RETRIES}): ${errorMessage(error)}`,
+        });
+        await sleepWithAbort(delayMs, options.signal);
+        if (isAborted()) return finish('cancelled');
+        continue;
       }
       // 服务端工具解析 400(参数 JSON 未闭合/畸形):追加 nudge 自动重试本步,
       // 每轮最多 TOOL_PARSE_400_MAX_RECOVERIES 次,超出按原路径报错。
