@@ -136,10 +136,15 @@ def _render_markdown(report: Report) -> str:
             lines.extend(_render_event_result(result, report.expert_candidates))
 
     # Binary encoding explanation (former 最终分类 text)
+    encoding_width = len(report.binary_encoding.encoding_string.split("_")) if report.binary_encoding.encoding_string else 0
     lines.append("### 编码说明")
     lines.append("")
-    lines.append("- 每一位对应一个事件类别（按 event_id 升序，位序 1..11，")
-    lines.append("  第 9 位为正常占位恒为 0），")
+    lines.append(
+        f"- 每一位对应一个事件类别（按 event_id 升序，位序 1..{encoding_width}，"
+        if encoding_width > 0
+        else "- 每一位对应一个事件类别（按 event_id 升序，"
+    )
+    lines.append("  第 9 位为正常指示位：无任何事件检出时为 1，否则为 0），")
     lines.append("  `1` 表示该类别被检测到，`0` 表示未检测到。")
     lines.append("")
     if report.binary_encoding.detected_events:
