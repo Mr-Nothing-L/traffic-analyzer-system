@@ -45,6 +45,7 @@ from traffic_analyzer.models.schemas import (
 from traffic_analyzer.utils.event_detection import (
     parse_expert_response,
     reflect_expert_candidate,
+    resolve_vlm_max_frames,
     select_event_images,
 )
 from traffic_analyzer.utils.progress import get_reporter as _get_progress_reporter
@@ -78,10 +79,7 @@ class ExpertAgent:
         and a summary containing the error message.
         """
         # -- 1. Image selection ------------------------------------------------
-        vlm_max_frames = 6
-        if context.config is not None:
-            vlm_max_frames = context.config.vlm_max_frames
-        images = select_event_images(context, vlm_max_frames)
+        images = select_event_images(context, resolve_vlm_max_frames(context))
 
         if not images:
             logger.error(

@@ -34,7 +34,7 @@ from traffic_analyzer.core.verdict_format import (
 )
 from traffic_analyzer.core.vlm_engine import FatalAPIError
 from traffic_analyzer.models.schemas import AnalysisContext
-from traffic_analyzer.utils.event_detection import is_event_id, select_event_images
+from traffic_analyzer.utils.event_detection import is_event_id, resolve_vlm_max_frames, select_event_images
 
 logger = logging.getLogger(__name__)
 
@@ -90,8 +90,7 @@ class GroundingVerificationStep(PipelineStep):
             return None
 
         # 2. Student view: raw coarse frames only (no enhancement artifacts).
-        vlm_max_frames = getattr(context.config, "vlm_max_frames", 6)
-        images = select_event_images(context, vlm_max_frames)
+        images = select_event_images(context, resolve_vlm_max_frames(context))
         if not images:
             logger.warning("[grounding_verification] SKIP | no raw frames selected")
             return None

@@ -246,13 +246,26 @@ def reflect_expert_candidate(
     return candidate
 
 
+# VLM 检测选帧上限缺省:与 SystemConfig.vlm_max_frames 的缺省一致(models/config.py)。
+DEFAULT_VLM_MAX_FRAMES = 10
+
+
+def resolve_vlm_max_frames(context: AnalysisContext) -> int:
+    """VLM 检测选帧上限的唯一解析口(SystemConfig.vlm_max_frames,缺省 10)。
+
+    此前四处各写 `6 if config is None else config.vlm_max_frames`,config
+    缺失时与 SystemConfig 缺省(10)不一致(P3-7)。"""
+    value = getattr(context.config, "vlm_max_frames", DEFAULT_VLM_MAX_FRAMES)
+    return int(value) if value else DEFAULT_VLM_MAX_FRAMES
+
+
 def select_event_images(context: AnalysisContext, vlm_max_frames: int) -> List[Any]:
     """Select up to *vlm_max_frames* coarse keyframes (evenly distributed) for VLM detection."""
     images: List[Any] = []
     if not context.keyframes:
         return images
 
-    max_frames = vlm_max_frames if vlm_max_frames > 0 else 6
+    max_frames = vlm_max_frames if vlm_max_frames > 0 else DEFAULT_VLM_MAX_FRAMES
 
     coarse = context.keyframes.coarse_frames
     if len(coarse) > max_frames:

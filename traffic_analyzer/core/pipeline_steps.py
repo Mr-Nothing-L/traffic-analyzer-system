@@ -35,7 +35,7 @@ from traffic_analyzer.core.config_manager import ConfigManager
 from traffic_analyzer.core.expert_agent import ExpertAgent
 from traffic_analyzer.core.vlm_engine import FatalAPIError, VLMInferenceEngine
 from traffic_analyzer.utils.annotation_spec_loader import AnnotationSpecLoader
-from traffic_analyzer.utils.event_detection import is_event_id
+from traffic_analyzer.utils.event_detection import is_event_id, resolve_vlm_max_frames
 from traffic_analyzer.utils.event_detection import select_event_images as _select_event_images_impl
 from traffic_analyzer.utils.progress import get_reporter as _get_progress_reporter
 from traffic_analyzer.models.schemas import (
@@ -385,9 +385,7 @@ class AdjudicationStep(PipelineStep):
             raise RuntimeError("Adjudication prompt template 'adjudication' not found")
 
         # 3. Select images
-        vlm_max_frames = 6
-        if context.config is not None:
-            vlm_max_frames = context.config.vlm_max_frames
+        vlm_max_frames = resolve_vlm_max_frames(context)
         images = _select_event_images_impl(context, vlm_max_frames=vlm_max_frames)
 
         # Load annotation spec (xlsx-derived business rules)
