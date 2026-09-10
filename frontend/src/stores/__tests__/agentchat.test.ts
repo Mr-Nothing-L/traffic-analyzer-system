@@ -211,6 +211,65 @@ describe('selectSession 代际守卫', () => {
   });
 });
 
+// P1-7 回归:刷新后经 history 载入的未决审批(pending 且无 decision)也要武装
+// 审批态,否则 composer 面板不出现而时间线卡提示「请在下方输入区处理」。
+describe('历史载入武装未决审批', () => {
+  function stubFetchWithHistory(entries: unknown[]) {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: unknown) => {
+        const url = String(input);
+        if (url.endsWith('/history')) return historyResponse(entries);
+        if (url.includes('/events')) return jsonResponse({ events: [], inProgress: false });
+        return jsonResponse({ sessions: [] });
+      }),
+    );
+  }
+
+  it('pending 审批条目 → awaiting_approval;已回执或失效则保持 idle', async () => {
+    const { agent } = await load();
+    stubFetchWithHistory([
+      { kind: 'user', text: '跑个脚本', images: [], at: 1 },
+      {
+        kind: 'approval',
+        requestId: 'r1',
+        toolName: 'run_script',
+        approvalRule: 'run_script(x.py)',
+        accesses: [],
+        pending: true,
+        at: 2,
+      },
+    ]);
+    await agent.selectSession('s1');
+    expect(agent.status).toBe('awaiting_approval');
+    vi.unstubAllGlobals();
+
+    // 同一 store 换会话重载:已回执/失效的审批不武装审批态
+    stubFetchWithHistory([
+      {
+        kind: 'approval',
+        requestId: 'r2',
+        toolName: 'run_script',
+        approvalRule: 'run_script(x.py)',
+        accesses: [],
+        decision: 'approved',
+        at: 1,
+      },
+      {
+        kind: 'approval',
+        requestId: 'r3',
+        toolName: 'run_script',
+        approvalRule: 'run_script(y.py)',
+        accesses: [],
+        at: 2,
+      }, // 服务端已无此审批 → stale
+    ]);
+    await agent.selectSession('s2');
+    expect(agent.status).toBe('idle');
+    vi.unstubAllGlobals();
+  });
+});
+
 // 工具结果图片回归测试:extract_frames/draw_boxes 的 output 是 kosong ContentPart[]
 // (text + image_url),历史落盘 JSON 往返后仍是数组;期望 mapHistoryEntry 提取
 // 图片 dataURL 进 images,文本仍进 result。

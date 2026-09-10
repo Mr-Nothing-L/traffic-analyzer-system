@@ -1141,7 +1141,13 @@ export const useAgentChatStore = defineStore('agentchat', () => {
       }
       // 会话切换:沿用列表里的最近已知用量(没有则清空等下一次 context_usage)
       usedTokens.value = typeof info?.usedTokens === 'number' ? info.usedTokens : null
-      status.value = 'idle'
+      // 刷新/重载场景:已落盘的未决审批(轮次已结束但仍挂起)需武装审批态,
+      // 否则 composer 审批面板不出现,而时间线卡仍提示「请在下方输入区处理」。
+      // 与 mergePersistedEvents 的判定对称(SSE/轮询路径只覆盖新增条目)。
+      const hasPendingApproval = entries.value.some(
+        (e) => e.kind === 'approval' && !e.decision && !e.stale,
+      )
+      status.value = hasPendingApproval ? 'awaiting_approval' : 'idle'
       // 断连恢复探测:服务端轮次仍在跑则进入恢复态(轮询补齐)
       await s.resumeFromServer()
     } catch (e) {
