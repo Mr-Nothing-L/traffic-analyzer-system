@@ -214,7 +214,14 @@ def _rewrite_dir(kf_directory: Path, items: List[Dict[str, Any]]) -> List[Dict[s
                 }
             )
         return written
-    finally:
+    except Exception:
+        # 中途失败:仍在暂存的文件放回原名(POSIX rename 覆盖半写的目标),
+        # 原有关键帧不再被删光——否则 SFT JSON 留下一堆坏引用(P3-22)。
+        for name, tmp in staged.items():
+            tmp.rename(kf_directory / name)
+        raise
+    else:
+        # 成功路径:未被引用的暂存件(删除场景与孤儿残留)统一清除。
         for tmp in staged.values():
             tmp.unlink(missing_ok=True)
 
