@@ -799,11 +799,21 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       clientDisconnected = true;
       // 不再 cancelAll:显式 /cancel 与轮末兜底仍负责 settle。
     });
+    // SSE 写通道异常兜底:正常收尾后仍可能有迟到的子代理事件写向已 end 的
+    // res(ERR_STREAM_WRITE_AFTER_END 以 'error' 异步抛出),无监听会升级为
+    // uncaughtException 击穿进程——这里吞掉并标记断开,迟到写入由 emit 终态
+    // 守卫拦截。
+    res.on('error', () => {
+      clientDisconnected = true;
+    });
 
     // SSE 事件带 seq:发出时已落盘 entries 的水位(= 当前最大落盘 seq),
     // 前端刷新后以最后收到的 seq 调 GET /sessions/{id}/events?fromSeq=N 补齐。
     const emit = (event: unknown): void => {
       if (clientDisconnected) return;
+      // 终态守卫:res 已 end/销毁后任何写入都是 write-after-end('close' 在
+      // 正常完成时也触发,clientDisconnected 可能仍为 false)。
+      if (res.writableEnded || res.destroyed) return;
       const payload = isRecord(event) ? { ...event, seq: session.entries.length } : event;
       try {
         writeSseEvent(res, payload);
@@ -945,6 +955,10 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
           persister.onStepPersist(update);
         },
         onEvent: (event: AgentLoopEvent) => {
+          // 迟到事件守卫:轮次已收尾(controller 已清空或被新轮次接管)时,
+          // 仍在运行的子代理事件不再进入本轮回调——res 已 end,转发既无意义
+          // 还会在落盘 finalized 之后继续 pushEntry。
+          if (runtime.controller !== controller) return;
           switch (event.type) {
             case 'text_delta':
               assistantText += event.text;

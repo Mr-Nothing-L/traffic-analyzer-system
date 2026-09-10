@@ -396,6 +396,55 @@ describe('agent server', () => {
     });
   });
 
+  it('轮次结束后迟到的子代理事件不写已 end 的 SSE 也不追加条目(P1-2 回归)', async () => {
+    let lateEmit: ((event: unknown) => void | Promise<void>) | undefined;
+    const captureTool: ExecutableTool = {
+      name: 'sub_late',
+      description: 'fake tool capturing onSubagentEvent for late replay',
+      parameters: { type: 'object' },
+      resolveExecution: () => ({
+        accesses: [],
+        approvalRule: 'sub_late()',
+        execute: (ctx): Promise<ExecutableToolResult> => {
+          lateEmit = ctx.onSubagentEvent;
+          return Promise.resolve({ output: '已捕获' });
+        },
+      }),
+    };
+    const provider = new ScriptedProvider({ script: [
+      [toolCall('c1', 'sub_late', { task: '分析视频' })],
+      [text('总结')],
+      [text('第二轮回答')],
+    ] });
+    await startServer(provider, [captureTool]);
+    const sessionId = await createSession('yolo');
+
+    const res = await startChat(sessionId, '分析一下');
+    if (res.body === null) throw new Error('no body');
+    const events = await readUntilDone(sseReader(res.body));
+    expect(events[events.length - 1]?.type).toBe('done');
+    // 等服务端 finally 收尾跑完(controller 清空、res.end() 已生效)。
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // 模拟父轮次超时后仍在跑的子代理:回灌迟到事件,不得 write-after-end、
+    // 不得在轮次 finalize 后追加条目,更不得击穿进程。
+    expect(lateEmit).toBeDefined();
+    await lateEmit?.({ type: 'text_delta', text: '迟到的子代理事件' });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const health = await getJson('/health');
+    expect(health.status).toBe(200);
+    const history = await getJson(`/sessions/${sessionId}/history`);
+    const entries = (history.json as { entries: TimelineEntry[] }).entries;
+    expect(entries.some((e) => JSON.stringify(e).includes('迟到的子代理事件'))).toBe(false);
+
+    // 服务仍可继续服务新轮次。
+    const res2 = await startChat(sessionId, '继续');
+    if (res2.body === null) throw new Error('no body');
+    const events2 = await readUntilDone(sseReader(res2.body));
+    expect(events2[events2.length - 1]?.type).toBe('done');
+  });
+
   it('approval 往返:manual 模式收到 approval_request,POST /approval approved 后继续', async () => {
     const provider = new ScriptedProvider({ script: [
       [toolCall('c1', 'write_file', { path: '/tmp/x' })],
