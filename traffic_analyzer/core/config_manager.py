@@ -656,7 +656,10 @@ class ConfigManager:
 
         for env_path in candidates:
             if env_path.exists():
-                load_dotenv(dotenv_path=str(env_path), override=True)
+                # override=False:进程环境(含 CLI 显式导出的参数)优先,.env
+                # 只补缺。此前 override=True 会让 .env 同名键反超 CLI 参数
+                # (P3-9);LLM 键不经过本路径(经 dotenv_values 单独解析)。
+                load_dotenv(dotenv_path=str(env_path), override=False)
                 logger.info("Loaded environment variables from %s", env_path)
                 env_loaded = True
                 break
