@@ -27,7 +27,6 @@ from .event import (
 )
 from .llm import (
     FarObjectEnhancementConfig,
-    LLMCallRecord,
     LLMResponse,
     PromptTemplate,
 )
@@ -53,7 +52,6 @@ __all__ = [
     "FarObjectEnhancementConfig",
     "PromptTemplate",
     "LLMResponse",
-    "LLMCallRecord",
     "BinaryEncoding",
     "Report",
     "SamplingConfig",

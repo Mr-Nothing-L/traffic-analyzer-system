@@ -615,7 +615,7 @@ class SftLabelRewriteStep(PipelineStep):
     """Optional step 4: rewrite adjudicated verdicts into one SFT sample per video."""
 
     def __init__(self, config_manager, vlm_engine):
-        super().__init__("sft_label_rewrite", max_retries=0)
+        super().__init__("sft_label_rewrite")
         self.config_manager = config_manager
         self.vlm_engine = vlm_engine
 

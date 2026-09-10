@@ -126,30 +126,26 @@ class StepResult:
         data: Any = None,
         error: Optional[Exception] = None,
         duration_sec: float = 0.0,
-        retry_count: int = 0,
     ) -> None:
         self.success = success
         self.data = data
         self.error = error
         self.duration_sec = duration_sec
-        self.retry_count = retry_count
 
 
 class PipelineStep(ABC):
     """Abstract base class for analysis pipeline steps.
 
     Each step encapsulates a discrete phase of the analysis pipeline
-    with built-in retry and fallback support.
+    with fallback support(重试骨架 max_retries/retry_count 从未生效,已删)。
     """
 
     def __init__(
         self,
         name: str,
-        max_retries: int = 0,
         fallback_enabled: bool = False,
     ) -> None:
         self.name = name
-        self.max_retries = max_retries
         self.fallback_enabled = fallback_enabled
 
     @abstractmethod
@@ -183,7 +179,6 @@ class PipelineStep(ABC):
                 success=True,
                 data=data,
                 duration_sec=time.perf_counter() - start,
-                retry_count=0,
             )
         except FatalAPIError:
             raise
@@ -196,13 +191,11 @@ class PipelineStep(ABC):
                     success=True,
                     data=fallback_data,
                     duration_sec=time.perf_counter() - start,
-                    retry_count=0,
-                )
+                    )
             return StepResult(
                 success=False,
                 error=exc,
                 duration_sec=time.perf_counter() - start,
-                retry_count=0,
             )
 
     def _fallback(self, context: AnalysisContext, error: Optional[Exception]) -> Any:
@@ -216,8 +209,8 @@ class PipelineStep(ABC):
 class ExpertAgentLayer(PipelineStep):
     """Step 2: Parallel expert agents for each active event."""
 
-    def __init__(self, config_manager, vlm_engine, max_workers=4, max_retries=0):
-        super().__init__("expert_agent_layer", max_retries=max_retries)
+    def __init__(self, config_manager, vlm_engine, max_workers=4):
+        super().__init__("expert_agent_layer")
         self.config_manager = config_manager
         self.vlm_engine = vlm_engine
         self.max_workers = max_workers
@@ -347,9 +340,8 @@ class AdjudicationStep(PipelineStep):
         config_manager,
         vlm_engine,
         expert_agent_layer: Optional[ExpertAgentLayer] = None,
-        max_retries: int = 0,
     ):
-        super().__init__("adjudication", max_retries=max_retries, fallback_enabled=True)
+        super().__init__("adjudication", fallback_enabled=True)
         self.config_manager = config_manager
         self.vlm_engine = vlm_engine
         self.expert_agent_layer = expert_agent_layer

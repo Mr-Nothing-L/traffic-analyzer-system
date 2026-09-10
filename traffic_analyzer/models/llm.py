@@ -2,7 +2,7 @@
 LLM/VLM call and prompt-template models for the traffic analyzer framework.
 
 [文件说明]
-作用:定义 PromptTemplate(prompt 模板,含远小目标增强配置 FarObjectEnhancementConfig)、LLMResponse(VLM 结构化响应)、LLMCallRecord(单次调用审计记录)。
+作用:定义 PromptTemplate(prompt 模板,含远小目标增强配置 FarObjectEnhancementConfig)、LLMResponse(VLM 结构化响应)。
 上游:models/schemas.py(再导出);被 core/config_manager.py(加载 YAML prompt 模板)、core/vlm_engine.py、core/vlm_cache.py、core/expert_agent_far_enhancement.py 使用。
 下游:pydantic。
 """
@@ -93,16 +93,3 @@ class LLMResponse(BaseModel):
     error_message: Optional[str] = None
 
 
-class LLMCallRecord(BaseModel):
-    """Audit record of a single LLM call."""
-    call_id: str
-    timestamp: datetime = Field(default_factory=datetime.now)
-    template_id: str
-    model: str
-    provider: str = ""
-    prompt_tokens: int
-    completion_tokens: int
-    total_tokens: int
-    latency_ms: float
-    success: bool
-    error_message: Optional[str] = None

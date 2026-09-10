@@ -63,7 +63,7 @@ class GroundingVerificationStep(PipelineStep):
     """Optional step 3.4: overturn hallucinated positives via raw-frame anchoring."""
 
     def __init__(self, config_manager, vlm_engine):
-        super().__init__("grounding_verification", max_retries=0)
+        super().__init__("grounding_verification")
         self.config_manager = config_manager
         self.vlm_engine = vlm_engine
 
