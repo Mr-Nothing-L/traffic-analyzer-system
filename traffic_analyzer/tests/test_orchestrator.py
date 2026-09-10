@@ -297,15 +297,6 @@ class TestAnalyze:
         call_kwargs = orchestrator.report_generator.generate.call_args.kwargs
         assert call_kwargs.get("total_categories") == 3
 
-    def test_scene_understanding_passed_externally(
-        self,
-        orchestrator: AnalysisOrchestrator,
-        temp_video: str,
-    ) -> None:
-        scene_info = SceneInfo(road_count=3, weather="rainy", lighting="night")
-        report = orchestrator.analyze(temp_video, scene_understanding=scene_info)
-        assert isinstance(report, Report)
-
     def test_inactive_events_skipped_by_expert_layer(
         self,
         orchestrator: AnalysisOrchestrator,

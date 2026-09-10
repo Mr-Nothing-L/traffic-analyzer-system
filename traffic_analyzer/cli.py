@@ -26,7 +26,6 @@ from typing import List, Optional, Sequence
 
 from traffic_analyzer import __version__
 from traffic_analyzer.core.config_manager import ConfigManager
-from traffic_analyzer.models.schemas import SceneInfo
 from traffic_analyzer.orchestrator.analysis_orchestrator import AnalysisOrchestrator
 
 
@@ -75,30 +74,11 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         os.environ["SFT_LABEL_OUTPUT_DIR"] = args.sft_output_dir
         logger.info("SFT label output directory set to %s", args.sft_output_dir)
 
-    # Load external scene understanding if provided
-    scene_understanding: Optional[SceneInfo] = None
-    if args.scene_understanding:
-        su_path = _resolve_path(args.scene_understanding)
-        if not Path(su_path).exists():
-            logger.error("Scene understanding file not found: %s", su_path)
-            return 1
-        try:
-            with open(su_path, "r", encoding="utf-8") as f:
-                scene_understanding = SceneInfo.model_validate(json.load(f))
-            logger.info("Loaded external scene understanding from %s", su_path)
-        except json.JSONDecodeError as exc:
-            logger.error("Invalid JSON in scene understanding file: %s", exc)
-            return 1
-        except Exception as exc:
-            logger.error("Failed to read scene understanding file: %s", exc)
-            return 1
-
     try:
         orchestrator = AnalysisOrchestrator.from_config_dir(config_dir)
         report_output_dir = str(Path(output_path).parent) if output_path else None
         report = orchestrator.analyze(
             video_path,
-            scene_understanding=scene_understanding,
             output_dir=report_output_dir,
         )
     except Exception as exc:
@@ -241,11 +221,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--video", "-v",
         required=True,
         help="Path to the input video file.",
-    )
-    analyze_parser.add_argument(
-        "--scene-understanding", "-s",
-        default=None,
-        help="Optional path to external scene understanding JSON file.",
     )
     analyze_parser.add_argument(
         "--config-dir", "-d",

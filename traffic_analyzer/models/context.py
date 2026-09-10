@@ -15,7 +15,6 @@ from pydantic import BaseModel, Field
 
 from .config import SystemConfig
 from .event import EventCandidate, EventResult
-from .scene import SceneInfo
 from .video import KeyframeSequence, VideoMetadata
 
 
@@ -27,7 +26,6 @@ class AnalysisContext(BaseModel):
 
     video_meta: Optional[VideoMetadata] = None
     config: Optional[SystemConfig] = None
-    scene_understanding: Optional[SceneInfo] = None
     keyframes: Optional[KeyframeSequence] = None
     event_candidates: Dict[int, EventCandidate] = Field(default_factory=dict)
     event_results: Dict[int, EventResult] = Field(default_factory=dict)

@@ -132,14 +132,12 @@ class AnalysisOrchestrator:
     def analyze(
         self,
         video_path: str,
-        scene_understanding: Optional[SceneInfo] = None,
         output_dir: Optional[str] = None,
     ) -> Report:
         """Run the full analysis pipeline on a video.
 
         Args:
             video_path: Path to the video file.
-            scene_understanding: Optional pre-computed scene understanding.
             output_dir: Optional directory where the report will be written.
                 When provided, far-enhancement composite images are saved
                 under ``<output_dir>/tmp_img/<video_stem>`` and referenced
@@ -158,8 +156,6 @@ class AnalysisOrchestrator:
             config=self.config_manager.load_all(),
             output_dir=output_dir,
         )
-        if scene_understanding is not None:
-            context.scene_understanding = scene_understanding
 
         # Extract video metadata early (needed for prefilter reject report)
         video_meta = extract_video_meta(video_path)
