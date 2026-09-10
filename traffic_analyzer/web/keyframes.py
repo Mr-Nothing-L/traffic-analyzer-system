@@ -233,7 +233,11 @@ def _with_order(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def _read_keyframes_locked(sft_path: Path) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
-    """锁内读磁盘 SFT JSON 及其 keyframes 条目(无标注 → (None, []))。"""
+    """读磁盘 SFT JSON 及其 keyframes 条目(无标注 → (None, []))。
+
+    命名中的 locked 指“供锁内调用方复用的读助手”,读本身不持锁:落盘走
+    _atomic_write_json 原子替换,无锁读不会看到半写窗口(P3-21 订正注释)。
+    """
     try:
         disk = _read_json(sft_path)
     except _CorruptJsonError as exc:
@@ -526,7 +530,7 @@ def get_candidates(
 def list_keyframes(stem: str, request: Request) -> List[Dict[str, Any]]:
     workspace = _require_sft_stem(request, stem)
     sft_path = sft_json_path(workspace, stem)
-    _, entries = _read_keyframes_locked(sft_path)  # 读也走锁:避开半写窗口
+    _, entries = _read_keyframes_locked(sft_path)  # 原子写保证无锁读无半写窗口
     return _with_order(entries)
 
 
