@@ -11,9 +11,14 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "video_path": { "type": "string", "description": "视频文件绝对路径" }
+          "video_path": {
+            "type": "string",
+            "description": "视频文件绝对路径"
+          }
         },
-        "required": ["video_path"],
+        "required": [
+          "video_path"
+        ],
         "additionalProperties": false
       },
       "returns": "{duration_s, fps, width, height, frame_count};失败时返回 {error: {code, message}}(403 path_outside_workspace / 404 video_not_found / 404 video_meta_unavailable)",
@@ -80,8 +85,15 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "video_path": { "type": "string", "description": "视频文件路径(绝对路径或 workspace 相对路径)" },
-          "timestamp": { "type": "number", "description": "目标帧时刻(秒),自动换算并夹取到有效帧号", "minimum": 0 },
+          "video_path": {
+            "type": "string",
+            "description": "视频文件路径(绝对路径或 workspace 相对路径)"
+          },
+          "timestamp": {
+            "type": "number",
+            "description": "目标帧时刻(秒),自动换算并夹取到有效帧号",
+            "minimum": 0
+          },
           "boxes": {
             "type": "array",
             "description": "要绘制的框列表,至少 1 个;坐标为归一化 xyxy(0~1),label 可选(缺省 \"target\",截断至 40 字符)",
@@ -89,18 +101,46 @@
             "items": {
               "type": "object",
               "properties": {
-                "x1": { "type": "number", "minimum": 0, "maximum": 1 },
-                "y1": { "type": "number", "minimum": 0, "maximum": 1 },
-                "x2": { "type": "number", "minimum": 0, "maximum": 1 },
-                "y2": { "type": "number", "minimum": 0, "maximum": 1 },
-                "label": { "type": "string", "description": "框标签(如 \"疑似行人\");框颜色由标签自动决定" }
+                "x1": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "y1": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "x2": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "y2": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "label": {
+                  "type": "string",
+                  "description": "框标签(如 \"疑似行人\");框颜色由标签自动决定"
+                }
               },
-              "required": ["x1", "y1", "x2", "y2"],
+              "required": [
+                "x1",
+                "y1",
+                "x2",
+                "y2"
+              ],
               "additionalProperties": false
             }
           }
         },
-        "required": ["video_path", "timestamp", "boxes"],
+        "required": [
+          "video_path",
+          "timestamp",
+          "boxes"
+        ],
         "additionalProperties": false
       },
       "returns": "{jpeg_base64, width, height};失败时返回 {error: {code, message}}(403 path_outside_workspace / 404 video_not_found / 404 frame_unavailable)",
@@ -117,10 +157,21 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "video_path": { "type": "string", "description": "视频文件路径(绝对路径或 workspace 相对路径)" },
-          "max_mb": { "type": "number", "description": "超过该大小(MB)时由服务端降帧/转码,默认 40,上限 100", "exclusiveMinimum": 0, "maximum": 100, "default": 40 }
+          "video_path": {
+            "type": "string",
+            "description": "视频文件路径(绝对路径或 workspace 相对路径)"
+          },
+          "max_mb": {
+            "type": "number",
+            "description": "超过该大小(MB)时由服务端降帧/转码,默认 40,上限 100",
+            "exclusiveMinimum": 0,
+            "maximum": 100,
+            "default": 40
+          }
         },
-        "required": ["video_path"],
+        "required": [
+          "video_path"
+        ],
         "additionalProperties": false
       },
       "returns": "视频内容(整段 mp4)直接作为模型输入,附文本说明(时长/fps/大小/是否降帧);失败时返回 {error: {code, message}}(403 path_outside_workspace / 404 video_not_found 等)",
@@ -138,7 +189,10 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "video_path": { "type": "string", "description": "视频文件路径(绝对路径或 workspace 相对路径)" },
+          "video_path": {
+            "type": "string",
+            "description": "视频文件路径(绝对路径或 workspace 相对路径)"
+          },
           "suspects": {
             "type": "array",
             "description": "可疑目标锚点列表(1~5 个):必须是你从抽帧里实际看到的对象,不要凭空编造锚点。每个锚点可选带 side 字段,说明目标所在车道相对中央隔离带(分隔双向车道的中央护栏,非路侧护栏)的方位:coming=来向侧(预期靠近镜头)/going=去向侧(预期远离镜头)/unknown;运行时服务端会做一次场景级方位复核,以此为准;判逆行/倒车时必填,不确定填 unknown",
@@ -151,19 +205,59 @@
                   "type": "object",
                   "description": "目标在锚点帧上的归一化 xyxy 定位框(0~1)",
                   "properties": {
-                    "x1": { "type": "number", "minimum": 0, "maximum": 1 },
-                    "y1": { "type": "number", "minimum": 0, "maximum": 1 },
-                    "x2": { "type": "number", "minimum": 0, "maximum": 1 },
-                    "y2": { "type": "number", "minimum": 0, "maximum": 1 }
+                    "x1": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "y1": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "x2": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "y2": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    }
                   },
-                  "required": ["x1", "y1", "x2", "y2"],
+                  "required": [
+                    "x1",
+                    "y1",
+                    "x2",
+                    "y2"
+                  ],
                   "additionalProperties": false
                 },
-                "timestamp": { "type": "number", "description": "锚点帧的大致时刻(秒)", "minimum": 0 },
-                "description": { "type": "string", "description": "自然语言描述该目标外观与疑点(如\"白色小客车,疑似长时间静止\")" },
-                "side": { "type": "string", "description": "目标所在车道相对中央隔离带(分隔双向车道的中央护栏,非路侧护栏)的方位:coming=来向侧(预期靠近镜头)/going=去向侧(预期远离镜头)/unknown;运行时服务端会做一次场景级方位复核,以此为准;判逆行/倒车时必填,不确定填 unknown", "enum": ["coming", "going", "unknown"] }
+                "timestamp": {
+                  "type": "number",
+                  "description": "锚点帧的大致时刻(秒)",
+                  "minimum": 0
+                },
+                "description": {
+                  "type": "string",
+                  "description": "自然语言描述该目标外观与疑点(如\"白色小客车,疑似长时间静止\")"
+                },
+                "side": {
+                  "type": "string",
+                  "description": "目标所在车道相对中央隔离带(分隔双向车道的中央护栏,非路侧护栏)的方位:coming=来向侧(预期靠近镜头)/going=去向侧(预期远离镜头)/unknown;运行时服务端会做一次场景级方位复核,以此为准;判逆行/倒车时必填,不确定填 unknown",
+                  "enum": [
+                    "coming",
+                    "going",
+                    "unknown"
+                  ]
+                }
               },
-              "required": ["box", "timestamp", "description"],
+              "required": [
+                "box",
+                "timestamp",
+                "description"
+              ],
               "additionalProperties": false
             }
           },
@@ -172,10 +266,16 @@
             "description": "可选分析时段 [start, end](秒)。不传时服务端只分析锚点时刻后约 10 秒——若嫌疑贯穿整个视频(如'全程静止''全程逆行'),必须显式传 [0, 视频时长],否则跟踪只覆盖片段前段",
             "minItems": 2,
             "maxItems": 2,
-            "items": { "type": "number", "minimum": 0 }
+            "items": {
+              "type": "number",
+              "minimum": 0
+            }
           }
         },
-        "required": ["video_path", "suspects"],
+        "required": [
+          "video_path",
+          "suspects"
+        ],
         "additionalProperties": false
       },
       "returns": "{tracks: [{id, description, profile, side_hint, direction_verdict, best_frames: [{timestamp, jpeg_base64}]}], annotated_image(jpeg_base64), artifacts: {dir, clip, csv}, failed, failure_reason};failed=true 表示跟踪失败(failure_reason 给出原因,此时无有效轨迹证据)",
@@ -191,7 +291,9 @@
       "name": "submit_detection",
       "description": "提交本次检测的最终结构化结果:视频路径(video_path)、逐事件判定(events)、11 位二进制编码(binary_encoding)、正常标志(normal)与中文 Markdown 报告(report_markdown)。正式检测时,每个 detected=true 的事件一律提供 boxes(归一化定位框)与 box_frame(取自 evidence_frames 中最能看清事件主体的帧时刻):事件主体明确的直接框主体(车辆/行人/摩托车/抛洒物),拥堵、施工等场景级事件框事件大致范围(排队车流区域、施工作业区),多实例给多个框;提交时会据此逐事件生成带定位框的标注图,给用户展示目标定位。",
       "when_to_use": "分析全部完成后调用,且每次分析恰好调用一次。这是唯一有效输出——禁止只在文本回复里给结论。",
-      "parameters": { "$ref": "./submit_detection.schema.json" },
+      "parameters": {
+        "$ref": "./submit_detection.schema.json"
+      },
       "returns": "{accepted: true} 或 {accepted: false, errors: [...]}(schema 校验失败,需修正后重新调用)",
       "limits": [
         "参数必须符合 submit_detection.schema.json;位 9 为正常指示位:无任何事件检出时为 1(编码 {0_0_0_0_0_0_0_0_1_0_0}),其余情况为 0",
@@ -208,9 +310,14 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "path": { "type": "string", "description": "文件路径(相对沙盒工作区,或其内的绝对路径)" }
+          "path": {
+            "type": "string",
+            "description": "文件路径(相对沙盒工作区,或其内的绝对路径)"
+          }
         },
-        "required": ["path"],
+        "required": [
+          "path"
+        ],
         "additionalProperties": false
       },
       "returns": "{content} 或 {error}",
@@ -227,10 +334,19 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "path": { "type": "string", "description": "文件路径(相对沙盒工作区,或其内的绝对路径)" },
-          "content": { "type": "string", "description": "要写入的完整文本内容" }
+          "path": {
+            "type": "string",
+            "description": "文件路径(相对沙盒工作区,或其内的绝对路径)"
+          },
+          "content": {
+            "type": "string",
+            "description": "要写入的完整文本内容"
+          }
         },
-        "required": ["path", "content"],
+        "required": [
+          "path",
+          "content"
+        ],
         "additionalProperties": false
       },
       "returns": "{path, bytes_written} 或 {error}",
@@ -247,16 +363,29 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "path": { "type": "string", "description": "脚本文件路径(沙盒内,需先用 write_file 创建)" },
+          "path": {
+            "type": "string",
+            "description": "脚本文件路径(沙盒内,需先用 write_file 创建)"
+          },
           "args": {
             "type": "array",
             "description": "命令行参数列表",
-            "items": { "type": "string" },
+            "items": {
+              "type": "string"
+            },
             "default": []
           },
-          "timeout_sec": { "type": "integer", "description": "超时秒数,默认 60", "default": 60, "minimum": 1, "maximum": 300 }
+          "timeout_sec": {
+            "type": "integer",
+            "description": "超时秒数,默认 60",
+            "default": 60,
+            "minimum": 1,
+            "maximum": 300
+          }
         },
-        "required": ["path"],
+        "required": [
+          "path"
+        ],
         "additionalProperties": false
       },
       "returns": "{exit_code, stdout, stderr} 或 {error}",
@@ -273,11 +402,26 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "command": { "type": "string", "description": "要执行的 shell 命令( bash -c 执行)" },
-          "timeout_sec": { "type": "integer", "description": "前台命令超时秒数,默认 30,最大 300", "default": 30, "minimum": 1, "maximum": 300 },
-          "background": { "type": "boolean", "description": "是否后台运行;为 true 时立即返回 job_id,不等待命令结束", "default": false }
+          "command": {
+            "type": "string",
+            "description": "要执行的 shell 命令( bash -c 执行)"
+          },
+          "timeout_sec": {
+            "type": "integer",
+            "description": "前台命令超时秒数,默认 30,最大 300",
+            "default": 30,
+            "minimum": 1,
+            "maximum": 300
+          },
+          "background": {
+            "type": "boolean",
+            "description": "是否后台运行;为 true 时立即返回 job_id,不等待命令结束",
+            "default": false
+          }
         },
-        "required": ["command"],
+        "required": [
+          "command"
+        ],
         "additionalProperties": false
       },
       "returns": "前台:{exit_code, stdout, stderr};后台:{job_id, command, status: 'running'};失败时返回 {error}",
@@ -311,11 +455,26 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "job_id": { "type": "string", "description": "后台任务 id(由 run_command 后台模式返回)" },
-          "stdout_offset": { "type": "integer", "description": "stdout 已读取偏移,默认 0", "default": 0, "minimum": 0 },
-          "stderr_offset": { "type": "integer", "description": "stderr 已读取偏移,默认 0", "default": 0, "minimum": 0 }
+          "job_id": {
+            "type": "string",
+            "description": "后台任务 id(由 run_command 后台模式返回)"
+          },
+          "stdout_offset": {
+            "type": "integer",
+            "description": "stdout 已读取偏移,默认 0",
+            "default": 0,
+            "minimum": 0
+          },
+          "stderr_offset": {
+            "type": "integer",
+            "description": "stderr 已读取偏移,默认 0",
+            "default": 0,
+            "minimum": 0
+          }
         },
-        "required": ["job_id"],
+        "required": [
+          "job_id"
+        ],
         "additionalProperties": false
       },
       "returns": "{stdout, stderr, stdout_truncated, stderr_truncated, stdout_next_offset, stderr_next_offset, finished, exit_code};任务不存在返回错误",
@@ -331,10 +490,19 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "job_id": { "type": "string", "description": "后台任务 id" },
-          "signal": { "type": "string", "description": "发送的信号名,默认 SIGTERM", "default": "SIGTERM" }
+          "job_id": {
+            "type": "string",
+            "description": "后台任务 id"
+          },
+          "signal": {
+            "type": "string",
+            "description": "发送的信号名,默认 SIGTERM",
+            "default": "SIGTERM"
+          }
         },
-        "required": ["job_id"],
+        "required": [
+          "job_id"
+        ],
         "additionalProperties": false
       },
       "returns": "{killed: true, job_id, signal} 或错误信息",
@@ -350,12 +518,29 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "path": { "type": "string", "description": "文件路径(相对沙盒工作区,或其内的绝对路径)" },
-          "old_string": { "type": "string", "description": "要被替换的原文本" },
-          "new_string": { "type": "string", "description": "用于替换的新文本" },
-          "replace_all": { "type": "boolean", "description": "old_string 出现多次时是否全部替换;未提供且出现多次则报错", "default": false }
+          "path": {
+            "type": "string",
+            "description": "文件路径(相对沙盒工作区,或其内的绝对路径)"
+          },
+          "old_string": {
+            "type": "string",
+            "description": "要被替换的原文本"
+          },
+          "new_string": {
+            "type": "string",
+            "description": "用于替换的新文本"
+          },
+          "replace_all": {
+            "type": "boolean",
+            "description": "old_string 出现多次时是否全部替换;未提供且出现多次则报错",
+            "default": false
+          }
         },
-        "required": ["path", "old_string", "new_string"],
+        "required": [
+          "path",
+          "old_string",
+          "new_string"
+        ],
         "additionalProperties": false
       },
       "returns": "{path, replacements, changed_lines, context} 或 {error}",
@@ -373,10 +558,19 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "pattern": { "type": "string", "description": "glob 模式,如 '*.mp4'、'**/*.json'、'{a,b}.ts'" },
-          "path": { "type": "string", "description": "搜索根目录,默认当前工作区根目录", "default": "." }
+          "pattern": {
+            "type": "string",
+            "description": "glob 模式,如 '*.mp4'、'**/*.json'、'{a,b}.ts'"
+          },
+          "path": {
+            "type": "string",
+            "description": "搜索根目录,默认当前工作区根目录",
+            "default": "."
+          }
         },
-        "required": ["pattern"],
+        "required": [
+          "pattern"
+        ],
         "additionalProperties": false
       },
       "returns": "{files: [...], truncated: boolean};失败时返回 {error}",
@@ -393,12 +587,31 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "pattern": { "type": "string", "description": "搜索正则表达式( JavaScript RegExp 语法)" },
-          "path": { "type": "string", "description": "搜索根目录,默认当前工作区根目录", "default": "." },
-          "include": { "type": "string", "description": "glob 过滤,仅搜索匹配文件名的文件,如 '*.ts'", "default": "*" },
-          "context_lines": { "type": "integer", "description": "匹配行上下文行数,默认 0,最大 5", "default": 0, "minimum": 0, "maximum": 5 }
+          "pattern": {
+            "type": "string",
+            "description": "搜索正则表达式( JavaScript RegExp 语法)"
+          },
+          "path": {
+            "type": "string",
+            "description": "搜索根目录,默认当前工作区根目录",
+            "default": "."
+          },
+          "include": {
+            "type": "string",
+            "description": "glob 过滤,仅搜索匹配文件名的文件,如 '*.ts'",
+            "default": "*"
+          },
+          "context_lines": {
+            "type": "integer",
+            "description": "匹配行上下文行数,默认 0,最大 5",
+            "default": 0,
+            "minimum": 0,
+            "maximum": 5
+          }
         },
-        "required": ["pattern"],
+        "required": [
+          "pattern"
+        ],
         "additionalProperties": false
       },
       "returns": "{results: [{path, line, text, match}], truncated: boolean};失败时返回 {error}",
@@ -422,19 +635,31 @@
             "items": {
               "type": "object",
               "properties": {
-                "content": { "type": "string", "description": "任务内容" },
+                "content": {
+                  "type": "string",
+                  "description": "任务内容"
+                },
                 "status": {
                   "type": "string",
-                  "enum": ["pending", "in_progress", "done"],
+                  "enum": [
+                    "pending",
+                    "in_progress",
+                    "done"
+                  ],
                   "description": "任务状态"
                 }
               },
-              "required": ["content", "status"],
+              "required": [
+                "content",
+                "status"
+              ],
               "additionalProperties": false
             }
           }
         },
-        "required": ["todos"],
+        "required": [
+          "todos"
+        ],
         "additionalProperties": false
       },
       "returns": "当前任务清单的紧凑文本渲染",
@@ -466,9 +691,14 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "id": { "type": "string", "description": "子代理运行 id" }
+          "id": {
+            "type": "string",
+            "description": "子代理运行 id"
+          }
         },
-        "required": ["id"],
+        "required": [
+          "id"
+        ],
         "additionalProperties": false
       },
       "returns": "子代理运行的 id/task/status/conclusion/steps/reason/error 文本;不存在返回错误",
@@ -484,17 +714,29 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "url": { "type": "string", "description": "要抓取的完整 http/https URL" },
-          "max_chars": { "type": "integer", "description": "返回内容最大字符数,默认 8000,最大 20000", "default": 8000, "minimum": 1, "maximum": 20000 }
+          "url": {
+            "type": "string",
+            "description": "要抓取的完整 http/https URL"
+          },
+          "max_chars": {
+            "type": "integer",
+            "description": "返回内容最大字符数,默认 8000,最大 20000",
+            "default": 8000,
+            "minimum": 1,
+            "maximum": 20000
+          }
         },
-        "required": ["url"],
+        "required": [
+          "url"
+        ],
         "additionalProperties": false
       },
       "returns": "{url, status, content_type, content, truncated};失败时返回 {error}",
       "limits": [
         "仅支持 http/https 公开 URL",
+        "拒绝访问回环/私网/链路本地地址(SSRF 防护;豁免开关 AGENT_WEB_FETCH_ALLOW_PRIVATE=1)",
         "响应体超过 5MB 拒绝读取",
-        "请求超时 30s",
+        "请求超时 30s,重定向最多跟随 5 跳且逐跳校验",
         "HTML 会简单提取正文文本,文本/plain/json 原样返回"
       ]
     }

@@ -6,6 +6,8 @@
  * collapsing whitespace; text/plain and application/json are returned as-is
  * (truncated to max_chars). No external dependencies beyond Node 18 fetch.
  */
+import { lookup } from 'node:dns/promises';
+
 import { z } from 'zod';
 
 import {
@@ -21,6 +23,13 @@ const TIMEOUT_MS = 30_000;
 const MAX_BODY_BYTES = 5 * 1024 * 1024;
 const DEFAULT_MAX_CHARS = 8_000;
 const MAX_MAX_CHARS = 20_000;
+const MAX_REDIRECTS = 5;
+
+/** SSRF 豁免开关:纯内网部署需要抓取内网文档时设 AGENT_WEB_FETCH_ALLOW_PRIVATE=1。
+ * 调用时读取(非模块加载时),便于测试与运行时切换。 */
+function allowPrivate(): boolean {
+  return process.env.AGENT_WEB_FETCH_ALLOW_PRIVATE === '1';
+}
 
 class WebFetchError extends Error {
   constructor(
@@ -29,6 +38,63 @@ class WebFetchError extends Error {
   ) {
     super(message);
     this.name = 'WebFetchError';
+  }
+}
+
+/** 私网/回环/链路本地(含云元数据端点网段)地址判定。 */
+function isPrivateAddress(ip: string): boolean {
+  const normalized = ip.toLowerCase().replace(/^\[|\]$/g, '');
+  if (normalized.includes(':')) {
+    if (normalized === '::1' || normalized === '::') return true;
+    // IPv4-mapped ::ffff:a.b.c.d:按 IPv4 规则判
+    const mapped = normalized.match(/::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+    if (mapped !== null) return isPrivateAddress(mapped[1]!);
+    const first = Number.parseInt(normalized.split(':')[0] ?? '0', 16);
+    if (Number.isNaN(first)) return true; // 解析不了的按私网保守拒绝
+    if ((first & 0xfe00) === 0xfc00) return true; // fc00::/7 唯一本地
+    if ((first & 0xffc0) === 0xfe80) return true; // fe80::/10 链路本地
+    return false;
+  }
+  const parts = normalized.split('.').map(Number);
+  if (parts.length !== 4 || parts.some((p) => Number.isNaN(p) || p < 0 || p > 255)) return true;
+  const [a, b] = parts as [number, number, number, number];
+  if (a === 0 || a === 10 || a === 127) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 169 && b === 254) return true; // 含 169.254.169.254 云元数据
+  return false;
+}
+
+/** 抓取前的 SSRF 守卫:拒绝回环/私网/链路本地目标(IP 字面量直判,域名解析后判全部地址)。
+ * 豁免:AGENT_WEB_FETCH_ALLOW_PRIVATE=1。 */
+async function assertPublicUrl(rawUrl: string): Promise<void> {
+  if (allowPrivate()) return;
+  const host = new URL(rawUrl).hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  const block = (): WebFetchError =>
+    new WebFetchError(
+      `已拒绝访问非公网地址 ${host}(SSRF 防护;确需抓取内网请设置 AGENT_WEB_FETCH_ALLOW_PRIVATE=1)`,
+      'WEB_FETCH_PRIVATE_BLOCKED',
+    );
+  if (
+    host === 'localhost' ||
+    host.endsWith('.localhost') ||
+    host.endsWith('.local') ||
+    host.endsWith('.internal')
+  ) {
+    throw block();
+  }
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(host) || host.includes(':')) {
+    if (isPrivateAddress(host)) throw block();
+    return;
+  }
+  let addresses: { address: string }[];
+  try {
+    addresses = await lookup(host, { all: true });
+  } catch {
+    throw new WebFetchError(`域名解析失败:${host}`, 'WEB_FETCH_DNS_FAILED');
+  }
+  if (addresses.length === 0 || addresses.some((entry) => isPrivateAddress(entry.address))) {
+    throw block();
   }
 }
 
@@ -105,10 +171,31 @@ export function createWebFetchTool(spec: ToolsetEntrySpec): ExecutableTool {
           ctx.signal.addEventListener('abort', onParentAbort, { once: true });
 
           try {
-            const response = await fetch(url, {
-              signal: controller.signal,
-              redirect: 'follow',
-            });
+            // 手动跟随重定向:每一跳都过 SSRF 守卫(follow 模式无法拦截
+            // 30x 跳向 127.0.0.1/私网的链路)。
+            let response: Response;
+            try {
+              let currentUrl = url;
+              for (let hop = 0; ; hop++) {
+                await assertPublicUrl(currentUrl);
+                response = await fetch(currentUrl, {
+                  signal: controller.signal,
+                  redirect: 'manual',
+                });
+                if (response.status < 300 || response.status >= 400) break;
+                const location = response.headers.get('location');
+                if (location === null) break;
+                if (hop >= MAX_REDIRECTS) {
+                  throw new WebFetchError(`重定向超过 ${MAX_REDIRECTS} 跳`, 'WEB_FETCH_TOO_MANY_REDIRECTS');
+                }
+                currentUrl = new URL(location, currentUrl).toString();
+              }
+            } catch (error) {
+              if (error instanceof WebFetchError) {
+                return { output: `${error.message} [${error.code}]`, isError: true };
+              }
+              throw error;
+            }
 
             if (!response.ok) {
               return {
