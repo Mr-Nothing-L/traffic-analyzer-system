@@ -370,9 +370,16 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       ? { workspaceRegistryPath: options.workspaceRegistryPath }
       : {}),
     onExpire: (session) => {
-      runtimes.get(session.id)?.bridge.cancelAll();
+      const runtime = runtimes.get(session.id);
+      // 会话被清扫/删除时终止进行中轮次的 controller:loop 继续跑只会
+      // 白烧 provider 费用(事件已无人消费)。
+      runtime?.controller?.abort();
+      runtime?.bridge.cancelAll();
       runtimes.delete(session.id);
     },
+    // 空闲清扫跳过 busy 会话:轮次进行中 lastActiveAt 可能长期不动(长工具
+    // 调用),清掉 runtime 会让轮末 finally 的复位写到已删除的 runtime 上。
+    isSessionBusy: (id: string) => runtimes.get(id)?.busy === true,
   });
 
   const toolsFactory =
@@ -898,174 +905,176 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       }
     };
 
-    const userText =
-      videoPath === undefined ? body.input : `视频路径:${videoPath}\n\n${body.input}`;
-    const userContent: ContentPart[] = [{ type: 'text', text: userText }];
-    for (const url of images) {
-      userContent.push({ type: 'image_url', imageUrl: { url } });
-    }
-    const userMessage: Message = { role: 'user', content: userContent, toolCalls: [] };
-    // loop 的初始历史必须在 appendMessages 推进 session.messages 之前快照,
-    // 否则 user 消息会重复一份。
-    const turnMessages: Message[] = [...session.messages, userMessage];
-    // entry ↔ message 映射:记录本轮 user 消息写入前的 messages 长度,
-    // recall 该 user 条目时按此值截断 messages(见 storage.ts messageIndex)。
-    userEntry.messageIndex = session.messages.length;
-    sessions.appendMessages(session.id, [userMessage]);
-    persister.markUserMessagePersisted();
-    persister.flushEntries(); // user 条目立即落盘:崩溃也至少保留用户输入。
-
-    const { provider } = providerFactory();
-
+    // busy=true 后立即进入 try:同步 setup 段(appendMessages/flushEntries/
+    // providerFactory)抛错也走统一 finally 复位 busy,否则该会话 409 直到清扫(≤2h)。
     try {
-      const result = await runAgentLoop({
-        provider,
-        systemPrompt,
-        registry: runtime.registry,
-        gate: runtime.gate,
-        messages: turnMessages,
-        signal: controller.signal,
-        // steer:每个 step 的 generate 之前由 loop 逐条取回(取走即消费);
-        // 每条立即构建 user 条目并落盘(TurnPersister),经活跃流发 SSE steer
-        // 事件(客户端已断则 emit 为空操作,只落盘),消息体交给 loop 追加
-        // 并即时落盘。
-        nextSteer: () => {
-          const item = runtime.steerQueue.shift();
-          if (item === undefined) return null;
-          // 与 /chat 的 user 条目同一映射:注入点即该消息在 messages 中的下标
-          // (loop 逐条取走、取走即落盘,session.messages 已推进)。
-          const entry: TimelineEntry = {
-            kind: 'user',
-            text: item.text,
-            images: item.images,
-            ...(item.videoPath !== undefined ? { videoPath: item.videoPath } : {}),
-            messageIndex: session.messages.length,
-            at: Date.now(),
-          };
-          persister.pushEntry(entry);
-          persister.flushEntries(); // steer 条目立即落盘(seq 水位先于 SSE 事件推进)。
-          emit({
-            type: 'steer',
-            text: item.text,
-            images: item.images,
-            ...(item.videoPath !== undefined ? { videoPath: item.videoPath } : {}),
-          });
-          return item.message;
-        },
-        compaction: { maxContextTokens: contextTokens },
-        // 抽帧(多图)后的 generate 步降思考档位,防逐帧分析烧穿 maxTokens。
-        framesThinkingEffort: resolveFramesThinkingEffort(),
-        onStepPersist: (update) => {
-          // loop 按消息确定点即时回灌(steer user / assistant / tool 增量,
-          // 或压缩后的整体折叠),TurnPersister 统一决定 append 还是重写
-          // (sqlite 同步写,在 onEvent 同一调用栈内完成,不引入异步积压)。
-          persister.onStepPersist(update);
-        },
-        onEvent: (event: AgentLoopEvent) => {
-          // 迟到事件守卫:轮次已收尾(controller 已清空或被新轮次接管)时,
-          // 仍在运行的子代理事件不再进入本轮回调——res 已 end,转发既无意义
-          // 还会在落盘 finalized 之后继续 pushEntry。
-          if (runtime.controller !== controller) return;
-          switch (event.type) {
-            case 'text_delta':
-              assistantText += event.text;
-              break;
-            case 'think_delta':
-              assistantThink += event.text;
-              break;
-            case 'context_usage':
-              sessions.setLastKnownUsage(session.id, event.usedTokens);
-              break;
-            case 'tool_call_start':
-              flushAssistant();
-              pendingCalls.set(event.call.id, {
-                name: event.call.name,
-                arguments: event.call.arguments,
-              });
-              break;
-            case 'tool_result': {
-              const call = pendingCalls.get(event.toolCallId);
-              pendingCalls.delete(event.toolCallId);
-              // load_video 的 output 含整段视频 dataURL(可达 ~50MB):SSE 与
-              // sqlite 都用裁剪版——video part 替换为占位文本;image part 的
-              // dataURL 写盘为 media 引用 URL(见 sanitizeToolOutputForTransport)。
-              // 模型侧 messages 不受影响(loop 内部仍持原始 output)。
-              const media = { sessionId: session.id, workspaceDir: session.workspaceDir };
-              const safeOutput = sanitizeToolOutputForTransport(event.result.output, media);
-              // 成功结果的结构化附件(submit_detection 的检测载荷)进条目前
-              // 同样把 annotated_image dataURL 转为 media 引用 URL。
-              const resultPayload =
-                'payload' in event.result
-                  ? sanitizeDetectionPayloadForTransport(event.result.payload, media)
-                  : undefined;
-              persister.pushEntry({
-                kind: 'tool',
-                toolCallId: event.toolCallId,
-                name: event.name,
-                arguments: call?.arguments ?? null,
-                output: safeOutput,
-                isError: event.isError,
-                ...(event.result.note !== undefined ? { note: event.result.note } : {}),
-                ...(resultPayload !== undefined ? { payload: resultPayload } : {}),
-                at: Date.now(),
-              });
-              emit({
-                ...event,
-                result: {
-                  ...event.result,
-                  output: safeOutput,
-                  ...(resultPayload !== undefined ? { payload: resultPayload } : {}),
-                },
-              });
-              return;
-            }
-            case 'step_done':
-              flushAssistant();
-              persister.flushEntries();
-              break;
-            case 'generate_done':
-              // 暂存本步 generate 耗时,随本条 assistant 条目落盘(flushAssistant);
-              // 事件本身经末尾 emit 透传 SSE,供前端实时展示。
-              pendingGenerateMs = event.generateMs;
-              break;
-            case 'done': {
-              dropUnconsumedSteers();
-              flushAssistant();
-              // stop_turn 的结构化附件(submit_detection 的检测载荷)直接从
-              // payload 读取,合成 detection SSE 事件并落盘——不再有
-              // JSON.parse(note) 字符串编解码。
-              const stopPayload =
-                event.stopResult !== undefined && 'payload' in event.stopResult
-                  ? event.stopResult.payload
-                  : undefined;
-              if (event.reason === 'stop_turn' && stopPayload !== undefined) {
-                // annotated_image dataURL 先转 media 引用 URL 再进 SSE 与落盘。
-                const safePayload = sanitizeDetectionPayloadForTransport(
-                  stopPayload,
-                  { sessionId: session.id, workspaceDir: session.workspaceDir },
-                );
-                emit({ type: 'detection', data: safePayload });
+      const userText =
+        videoPath === undefined ? body.input : `视频路径:${videoPath}\n\n${body.input}`;
+      const userContent: ContentPart[] = [{ type: 'text', text: userText }];
+      for (const url of images) {
+        userContent.push({ type: 'image_url', imageUrl: { url } });
+      }
+      const userMessage: Message = { role: 'user', content: userContent, toolCalls: [] };
+      // loop 的初始历史必须在 appendMessages 推进 session.messages 之前快照,
+      // 否则 user 消息会重复一份。
+      const turnMessages: Message[] = [...session.messages, userMessage];
+      // entry ↔ message 映射:记录本轮 user 消息写入前的 messages 长度,
+      // recall 该 user 条目时按此值截断 messages(见 storage.ts messageIndex)。
+      userEntry.messageIndex = session.messages.length;
+      sessions.appendMessages(session.id, [userMessage]);
+      persister.markUserMessagePersisted();
+      persister.flushEntries(); // user 条目立即落盘:崩溃也至少保留用户输入。
+
+        const { provider } = providerFactory();
+
+        const result = await runAgentLoop({
+          provider,
+          systemPrompt,
+          registry: runtime.registry,
+          gate: runtime.gate,
+          messages: turnMessages,
+          signal: controller.signal,
+          // steer:每个 step 的 generate 之前由 loop 逐条取回(取走即消费);
+          // 每条立即构建 user 条目并落盘(TurnPersister),经活跃流发 SSE steer
+          // 事件(客户端已断则 emit 为空操作,只落盘),消息体交给 loop 追加
+          // 并即时落盘。
+          nextSteer: () => {
+            const item = runtime.steerQueue.shift();
+            if (item === undefined) return null;
+            // 与 /chat 的 user 条目同一映射:注入点即该消息在 messages 中的下标
+            // (loop 逐条取走、取走即落盘,session.messages 已推进)。
+            const entry: TimelineEntry = {
+              kind: 'user',
+              text: item.text,
+              images: item.images,
+              ...(item.videoPath !== undefined ? { videoPath: item.videoPath } : {}),
+              messageIndex: session.messages.length,
+              at: Date.now(),
+            };
+            persister.pushEntry(entry);
+            persister.flushEntries(); // steer 条目立即落盘(seq 水位先于 SSE 事件推进)。
+            emit({
+              type: 'steer',
+              text: item.text,
+              images: item.images,
+              ...(item.videoPath !== undefined ? { videoPath: item.videoPath } : {}),
+            });
+            return item.message;
+          },
+          compaction: { maxContextTokens: contextTokens },
+          // 抽帧(多图)后的 generate 步降思考档位,防逐帧分析烧穿 maxTokens。
+          framesThinkingEffort: resolveFramesThinkingEffort(),
+          onStepPersist: (update) => {
+            // loop 按消息确定点即时回灌(steer user / assistant / tool 增量,
+            // 或压缩后的整体折叠),TurnPersister 统一决定 append 还是重写
+            // (sqlite 同步写,在 onEvent 同一调用栈内完成,不引入异步积压)。
+            persister.onStepPersist(update);
+          },
+          onEvent: (event: AgentLoopEvent) => {
+            // 迟到事件守卫:轮次已收尾(controller 已清空或被新轮次接管)时,
+            // 仍在运行的子代理事件不再进入本轮回调——res 已 end,转发既无意义
+            // 还会在落盘 finalized 之后继续 pushEntry。
+            if (runtime.controller !== controller) return;
+            switch (event.type) {
+              case 'text_delta':
+                assistantText += event.text;
+                break;
+              case 'think_delta':
+                assistantThink += event.text;
+                break;
+              case 'context_usage':
+                sessions.setLastKnownUsage(session.id, event.usedTokens);
+                break;
+              case 'tool_call_start':
+                flushAssistant();
+                pendingCalls.set(event.call.id, {
+                  name: event.call.name,
+                  arguments: event.call.arguments,
+                });
+                break;
+              case 'tool_result': {
+                const call = pendingCalls.get(event.toolCallId);
+                pendingCalls.delete(event.toolCallId);
+                // load_video 的 output 含整段视频 dataURL(可达 ~50MB):SSE 与
+                // sqlite 都用裁剪版——video part 替换为占位文本;image part 的
+                // dataURL 写盘为 media 引用 URL(见 sanitizeToolOutputForTransport)。
+                // 模型侧 messages 不受影响(loop 内部仍持原始 output)。
+                const media = { sessionId: session.id, workspaceDir: session.workspaceDir };
+                const safeOutput = sanitizeToolOutputForTransport(event.result.output, media);
+                // 成功结果的结构化附件(submit_detection 的检测载荷)进条目前
+                // 同样把 annotated_image dataURL 转为 media 引用 URL。
+                const resultPayload =
+                  'payload' in event.result
+                    ? sanitizeDetectionPayloadForTransport(event.result.payload, media)
+                    : undefined;
                 persister.pushEntry({
-                  kind: 'detection',
-                  data: safePayload as DetectionPayload,
+                  kind: 'tool',
+                  toolCallId: event.toolCallId,
+                  name: event.name,
+                  arguments: call?.arguments ?? null,
+                  output: safeOutput,
+                  isError: event.isError,
+                  ...(event.result.note !== undefined ? { note: event.result.note } : {}),
+                  ...(resultPayload !== undefined ? { payload: resultPayload } : {}),
                   at: Date.now(),
                 });
+                emit({
+                  ...event,
+                  result: {
+                    ...event.result,
+                    output: safeOutput,
+                    ...(resultPayload !== undefined ? { payload: resultPayload } : {}),
+                  },
+                });
+                return;
               }
-              emit({
-                type: 'done',
-                reason: event.reason,
-                ...(event.error !== undefined ? { error: event.error } : {}),
-                ...(event.truncated === true ? { truncated: true } : {}),
-              });
-              return;
+              case 'step_done':
+                flushAssistant();
+                persister.flushEntries();
+                break;
+              case 'generate_done':
+                // 暂存本步 generate 耗时,随本条 assistant 条目落盘(flushAssistant);
+                // 事件本身经末尾 emit 透传 SSE,供前端实时展示。
+                pendingGenerateMs = event.generateMs;
+                break;
+              case 'done': {
+                dropUnconsumedSteers();
+                flushAssistant();
+                // stop_turn 的结构化附件(submit_detection 的检测载荷)直接从
+                // payload 读取,合成 detection SSE 事件并落盘——不再有
+                // JSON.parse(note) 字符串编解码。
+                const stopPayload =
+                  event.stopResult !== undefined && 'payload' in event.stopResult
+                    ? event.stopResult.payload
+                    : undefined;
+                if (event.reason === 'stop_turn' && stopPayload !== undefined) {
+                  // annotated_image dataURL 先转 media 引用 URL 再进 SSE 与落盘。
+                  const safePayload = sanitizeDetectionPayloadForTransport(
+                    stopPayload,
+                    { sessionId: session.id, workspaceDir: session.workspaceDir },
+                  );
+                  emit({ type: 'detection', data: safePayload });
+                  persister.pushEntry({
+                    kind: 'detection',
+                    data: safePayload as DetectionPayload,
+                    at: Date.now(),
+                  });
+                }
+                emit({
+                  type: 'done',
+                  reason: event.reason,
+                  ...(event.error !== undefined ? { error: event.error } : {}),
+                  ...(event.truncated === true ? { truncated: true } : {}),
+                });
+                return;
+              }
             }
-          }
-          emit(event);
-        },
-      });
-      // 轮末兜底:正常路径各消息已即时落盘,这里只补齐理论不可达的余量
-      // (水位与返回值脱节的回归安全网)与剩余条目;幂等。
-      persister.finalize(result.messages);
+            emit(event);
+          },
+        });
+        // 轮末兜底:正常路径各消息已即时落盘,这里只补齐理论不可达的余量
+        // (水位与返回值脱节的回归安全网)与剩余条目;幂等。
+        persister.finalize(result.messages);
     } catch (error) {
       emit({
         type: 'done',

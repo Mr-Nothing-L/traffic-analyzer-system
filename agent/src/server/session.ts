@@ -60,6 +60,9 @@ export interface SessionManagerOptions {
   readonly sweepIntervalMs?: number;
   /** 会话被清扫/删除时的回调(用于取消挂起的审批等清理)。 */
   readonly onExpire?: (session: Session) => void;
+  /** 会话是否正有轮次/压缩在进行中:空闲清扫跳过 busy 会话(清掉 runtime
+   * 会让轮末 finally 的复位写到已删除的 runtime 上,且 loop 白烧算力)。 */
+  readonly isSessionBusy?: (id: string) => boolean;
   /** 启动时从这些 workspace 的 .agent/sessions.db 加载全部历史 session。 */
   readonly workspaces?: readonly string[];
   /**
@@ -82,12 +85,14 @@ export class SessionManager {
   private readonly storages = new Map<string, SessionStorage>();
   private readonly idleMs: number;
   private readonly onExpire: ((session: Session) => void) | undefined;
+  private readonly isSessionBusy: ((id: string) => boolean) | undefined;
   private readonly registryPath: string | undefined;
   private readonly sweeper: ReturnType<typeof setInterval>;
 
   constructor(options: SessionManagerOptions = {}) {
     this.idleMs = options.idleMs ?? DEFAULT_SESSION_IDLE_MS;
     this.onExpire = options.onExpire;
+    this.isSessionBusy = options.isSessionBusy;
     this.registryPath =
       options.workspaceRegistryPath ?? process.env.AGENT_WORKSPACE_REGISTRY_PATH;
     for (const workspaceDir of options.workspaces ?? []) {
@@ -392,6 +397,7 @@ export class SessionManager {
     let removed = 0;
     for (const session of this.sessions.values()) {
       if (session.lastActiveAt < cutoff) {
+        if (this.isSessionBusy?.(session.id) === true) continue; // 轮次进行中:下次再扫
         this.sessions.delete(session.id);
         this.onExpire?.(session);
         removed += 1;
