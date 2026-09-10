@@ -41,6 +41,78 @@ class TestAgentEventContractSync:
         active_ids = [cat.event_id for cat in manager.get_active_event_categories()]
         assert contract["active_event_ids"] == active_ids
 
+    def test_contract_encoding_length_matches_python_report_width(self):
+        """P2-4 守护:两侧位宽同语义 = max(基础位宽 11, 全部类别最大编号)。
+
+        Python 报告位宽(analysis_orchestrator._max_event_id)取全部类别(含
+        is_active: false,YAML 约定关闭事件保留位数);gen 脚本曾按仅活跃事件
+        计算,禁用高位事件时两侧位宽会分裂。
+        """
+        from traffic_analyzer.core.config_manager import ConfigManager
+
+        contract = json.loads((AGENT_CONFIG_DIR / "event_contract.json").read_text(encoding="utf-8"))
+        manager = ConfigManager(str(ROOT / "traffic_analyzer" / "config"))
+        manager.load_all()
+        all_max = max(
+            (cat.event_id for cat in manager.get_event_categories()), default=0
+        )
+        assert contract["encoding_length"] == max(11, all_max)
+
+    def test_gen_script_counts_inactive_high_event_for_width(self, tmp_path):
+        """禁用的高位事件(is_active: false)仍计入位宽——YAML 注释明文约定。"""
+        import importlib.util
+
+        import yaml
+
+        spec = importlib.util.spec_from_file_location(
+            "gen_agent_event_contract", ROOT / "scripts" / "gen_agent_event_contract.py"
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        events_yaml = tmp_path / "event_categories.yaml"
+        events_yaml.write_text(
+            yaml.safe_dump(
+                {
+                    "event_categories": [
+                        {
+                            "event_id": 1,
+                            "event_code": "A",
+                            "name": "Parking",
+                            "name_zh": "违法停车",
+                            "is_active": True,
+                        },
+                        {
+                            "event_id": 12,
+                            "event_code": "L",
+                            "name": "Animal Crossing",
+                            "name_zh": "动物穿越",
+                            "is_active": False,
+                        },
+                    ],
+                    "adjudication_rules": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        spec_yaml = tmp_path / "annotation_spec.yaml"
+        spec_yaml.write_text(
+            yaml.safe_dump(
+                {
+                    "annotation_spec": {
+                        "events": [{"event_id": 1, "boundary_conditions": []}],
+                        "global_guidelines": [],
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        mod.EVENT_CATEGORIES_YAML = events_yaml
+        mod.ANNOTATION_SPEC_YAML = spec_yaml
+        contract = mod.build_contract()
+        assert contract["encoding_length"] == 12
+        assert contract["active_event_ids"] == [1]
+
 
 class TestToolsetLimitsMatchToolserver:
     """toolset.json 是模型可见限额文案的单一来源,数字须与 toolserver 常量一致。"""

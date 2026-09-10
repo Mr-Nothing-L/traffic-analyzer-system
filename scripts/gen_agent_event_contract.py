@@ -63,12 +63,14 @@ def build_contract() -> dict:
 
     seen_ids: set[int] = set()
     events: list[dict] = []
+    all_ids: list[int] = []  # 位宽语义 = 全部类别(含 is_active: false,YAML 约定保留位数)
     active_ids: list[int] = []
     for cat in categories:
         event_id = int(cat["event_id"])
         if event_id in seen_ids:
             raise ValueError(f"event_categories.yaml 中 event_id 重复: {event_id}")
         seen_ids.add(event_id)
+        all_ids.append(event_id)
         if not cat.get("is_active", False):
             continue
         active_ids.append(event_id)
@@ -127,7 +129,10 @@ def build_contract() -> dict:
             "event_categories": "traffic_analyzer/config/event_categories.yaml",
             "annotation_spec": "traffic_analyzer/config/annotation_spec.yaml",
         },
-        "encoding_length": max(BASE_ENCODING_LENGTH, max(active_ids)),
+        # 位宽 = max(基础位宽, 全部类别最大编号)。与 Python 侧
+        # analysis_orchestrator._max_event_id()(全部类别)同语义——禁用高位
+        # 事件(is_active: false)仍保留位数,两侧位宽不得分裂(P2-4)。
+        "encoding_length": max(BASE_ENCODING_LENGTH, max(all_ids, default=0)),
         "normal_bit_index": NORMAL_BIT_INDEX,
         "active_event_ids": active_ids,
         "events": events,
