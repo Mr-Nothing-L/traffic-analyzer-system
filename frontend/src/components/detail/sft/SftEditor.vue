@@ -12,7 +12,7 @@ import KeyframePanel from './KeyframePanel.vue'
 import SftAnswer from './SftAnswer.vue'
 import SftEventCard from './SftEventCard.vue'
 
-const props = defineProps<{ stem: string; sft: ApiSftLabel | null; fileSig: string | null; rawAction: number[] | null }>()
+const props = defineProps<{ stem: string; rel?: string | null; sft: ApiSftLabel | null; fileSig: string | null; rawAction: number[] | null }>()
 const store = useSftStore()
 const evStore = useEvidenceStore()
 const message = useMessage()
@@ -91,7 +91,7 @@ function onReset() {
         <span>{{ sft.chunk_name || '' }}</span>
       </div>
       <!-- 关键帧面板:增删改即时落盘并同步乐观锁指纹(见 KeyframePanel.vue) -->
-      <KeyframePanel :stem="stem" />
+      <KeyframePanel :stem="stem" :rel="rel" />
       <div v-if="store.configError" class="empty-note">
         事件配置加载失败:{{ store.configError }}
       </div>

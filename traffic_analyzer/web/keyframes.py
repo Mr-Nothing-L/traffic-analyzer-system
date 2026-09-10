@@ -321,23 +321,36 @@ def _call_llm_pick(image_urls: List[str], context_text: str) -> str:
         client.close()
 
 
+def _find_video_for_pick(workspace: Path, stem: str, video_rel: Optional[str]) -> Path:
+    """智能挑选的视频解析:rel 给定走工作区受限解析,否则顶层 find_video。"""
+    if video_rel:
+        video = workspace_mod.resolve_workspace_file(workspace, video_rel)
+        if video.suffix.lower() not in workspace_mod.VIDEO_EXTENSIONS:
+            raise KeyframeError(f"不是视频文件:{video_rel}")
+        return video
+    video = workspace_mod.find_video(workspace, stem)
+    if video is None:
+        raise KeyframeError(f"工作区中找不到视频:{stem}")
+    return video
+
+
 def perform_auto_pick(
     workspace: Path,
     stem: str,
     *,
     overwrite: bool = False,
     jobs: Any = None,
+    video_rel: Optional[str] = None,
 ) -> Tuple[List[int], List[Dict[str, Any]], Optional[str]]:
     """对一个 stem 运行智能挑选并落盘,返回 (选中的候选序号, 新条目列表, 新 file_sig)。
 
     失败(找不到视频/SFT/LLM 应答不合格等)抛 KeyframeError 且不动磁盘;
     已有关键帧且 overwrite=False 抛 KeyframeExistsError。SFT JSON 不存在抛
     KeyframeError(批量路径事先过滤,不依赖此分支)。jobs 传入 JobManager
-    时(路由/批量线程),落盘前的锁内复查活跃 infer 并 409。
+    时(路由/批量线程),落盘前的锁内复查活跃 infer 并 409;video_rel 给定
+    时按工作区相对路径解析视频(嵌套目录视频)。
     """
-    video = workspace_mod.find_video(workspace, stem)
-    if video is None:
-        raise KeyframeError(f"工作区中找不到视频:{stem}")
+    video = _find_video_for_pick(workspace, stem, video_rel)
     sft_path = sft_json_path(workspace, stem)
     disk = _read_json(sft_path)
     if not isinstance(disk, dict):
@@ -475,9 +488,16 @@ def _batch_item_running(batch_id: str, stem: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _video_or_404(request: Request, stem: str) -> Path:
+def _video_or_404(request: Request, stem: str, rel: Optional[str] = None) -> Path:
+    """视频解析:rel 给定(嵌套目录视频,同 /api/infer 的 resolve_workspace_file
+    语义)走工作区受限解析;否则顶层 find_video(P2-6:嵌套视频此前候选/加帧 404)。"""
     workspace = workspace_mod.require_workspace(request)
     workspace_mod.validate_stem(stem)
+    if rel:
+        video = workspace_mod.resolve_workspace_file(workspace, rel)
+        if video.suffix.lower() not in workspace_mod.VIDEO_EXTENSIONS:
+            raise HTTPException(status_code=404, detail="Not a video file")
+        return video
     video = workspace_mod.find_video(workspace, stem)
     if video is None:
         raise HTTPException(status_code=404, detail="Video not found")
@@ -491,9 +511,11 @@ def _require_sft_stem(request: Request, stem: str) -> Path:
 
 
 @router.get("/api/videos/{stem}/keyframes/candidates")
-def get_candidates(stem: str, request: Request) -> List[Dict[str, Any]]:
+def get_candidates(
+    stem: str, request: Request, rel: Optional[str] = None
+) -> List[Dict[str, Any]]:
     """首末帧之间均匀采样的候选帧 [{index, time_sec}](≤10 个)。"""
-    video = _video_or_404(request, stem)
+    video = _video_or_404(request, stem, rel)
     meta = frames_mod.read_video_meta(video)
     if meta is None:
         raise HTTPException(status_code=404, detail="Video metadata unreadable")
@@ -509,9 +531,11 @@ def list_keyframes(stem: str, request: Request) -> List[Dict[str, Any]]:
 
 
 @router.post("/api/results/{stem}/keyframes")
-def add_keyframe(stem: str, body: _AddRequest, request: Request) -> Dict[str, Any]:
+def add_keyframe(
+    stem: str, body: _AddRequest, request: Request, rel: Optional[str] = None
+) -> Dict[str, Any]:
     workspace = _require_sft_stem(request, stem)
-    video = _video_or_404(request, stem)
+    video = _video_or_404(request, stem, rel)
     try:
         jpeg = frames_mod.read_frame_jpeg(video, body.frame_index)
     except OSError:
@@ -583,7 +607,9 @@ def reorder_keyframes(stem: str, body: _OrderRequest, request: Request) -> Dict[
 
 
 @router.post("/api/videos/{stem}/keyframes/auto_pick")
-def auto_pick(stem: str, request: Request, body: Optional[_AutoPickRequest] = None) -> Dict[str, Any]:
+def auto_pick(
+    stem: str, request: Request, body: Optional[_AutoPickRequest] = None, rel: Optional[str] = None
+) -> Dict[str, Any]:
     workspace = _require_sft_stem(request, stem)
     overwrite = bool(body and body.overwrite)
     try:
@@ -592,6 +618,7 @@ def auto_pick(stem: str, request: Request, body: Optional[_AutoPickRequest] = No
             stem,
             overwrite=overwrite,
             jobs=getattr(request.app.state, "jobs", None),
+            video_rel=rel,
         )
     except HTTPException:
         raise  # 409 活跃 infer 守卫等 FastAPI 异常原样透传

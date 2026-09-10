@@ -212,7 +212,7 @@ const emptyNote = computed(() => {
               {{ TAB_LABELS[t] }}
             </button>
           </div>
-          <SftEditor v-show="activeTab === 'sft'" :stem="stem" :sft="results.sft_label" :file-sig="results.file_sig" :raw-action="results.raw_action" />
+          <SftEditor v-show="activeTab === 'sft'" :stem="stem" :rel="rel" :sft="results.sft_label" :file-sig="results.file_sig" :raw-action="results.raw_action" />
           <ReportCard v-show="activeTab === 'report'" :stem="stem" :report-md="results.report_md" />
           <EvidenceCard v-if="results.evidence" v-show="activeTab === 'evidence'" :stem="stem" :source="source" />
         </template>

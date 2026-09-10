@@ -14,10 +14,10 @@ import {
   reorderKf,
 } from '../../../api/keyframes'
 import type { CandidateFrame, KeyframeEntry } from '../../../api/keyframes'
-import { frameUrl, resultFileUrl } from '../../../api/results'
+import { frameUrl, resultFileUrl, videoSourceOf } from '../../../api/results'
 import { useSftStore } from '../../../stores/sft'
 
-const props = defineProps<{ stem: string }>()
+const props = defineProps<{ stem: string; rel?: string | null }>()
 const store = useSftStore()
 const message = useMessage()
 const dialog = useDialog()
@@ -37,11 +37,12 @@ function applyMutation(data: { keyframes?: KeyframeEntry[]; file_sig?: string | 
 
 async function reload() {
   const stem = props.stem
+  const rel = props.rel
   candidates.value = []
   frames.value = []
   try {
     const [cands, list] = await Promise.all([
-      getKfCandidates(stem),
+      getKfCandidates(stem, rel),
       getKfList(stem).catch(() => [] as KeyframeEntry[]), // 尚未标注过:空列表不报错
     ])
     if (props.stem !== stem) return // 期间已切换视频:丢弃过期响应
@@ -56,7 +57,7 @@ watch(() => props.stem, reload, { immediate: true })
 
 async function onAdd(c: CandidateFrame) {
   try {
-    applyMutation(await addKf(props.stem, c.index, c.time_sec))
+    applyMutation(await addKf(props.stem, c.index, c.time_sec, props.rel))
   } catch (e) {
     message.error(`加入关键帧失败:${errText(e)}`)
   }
@@ -110,7 +111,7 @@ function onAutoPick() {
   const run = async () => {
     picking.value = true
     try {
-      const r = await autoPickKf(props.stem, true)
+      const r = await autoPickKf(props.stem, true, props.rel)
       applyMutation(r)
       message.success(`智能挑选完成:选中 ${r.picked?.length ?? r.keyframes.length} 帧`)
     } catch (e) {
@@ -139,7 +140,7 @@ function onAutoPick() {
         <div v-for="c in candidates" :key="c.index" class="kf-cell">
           <n-image
             class="kf-thumb"
-            :src="frameUrl({ stem: props.stem }, c.index)"
+            :src="frameUrl(videoSourceOf(props.stem, props.rel), c.index)"
             width="120"
             lazy
           />

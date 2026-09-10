@@ -246,6 +246,9 @@ class _FakeCapture:
         type(self).instances += 1
         self._index = 0
 
+    def isOpened(self) -> bool:
+        return True
+
     def get(self, prop: int) -> float:
         return 10.0
 
@@ -322,6 +325,9 @@ def _install_fake_cv2(monkeypatch: pytest.MonkeyPatch) -> None:
         VideoCapture=_FakeCapture,
         CAP_PROP_FRAME_COUNT=7,
         CAP_PROP_POS_FRAMES=1,
+        CAP_PROP_FPS=2,
+        CAP_PROP_FRAME_WIDTH=3,
+        CAP_PROP_FRAME_HEIGHT=6,
         imencode=lambda ext, frame: (True, _FakeBuf(f"jpeg:{frame}".encode())),
     )
     monkeypatch.setattr("traffic_analyzer.web.frames.cv2", fake)

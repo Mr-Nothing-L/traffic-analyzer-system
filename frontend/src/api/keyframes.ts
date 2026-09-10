@@ -39,16 +39,26 @@ export interface BatchStatus {
 
 const enc = encodeURIComponent
 
-export function getKfCandidates(stem: string): Promise<CandidateFrame[]> {
-  return apiFetch<CandidateFrame[]>(`/videos/${enc(stem)}/keyframes/candidates`)
+/** rel:嵌套目录视频的工作区相对路径(顶层视频不传;后端 rel 参数走 workspace 解析)。 */
+function relQuery(rel?: string | null): string {
+  return rel ? `?rel=${enc(rel)}` : ''
+}
+
+export function getKfCandidates(stem: string, rel?: string | null): Promise<CandidateFrame[]> {
+  return apiFetch<CandidateFrame[]>(`/videos/${enc(stem)}/keyframes/candidates${relQuery(rel)}`)
 }
 
 export function getKfList(stem: string): Promise<KeyframeEntry[]> {
   return apiFetch<KeyframeEntry[]>(`/results/${enc(stem)}/keyframes`)
 }
 
-export function addKf(stem: string, frameIndex: number, timeSec: number): Promise<KeyframeMutation> {
-  return apiFetch(`/results/${enc(stem)}/keyframes`, {
+export function addKf(
+  stem: string,
+  frameIndex: number,
+  timeSec: number,
+  rel?: string | null,
+): Promise<KeyframeMutation> {
+  return apiFetch(`/results/${enc(stem)}/keyframes${relQuery(rel)}`, {
     method: 'POST',
     body: JSON.stringify({ frame_index: frameIndex, time_sec: timeSec }),
   })
@@ -65,8 +75,12 @@ export function reorderKf(stem: string, filenames: string[]): Promise<KeyframeMu
   })
 }
 
-export function autoPickKf(stem: string, overwrite: boolean): Promise<KeyframeMutation> {
-  return apiFetch(`/videos/${enc(stem)}/keyframes/auto_pick`, {
+export function autoPickKf(
+  stem: string,
+  overwrite: boolean,
+  rel?: string | null,
+): Promise<KeyframeMutation> {
+  return apiFetch(`/videos/${enc(stem)}/keyframes/auto_pick${relQuery(rel)}`, {
     method: 'POST',
     body: JSON.stringify({ overwrite }),
   })
