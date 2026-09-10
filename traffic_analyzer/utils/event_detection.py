@@ -18,6 +18,7 @@ import json
 import logging
 from typing import Any, Dict, List
 
+from traffic_analyzer.core.vlm_engine import FatalAPIError
 from traffic_analyzer.models.schemas import (
     AnalysisContext,
     EventCandidate,
@@ -156,6 +157,8 @@ def reflect_expert_candidate(
             context_vars=context_vars,
             response_schema=_REFLECTION_RESPONSE_SCHEMA,
         )
+    except FatalAPIError:
+        raise
     except Exception as exc:
         logger.warning(
             "[reflect_expert_candidate] VLM_ERROR | event_id=%d event_name=%s | %s",

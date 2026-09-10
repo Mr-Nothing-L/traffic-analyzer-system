@@ -259,6 +259,8 @@ def _run_final_classifier(
         retry_template = _build_minimal_final_classifier_template(category, template)
         try:
             retry_response = _call_classifier(retry_template)
+        except FatalAPIError:
+            raise
         except Exception as exc:
             logger.error(
                 "[expert_agent:_run_final_classifier] RETRY_CALL_ERROR | event_id=%d frame=%d | %s",
