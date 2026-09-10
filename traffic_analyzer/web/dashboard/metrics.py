@@ -121,14 +121,18 @@ def _read_video_payloads(
 ) -> Tuple[bool, Optional[Any], Optional[Any]]:
     """单个视频的看板输入(纯 IO):has_results + SFT JSON + 冻结快照 JSON。
 
-    单条损坏不拖垮整个看板:JSON 损坏按「无预测/无快照」降级展示。
+    单条损坏不拖垮整个看板,且互不连累:SFT 与 _raw.json 分开捕获,
+    损坏的 _raw.json 不再把已读成功的 SFT 一并降级为「预测正常」。
     """
     out_dir = workspace_mod.analysis_dir(workspace, stem)
     try:
         sft = evidence_api._read_json(evidence_api.sft_json_path(out_dir, stem))
+    except evidence_api._CorruptJsonError:
+        sft = None
+    try:
         raw = evidence_api._read_json(out_dir / f"{stem}_raw.json")
     except evidence_api._CorruptJsonError:
-        sft = raw = None
+        raw = None
     return workspace_mod.has_results(workspace, stem), sft, raw
 
 
