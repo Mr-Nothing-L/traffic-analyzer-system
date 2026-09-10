@@ -26,6 +26,7 @@ from traffic_analyzer.models.schemas import (
     EventInstance,
     PromptTemplate,
 )
+from traffic_analyzer.utils.event_detection import EVENT_NON_MOTOR_ID, EVENT_PEDESTRIAN_ID
 from traffic_analyzer.utils.bbox_geometry import (
     compute_bbox_area_px,
     compute_bbox_aspect_ratio,
@@ -91,7 +92,7 @@ def _build_minimal_final_classifier_template(
     template: PromptTemplate,
 ) -> PromptTemplate:
     """Build a concise retry prompt when the first classifier response is unparseable."""
-    if category.event_id == 5:
+    if category.event_id == EVENT_NON_MOTOR_ID:
         example_json = (
             '{\n'
             '  "detected": <true|false>,\n'
@@ -213,7 +214,7 @@ def _run_final_classifier(
     # Pedestrian final classifier returns a full expert response so that
     # the adjudication layer receives the same structured instances as
     # other expert agents.
-    if category.event_id == 4:
+    if category.event_id == EVENT_PEDESTRIAN_ID:
         response_schema = _EXPERT_RESPONSE_SCHEMA
     else:
         response_schema = _FAR_ENHANCEMENT_RESPONSE_SCHEMA
@@ -309,7 +310,7 @@ def _run_final_classifier(
     # ------------------------------------------------------------------
     # Pedestrian branch: keep instances/summary from the classifier.
     # ------------------------------------------------------------------
-    if category.event_id == 4:
+    if category.event_id == EVENT_PEDESTRIAN_ID:
         final_summary = str(parsed.get("summary", ""))
         frame_info["raw_final_reason"] = final_summary
         final_instances = parsed.get("instances") or []
@@ -441,6 +442,7 @@ def _accept_fallback(
     category: EventCategory,
     frame_info: Dict[str, Any],
     frame_analysis_log: List[Dict[str, Any]],
+    fallback_confidence_threshold: float = 0.5,
 ) -> Optional[EventCandidate]:
     """Promote a previously negative candidate to detected=True if safe."""
     if frame_info.get("occluded"):
@@ -451,9 +453,9 @@ def _accept_fallback(
         )
         return None
 
-    # Pedestrians require a higher confidence bar before we override the
-    # final classifier, because the ROI detector is intentionally permissive.
-    confidence_threshold = 0.7 if category.event_id == 4 else 0.5
+    # 行人模板(event_4.yaml)把阈值显式提高到 0.7:ROI 检测器对行人刻意
+    # 放宽,覆盖最终分类结果需要更高的置信门槛(阈值来自 far 配置)。
+    confidence_threshold = fallback_confidence_threshold
     confidence = parse_roi_confidence(frame_info.get("confidence", 0.0))
     if confidence < confidence_threshold:
         logger.info(
@@ -468,7 +470,7 @@ def _accept_fallback(
     # For pedestrians, re-validate that the ROI itself passed the configured
     # size/aspect filters. These checks already happened during candidate
     # collection, but repeating them here makes the fallback self-contained.
-    if category.event_id == 4:
+    if category.event_id == EVENT_PEDESTRIAN_ID:
         if not frame_info.get("area_px"):
             logger.info(
                 "[expert_agent:_detect_with_far_enhancement] FALLBACK_REJECT_NO_AREA | event_id=%d frame=%d",
@@ -516,7 +518,7 @@ def _accept_fallback(
     # vehicle-structure evidence (wheels, handlebars, etc.). For pedestrians
     # the ROI detector already verified an upright human silhouette, so a
     # vague "cannot confirm" classifier reason should not block fallback.
-    if category.event_id == 5 and is_no_structure_reasoning(negative_reason):
+    if category.event_id == EVENT_NON_MOTOR_ID and is_no_structure_reasoning(negative_reason):
         logger.info(
             "[expert_agent:_detect_with_far_enhancement] FALLBACK_REJECT_NO_STRUCTURE | event_id=%d frame=%d negative_reason=%s",
             category.event_id,
@@ -528,7 +530,7 @@ def _accept_fallback(
     # Build a self-consistent summary. For pedestrians, anchor the summary
     # in the ROI detector's own reason so the report's "expert raw output"
     # matches the per-frame ROI evidence table.
-    if category.event_id == 4:
+    if category.event_id == EVENT_PEDESTRIAN_ID:
         roi_reason = str(frame_info.get("reason", ""))
         fallback_reason = (
             f"检测到高速公路行人。第{frame_info['global_index']}帧红色方框内"
@@ -548,7 +550,7 @@ def _accept_fallback(
         fallback=True,
     )
     candidate.is_target_explicitly_four_wheel_vehicle = False
-    candidate.target_type = "行人" if category.event_id == 4 else "非机动车"
+    candidate.target_type = "行人" if category.event_id == EVENT_PEDESTRIAN_ID else "非机动车"
     return candidate
 
 
@@ -962,11 +964,13 @@ def detect_per_frame(
     # enhancements. When the gate drops every candidate, keep the best ROI
     # as evidence so the report shows what was analysed and rejected.
     # ------------------------------------------------------------------
-    if category.event_id in (4, 5):
+    if category.event_id in (EVENT_PEDESTRIAN_ID, EVENT_NON_MOTOR_ID):
         total_candidates = len(candidates)
-        gated_candidates = [c for c in candidates if c.get("confidence", 0.0) >= 0.6]
+        gated_candidates = [
+            c for c in candidates if c.get("confidence", 0.0) >= far_cfg.confidence_gate
+        ]
         if not gated_candidates:
-            entity = "高速公路行人" if category.event_id == 4 else "非机动车"
+            entity = "高速公路行人" if category.event_id == EVENT_PEDESTRIAN_ID else "非机动车"
             logger.info(
                 "[expert_agent:_detect_with_far_enhancement] LOW_CONFIDENCE_FILTER | "
                 "event_id=%d kept=0 total=%d",
@@ -988,7 +992,7 @@ def detect_per_frame(
                 detected=False,
                 event_id=category.event_id,
                 event_name=category.name_zh,
-                summary=f"未检测到{entity}。所有远距离候选ROI置信度均低于0.6。",
+                summary=f"未检测到{entity}。所有远距离候选ROI置信度均低于{far_cfg.confidence_gate}。",
                 raw_vlm_response=negative_raw_response,
             )
         candidates = gated_candidates
@@ -1116,7 +1120,10 @@ def detect_per_frame(
     best_candidate = top_candidates[0]
     if "composite_path" in best_candidate and category.event_id in (4, 5):
         fallback_candidate = _accept_fallback(
-            category, best_candidate, frame_analysis_log
+            category,
+            best_candidate,
+            frame_analysis_log,
+            fallback_confidence_threshold=far_cfg.fallback_confidence_threshold,
         )
         if fallback_candidate is not None:
             logger.info(

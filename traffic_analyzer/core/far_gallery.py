@@ -37,6 +37,8 @@ from traffic_analyzer.utils.progress import get_reporter as _get_progress_report
 # can still import it from the far-enhancement module.
 from traffic_analyzer.core.car_semantic_veto import apply_structured_veto_to_candidate
 
+from traffic_analyzer.utils.event_detection import EVENT_CONSTRUCTION_ID
+
 logger = logging.getLogger(__name__)
 
 
@@ -450,7 +452,7 @@ def detect_gallery(
     # output consistent with the evidence table and gallery image.
     # ------------------------------------------------------------------
     if (
-        category.event_id == 7
+        category.event_id == EVENT_CONSTRUCTION_ID
         and not candidate.detected
         and _has_construction_evidence(category, valid_regions)
     ):

@@ -52,6 +52,10 @@ class SystemConfig(BaseModel):
     output_dir: str = "./output"
     save_debug_frames: bool = False
     log_level: str = "INFO"
+    # 裁决层缺事件恢复的最大重试轮数(AdjudicationRecovery)。
+    max_adjudication_retries: int = Field(
+        default_factory=lambda: int(os.getenv("MAX_ADJUDICATION_RETRIES", "5"))
+    )
     scene_understanding_min_frames: int = Field(
         default_factory=lambda: int(os.getenv("SCENE_UNDERSTANDING_MIN_FRAMES", "10"))
     )

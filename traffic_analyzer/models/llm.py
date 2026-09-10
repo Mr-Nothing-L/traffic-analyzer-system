@@ -32,6 +32,11 @@ class FarObjectEnhancementConfig(BaseModel):
     motion_penalty: float = 5.0
     top_k: int = Field(default=2, ge=1)
     frame_selection: str = "all"  # "all" = per-frame ROI scan; "middle" = single middle frame (e.g. construction)
+    # ROI 进入最终分类器的置信度下限(低置信增强是误报主要来源)。
+    confidence_gate: float = 0.6
+    # 负候选回退提升(override 最终分类结果)所需置信度;行人模板在
+    # event_4.yaml 显式提高到 0.7(ROI 检测器对行人刻意放宽,须更高门槛)。
+    fallback_confidence_threshold: float = 0.5
 
 
 class PromptTemplate(BaseModel):

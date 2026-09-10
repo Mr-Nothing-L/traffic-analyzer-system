@@ -49,6 +49,7 @@ from traffic_analyzer.models.schemas import (
 
 logger = logging.getLogger(__name__)
 
+# 兜底默认:实际取 SystemConfig.max_adjudication_retries(env MAX_ADJUDICATION_RETRIES)。
 MAX_ADJUDICATION_RETRIES = 5
 
 # JSON schema for adjudication VLM response (forces valid JSON output).
@@ -414,9 +415,10 @@ class AdjudicationStep(PipelineStep):
         previously_missing_event_ids: List[int] = []
         last_response: Optional[Any] = None
         last_parsed_data: Dict[str, Any] = {}
-        recovery = AdjudicationRecovery(max_retries=MAX_ADJUDICATION_RETRIES)
+        max_retries = int(getattr(context.config, "max_adjudication_retries", MAX_ADJUDICATION_RETRIES))
+        recovery = AdjudicationRecovery(max_retries=max_retries)
 
-        for attempt in range(1, MAX_ADJUDICATION_RETRIES + 1):
+        for attempt in range(1, max_retries + 1):
             candidates = list(context.event_candidates.values())
             candidates_json = json.dumps(
                 [c.to_adjudication_json() for c in candidates],

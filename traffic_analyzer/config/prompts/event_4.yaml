@@ -140,6 +140,8 @@ prompt_templates:
       roi_template_id: "far_non_motor_roi_detection"
       min_area_px: 80
       max_aspect_ratio: 1.2
+      # 行人 ROI 检测器刻意放宽,负候选回退提升需更高置信门槛(其余 far 事件默认 0.5)
+      fallback_confidence_threshold: 0.7
 
   # ---------------------------------------------------------------------------
   # 7. Heavy Congestion Detection (event_id=6)

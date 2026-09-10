@@ -28,6 +28,8 @@ def _render_far_enhancement(
     if not candidate:
         return []
 
+    # 标题文案与 event_categories.yaml name_zh 语义对应(5=非机动车、4=行人、
+    # 7=施工、2=应急车道);完整单源化(标题也入 YAML)随跨语言单源化一并做。
     if event_id == 5:
         title = "远距离非机动车增强证据"
         composite_alt = "远距离非机动车增强"

@@ -29,6 +29,14 @@ from traffic_analyzer.models.schemas import (
 logger = logging.getLogger(__name__)
 
 
+# 事件语义常量:编号唯一权威来源是 config/event_categories.yaml(标注文档 v4.5)。
+# 代码里的事件分支只准引用命名常量,不再散写魔法数(P3-5)。
+EVENT_EMERGENCY_LANE_ID = 2
+EVENT_PEDESTRIAN_ID = 4
+EVENT_NON_MOTOR_ID = 5
+EVENT_CONSTRUCTION_ID = 7
+
+
 def is_event_id(value: Any) -> bool:
     """event_id 严格整数判定:JSON true/false 解析为 bool(bool 是 int 的子类),
     不得当作 event 1/0 计入检出集合。"""

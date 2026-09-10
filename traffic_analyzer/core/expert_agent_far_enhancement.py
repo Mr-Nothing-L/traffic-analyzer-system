@@ -39,6 +39,7 @@ from traffic_analyzer.core.far_emergency_lane import detect_emergency_lane_occup
 from traffic_analyzer.core.far_gallery import detect_gallery
 from traffic_analyzer.core.far_per_frame import detect_per_frame
 
+from traffic_analyzer.utils.event_detection import EVENT_EMERGENCY_LANE_ID
 logger = logging.getLogger(__name__)
 
 # Directory where far-distance object composite images are saved.
@@ -139,7 +140,7 @@ class FarEnhancementDetector:
         # Emergency lane occupancy branch (event_id=2).
         # Must be checked before the generic "middle" gallery branch.
         # ------------------------------------------------------------------
-        if self.category.event_id == 2:
+        if self.category.event_id == EVENT_EMERGENCY_LANE_ID:
             return detect_emergency_lane_occupancy(
                 category=self.category,
                 vlm_engine=self.vlm_engine,
