@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
-from .enums import ConfidenceLevel, DetectionMode
+from .enums import DetectionMode
 
 
 class EventCategory(BaseModel):
@@ -25,8 +25,6 @@ class EventCategory(BaseModel):
     description: str = Field(..., description="What this event is")
     detection_mode: DetectionMode = DetectionMode.EXPERT_AGENT
     definition: str = Field("", description="Detailed definition for LLM prompt")
-    visual_indicators: List[str] = Field(default_factory=list)
-    confidence_threshold: float = 0.7
     prompt_template_id: Optional[str] = Field(
         None, description="Template ID for expert_agent mode. Required for expert_agent mode."
     )
@@ -54,7 +52,6 @@ class EventInstance(BaseModel):
     road_id: Optional[int] = None
     start_time_sec: float = 0.0
     end_time_sec: float = 0.0
-    confidence_level: ConfidenceLevel = ConfidenceLevel.LOW
     evidence_frames: List[int] = Field(default_factory=list)
     description: str = ""
     reasoning: str = ""
@@ -70,7 +67,6 @@ class EventResult(BaseModel):
     instances: List[EventInstance] = Field(default_factory=list)
     summary: str = ""
     reasoning: str = ""
-    analysis_process: List[str] = Field(default_factory=list)
     adjudication_reasoning: str = Field(default="", description="裁决层对该事件的详细推理过程")
     grounding_note: str = Field(default="", description="锚定核验层对该事件的分析说明")
     grounding_overturned: bool = Field(default=False, description="裁决检出但被锚定核验推翻")

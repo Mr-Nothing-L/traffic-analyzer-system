@@ -24,7 +24,6 @@ import pytest
 from traffic_analyzer.core.report_generator import ReportGenerator
 from traffic_analyzer.models.schemas import (
     BinaryEncoding,
-    ConfidenceLevel,
     EventInstance,
     EventResult,
     Report,
@@ -83,7 +82,6 @@ def event_results() -> List[EventResult]:
                     road_id=1,
                     start_time_sec=15.0,
                     end_time_sec=22.0,
-                    confidence_level=ConfidenceLevel.HIGH,
                     evidence_frames=[375, 400, 425, 550],
                     description="白色轿车在对向车道逆向行驶约 7 秒。",
                     reasoning="车辆轨迹与道路正常方向夹角大于 150 度，且持续多帧。",
@@ -91,7 +89,6 @@ def event_results() -> List[EventResult]:
                 )
             ],
             summary="检测到 1 起逆行事件。",
-            analysis_process=["提取关键帧", "VLM 识别逆行", "轨迹验证"],
         ),
         EventResult(
             event_id=2,
@@ -99,7 +96,6 @@ def event_results() -> List[EventResult]:
             detected=False,
             instances=[],
             summary="未检测到应急车道占用行为。",
-            analysis_process=["提取关键帧", "VLM 识别应急车道"],
         ),
         EventResult(
             event_id=3,
@@ -113,7 +109,6 @@ def event_results() -> List[EventResult]:
                     road_id=0,
                     start_time_sec=45.0,
                     end_time_sec=55.0,
-                    confidence_level=ConfidenceLevel.MEDIUM,
                     evidence_frames=[1125, 1150, 1200, 1375],
                     description="黑色 SUV 在限速 80 km/h 路段估算速度约 110 km/h。",
                     reasoning="跨帧位移与标定车道长度比值超出阈值 1.35 倍。",
@@ -126,7 +121,6 @@ def event_results() -> List[EventResult]:
                     road_id=0,
                     start_time_sec=80.0,
                     end_time_sec=88.0,
-                    confidence_level=ConfidenceLevel.MEDIUM,
                     evidence_frames=[2000, 2050, 2100, 2200],
                     description="银色轿车疑似超速。",
                     reasoning="同上。",
@@ -134,7 +128,6 @@ def event_results() -> List[EventResult]:
                 ),
             ],
             summary="检测到 2 起超速事件。",
-            analysis_process=["速度估算", "阈值比对"],
         ),
     ]
 
@@ -398,7 +391,6 @@ class TestToMarkdown:
         assert "## 视频信息" in md
         assert "## 最终分析" in md
         assert "## 分析统计" in md
-        assert "## 附录：详细分析过程" in md
 
     def test_video_info_content(
         self,
@@ -444,7 +436,6 @@ class TestToMarkdown:
         assert "375" in md
         assert "1125" in md
         # Reasoning
-        assert "轨迹验证" in md
 
     def test_binary_encoding_explanation(
         self,

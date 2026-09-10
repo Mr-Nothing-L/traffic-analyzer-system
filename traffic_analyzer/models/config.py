@@ -47,13 +47,10 @@ class LLMProviderConfig(BaseModel):
 
 class SystemConfig(BaseModel):
     """Complete system configuration."""
-    llm_provider: LLMProviderConfig = Field(default_factory=LLMProviderConfig)
     llm_providers: List[LLMProviderConfig] = Field(default_factory=list)
     sampling: SamplingConfig = Field(default_factory=SamplingConfig)
     output_dir: str = "./output"
     save_debug_frames: bool = False
-    event_confidence_threshold: float = 0.7
-    max_video_length_sec: float = 300.0
     log_level: str = "INFO"
     scene_understanding_min_frames: int = Field(
         default_factory=lambda: int(os.getenv("SCENE_UNDERSTANDING_MIN_FRAMES", "10"))
@@ -76,14 +73,3 @@ class SystemConfig(BaseModel):
     sft_label_output_dir: str = Field(
         default_factory=lambda: os.getenv("SFT_LABEL_OUTPUT_DIR", "output/sft_labels")
     )
-
-    @model_validator(mode="after")
-    def _sync_llm_providers(self) -> "SystemConfig":
-        if self.llm_providers and self.llm_provider:
-            logger.warning(
-                "Both llm_provider and llm_providers are set; llm_providers takes precedence."
-            )
-            self.llm_provider = self.llm_providers[0]
-        elif not self.llm_providers and self.llm_provider:
-            self.llm_providers = [self.llm_provider.model_copy()]
-        return self

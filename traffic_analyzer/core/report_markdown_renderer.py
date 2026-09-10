@@ -324,12 +324,6 @@ def _render_event_result(result: EventResult, expert_candidates: Optional[List[D
             lines.append("_检测到事件，但无详细实例信息。_")
             lines.append("")
 
-        if result.analysis_process:
-            lines.append("#### 分析过程")
-            for step in result.analysis_process:
-                lines.append(f"- {step}")
-            lines.append("")
-
         # 展示裁决层对该事件的推理
         if result.adjudication_reasoning:
             lines.append("#### 裁决推理")

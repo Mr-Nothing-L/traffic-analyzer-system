@@ -48,7 +48,6 @@ class Report(BaseModel):
     binary_encoding: BinaryEncoding = Field(default_factory=BinaryEncoding)
     final_classification: str = ""
     disposal_recommendations: List[str] = Field(default_factory=list)
-    verification_results: Dict[str, str] = Field(default_factory=dict)
     llm_usage_stats: Dict[str, Any] = Field(default_factory=dict)
     analysis_duration_sec: float = 0.0
     generated_at: datetime = Field(default_factory=datetime.now)

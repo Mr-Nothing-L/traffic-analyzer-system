@@ -127,7 +127,7 @@ class TestLoadAll:
     def test_load_all_returns_system_config(self, manager: ConfigManager) -> None:
         config = manager.load_all()
         assert isinstance(config, SystemConfig)
-        assert config.llm_provider.provider == "anthropic"
+        assert config.llm_providers[0].provider == "anthropic"
 
     def test_event_categories_loaded(self, manager: ConfigManager) -> None:
         manager.load_all()
@@ -300,14 +300,14 @@ class TestEnvParsing:
         mgr = ConfigManager(str(temp_config_dir))
         config = mgr.load_all()
 
-        assert config.llm_provider.provider == "openai"
-        assert config.llm_provider.api_key == "sk-test-key"
-        assert config.llm_provider.base_url == "https://api.openai.com/v1"
-        assert config.llm_provider.model == "gpt-4o"
-        assert config.llm_provider.max_tokens == 2048
-        assert config.llm_provider.temperature == 0.5
-        assert config.llm_provider.timeout == 60.0
-        assert config.llm_provider.max_retries == 5
+        assert config.llm_providers[0].provider == "openai"
+        assert config.llm_providers[0].api_key == "sk-test-key"
+        assert config.llm_providers[0].base_url == "https://api.openai.com/v1"
+        assert config.llm_providers[0].model == "gpt-4o"
+        assert config.llm_providers[0].max_tokens == 2048
+        assert config.llm_providers[0].temperature == 0.5
+        assert config.llm_providers[0].timeout == 60.0
+        assert config.llm_providers[0].max_retries == 5
 
     def test_invalid_numeric_env_ignored(self, temp_config_dir: Path) -> None:
         (temp_config_dir / ".env").write_text(
@@ -316,7 +316,7 @@ class TestEnvParsing:
         mgr = ConfigManager(str(temp_config_dir))
         config = mgr.load_all()
         # Should fall back to default
-        assert config.llm_provider.max_tokens == 4096
+        assert config.llm_providers[0].max_tokens == 4096
 
     def test_legacy_single_env_becomes_first_provider(self, temp_config_dir: Path) -> None:
         """Legacy LLM_* variables must be available as llm_providers[0]."""
@@ -348,7 +348,7 @@ class TestEnvParsing:
         assert config.llm_providers[0].max_retries == 5
 
         # Backwards-compatible accessors
-        assert config.llm_provider.provider == "openai"
+        assert config.llm_providers[0].provider == "openai"
         assert mgr.get_llm_provider().provider == "openai"
         assert len(mgr.get_llm_providers()) == 1
 
@@ -402,7 +402,6 @@ class TestEnvParsing:
         assert p1.max_retries == 4
 
         # Primary provider is the first one
-        assert config.llm_provider == p0
         assert mgr.get_llm_provider() == p0
 
     def test_sparse_provider_indices_create_no_phantom(self, temp_config_dir: Path) -> None:
@@ -423,7 +422,7 @@ class TestEnvParsing:
         assert len(config.llm_providers) == 1
         assert config.llm_providers[0].provider == "openai"
         assert config.llm_providers[0].api_key == "sk-only"
-        assert config.llm_provider.provider == "openai"
+        assert config.llm_providers[0].provider == "openai"
 
     def test_invalid_frame_count_env_falls_back_to_default(self, temp_config_dir: Path) -> None:
         """Non-integer SCENE_UNDERSTANDING_MIN_FRAMES/VLM_MAX_FRAMES must not crash load."""
@@ -459,27 +458,6 @@ class TestEnvParsing:
 
         assert config.sft_label_enabled is True
         assert config.sft_label_output_dir == "/tmp/sft_out"
-
-
-# ---------------------------------------------------------------------------
-# SystemConfig model validator tests
-# ---------------------------------------------------------------------------
-
-
-class TestSystemConfigValidator:
-    def test_both_provider_fields_list_wins(self, caplog) -> None:
-        """When both llm_provider and llm_providers are provided, the list wins."""
-        single = LLMProviderConfig(provider="openai", api_key="old-key")
-        multi = [LLMProviderConfig(provider="anthropic", api_key="new-key")]
-
-        with caplog.at_level("WARNING"):
-            config = SystemConfig(llm_provider=single, llm_providers=multi)
-
-        assert len(config.llm_providers) == 1
-        assert config.llm_providers[0].provider == "anthropic"
-        assert config.llm_providers[0].api_key == "new-key"
-        assert config.llm_provider.provider == "anthropic"
-        assert "llm_providers takes precedence" in caplog.text
 
 
 # ---------------------------------------------------------------------------

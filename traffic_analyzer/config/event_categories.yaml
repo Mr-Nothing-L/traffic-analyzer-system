@@ -39,7 +39,6 @@ event_categories:
     description: "机动车在禁止停车区域静止或停放"
     detection_mode: "expert_agent"
     prompt_template_id: "illegal_parking_detection"
-    confidence_threshold: 0.7
     is_active: true
     definition: |
       违法停车判定规则（与标注文档 v4.5 一致）：
@@ -57,7 +56,6 @@ event_categories:
     description: "车辆进入、停止、占用或在应急车道内行驶"
     detection_mode: "expert_agent"
     prompt_template_id: "emergency_lane_occupancy_detection"
-    confidence_threshold: 0.7
     is_active: true
     definition: |
       应急车道（路肩）特征：
@@ -77,7 +75,6 @@ event_categories:
     description: "车辆碰撞、翻车、起火、散落物等突发事件"
     detection_mode: "expert_agent"
     prompt_template_id: "traffic_accident_detection"
-    confidence_threshold: 0.7
     is_active: true
     definition: |
       交通事故包括：车辆碰撞、翻车、起火/冒烟、路面散落物、动物进入车道等。
@@ -91,7 +88,6 @@ event_categories:
     description: "行人或滞留驾乘人员出现在高速公路限制区域"
     detection_mode: "expert_agent"
     prompt_template_id: "pedestrian_detection"
-    confidence_threshold: 0.7
     is_active: true
     definition: |
       行人出现：高速公路车道、路肩、中央隔离带、匝道等区域行走的普通人或滞留驾乘人员。
@@ -105,7 +101,6 @@ event_categories:
     description: "两轮/三轮摩托车出现在高速公路上"
     detection_mode: "expert_agent"
     prompt_template_id: "non_motor_vehicle_detection"
-    confidence_threshold: 0.7
     is_active: true
     definition: |
       摩托车出现：两轮/三轮摩托车在高速公路上行驶或静止。
@@ -119,7 +114,6 @@ event_categories:
     description: "单车道或多车道通行能力下降的交通状态"
     detection_mode: "expert_agent"
     prompt_template_id: "heavy_congestion_detection"
-    confidence_threshold: 0.7
     is_active: true
     definition: |
       拥堵：道路上出现单车道或多车道通行能力下降、影响整体通行效率的交通状态。
@@ -134,7 +128,6 @@ event_categories:
     description: "道路施工或维护作业区域"
     detection_mode: "expert_agent"
     prompt_template_id: "road_construction_detection"
-    confidence_threshold: 0.7
     is_active: true
     definition: |
       道路施工判定（v4.5）：
@@ -150,7 +143,6 @@ event_categories:
     description: "车辆移动方向与车道正常流向相反"
     detection_mode: "expert_agent"
     prompt_template_id: "direct_reversing_detection"
-    confidence_threshold: 0.8
     is_active: true
     definition: |
       车辆逆行/倒车：车辆移动方向与所在车道正常流向相反。
@@ -164,7 +156,6 @@ event_categories:
     description: "车道内可能影响通行的遗落异物"
     detection_mode: "expert_agent"
     prompt_template_id: "thrown_object_detection"
-    confidence_threshold: 0.7
     is_active: true
     definition: |
       抛洒物：遗落至车道内可能影响车辆通行的异物（塑料袋、瓶子、木板、泥土等）。
@@ -180,7 +171,6 @@ event_categories:
     description: "车辆跨越实线标线变道"
     detection_mode: "expert_agent"
     prompt_template_id: "lane_change_solid_detection"
-    confidence_threshold: 0.7
     is_active: true
     definition: |
       实线变道：车辆主动跨越白色/黄色实线从一个车道驶入另一个车道。
