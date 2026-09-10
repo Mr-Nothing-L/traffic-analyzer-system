@@ -438,8 +438,9 @@ def _run_batch(
     workspace: Path, stems: List[str], overwrite: bool, batch_id: str, jobs: Any = None
 ) -> None:
     for stem in stems:
-        adir = workspace_mod.analysis_dir(workspace, stem)
-        if not (adir / f"{stem}.json").is_file():
+        # 跳过检查走 sft_json_path 单一真相源:仅存 quarantine 副本的隔离
+        # 样本不再被误报「无 SFT 标注」(077ae7f 收敛的最后一处残留)。
+        if not sft_json_path(workspace, stem).is_file():
             _batch_item(batch_id, stem, "skipped", "无 SFT 标注")
             continue
         try:
