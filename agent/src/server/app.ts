@@ -583,20 +583,27 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       sendError(res, 409, 'chat_in_progress', `session ${session.id} already has a chat turn in progress`);
       return;
     }
-    const { provider } = providerFactory();
-    const outcome = await compactMessagesWithSummary(
-      session.messages,
-      createCompactionConfig(contextTokens),
-      provider,
-    );
-    if (outcome.compacted) sessions.replaceMessages(session.id, outcome.messages);
-    sendJson(res, 200, {
-      status: 'ok',
-      compacted: outcome.compacted,
-      summarized: outcome.summarized,
-      beforeTokens: outcome.beforeTokens,
-      afterTokens: outcome.afterTokens,
-    });
+    // 压缩期间占用 busy:LLM 摘要最长可达 60s,并发 /chat 会与压缩完成后的
+    // replaceMessages 整体重写互相踩持久化(appendMessages 增量 vs 整体清写)。
+    runtime.busy = true;
+    try {
+      const { provider } = providerFactory();
+      const outcome = await compactMessagesWithSummary(
+        session.messages,
+        createCompactionConfig(contextTokens),
+        provider,
+      );
+      if (outcome.compacted) sessions.replaceMessages(session.id, outcome.messages);
+      sendJson(res, 200, {
+        status: 'ok',
+        compacted: outcome.compacted,
+        summarized: outcome.summarized,
+        beforeTokens: outcome.beforeTokens,
+        afterTokens: outcome.afterTokens,
+      });
+    } finally {
+      runtime.busy = false;
+    }
   };
 
   /** 撤回:截断 entries[entryIndex..] 与其后的 kosong messages(见
