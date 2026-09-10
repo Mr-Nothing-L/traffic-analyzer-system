@@ -23,6 +23,9 @@ wheels/
 
 # Environment variables
 .env
+.env.*
+!.env.example
+*.bak
 
 # Output
 output/
