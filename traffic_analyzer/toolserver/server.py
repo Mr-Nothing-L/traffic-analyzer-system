@@ -22,6 +22,7 @@ import base64
 import io
 import logging
 import os
+import secrets
 import shutil
 import subprocess
 import time
@@ -580,8 +581,14 @@ _TRANSCODE_TIMEOUT_S = 300.0  # prepare_video 单次 ffmpeg 转码超时(秒)
 
 
 def _timestamp_tag() -> str:
-    """产物目录时间戳标签:YYYYmmdd_HHMMSS。"""
-    return time.strftime("%Y%m%d_%H%M%S")
+    """产物目录时间戳标签:YYYYmmdd_HHMMSS_mmm_xxxx。
+
+    毫秒 + 随机后缀:同 stem 同秒并发 track 的产物目录不再互踩(P3-17)。"""
+    now = time.time()
+    return (
+        time.strftime("%Y%m%d_%H%M%S", time.localtime(now))
+        + f"_{int((now % 1) * 1000):03d}_{secrets.token_hex(2)}"
+    )
 
 
 def _rel_to_root(root: Path, path: Path) -> Optional[Path]:
