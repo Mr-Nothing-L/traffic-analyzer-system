@@ -93,6 +93,7 @@ import { CallbackApprovalService } from '../permissions/approval';
 import { PermissionGate } from '../permissions/gate';
 import type { PermissionMode } from '../permissions/types';
 import {
+  BackgroundJobRegistry,
   createSubagentListTool,
   createSubagentReportTool,
   loadToolsetEntrySpec,
@@ -123,8 +124,9 @@ export interface ProviderHandle {
 export interface AgentServerOptions {
   /** 构造 LLM provider;默认 createProviderFromEnv()(惰性,首次使用时创建)。 */
   readonly providerFactory?: () => ProviderHandle;
-  /** 按 session 构造工具注册表;默认 registerBuiltinTools(workspaceDir)。 */
-  readonly toolsFactory?: (session: Session) => ToolRegistry;
+  /** 按 session 构造工具注册表;默认 registerBuiltinTools(workspaceDir)。
+   * jobRegistry 为会话级后台任务注册表,删除/清扫/关闭时由 server dispose。 */
+  readonly toolsFactory?: (session: Session, jobRegistry: BackgroundJobRegistry) => ToolRegistry;
   /** system prompt;默认读 agent/prompts/chat_system.md 并渲染事件契约占位符。 */
   readonly systemPrompt?: string;
   /** 审批挂起超时(ms),默认 5 分钟。 */
@@ -170,6 +172,8 @@ interface SessionRuntime {
   /** steer 排队的 user 消息(注入后清空;轮次结束时未消费的丢弃并发
    *  steer_dropped 事件,不带入下一轮,避免插话注入在新用户消息之后)。 */
   readonly steerQueue: QueuedSteer[];
+  /** 会话级后台任务注册表:删除/清扫/服务器关闭时 dispose 终止运行中的子进程。 */
+  readonly jobRegistry: BackgroundJobRegistry;
 }
 
 /**
@@ -375,6 +379,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       // 白烧 provider 费用(事件已无人消费)。
       runtime?.controller?.abort();
       runtime?.bridge.cancelAll();
+      runtime?.jobRegistry.dispose(); // 终止会话遗留的后台 bash 进程
       runtimes.delete(session.id);
     },
     // 空闲清扫跳过 busy 会话:轮次进行中 lastActiveAt 可能长期不动(长工具
@@ -384,9 +389,12 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
 
   const toolsFactory =
     options.toolsFactory ??
-    ((session: Session): ToolRegistry => {
+    ((
+      session: Session,
+      jobRegistry: BackgroundJobRegistry,
+    ): ToolRegistry => {
       const registry = new ToolRegistry();
-      registerBuiltinTools(registry, { workspaceDir: session.workspaceDir });
+      registerBuiltinTools(registry, { workspaceDir: session.workspaceDir, jobRegistry });
       return registry;
     });
 
@@ -404,7 +412,8 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
         }),
       ),
     });
-    const registry = toolsFactory(session);
+    const jobRegistry = new BackgroundJobRegistry();
+    const registry = toolsFactory(session, jobRegistry);
     // spawn_subagent / subagent_list / subagent_report 在 server 组装处闭包注入
     // (provider/gate/systemPrompt 与共享 SubagentRunRegistry);自定义 toolsFactory
     // 已自带同名工具时跳过,避免覆盖。子代理运行注册表按 session 构造注入,避免全局态。
@@ -436,7 +445,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
         ),
       );
     }
-    return { registry, gate, bridge, busy: false, controller: null, steerQueue: [] };
+    return { registry, gate, bridge, busy: false, controller: null, steerQueue: [], jobRegistry };
   };
 
   /** 内存中无 runtime 时(恢复的 session)按需创建。 */
@@ -1127,7 +1136,10 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
     close: () =>
       new Promise<void>((resolvePromise, rejectPromise) => {
         sessions.close();
-        for (const runtime of runtimes.values()) runtime.bridge.cancelAll();
+        for (const runtime of runtimes.values()) {
+          runtime.bridge.cancelAll();
+          runtime.jobRegistry.dispose();
+        }
         server.close((error) => (error === undefined ? resolvePromise() : rejectPromise(error)));
       }),
   };

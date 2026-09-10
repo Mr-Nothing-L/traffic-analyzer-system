@@ -39,6 +39,8 @@ const EXEC_MAX_BUFFER = 16 * 1024 * 1024;
 
 /** Per-background-job output buffer cap (characters). Old data is dropped. */
 const MAX_BACKGROUND_OUTPUT_CHARS = 64 * 1024;
+/** 已结束(exited/killed)记录的保留上限:超出的按 job_id 淘汰最旧。 */
+const MAX_FINISHED_JOBS = 50;
 
 const runCommandInputSchema = z.strictObject({
   command: z.string().min(1),
@@ -167,6 +169,7 @@ export class BackgroundJobRegistry {
         job.status = 'exited';
         job.exit_code = code ?? 0;
       }
+      this.evictFinished();
     });
 
     child.on('error', () => {
@@ -174,10 +177,30 @@ export class BackgroundJobRegistry {
         job.status = 'exited';
         job.exit_code = child.exitCode ?? 1;
       }
+      this.evictFinished();
     });
 
     this.jobs.set(job_id, job);
+    this.evictFinished();
     return job_id;
+  }
+
+  /** 终止全部运行中的后台进程并清空记录(会话删除/清扫/服务器关闭时调用)。 */
+  dispose(): void {
+    for (const job of this.jobs.values()) {
+      if (job.status === 'running') job.process.kill('SIGTERM');
+    }
+    this.jobs.clear();
+  }
+
+  /** 已结束记录做上限淘汰:ChildProcess 与 64KB×2 输出缓冲不再随 Map 常驻。 */
+  private evictFinished(): void {
+    const finished = [...this.jobs.values()].filter((job) => job.status !== 'running');
+    if (finished.length <= MAX_FINISHED_JOBS) return;
+    finished
+      .sort((a, b) => a.job_id.localeCompare(b.job_id))
+      .slice(0, finished.length - MAX_FINISHED_JOBS)
+      .forEach((job) => this.jobs.delete(job.job_id));
   }
 
   list(): BackgroundJobInfo[] {

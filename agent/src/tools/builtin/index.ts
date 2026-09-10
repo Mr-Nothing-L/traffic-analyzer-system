@@ -51,6 +51,9 @@ export interface BuiltinToolsOptions {
   /** Overrides TOOLSERVER_URL env var and the http://127.0.0.1:8601 default. */
   readonly toolserverUrl?: string | undefined;
   readonly additionalDirs?: readonly string[];
+  /** 注入共享的后台任务注册表(app.ts 按会话持有,删除/清扫时 dispose);
+   * 缺省时内部自建(测试/独立使用场景)。 */
+  readonly jobRegistry?: BackgroundJobRegistry;
 }
 
 interface ToolsetEntry {
@@ -140,7 +143,7 @@ export function registerBuiltinTools(
   const client = new ToolserverClient({ baseUrl: options.toolserverUrl });
 
   // 每 session 新建:后台任务注册表、任务清单与取证发起记录,保证会话隔离。
-  const shellToolsDeps = { workspace, jobRegistry: new BackgroundJobRegistry() };
+  const shellToolsDeps = { workspace, jobRegistry: options.jobRegistry ?? new BackgroundJobRegistry() };
   const todoWriteTool = createTodoWriteTool(specOf('todo_write'));
   // 防跳跟踪闸门:记录本 session 已对哪些视频发起过 track_suspects,
   // 供 submit_detection 校验事件 1/2/8 的取证前置(生产路径必传)。
