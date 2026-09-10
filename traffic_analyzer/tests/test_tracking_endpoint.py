@@ -313,6 +313,30 @@ class TestContract:
         cache_dir = tracked_video.parent / ".agent" / "tracks" / "_cache"
         assert cache_dir.is_dir() and len(list(cache_dir.glob("*.json"))) == 1
 
+    def test_cache_key_includes_time_range(
+        self, client: TestClient, tracked_video: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = ScriptedEngine(responses=[_window_response("[100,700,400,950]")])
+        monkeypatch.setattr(
+            "traffic_analyzer.toolserver.server._build_default_engine", lambda: engine
+        )
+        tc = client.app.state.tracking_engine  # type: ignore[attr-defined]
+        resp1 = _post(client, tc, time_range=[0.0, 6.0])
+        assert resp1.status_code == 200 and resp1.json()["failed"] is False
+        calls_after_first = engine.calls
+        assert calls_after_first > 0
+
+        # 同锚点同视频但不同 time_range → 缓存键必须变化,VLM 重新被调用
+        resp2 = _post(client, tc, time_range=[0.0, 8.0])
+        assert resp2.status_code == 200 and resp2.json()["failed"] is False
+        calls_after_second = engine.calls
+        assert calls_after_second > calls_after_first
+
+        # 浮点抖动(1e-4 量级)不得造成未命中
+        resp3 = _post(client, tc, time_range=[0.0, 6.0004])
+        assert resp3.status_code == 200 and resp3.json()["failed"] is False
+        assert engine.calls == calls_after_second
+
 
 class TestFailurePaths:
     def test_all_windows_fail_returns_200_failed_true(

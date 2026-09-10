@@ -512,10 +512,10 @@ def create_app(workspace: Path | str) -> FastAPI:
             else None
         )
 
-        # 磁盘结果缓存:键 = (视频解析路径, 规范化锚点集合),描述不进键
+        # 磁盘结果缓存:键 = (视频解析路径, 规范化锚点集合, 规范化 time_range),描述不进键
         root = next(r for r in request.app.state.allowed_roots if video.is_relative_to(r))
         cache_dir = root / ".agent" / "tracks" / "_cache"
-        key = tracking_cache.cache_key(video.resolve(), anchors)
+        key = tracking_cache.cache_key(video.resolve(), anchors, time_range)
         cached = tracking_cache.load_cached(cache_dir, key)
         if cached is not None:
             return dict(cached)
