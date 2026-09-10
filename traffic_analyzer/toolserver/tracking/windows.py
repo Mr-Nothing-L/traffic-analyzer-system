@@ -710,17 +710,26 @@ def compute_env_flow(
 
 
 def _parse_heading(raw_text: str) -> str:
-    """从模型输出提取车头朝向:朝镜头/背镜头/难以判断。"""
+    """从模型输出提取车头朝向:朝镜头(toward)/背镜头(away)/难以判断。
+
+    先对三类标准答案做全等匹配(剥首尾空白/引号/标点后整串相等);不中再按
+    词表打分——反向词(背/车尾/远离)优先级不低于正向词,否则"车尾朝镜头"
+    会命中"朝镜头"给出反向答案;都不中才 unknown。
+    """
     text = (raw_text or "").strip()
-    # 简单关键词匹配,兼容 JSON 包装
+    # 全等匹配(兼容 JSON 值/裸答案:剥掉包裹符号后的整串)
+    compact = text.strip("\"'` \t\n\r:,;。.…")
     for cn, value in _HEADING_ANSWERS.items():
-        if cn in text:
+        if compact == cn:
             return value
-    # 容错:只看首尾关键字
-    if "朝" in text or "镜头" in text and "背" not in text:
-        return "toward"
-    if "背" in text:
+    away_words = ("背", "车尾", "远离", "尾部")
+    toward_words = ("车头", "面向", "朝镜头", "朝向镜头")
+    away_score = sum(1 for w in away_words if w in text)
+    toward_score = sum(1 for w in toward_words if w in text)
+    if away_score > 0 and away_score >= toward_score:
         return "away"
+    if toward_score > 0:
+        return "toward"
     return "unknown"
 
 

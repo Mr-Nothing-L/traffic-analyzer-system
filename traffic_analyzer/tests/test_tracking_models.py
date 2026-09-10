@@ -1086,3 +1086,26 @@ class TestSceneSideVoting:
         assert "2/3帧" in _scene_vote_text(
             {"coming": 2, "unknown": 1, "total": 3}, "coming"
         )
+
+
+class TestParseHeading:
+    """车头朝向封闭题解析(P2-9):全等匹配三类答案 + 词表打分,反向词不被"朝镜头"吞。"""
+
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("朝镜头", "toward"),
+            ("背镜头", "away"),
+            ("难以判断", "unknown"),
+            ('{"answer": "朝镜头"}', "toward"),  # JSON 包装走词表
+            ('"背镜头"', "away"),
+            ("车尾朝镜头", "away"),  # 旧实现的反向 bug:命中"朝镜头"返回 toward
+            ("车头背对镜头远离", "away"),
+            ("车头面向镜头", "toward"),
+            ("画面模糊无法判断", "unknown"),
+        ],
+    )
+    def test_parse(self, raw: str, expected: str) -> None:
+        from traffic_analyzer.toolserver.tracking.windows import _parse_heading
+
+        assert _parse_heading(raw) == expected
