@@ -597,7 +597,9 @@ class ActiveSession {
       const mapped = mapHistoryEntry(ev.entry, seq > 0 ? seq : undefined)
       if (mapped === null) continue
       if (mapped.kind === 'user' && this.bindPendingSteer(seq)) continue
-      this.host.entries.value.push(markRaw(mapped))
+      // 审批条目不 markRaw:respondApproval 回写 decision 需触发卡片重渲染
+      // (条目小,无大 base64 负担);其余落盘条目保持 markRaw。
+      this.host.entries.value.push(mapped.kind === 'approval' ? mapped : markRaw(mapped))
       if (mapped.kind === 'approval' && !mapped.decision && !mapped.stale) {
         this.host.status.value = 'awaiting_approval'
       }
@@ -1129,11 +1131,12 @@ export const useAgentChatStore = defineStore('agentchat', () => {
       entries.value = (Array.isArray(r.entries) ? r.entries : [])
         .map((raw, i) => {
           // 历史条目落盘后不再变更:markRaw 跳过深响应式代理(工具结果/
-          // 附件里的大 base64 字符串逐层 proxy 化开销可观);流式轮次新
-          // 压入的条目不受影响,仍走正常响应式更新。seq=数组下标+1
+          // 附件里的大 base64 字符串逐层 proxy 化开销可观);例外:审批条目
+          // 小且 respondApproval 要回写 decision,保持响应式。seq=数组下标+1
           // (后端落盘序号,撤回定位用)。
           const e = mapHistoryEntry(raw, i + 1)
-          return e === null ? null : markRaw(e)
+          if (e === null) return null
+          return e.kind === 'approval' ? e : markRaw(e)
         })
         .filter((e): e is AgentEntry => e !== null)
       sessionId.value = id
