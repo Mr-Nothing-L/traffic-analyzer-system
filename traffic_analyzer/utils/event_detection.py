@@ -29,6 +29,12 @@ from traffic_analyzer.models.schemas import (
 logger = logging.getLogger(__name__)
 
 
+def is_event_id(value: Any) -> bool:
+    """event_id 严格整数判定:JSON true/false 解析为 bool(bool 是 int 的子类),
+    不得当作 event 1/0 计入检出集合。"""
+    return type(value) is int
+
+
 def _parse_strict_bool(value: Any) -> bool:
     """Strict boolean normalization for VLM outputs.
 

@@ -133,6 +133,24 @@ def _make_candidate(
 
 
 # ---------------------------------------------------------------------------
+# is_event_id tests
+# ---------------------------------------------------------------------------
+
+
+class TestIsEventId:
+    def test_bool_is_not_event_id(self) -> None:
+        """JSON true/false 是 bool,不得被当作 event 1/0(P2-3 回归)。"""
+        from traffic_analyzer.utils.event_detection import is_event_id
+
+        assert is_event_id(1) is True
+        assert is_event_id(True) is False
+        assert is_event_id(False) is False
+        assert is_event_id("1") is False
+        assert is_event_id(1.0) is False
+        assert is_event_id(None) is False
+
+
+# ---------------------------------------------------------------------------
 # reflect_expert_candidate tests
 # ---------------------------------------------------------------------------
 

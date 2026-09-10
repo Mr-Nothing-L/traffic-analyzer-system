@@ -35,6 +35,7 @@ from traffic_analyzer.core.config_manager import ConfigManager
 from traffic_analyzer.core.expert_agent import ExpertAgent
 from traffic_analyzer.core.vlm_engine import FatalAPIError, VLMInferenceEngine
 from traffic_analyzer.utils.annotation_spec_loader import AnnotationSpecLoader
+from traffic_analyzer.utils.event_detection import is_event_id
 from traffic_analyzer.utils.event_detection import select_event_images as _select_event_images_impl
 from traffic_analyzer.utils.progress import get_reporter as _get_progress_reporter
 from traffic_analyzer.models.schemas import (
@@ -467,7 +468,10 @@ class AdjudicationStep(PipelineStep):
             last_parsed_data = data
 
             event_results_raw = data.get("event_results", [])
-            present_event_ids = {er.get("event_id") for er in event_results_raw if isinstance(er.get("event_id"), int)}
+            # is_event_id:JSON true 是 bool(True == 1),不得当作 event 1。
+            present_event_ids = {
+                er.get("event_id") for er in event_results_raw if is_event_id(er.get("event_id"))
+            }
             expected_event_ids = set(context.event_candidates.keys())
             missing_event_ids = sorted(expected_event_ids - present_event_ids)
 

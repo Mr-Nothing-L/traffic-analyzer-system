@@ -54,7 +54,7 @@ from traffic_analyzer.models.schemas import (
     EventResult,
     VideoMetadata,
 )
-from traffic_analyzer.utils.event_detection import select_event_images
+from traffic_analyzer.utils.event_detection import is_event_id, select_event_images
 
 logger = logging.getLogger(__name__)
 
@@ -393,8 +393,8 @@ def _positive_event_details(
     if not isinstance(raw_thoughts, list):
         return details
     for item in raw_thoughts:
-        # type(...) is int:JSON true 是 bool(True == 1),不得当作 event 1。
-        if not isinstance(item, dict) or type(item.get("event_id")) is not int:
+        # is_event_id:JSON true 是 bool(True == 1),不得当作 event 1。
+        if not isinstance(item, dict) or not is_event_id(item.get("event_id")):
             continue
         if item.get("present") is not True:
             continue
@@ -439,8 +439,8 @@ def build_description(
     raw_thoughts = resp_data.get("event_thoughts")
     if isinstance(raw_thoughts, list):
         for item in raw_thoughts:
-            # type(...) is int:JSON true 是 bool(True == 1),不得当作 event 1。
-            if isinstance(item, dict) and type(item.get("event_id")) is int:
+            # is_event_id:JSON true 是 bool(True == 1),不得当作 event 1。
+            if isinstance(item, dict) and is_event_id(item.get("event_id")):
                 thoughts_by_id[item["event_id"]] = item
 
     details = _positive_event_details(resp_data)
@@ -578,8 +578,8 @@ def find_ungrounded_positive_event_ids(
     ungrounded = resp_data.get("ungrounded_event_ids")
     if isinstance(ungrounded, list):
         for eid in ungrounded:
-            # type(...) is int:JSON true 是 bool(True == 1),不得当作 event 1。
-            if type(eid) is int and eid in detected_ids:
+            # is_event_id:JSON true 是 bool(True == 1),不得当作 event 1。
+            if is_event_id(eid) and eid in detected_ids:
                 quarantine.add(eid)
     # present=false ∧ detected=true:改写模型无法锚定该阳性事件但漏报了
     # ungrounded_event_ids,同样按幻觉样本隔离。

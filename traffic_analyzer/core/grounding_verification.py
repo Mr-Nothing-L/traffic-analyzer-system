@@ -34,7 +34,7 @@ from traffic_analyzer.core.verdict_format import (
 )
 from traffic_analyzer.core.vlm_engine import FatalAPIError
 from traffic_analyzer.models.schemas import AnalysisContext
-from traffic_analyzer.utils.event_detection import select_event_images
+from traffic_analyzer.utils.event_detection import is_event_id, select_event_images
 
 logger = logging.getLogger(__name__)
 
@@ -151,8 +151,8 @@ class GroundingVerificationStep(PipelineStep):
         # 5. Apply the verdicts: overturn ungroundable positives.
         grounding_by_id: Dict[int, Dict[str, Any]] = {}
         for item in raw_results:
-            # type(...) is int:JSON true 是 bool(True == 1),不得当作 event 1。
-            if isinstance(item, dict) and type(item.get("event_id")) is int:
+            # is_event_id:JSON true 是 bool(True == 1),不得当作 event 1。
+            if isinstance(item, dict) and is_event_id(item.get("event_id")):
                 grounding_by_id[item["event_id"]] = item
 
         records: List[Dict[str, Any]] = []
