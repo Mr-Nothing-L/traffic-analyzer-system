@@ -32,7 +32,7 @@
  * (swap),旧实例 dispose 后晚到的异步收尾一律丢弃。 */
 import { markRaw, ref, watch, type Ref } from 'vue'
 import { defineStore } from 'pinia'
-import { ApiError } from '../api/client'
+import { ApiError, apiFetch } from '../api/client'
 import { useWorkspaceStore } from './workspace'
 
 /** 权限模式三档:逐条确认 manual / 自动通过 auto / 完全自主 yolo。 */
@@ -238,54 +238,6 @@ export interface SendOptions {
   videoPath?: string
   videoSrc?: string
   images?: string[]
-}
-
-/** 非 2xx 统一成 ApiError:agent 服务错误为 {error:{code,message}},
- * FastAPI 代理/其他后端为 {detail},两种都认。 */
-async function toApiError(res: Response): Promise<ApiError> {
-  if (res.status === 401 && window.location.pathname !== '/login') {
-    window.location.href = '/login'
-  }
-  let detail = res.statusText
-  try {
-    const body = (await res.json()) as {
-      detail?: unknown
-      error?: { message?: unknown }
-    }
-    if (body?.detail != null) detail = String(body.detail)
-    else if (body?.error?.message != null) detail = String(body.error.message)
-  } catch {
-    // 非 JSON 错误响应,保留 statusText
-  }
-  return new ApiError(res.status, detail)
-}
-
-/** JSON POST 封装(错误体两种形态兼容;401 跳登录由 toApiError 处理)。 */
-async function postJson(path: string, body: unknown): Promise<unknown> {
-  let res: Response
-  try {
-    res = await fetch(path, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    })
-  } catch {
-    throw new ApiError(0, '网络错误,无法连接后端')
-  }
-  if (!res.ok) throw await toApiError(res)
-  return res.json()
-}
-
-/** GET/DELETE 封装(与 postJson 同一套错误语义)。 */
-async function reqJson(path: string, method: 'GET' | 'DELETE'): Promise<unknown> {
-  let res: Response
-  try {
-    res = await fetch(path, { method })
-  } catch {
-    throw new ApiError(0, '网络错误,无法连接后端')
-  }
-  if (!res.ok) throw await toApiError(res)
-  return res.json()
 }
 
 /** tool_result 的 output:string 原样;ContentPart[] 取 text 拼接;其他 JSON 化。 */
@@ -529,9 +481,8 @@ class ActiveSession {
   async resumeFromServer() {
     let r: { events?: Array<{ seq?: unknown; entry?: unknown }>; inProgress?: boolean }
     try {
-      r = (await reqJson(
+      r = (await apiFetch(
         `/api/agent/sessions/${this.host.sessionId.value}/events?fromSeq=${this.persistedSeq}`,
-        'GET',
       )) as typeof r
     } catch {
       return
@@ -565,9 +516,8 @@ class ActiveSession {
     if (this.disposed) return
     let r: { events?: Array<{ seq?: unknown; entry?: unknown }>; inProgress?: boolean }
     try {
-      r = (await reqJson(
+      r = (await apiFetch(
         `/api/agent/sessions/${this.host.sessionId.value}/events?fromSeq=${this.persistedSeq}`,
-        'GET',
       )) as typeof r
     } catch {
       return // 网络抖动:下轮重试
@@ -665,7 +615,15 @@ class ActiveSession {
         if ((e as Error).name === 'AbortError') return
         throw new ApiError(0, '网络错误,无法连接后端')
       }
-      if (!res.ok || !res.body) throw await toApiError(res)
+      if (!res.ok || !res.body) {
+        let detail = res.statusText
+        try {
+          const body = (await res.json()) as { detail?: unknown; error?: { message?: unknown } }
+          if (body?.detail != null) detail = String(body.detail)
+          else if (body?.error?.message != null) detail = String(body.error.message)
+        } catch { /* 非 JSON 错误响应 */ }
+        throw new ApiError(res.status, detail)
+      }
 
       const reader = res.body.getReader()
       const decoder = new TextDecoder()
@@ -726,10 +684,13 @@ class ActiveSession {
   async steer(input: string, opts: SendOptions): Promise<boolean> {
     const { sessionId, recovering } = this.host
     try {
-      await postJson(`/api/agent/sessions/${sessionId.value}/steer`, {
-        input,
-        ...(opts.videoPath ? { videoPath: opts.videoPath } : {}),
-        ...(opts.images?.length ? { images: opts.images } : {}),
+      await apiFetch(`/api/agent/sessions/${sessionId.value}/steer`, {
+        method: 'POST',
+        body: JSON.stringify({
+          input,
+          ...(opts.videoPath ? { videoPath: opts.videoPath } : {}),
+          ...(opts.images?.length ? { images: opts.images } : {}),
+        }),
       })
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) {
@@ -766,7 +727,7 @@ class ActiveSession {
     const { sessionId, recovering } = this.host
     if (!sessionId.value) return
     try {
-      await postJson(`/api/agent/sessions/${sessionId.value}/cancel`, {})
+      await apiFetch(`/api/agent/sessions/${sessionId.value}/cancel`, { method: 'POST', body: JSON.stringify({}) })
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) {
         await this.pollEvents()
@@ -1086,7 +1047,7 @@ export const useAgentChatStore = defineStore('agentchat', () => {
 
   /** 拉历史会话列表(失败抛错,调用方提示)。 */
   async function fetchSessions() {
-    const r = (await reqJson('/api/agent/sessions', 'GET')) as {
+    const r = (await apiFetch('/api/agent/sessions')) as {
       sessions?: AgentSessionInfo[]
     }
     sessions.value = Array.isArray(r.sessions) ? r.sessions : []
@@ -1100,7 +1061,7 @@ export const useAgentChatStore = defineStore('agentchat', () => {
     sessionId.value = null
     usedTokens.value = null
     try {
-      const r = (await postJson('/api/agent/sessions', { mode: mode.value })) as {
+      const r = (await apiFetch('/api/agent/sessions', { method: 'POST', body: JSON.stringify({ mode: mode.value }) })) as {
         sessionId?: string
       }
       if (!r.sessionId) throw new ApiError(0, '后端未返回 sessionId')
@@ -1124,7 +1085,7 @@ export const useAgentChatStore = defineStore('agentchat', () => {
     status.value = 'connecting'
     error.value = null
     try {
-      const r = (await reqJson(`/api/agent/sessions/${id}/history`, 'GET')) as {
+      const r = (await apiFetch(`/api/agent/sessions/${id}/history`)) as {
         entries?: unknown[]
       }
       if (active !== s) return // 在途期间发生了更新的选择/新建/工作区切换:丢弃晚到的历史
@@ -1182,7 +1143,7 @@ export const useAgentChatStore = defineStore('agentchat', () => {
     const wasCurrent = sessionId.value === id
     sessions.value = sessions.value.filter((s) => s.id !== id)
     try {
-      await reqJson(`/api/agent/sessions/${id}`, 'DELETE')
+      await apiFetch(`/api/agent/sessions/${id}`, { method: 'DELETE' })
     } catch (e) {
       await fetchSessions().catch(() => {})
       throw e
@@ -1206,7 +1167,7 @@ export const useAgentChatStore = defineStore('agentchat', () => {
 
   /** 重命名会话:成功后就地更新列表项标题;空串 = 恢复自动派生(后端语义)。 */
   async function renameSession(id: string, title: string) {
-    const res = (await postJson(`/api/agent/sessions/${id}/title`, { title })) as {
+    const res = (await apiFetch(`/api/agent/sessions/${id}/title`, { method: 'POST', body: JSON.stringify({ title }) })) as {
       title?: string
     }
     const s = sessions.value.find((x) => x.id === id)
@@ -1221,7 +1182,7 @@ export const useAgentChatStore = defineStore('agentchat', () => {
       mode.value = m
       return
     }
-    await postJson(`/api/agent/sessions/${sessionId.value}/mode`, { mode: m })
+    await apiFetch(`/api/agent/sessions/${sessionId.value}/mode`, { method: 'POST', body: JSON.stringify({ mode: m }) })
     mode.value = m
     const info = sessions.value.find((s) => s.id === sessionId.value)
     if (info) info.mode = m
@@ -1265,14 +1226,10 @@ export const useAgentChatStore = defineStore('agentchat', () => {
   async function uploadVideo(file: File) {
     const fd = new FormData()
     fd.append('file', file)
-    let res: Response
-    try {
-      res = await fetch('/api/agent/uploads', { method: 'POST', body: fd })
-    } catch {
-      throw new ApiError(0, '网络错误,无法连接后端')
+    const r = (await apiFetch('/api/agent/uploads', { method: 'POST', body: fd })) as {
+      path?: string
+      name?: string
     }
-    if (!res.ok) throw await toApiError(res)
-    const r = (await res.json()) as { path?: string; name?: string }
     if (!r.path || !r.name) throw new ApiError(0, '后端未返回视频路径')
     pendingVideo.value = {
       path: r.path,
@@ -1292,9 +1249,9 @@ export const useAgentChatStore = defineStore('agentchat', () => {
     if (!target || target.kind !== 'user') throw new ApiError(0, '仅支持撤回用户消息')
     const seq = target.seq
     if (seq == null) throw new ApiError(0, '该消息尚未落盘,无法撤回')
-    await postJson(`/api/agent/sessions/${sessionId.value}/recall`, {
+    await apiFetch(`/api/agent/sessions/${sessionId.value}/recall`, { method: 'POST', body: JSON.stringify({
       entryIndex: seq - 1,
-    })
+    }) })
     entries.value.splice(idx)
     active?.rewindTo(seq)
   }
@@ -1316,10 +1273,10 @@ export const useAgentChatStore = defineStore('agentchat', () => {
     decision: 'approved' | 'rejected',
     scope?: 'session',
   ) {
-    await postJson('/api/agent/approval', {
+    await apiFetch('/api/agent/approval', { method: 'POST', body: JSON.stringify({
       requestId,
       decision,
-      ...(scope ? { scope } : {}),
+      ...(scope ? { scope } : {}) }),
     })
     const entry = [...entries.value]
       .reverse()
@@ -1332,7 +1289,7 @@ export const useAgentChatStore = defineStore('agentchat', () => {
    * 失败抛错(调用方提示);进行中后端返回 409。 */
   async function compactContext() {
     if (!sessionId.value) throw new ApiError(0, '无活动会话')
-    const r = (await postJson(`/api/agent/sessions/${sessionId.value}/compact`, {})) as {
+    const r = (await apiFetch(`/api/agent/sessions/${sessionId.value}/compact`, { method: 'POST', body: JSON.stringify({}) })) as {
       compacted?: boolean
       afterTokens?: number
     }
