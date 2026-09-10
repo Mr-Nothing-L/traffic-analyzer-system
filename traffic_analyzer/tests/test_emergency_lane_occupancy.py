@@ -400,11 +400,11 @@ class TestReportRendering:
             "detected": True,
             "summary": "检测到应急车道占用",
             "raw_vlm_response": {
-                "mask_overlay_image_path": "tmp_img/test_video_event_1_occupancy/02_masks_overlay.jpg",
-                "vehicle_boxes_image_path": "tmp_img/test_video_event_1_occupancy/03_vehicles_red_boxes.jpg",
-                "zoom_grid_image_path": "tmp_img/test_video_event_1_occupancy/04_zoom_grid.jpg",
+                "mask_overlay_image_path": "tmp_img/test_video_event_2_occupancy/02_masks_overlay.jpg",
+                "vehicle_boxes_image_path": "tmp_img/test_video_event_2_occupancy/03_vehicles_red_boxes.jpg",
+                "zoom_grid_image_path": "tmp_img/test_video_event_2_occupancy/04_zoom_grid.jpg",
                 "single_zoom_image_paths": [
-                    ("V1", "tmp_img/test_video_event_1_occupancy/zoom/V1_黄色工程车_zoom4x.jpg"),
+                    ("V1", "tmp_img/test_video_event_2_occupancy/zoom/V1_黄色工程车_zoom4x.jpg"),
                 ],
                 "occupancy_detection": {
                     "selected_frame_index": 1,
@@ -431,7 +431,7 @@ class TestReportRendering:
         assert "03_vehicles_red_boxes.jpg" in markdown
         assert "04_zoom_grid.jpg" in markdown
         assert "车辆ID | 标签 | 区域 | bbox | overlap | 标定理由" in markdown
-        assert "tmp_img/test_video_event_1_occupancy/zoom/V1_黄色工程车_zoom4x.jpg" in markdown
+        assert "tmp_img/test_video_event_2_occupancy/zoom/V1_黄色工程车_zoom4x.jpg" in markdown
         assert "V1" in markdown
         assert "黄色工程车" in markdown
         assert "emergency_lane" in markdown
@@ -524,7 +524,7 @@ class TestExpertAgentIntegration:
             assert "summary" in occupancy
 
             # Evidence files should exist on disk.
-            base_dir = Path(context.output_dir) / "tmp_img" / "test_video" / "test_video_event_1_occupancy"
+            base_dir = Path(context.output_dir) / "tmp_img" / "test_video" / "test_video_event_2_occupancy"
             assert (base_dir / "02_masks_overlay.jpg").exists()
             assert (base_dir / "03_vehicles_red_boxes.jpg").exists()
             assert (base_dir / "04_zoom_grid.jpg").exists()

@@ -282,7 +282,8 @@ def detect_emergency_lane_occupancy(
         )
 
     # --- Prepare output directory --------------------------------------
-    occupancy_dir = output_dir / f"{video_stem}_event_1_occupancy"
+    # 产物目录按事件编号命名(应急车道=event 2;旧名 event_1 是命名漂移,P3-12)
+    occupancy_dir = output_dir / f"{video_stem}_event_{category.event_id}_occupancy"
     try:
         occupancy_dir.mkdir(parents=True, exist_ok=True)
     except Exception as exc:
@@ -315,9 +316,9 @@ def detect_emergency_lane_occupancy(
     vehicles_path = str(occupancy_dir / vehicles_filename)
     zoom_grid_path = str(occupancy_dir / zoom_grid_filename)
 
-    masks_ref = f"{image_ref_prefix}/{video_stem}_event_1_occupancy/{masks_filename}"
-    vehicles_ref = f"{image_ref_prefix}/{video_stem}_event_1_occupancy/{vehicles_filename}"
-    zoom_grid_ref = f"{image_ref_prefix}/{video_stem}_event_1_occupancy/{zoom_grid_filename}"
+    masks_ref = f"{image_ref_prefix}/{video_stem}_event_{category.event_id}_occupancy/{masks_filename}"
+    vehicles_ref = f"{image_ref_prefix}/{video_stem}_event_{category.event_id}_occupancy/{vehicles_filename}"
+    zoom_grid_ref = f"{image_ref_prefix}/{video_stem}_event_{category.event_id}_occupancy/{zoom_grid_filename}"
 
     try:
         generate_masks_overlay(
@@ -343,7 +344,7 @@ def detect_emergency_lane_occupancy(
     single_zoom_refs: List[tuple] = [
         (
             roi_id,
-            f"{image_ref_prefix}/{video_stem}_event_1_occupancy/{rel_path}",
+            f"{image_ref_prefix}/{video_stem}_event_{category.event_id}_occupancy/{rel_path}",
         )
         for roi_id, rel_path in single_zoom_results
     ]

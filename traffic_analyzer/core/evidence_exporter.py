@@ -100,7 +100,7 @@ def _build_event_entry(event_result: Any, raw: Dict[str, Any]) -> Dict[str, Any]
     evidence_regions: List[Dict[str, Any]] = []
     gallery_refs: List[str] = []
 
-    # --- Emergency lane occupancy branch (event_id=1): calibration polygons,
+    # --- Emergency lane occupancy branch (event_id=2): calibration polygons,
     # per-vehicle ROI boxes with single zooms, and overlay images. ----------
     occupancy = raw.get("occupancy_detection") or {}
     if occupancy:
