@@ -52,7 +52,7 @@ from traffic_analyzer.web.evidence import (
     _read_json,
     sft_json_path as evidence_sft_json_path,
 )
-from traffic_analyzer.web.evidence.locks import _put_locks
+from traffic_analyzer.web.evidence.locks import _put_locks, _reject_active_infer, _reject_active_infer_in
 
 logger = logging.getLogger(__name__)
 
@@ -322,13 +322,18 @@ def _call_llm_pick(image_urls: List[str], context_text: str) -> str:
 
 
 def perform_auto_pick(
-    workspace: Path, stem: str, *, overwrite: bool = False
+    workspace: Path,
+    stem: str,
+    *,
+    overwrite: bool = False,
+    jobs: Any = None,
 ) -> Tuple[List[int], List[Dict[str, Any]], Optional[str]]:
     """对一个 stem 运行智能挑选并落盘,返回 (选中的候选序号, 新条目列表, 新 file_sig)。
 
     失败(找不到视频/SFT/LLM 应答不合格等)抛 KeyframeError 且不动磁盘;
     已有关键帧且 overwrite=False 抛 KeyframeExistsError。SFT JSON 不存在抛
-    KeyframeError(批量路径事先过滤,不依赖此分支)。
+    KeyframeError(批量路径事先过滤,不依赖此分支)。jobs 传入 JobManager
+    时(路由/批量线程),落盘前的锁内复查活跃 infer 并 409。
     """
     video = workspace_mod.find_video(workspace, stem)
     if video is None:
@@ -370,6 +375,9 @@ def perform_auto_pick(
         items.append({"frame_index": valid[i]["index"], "time_sec": valid[i]["time_sec"], "jpeg": data})
     items.sort(key=lambda it: float(it["time_sec"]))  # 落盘顺序 = 时间顺序
     with _put_locks[stem]:
+        # 与 evidence/SFT PUT 同款防护:同 stem 的 infer 任务末尾会覆写
+        # <stem>.json,竞态窗口内的关键帧写入会互相覆盖。
+        _reject_active_infer_in(jobs, stem)
         # 二次确认防竞态:LLM 调用期间用户可能已手工加帧且未允许覆盖。
         _, current = _read_keyframes_locked(sft_path)
         if current and not overwrite:
@@ -426,7 +434,9 @@ def _batch_item(batch_id: str, stem: str, status: str, message: str = "") -> Non
         state["finished"] += 1
 
 
-def _run_batch(workspace: Path, stems: List[str], overwrite: bool, batch_id: str) -> None:
+def _run_batch(
+    workspace: Path, stems: List[str], overwrite: bool, batch_id: str, jobs: Any = None
+) -> None:
     for stem in stems:
         adir = workspace_mod.analysis_dir(workspace, stem)
         if not (adir / f"{stem}.json").is_file():
@@ -442,7 +452,7 @@ def _run_batch(workspace: Path, stems: List[str], overwrite: bool, batch_id: str
             continue
         _batch_item_running(batch_id, stem)
         try:
-            perform_auto_pick(workspace, stem, overwrite=overwrite)
+            perform_auto_pick(workspace, stem, overwrite=overwrite, jobs=jobs)
             _batch_item(batch_id, stem, "ok")
         except KeyframeExistsError as exc:
             _batch_item(batch_id, stem, "skipped", str(exc))
@@ -511,6 +521,7 @@ def add_keyframe(stem: str, body: _AddRequest, request: Request) -> Dict[str, An
     sft_path = sft_json_path(workspace, stem)
     directory = kf_dir(workspace, stem)
     with _put_locks[stem]:
+        _reject_active_infer(request, stem)  # 同 stem infer 会覆写 <stem>.json
         disk, existing = _read_keyframes_locked(sft_path)
         if disk is None:
             raise HTTPException(status_code=404, detail="SFT file not found")
@@ -535,6 +546,7 @@ def delete_keyframe(stem: str, filename: str, request: Request) -> Dict[str, Any
         raise HTTPException(status_code=404, detail="Unknown keyframe")
     sft_path = sft_json_path(workspace, stem)
     with _put_locks[stem]:
+        _reject_active_infer(request, stem)  # 同 stem infer 会覆写 <stem>.json
         disk, existing = _read_keyframes_locked(sft_path)
         if disk is None:
             raise HTTPException(status_code=404, detail="SFT file not found")
@@ -554,6 +566,7 @@ def reorder_keyframes(stem: str, body: _OrderRequest, request: Request) -> Dict[
     workspace = _require_sft_stem(request, stem)
     sft_path = sft_json_path(workspace, stem)
     with _put_locks[stem]:
+        _reject_active_infer(request, stem)  # 同 stem infer 会覆写 <stem>.json
         disk, existing = _read_keyframes_locked(sft_path)
         if disk is None:
             raise HTTPException(status_code=404, detail="SFT file not found")
@@ -573,7 +586,14 @@ def auto_pick(stem: str, request: Request, body: Optional[_AutoPickRequest] = No
     workspace = _require_sft_stem(request, stem)
     overwrite = bool(body and body.overwrite)
     try:
-        picks, written, sig = perform_auto_pick(workspace, stem, overwrite=overwrite)
+        picks, written, sig = perform_auto_pick(
+            workspace,
+            stem,
+            overwrite=overwrite,
+            jobs=getattr(request.app.state, "jobs", None),
+        )
+    except HTTPException:
+        raise  # 409 活跃 infer 守卫等 FastAPI 异常原样透传
     except KeyframeExistsError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     except KeyframeError as exc:
@@ -604,7 +624,13 @@ def start_batch(body: _BatchRequest, request: Request) -> Dict[str, Any]:
         _batches[batch_id] = state
     threading.Thread(
         target=_run_batch,
-        args=(workspace, list(body.stems), body.overwrite, batch_id),
+        args=(
+            workspace,
+            list(body.stems),
+            body.overwrite,
+            batch_id,
+            getattr(request.app.state, "jobs", None),
+        ),
         daemon=True,
         name=f"keyframes-batch-{batch_id}",
     ).start()

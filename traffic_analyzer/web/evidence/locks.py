@@ -29,14 +29,12 @@ from fastapi import HTTPException, Request
 _put_locks: "defaultdict[str, threading.Lock]" = defaultdict(threading.Lock)
 
 
-def find_active_infer_job(request: Request, stem: str) -> Optional[Dict[str, Any]]:
-    """The queued/running infer job for ``stem``, if any.
+def find_active_infer_job_in(jobs: Any, stem: str) -> Optional[Dict[str, Any]]:
+    """The queued/running infer job for ``stem`` within a jobs manager (no request).
 
-    Shared by the evidence/SFT PUT endpoints (409 guard) and
-    ``jobs.post_infer`` (duplicate-submit guard), so both sides test the
-    same condition. Caller holds ``_put_locks[stem]``.
+    无 request 上下文的调用方(keyframes 的批量/daemon 线程)直接传
+    ``request.app.state.jobs``;判定条件与 request 版完全一致。
     """
-    jobs = getattr(request.app.state, "jobs", None)
     if jobs is None:
         return None
     for job in jobs.list_jobs():
@@ -49,13 +47,19 @@ def find_active_infer_job(request: Request, stem: str) -> Optional[Dict[str, Any
     return None
 
 
-def _reject_active_infer(request: Request, stem: str) -> None:
-    """409 when a queued/running infer job targets ``stem``.
+def find_active_infer_job(request: Request, stem: str) -> Optional[Dict[str, Any]]:
+    """The queued/running infer job for ``stem``, if any.
 
-    The job would overwrite the very files the PUT is editing (PUT-vs-infer
-    race), so the edit must wait until the job finishes.
+    Shared by the evidence/SFT PUT endpoints (409 guard) and
+    ``jobs.post_infer`` (duplicate-submit guard), so both sides test the
+    same condition. Caller holds ``_put_locks[stem]``.
     """
-    job = find_active_infer_job(request, stem)
+    return find_active_infer_job_in(getattr(request.app.state, "jobs", None), stem)
+
+
+def _reject_active_infer_in(jobs: Any, stem: str) -> None:
+    """409 variant taking the jobs manager directly (see ``_reject_active_infer``)."""
+    job = find_active_infer_job_in(jobs, stem)
     if job is not None:
         raise HTTPException(
             status_code=409,
@@ -64,3 +68,12 @@ def _reject_active_infer(request: Request, stem: str) -> None:
                 f"{job.get('status')}; retry after it finishes"
             ),
         )
+
+
+def _reject_active_infer(request: Request, stem: str) -> None:
+    """409 when a queued/running infer job targets ``stem``.
+
+    The job would overwrite the very files the PUT is editing (PUT-vs-infer
+    race), so the edit must wait until the job finishes.
+    """
+    _reject_active_infer_in(getattr(request.app.state, "jobs", None), stem)
