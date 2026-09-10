@@ -2,9 +2,9 @@
 VLMInferenceEngine module for the traffic analyzer framework.
 
 Provides a unified interface for calling vision-language models across
-multiple providers (Anthropic, OpenAI, Google, Aliyun) with prompt
-templating, JSON response parsing, schema validation, retry logic,
-and usage tracking.
+multiple providers (anthropic / google / aliyun;aliyun 走 OpenAI 兼容协议)
+with prompt templating, JSON response parsing, schema validation, retry
+logic, and usage tracking. Provider 集合见 SUPPORTED_PROVIDERS.
 
 [文件说明]
 作用:VLM 统一推理引擎入口。VLMInferenceEngine 封装 prompt 渲染(Jinja2)、

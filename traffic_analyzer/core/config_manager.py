@@ -81,7 +81,8 @@ class ConfigManager:
 
         This method reads the three YAML files, parses the ``.env`` file for
         LLM provider overrides, and assembles a fully populated
-        ``SystemConfig`` model. The result is cached internally.
+        ``SystemConfig`` model. 每次调用都重读磁盘(TestReload 语义);
+        需要复用结果的调用方自行持有返回值。
 
         Args:
             config_dir: If provided, updates ``self.config_dir`` before loading.
@@ -367,7 +368,7 @@ class ConfigManager:
         5. Tools referenced in event categories exist in prompt templates;
            active categories declaring tools are rejected because the tool
            registry currently registers none.
-        6. Event IDs are continuous from 0 — inactive categories included, since
+        6. Event IDs are continuous from 1 — inactive categories included, since
            they still occupy a bit in the binary encoding.
         7. Active categories use ``expert_agent``, the only detection mode with
            an execution path.

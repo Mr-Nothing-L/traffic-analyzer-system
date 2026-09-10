@@ -5,7 +5,8 @@ All inter-module data contracts are defined here as Pydantic models
 to ensure type safety and validation across the system.
 
 This module is a compatibility shim that re-exports models from the
-domain-specific submodules under :mod:`traffic_analyzer.models`.
+domain-specific submodules under :mod:`traffic_analyzer.models`
+(config / context / enums / event / llm / report / scene / video).
 
 [文件说明]
 作用:纯数据模型的统一导出入口(兼容垫片),从 config/context/enums/event/llm/report/scene/video 各子模块再导出全部 Pydantic 模型,保证各模块间数据契约类型一致。
