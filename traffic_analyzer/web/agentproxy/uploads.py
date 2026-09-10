@@ -67,18 +67,24 @@ def _sanitize_filename(filename: str) -> str:
     return cleaned or "file"
 
 
-def _unique_path(directory: Path, filename: str) -> Path:
-    """同名冲突时在扩展名前追加 -1/-2...,避免同秒上传静默覆盖。"""
-    candidate = directory / filename
-    if not candidate.exists():
-        return candidate
+def _create_unique(directory: Path, filename: str) -> tuple[Path, "IO[bytes]"]:
+    """排他创建(xb)上传目标:同名冲突时在扩展名前追加 -1/-2...。
+
+    创建即占名:exists() 预检与创建之间的窗口内,并发同名上传会静默覆盖
+    对方(TOCTOU);xb 让后到者拿到 FileExistsError 后继续尝试后缀。
+    极端情况(同秒 100 个同名上传)落到异常,由 FastAPI 统一 500。
+    """
     stem, sep, suffix = filename.rpartition(".")
-    for index in range(1, 100):
-        name = f"{stem}-{index}{sep}{suffix}" if sep else f"{filename}-{index}"
+    names = [filename] + [
+        f"{stem}-{index}{sep}{suffix}" if sep else f"{filename}-{index}"
+        for index in range(1, 100)
+    ]
+    for name in names:
         candidate = directory / name
-        if not candidate.exists():
-            return candidate
-    # 极端情况(同秒 100 个同名上传):落到异常,由 FastAPI 统一 500。
+        try:
+            return candidate, candidate.open("xb")
+        except FileExistsError:
+            continue
     raise RuntimeError(f"too many name collisions for upload: {filename}")
 
 
@@ -105,22 +111,27 @@ async def upload_file(request: Request, file: UploadFile = File(...)) -> JSONRes
         )
     uploads_dir.mkdir(parents=True, exist_ok=True)
     original_name = file.filename or "file"
-    target = _unique_path(
+    target, fh = _create_unique(
         uploads_dir, f"{datetime.now():%Y%m%d_%H%M%S}_{_sanitize_filename(original_name)}"
     )
     max_bytes = _max_upload_bytes()
     size = 0
     too_big = False
-    with target.open("wb") as fh:
-        while True:
-            chunk = await file.read(_CHUNK_BYTES)
-            if not chunk:
-                break
-            size += len(chunk)
-            if size > max_bytes:
-                too_big = True
-                break
-            fh.write(chunk)
+    try:
+        with fh:
+            while True:
+                chunk = await file.read(_CHUNK_BYTES)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > max_bytes:
+                    too_big = True
+                    break
+                fh.write(chunk)
+    except Exception:
+        # 客户端中断等异常:不留半截文件
+        target.unlink(missing_ok=True)
+        raise
     if too_big:
         target.unlink(missing_ok=True)
         return _error(
