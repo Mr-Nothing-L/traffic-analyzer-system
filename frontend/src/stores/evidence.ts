@@ -29,26 +29,29 @@ export const useEvidenceStore = defineStore('evidence', () => {
   const loadError = ref<string | null>(null)
   const evidenceSig = ref<string | null>(null) // 乐观锁指纹(PUT base_sig)
   const tabIdx = ref(0) // 当前事件 Tab
-  let loadedStem = ''
+  /** load 请求序号:快速切换视频时旧响应晚到不得覆盖新状态(同 sft.save 守卫)。 */
+  let loadSeq = 0
 
   /** 拉取结果并重建草稿(切换视频 / 保存冲突后刷新 / 重置共用)。 */
   async function load(stem: string): Promise<boolean> {
+    const seq = ++loadSeq
     loading.value = true
     loadError.value = null
     try {
       const r = await getResults(stem)
+      if (seq !== loadSeq) return false // 期间已发起更新的 load,丢弃过期响应
       results.value = r
       evidenceSig.value = r.evidence_sig
       draft.value = r.evidence ? (JSON.parse(JSON.stringify(r.evidence)) as Evidence) : null
       dirty.value = false
       if (draft.value && tabIdx.value >= draft.value.events.length) tabIdx.value = 0
-      loadedStem = stem
       return true
     } catch (e) {
+      if (seq !== loadSeq) return false
       loadError.value = errInfo(e).message
       return false
     } finally {
-      loading.value = false
+      if (seq === loadSeq) loading.value = false
     }
   }
 
@@ -101,7 +104,7 @@ export const useEvidenceStore = defineStore('evidence', () => {
     loadError.value = null
     evidenceSig.value = null
     tabIdx.value = 0
-    loadedStem = ''
+    loadSeq++ // 在途 load 全部过期
   }
 
   return {
