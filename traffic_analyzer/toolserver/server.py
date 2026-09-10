@@ -23,6 +23,7 @@ import io
 import logging
 import os
 import secrets
+import threading
 import shutil
 import subprocess
 import time
@@ -502,9 +503,13 @@ def create_app(workspace: Path | str) -> FastAPI:
         """懒构建并缓存 VLMInferenceEngine(配置来自 ConfigManager 默认目录)。
 
         单独成函数以便测试注入 mock:monkeypatch server._build_engine。
+        双检加锁:并发首请求不再各自构建引擎(check-then-act 竞态,P3-18)。
         """
-        if getattr(request.app.state, "tracking_engine", None) is None:
-            request.app.state.tracking_engine = _build_default_engine()
+        engine = getattr(request.app.state, "tracking_engine", None)
+        if engine is None:
+            with _tracking_engine_lock:
+                if getattr(request.app.state, "tracking_engine", None) is None:
+                    request.app.state.tracking_engine = _build_default_engine()
         return request.app.state.tracking_engine
 
     @app.post("/tools/track_suspects")
@@ -578,6 +583,7 @@ def create_app(workspace: Path | str) -> FastAPI:
 
 _TRACK_TIMEOUT_S = 900.0  # track_suspects 同步执行总超时(秒)
 _TRANSCODE_TIMEOUT_S = 300.0  # prepare_video 单次 ffmpeg 转码超时(秒)
+_tracking_engine_lock = threading.Lock()  # tracking 引擎懒构建双检锁
 
 
 def _timestamp_tag() -> str:
@@ -611,7 +617,9 @@ def _build_default_engine() -> Any:
     default_config_dir = Path(__file__).resolve().parents[1] / "config"
     config_manager = ConfigManager(str(default_config_dir))
     system_config = config_manager.load_all()
-    disk_cache_path = Path(os.environ.get("TRAFFIC_ANALYZER_HOME", ".")) / ".vlm_cache.db"
+    # 缓存路径锚定包根:缺省此前是 CWD(不同启动目录各建一份缓存,P3-18)
+    cache_root = Path(os.environ.get("TRAFFIC_ANALYZER_HOME", "")) or Path(__file__).resolve().parents[1]
+    disk_cache_path = cache_root / ".vlm_cache.db"
     for provider in system_config.llm_providers:
         provider.disk_cache_path = str(disk_cache_path)
     return VLMInferenceEngine(system_config.llm_providers)
