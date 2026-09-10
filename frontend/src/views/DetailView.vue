@@ -91,13 +91,17 @@ watch(
 onUnmounted(() => ev.clear())
 
 // 离开详情页/切换视频时 dirty 未保存 → 三选一:保存并离开 / 丢弃并离开 / 继续编辑(v2 按要求加提示)
+// SFT 与证据两处编辑面板都可能置 dirty,守卫口径与 job-done 提示一致(两者都查)。
 function confirmDiscardIfDirty(): boolean | Promise<boolean> {
-  if (!sft.dirty) return true
+  if (!sft.dirty && !ev.dirty) return true
+  const evidenceOnly = !sft.dirty && ev.dirty
   return new Promise<boolean>((resolve) => {
     // 自定义 action 按钮不会自动关弹窗,各分支手动 destroy(等价原正/负按钮点击即关闭)
     const dlg = dialog.warning({
       title: '未保存的修改',
-      content: '当前视频的 SFT 标注有未保存的修改,离开将丢弃这些修改。',
+      content: evidenceOnly
+        ? '当前视频的证据编辑有未保存的修改,离开将丢弃这些修改。'
+        : '当前视频的 SFT 标注有未保存的修改,离开将丢弃这些修改。',
       action: () => [
         h(
           NButton,
@@ -105,6 +109,23 @@ function confirmDiscardIfDirty(): boolean | Promise<boolean> {
             type: 'primary',
             size: 'small',
             onClick: async () => {
+              if (evidenceOnly) {
+                if (ev.saving) return
+                const r = await ev.save(stem.value)
+                if (r.ok) {
+                  dlg.destroy()
+                  resolve(true)
+                  return
+                }
+                message.error(
+                  r.conflict
+                    ? '保存冲突:该视频的证据已被他人修改,请回「证据编辑」卡处理后重试'
+                    : `保存失败(${r.status ?? 0}):${r.message || '未知错误'}`,
+                )
+                dlg.destroy()
+                resolve(false)
+                return
+              }
               if (sft.saving) return // 保存中防重复点击(save 内部同款守卫)
               const r = await sft.save()
               if (r.ok) {
