@@ -466,3 +466,84 @@ export function buildAnalysisFlow(
     done: anchored,
   }
 }
+
+/* ---- detectionFlows 记忆化 ---- */
+
+/** 冻结态流程只依赖该 detection 之前(含自身)的条目;流式期间 text_delta
+ * 等高频更新只碰尾部条目,既有 detection 的输入前缀不变。按 条目 id+前缀签名
+ * memo,未变的直接复用上次结果,避免每次条目更新全量重建 O(检测条目数×条目数)。 */
+
+/** 双通道滚动签名:djb2 与 FNV-1a 各占一条(纯数字滚动合并,无字符串拼接)。
+ * 单通道 32 位碰撞概率 2^-32,两通道同时碰撞 ~2^-64,把「前缀变了却命中
+ * 旧缓存」压到工程上可忽略。 */
+interface PrefixSig {
+  a: number
+  b: number
+}
+
+const SIG_A_SEED = 5381
+const SIG_B_SEED = 2166136261 | 0
+
+function sigInto(sig: PrefixSig, text: string): void {
+  let a = sig.a
+  let b = sig.b
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i)
+    a = (Math.imul(a, 33) ^ c) | 0
+    b = Math.imul(b ^ c, 0x01000193) | 0
+  }
+  sig.a = a
+  sig.b = b
+}
+
+/** 条目的流程输入签名:只纳入 buildAnalysisFlow 实际读取的字段(kind/at +
+ * 各 kind 载荷)。图片地址、审批状态等未读字段不参与——它们不影响流程,
+ * 变更不应触发重建。approval/system 流程只按 kind 计数/判相邻,载荷同样不入。 */
+function entryFlowSig(e: AgentEntry, sig: PrefixSig): void {
+  sigInto(sig, e.kind)
+  sigInto(sig, String(e.at))
+  switch (e.kind) {
+    case 'user':
+      sigInto(sig, e.text)
+      break
+    case 'assistant':
+      sigInto(sig, `${e.id}\u0000${e.think}\u0000${e.text}\u0000${e.generateMs ?? ''}`)
+      break
+    case 'tool':
+      sigInto(sig, `${e.name}\u0000${e.args}\u0000${e.result}\u0000${e.done}\u0000${e.isError}`)
+      for (const c of e.children) {
+        if (c.kind === 'tool') sigInto(sig, `${c.name}\u0000${c.done}`)
+      }
+      break
+    case 'detection':
+      sigInto(sig, e.id)
+      break
+  }
+}
+
+/** detectionFlows 的记忆化容器:持有方(组件/setup)长持一个实例,每次
+ * 全量调 build——单趟前向扫描滚动签名,在每个 detection 处查缓存,未命中才
+ * buildAnalysisFlow;同 id 签名变了覆盖重建。缓存槽位数超上限(病态多的
+ * 检测卡/跨会话累积)整体清空,防无界增长。 */
+export class DetectionFlowMemo {
+  readonly #cache = new Map<string, { a: number; b: number; flow: AnalysisFlow }>()
+
+  build(entries: readonly AgentEntry[]): Map<string, AnalysisFlow> {
+    if (this.#cache.size > 256) this.#cache.clear()
+    const out = new Map<string, AnalysisFlow>()
+    const sig: PrefixSig = { a: SIG_A_SEED, b: SIG_B_SEED }
+    for (const e of entries) {
+      entryFlowSig(e, sig)
+      if (e.kind !== 'detection') continue
+      const hit = this.#cache.get(e.id)
+      if (hit !== undefined && hit.a === sig.a && hit.b === sig.b) {
+        out.set(e.id, hit.flow)
+        continue
+      }
+      const flow = buildAnalysisFlow(entries, e.id)
+      this.#cache.set(e.id, { a: sig.a, b: sig.b, flow })
+      out.set(e.id, flow)
+    }
+    return out
+  }
+}

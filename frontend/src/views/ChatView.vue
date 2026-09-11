@@ -46,7 +46,7 @@ import { mdToHtml } from '../utils/markdown'
 import { groupSessionsByWorkspace, wsBasename } from '../utils/sessionGroups'
 import type { SessionGroup } from '../utils/sessionGroups'
 import { copyText, lastUserEntryAt, relTime, absTime, shouldSendOnEnter, timelineEntries, toolLabel, toolRoundAssistantIds, toolRoundAssistantTextIds, workspaceVideoSrc } from '../utils/chatDisplay'
-import { buildAnalysisFlow } from '../utils/analysisFlow'
+import { buildAnalysisFlow, DetectionFlowMemo } from '../utils/analysisFlow'
 import type { AnalysisFlow } from '../utils/analysisFlow'
 import UiIcon from '../components/UiIcon.vue'
 import ContextRing from '../components/chat/ContextRing.vue'
@@ -583,13 +583,11 @@ const liveFlow = computed<AnalysisFlow | null>(() => {
   return f.phases.some((p) => p.nodes.length > 0) ? f : null
 })
 
-const detectionFlows = computed(() => {
-  const m = new Map<string, AnalysisFlow>()
-  for (const e of agent.entries) {
-    if (e.kind === 'detection') m.set(e.id, buildAnalysisFlow(agent.entries, e.id))
-  }
-  return m
-})
+/** 检测卡冻结态流程的记忆化容器:流式期间 text_delta 高频触发本 computed,
+ * 既有 detection 的输入前缀未变,按 条目 id+前缀签名 复用上次推导结果
+ * (见 analysisFlow.DetectionFlowMemo),只对新增/变更的检测条目重建。 */
+const detectionFlowMemo = new DetectionFlowMemo()
+const detectionFlows = computed(() => detectionFlowMemo.build(agent.entries))
 
 /* ---- composer 键盘:Enter 发送 / Shift+Enter 换行;输入法合成态(isComposing/
  * keyCode 229)中的 Enter 是选词上屏,不发送(判定抽 utils/chatDisplay 便于直测) ---- */

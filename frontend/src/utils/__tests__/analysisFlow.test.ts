@@ -2,10 +2,12 @@
 // - 冻结态区间(最近 user 之后至锚定 detection)与实时态区间(detectionId=null);
 // - 阶段映射/顺序、并行批(at 差 <1s 且只隔 approval/system)、子代理内嵌子步骤;
 // - 失败步 ok=false + 同名后续成功 → retried;耗时 = 下一条目 at − 本条目 at;
-// - 计数(loops/toolCalls/subagents/approvals)与 totalMs 全链有 at 才给出。
+// - 计数(loops/toolCalls/subagents/approvals)与 totalMs 全链有 at 才给出;
+// - DetectionFlowMemo 记忆化:前缀签名未变复用、变更重建、增量只建新增项。
 import { describe, it, expect } from 'vitest';
 import {
   buildAnalysisFlow,
+  DetectionFlowMemo,
   type FlowParallel,
   type FlowStep,
   type FlowSubagent,
@@ -538,5 +540,58 @@ describe('buildAnalysisFlow(generateMs 透传)', () => {
     expect(thinks).toHaveLength(2);
     expect(thinks[0]!.generateMs).toBe(12000);
     expect(thinks[1]!.generateMs).toBeUndefined();
+  });
+});
+
+describe('DetectionFlowMemo(冻结态记忆化)', () => {
+  it('签名未变复用同一对象:detection 之后追加条目,既有流程不重建', () => {
+    const memo = new DetectionFlowMemo();
+    const entries = linearEntries();
+    const detId = entries.find((e) => e.kind === 'detection')!.id;
+    const m1 = memo.build(entries);
+    entries.push(assistant('收尾说明', 17000), tool('video_meta', 18000));
+    const m2 = memo.build(entries);
+    expect(m2.get(detId)).toBe(m1.get(detId));
+  });
+
+  it('流式 text_delta 只改末尾 assistant:所有既有 detection 全命中', () => {
+    const memo = new DetectionFlowMemo();
+    const entries = linearEntries();
+    const detId = entries.find((e) => e.kind === 'detection')!.id;
+    const m1 = memo.build(entries);
+    const live: Extract<AgentEntry, { kind: 'assistant' }> = {
+      id: 'a-live',
+      kind: 'assistant',
+      text: '',
+      think: '',
+      at: 17000,
+    };
+    entries.push(live);
+    for (const chunk of ['先看', '元信息', '……']) {
+      live.text += chunk;
+      expect(memo.build(entries).get(detId)).toBe(m1.get(detId));
+    }
+  });
+
+  it('前缀内容变化(工具结果回填)则重建,新结果反映变更', () => {
+    const memo = new DetectionFlowMemo();
+    const entries = linearEntries();
+    const detId = entries.find((e) => e.kind === 'detection')!.id;
+    const m1 = memo.build(entries);
+    (entries[3] as Extract<AgentEntry, { kind: 'tool' }>).result = '抽帧 12 张';
+    const m2 = memo.build(entries);
+    expect(m2.get(detId)).not.toBe(m1.get(detId));
+  });
+
+  it('新增 detection 条目只构建新增项,既有项仍复用', () => {
+    const memo = new DetectionFlowMemo();
+    const entries = linearEntries();
+    const det1 = entries.find((e) => e.kind === 'detection')!.id;
+    const m1 = memo.build(entries);
+    entries.push(user('再看一次', 20000), tool('video_meta', 21000), detection(22000));
+    const m2 = memo.build(entries);
+    expect(m2.size).toBe(2);
+    expect(m2.get(det1)).toBe(m1.get(det1));
+    expect(m2.get(det1)).toBeDefined();
   });
 });
