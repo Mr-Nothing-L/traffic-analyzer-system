@@ -1,13 +1,7 @@
-python3 -m traffic_analyzer analyze \
---video output/01-02-07-11_Event_65536_1750981599056_1.mp4 \
---format markdown  \
---output output/01-02-07-11_Event_65536_1750981599056_1.md 
-
-# D：/CXXX/traffic_analyzer/traffic_analyzer_main
-# 1. .env 
-# 2. powershell
-# 3. cd D：/CXXX/traffic_analyzer/
-# 4 python3 -m traffic_analyzer analyze \
-# --video output/01-02-07-11_Event_65536_1750981599056_1.mp4 \
-# --format markdown  \
-# --output output/01-02-07-11_Event_65536_1750981599056_1.md 
+#!/usr/bin/env bash
+# 单视频分析:./scripts/analyze.sh <video_path> [output_md]
+# 输出缺省为 <video 去扩展名>.md;视频路径相对仓库根时需能被 traffic_analyzer 解析。
+set -euo pipefail
+video="${1:?用法: $0 <video_path> [output_md]}"
+out="${2:-${video%.*}.md}"
+python3 -m traffic_analyzer analyze --video "$video" --format markdown --output "$out"

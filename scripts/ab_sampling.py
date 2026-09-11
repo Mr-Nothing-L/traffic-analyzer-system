@@ -2,7 +2,7 @@
 """采样参数 A/B 实验驱动:直连独立 agent server 实例跑一次「分析视频」检测。
 
 用法:
-    python3 scripts/ab_sampling.py <agent_base_url> <video_filename> <label> <out_dir>
+    python3 scripts/ab_sampling.py <agent_base_url> <video_filename> <label> <out_dir> <workspace_dir>
 
 - 创建 yolo 会话(免审批),POST /chat SSE 流式收集事件直到 done。
 - 产出 <out_dir>/<label>_<video>.jsonl(全部事件)与 <out_dir>/<label>_<video>.summary.json。
@@ -13,8 +13,6 @@ import time
 from pathlib import Path
 
 import httpx
-
-WORKSPACE = "/media/wanji/Elements/大模型应用/traffic-agent-local-version/演示区"
 
 
 def find_key(obj, key):
@@ -35,7 +33,9 @@ def find_key(obj, key):
 
 
 def main() -> None:
-    base, video, label, out_dir = sys.argv[1:5]
+    if len(sys.argv) != 6:
+        sys.exit("用法: python3 scripts/ab_sampling.py <agent_base_url> <video_filename> <label> <out_dir> <workspace_dir>")
+    base, video, label, out_dir, workspace = sys.argv[1:6]
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     stem = f"{label}_{Path(video).stem}"
@@ -47,7 +47,7 @@ def main() -> None:
     session_id = None
     try:
         with httpx.Client(base_url=base, timeout=httpx.Timeout(900.0, connect=10.0)) as client:
-            resp = client.post("/sessions", json={"workspaceDir": WORKSPACE, "mode": "yolo"})
+            resp = client.post("/sessions", json={"workspaceDir": workspace, "mode": "yolo"})
             if resp.status_code != 200:
                 raise RuntimeError(f"POST /sessions -> {resp.status_code}: {resp.text[:500]}")
             session_id = resp.json()["sessionId"]

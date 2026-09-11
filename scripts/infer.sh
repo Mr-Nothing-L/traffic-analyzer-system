@@ -1,4 +1,6 @@
-python3 -m traffic_analyzer analyze \
---video /data/test_videos/高速交通事件agent测试视频_v2/01-02-07_Event_129_1754179639665_1_后半段.mp4  \
---format markdown \
---output /data/test_videos/高速交通事件agent测试视频_v2/01-02-07_Event_129_1754179639665_1_后半段report.md
+#!/usr/bin/env bash
+# 单视频推理(与 analyze.sh 同一 analyze 子命令的历史别名):./scripts/infer.sh <video_path> [output_md]
+set -euo pipefail
+video="${1:?用法: $0 <video_path> [output_md]}"
+out="${2:-${video%.*}.md}"
+python3 -m traffic_analyzer analyze --video "$video" --format markdown --output "$out"
