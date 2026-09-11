@@ -139,14 +139,20 @@ export const useDashboardStore = defineStore('dashboard', () => {
     return `/dashboard/rows?${q.toString()}`
   }
 
+  /** 在途请求序号:筛选变更/goToStem 与在途请求并发时仅最新请求的结果生效;
+   * 此前的在途去重直接 return,新请求被静默丢弃(P3-28)。 */
+  let rowsFetchSeq = 0
+
   async function fetchRows(page: number) {
-    if (rowsFetching.value) return
+    const seq = ++rowsFetchSeq
     rowsFetching.value = true
     try {
       let d = await apiFetch<RowsData>(rowsQuery(page))
+      if (seq !== rowsFetchSeq) return // 已有更新的请求在途:丢弃本响应
       // 页码夹紧:请求页超出总页数(数据变少/筛选收窄)时回退最后一页重拉
       if (d.total_pages >= 1 && d.page > d.total_pages) {
         d = await apiFetch<RowsData>(rowsQuery(d.total_pages))
+        if (seq !== rowsFetchSeq) return
       }
       if (pendingReviews.size && rowsData.value) {
         d.rows.forEach((r) => {
@@ -160,9 +166,10 @@ export const useDashboardStore = defineStore('dashboard', () => {
       curPage.value = d.page
       rowsError.value = null
     } catch (e) {
+      if (seq !== rowsFetchSeq) return
       if (!rowsData.value) rowsError.value = (e as Error).message
     } finally {
-      rowsFetching.value = false
+      if (seq === rowsFetchSeq) rowsFetching.value = false
     }
   }
 

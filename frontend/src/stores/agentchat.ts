@@ -933,6 +933,14 @@ class ActiveSession {
       if (Number.isFinite(max) && max > 0) maxTokens.value = max
     } else if (ev.type === 'compaction') {
       entries.value.push({ id: nextEntryId(), kind: 'system', text: '上下文已自动压缩', at: Date.now() })
+    } else if (ev.type === 'compaction_abandoned') {
+      // 摘要不够短,本次压缩放弃、消息保持原样:仅提示,不改变时间线状态
+      entries.value.push({
+        id: nextEntryId(),
+        kind: 'system',
+        text: '上下文压缩已放弃(摘要未能缩短),消息保持原样',
+        at: Date.now(),
+      })
     } else if (ev.type === 'done') {
       // 落盘水位兜底:done 的 seq 在异常路径先于轮末兜底落盘,以本地非 system
       // 条目数对齐(本地与后端逐条对齐是既有契约;见 rewindTo/seq 注释)。

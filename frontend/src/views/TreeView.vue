@@ -45,7 +45,7 @@ onMounted(async () => {
     await jobs.pollJobs() // 很轻,照常启动以恢复任务进度(同 legacy)
   }
   // 心跳上报 viewing(当前选中视频);名册由 SSE presence 事件推送
-  presence.startHeartbeat(() => ws.currentRel)
+  presence.startHeartbeat(() => ws.currentRel, () => ws.editingRel)
 })
 
 /** 过滤后整个工作区无匹配视频(勾选状态不受影响)。 */

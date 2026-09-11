@@ -78,9 +78,6 @@ const isThinkLive = computed(() => props.streaming && !entry.value.text)
   margin: var(--space-sm) 0;
 }
 
-.row.user {
-  justify-content: flex-end;
-}
 
 .avatar {
   width: 36px;
@@ -103,10 +100,6 @@ const isThinkLive = computed(() => props.streaming && !entry.value.text)
   background: var(--color-surface-2);
 }
 
-.row.user .bubble {
-  background: var(--color-accent-soft);
-  border-color: var(--color-accent-deep);
-}
 
 .bubble-text {
   white-space: pre-wrap;
@@ -194,9 +187,6 @@ const isThinkLive = computed(() => props.streaming && !entry.value.text)
   max-width: 65%;
 }
 
-.row.user .msg-col {
-  align-items: flex-end;
-}
 
 .msg-col .bubble {
   max-width: 100%;

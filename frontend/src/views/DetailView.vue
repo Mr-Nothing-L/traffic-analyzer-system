@@ -60,6 +60,14 @@ watch(tabs, (list) => {
   if (!list.includes(activeTab.value)) activeTab.value = list[0]
 })
 watch(activeTab, (t) => localStorage.setItem(TAB_STORAGE_KEY, t))
+// presence「正在编辑」徽章数据源:SFT 标注/证据编辑卡激活且落在某视频时上报
+watch(
+  [activeTab, rel],
+  ([t, r]) => {
+    ws.editingRel = (t === 'sft' || t === 'evidence') && r ? r : null
+  },
+  { immediate: true },
+)
 const job = computed(() => jobs.latestJobForStem(stem.value))
 
 async function loadAll() {
@@ -88,7 +96,10 @@ watch(
     ev.load(stem.value)
   },
 )
-onUnmounted(() => ev.clear())
+onUnmounted(() => {
+  ev.clear()
+  ws.editingRel = null
+})
 
 // 离开详情页/切换视频时 dirty 未保存 → 三选一:保存并离开 / 丢弃并离开 / 继续编辑(v2 按要求加提示)
 // SFT 与证据两处编辑面板都可能置 dirty,守卫口径与 job-done 提示一致(两者都查)。

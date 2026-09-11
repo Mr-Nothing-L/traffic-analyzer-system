@@ -82,18 +82,6 @@ const entry = computed(() => props.entry as AgentUserEntry)
   justify-content: flex-end;
 }
 
-.avatar {
-  width: 36px;
-  height: 36px;
-  flex: 0 0 36px;
-  border-radius: 50%;
-  border: 1px solid var(--color-border);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--color-accent-soft);
-  color: var(--color-accent);
-}
 
 .bubble {
   max-width: 65%;

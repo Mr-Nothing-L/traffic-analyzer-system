@@ -50,6 +50,8 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const videos = shallowRef<VideoInfo[]>([])
   const checked = reactive(new Set<string>()) // 勾选的视频 rel
   const currentRel = ref<string | null>(null) // 当前选中视频 rel(行高亮 + presence viewing)
+  /** 正在编辑(SFT/证据卡激活)的视频 rel:presence 心跳上报「正在编辑」徽章。 */
+  const editingRel = ref<string | null>(null)
   const filter = ref(localStorage.getItem(SIDE_FILTER_KEY) || '')
   const sort = ref<SortKey>((localStorage.getItem(SIDE_SORT_KEY) as SortKey) || 'name')
 
@@ -314,7 +316,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   return {
-    path, loaded, treeLoading, root, children, expanded, videos, checked, currentRel,
+    path, loaded, treeLoading, root, children, expanded, videos, checked, currentRel, editingRel,
     filter, sort, hasWorkspace, videoByRel, allChecked, someChecked,
     fetchWorkspace, loadTree, refreshTree, toggleDir, applyWorkspace,
     setFilter, setSort, setChecked, setAllChecked, deleteReport, deleteReports,

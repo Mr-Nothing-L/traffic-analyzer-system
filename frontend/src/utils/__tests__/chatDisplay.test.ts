@@ -18,7 +18,6 @@ import {
   thinkSummaryLine,
   textPreviewLines,
   timelineEntries,
-  toolErrorSummary,
   toolLabel,
   toolRoundAssistantIds,
   toolRoundAssistantTextIds,
@@ -357,23 +356,6 @@ describe('textPreviewLines(说明节点折叠预览)', () => {
   it('不足两行原样;空文本返回空串', () => {
     expect(textPreviewLines('只有一行')).toBe('只有一行');
     expect(textPreviewLines('')).toBe('');
-  });
-});
-
-describe('toolErrorSummary(工具失败摘要)', () => {
-  it('取结果首个非空行', () => {
-    expect(toolErrorSummary('\n读取失败:文件不存在\n堆栈第二行')).toBe('读取失败:文件不存在');
-  });
-
-  it('超长截断到 80 字并加省略号', () => {
-    const long = 'x'.repeat(100);
-    const out = toolErrorSummary(long);
-    expect(out).toBe(`${'x'.repeat(80)}…`);
-  });
-
-  it('无内容回退「未知错误」', () => {
-    expect(toolErrorSummary('')).toBe('未知错误');
-    expect(toolErrorSummary('\n \n')).toBe('未知错误');
   });
 });
 

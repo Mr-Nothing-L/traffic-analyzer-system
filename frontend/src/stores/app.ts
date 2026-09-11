@@ -14,9 +14,6 @@ export const useAppStore = defineStore('app', () => {
   const loginIp = ref<string | null>(null)
   const sseConnected = ref(false)
 
-  function setUser(name: string | null) {
-    user.value = name
-  }
   function setMe(me: MeInfo | null) {
     user.value = me?.username ?? null
     loginTs.value = me?.login_ts ?? null
@@ -26,5 +23,5 @@ export const useAppStore = defineStore('app', () => {
     sseConnected.value = connected
   }
 
-  return { user, loginTs, loginIp, sseConnected, setUser, setMe, setSseConnected }
+  return { user, loginTs, loginIp, sseConnected, setMe, setSseConnected }
 })

@@ -37,13 +37,18 @@ export const usePresenceStore = defineStore('presence', () => {
       .filter((u) => u.username)
   }
 
-  /** 每 10s 上报 viewing/editing(留在名册里的必要动作);页面隐藏时暂停。 */
-  function startHeartbeat(getViewing: () => string | null) {
+  /** 每 10s 上报 viewing/editing(留在名册里的必要动作);页面隐藏时暂停。
+   * getEditing 缺省不上报编辑态;SFT/证据编辑页传入当前 rel,树上「正在编辑」
+   * 徽章自此有真实数据源(此前硬编码 null 而徽章 UI 仍在,P3-28)。 */
+  function startHeartbeat(
+    getViewing: () => string | null,
+    getEditing: () => string | null = () => null,
+  ) {
     if (timer) return
     const beat = () => {
       apiFetch('/presence', {
         method: 'POST',
-        body: JSON.stringify({ viewing: getViewing(), editing: null }),
+        body: JSON.stringify({ viewing: getViewing(), editing: getEditing() }),
       }).catch(() => {
         // 后端未就绪:静默,下个周期重试
       })
