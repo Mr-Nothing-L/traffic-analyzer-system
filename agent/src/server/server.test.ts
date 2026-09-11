@@ -1158,11 +1158,13 @@ describe('agent server', () => {
 
       writeFileSync(
         path.join(promptsDir, 'chat_system.md'),
-        '头部\n当前共 {{ACTIVE_EVENT_COUNT}} 个活跃类别,编号 {{ACTIVE_EVENT_ID_LIST}}。\n{{EVENT_DEFINITIONS}}\n{{ADJUDICATION_RULES}}\n',
+        '头部\n当前共 {{ACTIVE_EVENT_COUNT}} 个活跃类别,编号 {{ACTIVE_EVENT_ID_LIST}}。\n{{EVENT_DEFINITIONS}}\n{{ADJUDICATION_RULES}}\n共 {{TOOL_COUNT}} 个工具,{{ENCODING_LENGTH}} 位编码\n',
       );
       const rendered = defaultSystemPrompt(promptsDir);
       expect(rendered).not.toMatch(/\{\{[A-Z_]+\}\}/);
       expect(rendered).toContain('共 10 个活跃类别,编号 1-8、10-11');
+      // 位宽取 event_contract.json,工具计数取 toolset.json 条目数(派生不手抄)
+      expect(rendered).toContain('共 21 个工具,11 位编码');
       expect(rendered).toContain('违法停车');
       expect(rendered).toContain('应急车道静止触发双事件');
     } finally {
@@ -1181,7 +1183,7 @@ describe('agent server', () => {
 
       writeFileSync(
         path.join(promptsDir, 'chat_system.md'),
-        '{{EVENT_DEFINITIONS}}\n{{ADJUDICATION_RULES}}\n{{ACTIVE_EVENT_COUNT}} {{ACTIVE_EVENT_ID_LIST}}\n{{UNKNOWN_TOKEN}}',
+        '{{EVENT_DEFINITIONS}}\n{{ADJUDICATION_RULES}}\n{{ACTIVE_EVENT_COUNT}} {{ACTIVE_EVENT_ID_LIST}} {{ENCODING_LENGTH}} {{TOOL_COUNT}}\n{{UNKNOWN_TOKEN}}',
       );
       expect(() => defaultSystemPrompt(promptsDir)).toThrow(/未知占位符/);
     } finally {

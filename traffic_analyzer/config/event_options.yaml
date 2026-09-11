@@ -9,7 +9,9 @@
 #      PUT sft 校验 event_attributes);前端 js/sft.js 据此渲染 chips 与骨架句。
 #
 # 约定:
-#   - groups 数组顺序即 UI 展示顺序与骨架模板槽位顺序;
+#   - groups 数组顺序即 UI 展示顺序(chips 渲染顺序);骨架句槽位顺序由
+#     frontend/src/sft/model.ts 的 SFT_SKELETON_TEMPLATES 独立定义
+#     (direction 槽位恒在最前),与 groups 顺序不必一致;
 #   - multi: true 的组(如施工要素)值为选项列表,其余为单选字符串;
 #   - required: true 的组为必填项(后端 PUT 校验与 API 配置使用);
 #   - 编辑器仅对 is_active 的事件渲染 chips;未激活事件即使定义选项也不渲染。

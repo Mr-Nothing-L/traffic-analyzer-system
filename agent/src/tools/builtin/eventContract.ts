@@ -46,8 +46,33 @@ export interface EventContract {
 }
 
 const CONTRACT_URL = new URL('../../../config/event_contract.json', import.meta.url);
+const TOOLSET_URL = new URL('../../../config/toolset.json', import.meta.url);
 
 let cached: EventContract | undefined;
+let cachedToolCount: number | undefined;
+
+/** toolset.json 条目数:chat_system.md 的 {{TOOL_COUNT}} 计数叙述从模型可见
+ * 工具清单本身派生,增删工具后计数随动。与 builtin/index.ts 的 loadToolset
+ * 各自读同一文件(此处的用途只有条目数,不为计数引入对 builtin 聚合模块的
+ * 循环依赖)。 */
+function toolsetToolCount(): number {
+  if (cachedToolCount !== undefined) return cachedToolCount;
+  let raw: unknown;
+  try {
+    raw = JSON.parse(readFileSync(fileURLToPath(TOOLSET_URL), 'utf8'));
+  } catch (error) {
+    throw new Error(
+      `加载 agent/config/toolset.json 失败(${error instanceof Error ? error.message : String(error)});` +
+        '工具计数无法派生',
+    );
+  }
+  const tools = (raw as { tools?: unknown }).tools;
+  if (!Array.isArray(tools)) {
+    throw new Error('toolset.json 结构不合法:缺少 tools 数组,工具计数无法派生');
+  }
+  cachedToolCount = tools.length;
+  return cachedToolCount;
+}
 
 /** 加载并校验事件契约;失败抛错(fail-fast),结果进程内缓存。 */
 export function loadEventContract(): EventContract {
@@ -267,6 +292,8 @@ const PROMPT_PLACEHOLDERS: Record<string, (contract: EventContract) => string> =
   ADJUDICATION_RULES: renderAdjudicationSection,
   ACTIVE_EVENT_COUNT: (contract) => String(contract.active_event_ids.length),
   ACTIVE_EVENT_ID_LIST: (contract) => formatEventIdList(contract.active_event_ids),
+  ENCODING_LENGTH: (contract) => String(contract.encoding_length),
+  TOOL_COUNT: () => String(toolsetToolCount()),
 };
 
 /**
