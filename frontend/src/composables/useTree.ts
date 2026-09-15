@@ -43,6 +43,14 @@ export function videoStatusOf(
   return { cls: 'st-none', text: '未推理' }
 }
 
+/** 视频审核态文案(unconfirmed/confirmed/needs_review,见 web/dashboard/review.py);
+ * 其余取值(含 undefined/null)一律按「未确认」展示。 */
+export function reviewLabelOf(review?: string | null): string {
+  if (review === 'confirmed') return '已确认'
+  if (review === 'needs_review') return '需复核'
+  return '未确认'
+}
+
 /** 渲染行视图模型:视频行预取 video/状态/进度(模板每行只算一次,不再重复 videoFor)。 */
 export interface ViewRow {
   e: TreeEntry
@@ -147,5 +155,5 @@ export function useTreeView() {  const ws = useWorkspaceStore()
     if (on) pendingRels.value.forEach((rel) => ws.checked.add(rel))
   }
 
-  return { nameMatches, viewEntries, viewRows, videoFor, videoStatus, pendingRels, setPendingChecked }
+  return { nameMatches, viewEntries, viewRows, videoFor, videoStatus, pendingRels, setPendingChecked, reviewLabelOf }
 }

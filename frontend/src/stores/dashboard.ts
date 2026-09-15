@@ -123,12 +123,19 @@ export const useDashboardStore = defineStore('dashboard', () => {
     }
   }
 
-  function rowsQuery(page: number): string {
-    const q = new URLSearchParams({ page: String(page), size: String(PAGE_SIZE) })
+  /** 筛选条件 → 明细/定位端点共用查询参数(size 两端点一致;page 由调用方按需追加)。 */
+  function filterParams(): URLSearchParams {
+    const q = new URLSearchParams({ size: String(PAGE_SIZE) })
     if (filters.consistency.size) q.set('consistency', Array.from(filters.consistency).join(','))
     if (filters.review.size) q.set('review', Array.from(filters.review).join(','))
     if (filters.editedOnly) q.set('edited', '1')
     if (filters.name) q.set('q', filters.name)
+    return q
+  }
+
+  function rowsQuery(page: number): string {
+    const q = filterParams()
+    q.set('page', String(page))
     return `/dashboard/rows?${q.toString()}`
   }
 
@@ -163,6 +170,28 @@ export const useDashboardStore = defineStore('dashboard', () => {
   async function refresh() {
     await fetchSummary()
     await fetchRows(curPage.value)
+  }
+
+  /* ---------- 跨页定位:树点看板路由的视频时按当前筛选查其所在页 ---------- */
+
+  /** 查 stem 在当前筛选下的所在页并翻页定位(后端 rows.py position 端点)。
+   * 查不到(被过滤掉)或请求失败返回 false,由调用方提示;命中则翻页成功后
+   * 再 triggerScroll——渲染完成才滚动/高亮,修复跨页定位时序。 */
+  async function goToStem(stem: string): Promise<boolean> {
+    const q = filterParams()
+    q.set('stem', stem)
+    let page: number | null
+    try {
+      page = (await apiFetch<{ page: number | null }>(
+        `/dashboard/rows/position?${q.toString()}`,
+      )).page
+    } catch {
+      return false
+    }
+    if (page == null) return false
+    await fetchRows(page)
+    triggerScroll(stem)
+    return true
   }
 
   /* ---------- 筛选:变更即回到第 1 页重新向服务端请求 ---------- */
@@ -236,7 +265,7 @@ export const useDashboardStore = defineStore('dashboard', () => {
   return {
     data, rowsData, fetching, rowsFetching, summaryError, rowsError,
     curPage, filters, pendingReviews, summary, hasFilters,
-    eventName, namesText, fetchSummary, fetchRows, refresh,
+    eventName, namesText, fetchSummary, fetchRows, refresh, goToStem,
     toggleConsistency, toggleReview, toggleEdited, clearFilters, setName, setReview,
     scrollToStem, triggerScroll,
   }

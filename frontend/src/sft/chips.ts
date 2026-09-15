@@ -56,34 +56,32 @@ export function applyDetectCheckOn(draft: SftDraft, ev: EventDef): void {
   d.skeletons[id] = sk;
   const text = String(d.texts[id] || '');
   if (sk && text.indexOf(sk) !== 0) {
+    (d.skeletonOrig || (d.skeletonOrig = {}))[id] = text; // 插入前原文快照,取消勾选撤销依据
     d.texts[id] = sk + '。' + (text ? '\n' + text : '');
   }
   d.mentionSpans[id] = null; // span 缓存作废,重渲染时按新文本重算
 }
 
-// 「检出 → 取消勾选」:撤销 applyDetectCheckOn 的文本插入——文本仍以当前骨架
-// (含句号/换行)开头说明骨架未被人工改过,移除前缀恢复原文;骨架被人工改过
-// (前缀不匹配)则不动文本、返回 false 由 UI 提示用户自行处理。
+// 「检出 → 取消勾选」:只撤销 applyDetectCheckOn 亲手插入且未被编辑过的文本。
+// 双重校验:① 有插入快照(模型检出/磁盘载入的事件没有,绝不碰其文本——此前
+// 仅凭「文本以骨架开头」判定,会把模型原文砍掉甚至清空整段,已落盘则重置也
+// 无法恢复);② 当前文本与「当前骨架+句号+快照原文」逐字符一致(chips 换值后
+// 骨架就地更新,用当前值故仍可撤销;人工打过字则不匹配,不动文本返回 false)。
 // attrs/声明提及保留:chips 仅勾选时显示,重新勾选按已选值重插骨架,不丢工作。
 export function applyDetectCheckOff(draft: SftDraft, ev: EventDef): boolean {
   const d = draft;
   const id = ev.event_id;
+  const orig = d.skeletonOrig ? d.skeletonOrig[id] : undefined;
+  if (orig === undefined) return true; // 非本次手动插入:不动文本
   const sk = d.skeletons[id] || '';
-  if (!sk) return true;
   const text = String(d.texts[id] || '');
-  if (text === sk + '。') {
-    d.texts[id] = '';
-  } else if (text.indexOf(sk + '。\n') === 0) {
-    d.texts[id] = text.slice(sk.length + 2);
-  } else if (text.indexOf(sk + '。') === 0) {
-    d.texts[id] = text.slice(sk.length + 1);
-  } else if (text.indexOf(sk) === 0) {
-    d.texts[id] = text.slice(sk.length); // 结尾句号被删等边缘:只去骨架本体
-  } else {
-    return false; // 骨架被人工改过:不删,由 UI 提示
+  if (sk && text === sk + '。' + (orig ? '\n' + orig : '')) {
+    d.texts[id] = orig;
+    delete d.skeletonOrig![id];
+    d.mentionSpans[id] = null;
+    return true;
   }
-  d.mentionSpans[id] = null;
-  return true;
+  return false; // 文本被人工编辑过:不删,由 UI 提示
 }
 
 // chip 变更 → 文本同步(优先级从高到低):

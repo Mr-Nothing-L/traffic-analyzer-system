@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /** 工作台外壳:侧栏文件树 + 拖拽分隔条 + 主区(嵌套路由:欢迎卡 / 分析详情)。
  * 迁移自 legacy tree.js renderSidebar + main.js 分隔条。 */
-import { computed, onMounted } from 'vue'
+import { computed, nextTick, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import TreeNode from '../components/tree/TreeNode.vue'
 import RagResultList from '../components/tree/RagResultList.vue'
@@ -30,6 +30,14 @@ subscribe('job.done', (d) => {
   ws.refreshTree() // 任务终态:静默对齐 has_results/徽标(不清空树,见 workspace store)
 })
 subscribe('presence', (d) => presence.setRoster(d))
+// 看板审核态变更:静默刷新树,让「已完成」徽标的审核态与看板一致(对齐 job.done 的刷新方式)
+subscribe('dashboard.changed', () => ws.refreshTree())
+
+// 树跟随:看板「打开」等外部定位改 currentRel 后,滚动使选中行居中(分片放行由 TreeNode 自管)
+watch(() => ws.currentRel, async () => {
+  await nextTick() // 等定位触发的行挂载完成后再查 DOM
+  document.querySelector('.video-item.active')?.scrollIntoView({ block: 'center' })
+})
 
 onMounted(async () => {
   await ws.fetchWorkspace()

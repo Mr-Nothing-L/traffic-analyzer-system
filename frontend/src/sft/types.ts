@@ -65,6 +65,10 @@ export interface SftDraft {
   mentionSpans: Record<number, DeclSpan[] | null>;
   unmatched: string[];
   env: Record<string, string>; // 天气/时间/场景
+  // 手动勾选检出插入骨架前的原文快照(纯内存,不进保存签名):取消勾选时仅当
+  // 文本与「骨架+快照原文」逐字符一致才撤销,防止误删模型/人工原文;
+  // 磁盘载入与模型检出事件无此标记,取消勾选不碰其文本
+  skeletonOrig?: Record<number, string>;
 }
 
 // 保存时重建的四字段(PUT body 的可编辑部分)

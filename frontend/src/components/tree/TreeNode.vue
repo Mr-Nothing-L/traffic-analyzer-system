@@ -60,6 +60,17 @@ onBeforeUnmount(() => {
   if (batchTimer) clearTimeout(batchTimer)
 })
 
+/* ---- 树跟随:外部定位(看板「打开」)改 currentRel 时,目标行若落在未挂载分片则直接放行 ---- */
+watch(
+  () => ws.currentRel,
+  (rel) => {
+    if (!rel) return
+    const i = rows.value.findIndex((r) => r.e.rel === rel)
+    if (i >= limit.value) limit.value = i + 1
+  },
+  { immediate: true }, // openRow 先逐层展开再赋 currentRel:深层节点晚于赋值挂载,需兜底放行
+)
+
 /* ---- 目录展开/收起动画(移植自 legacy tree.js:267-290 的 WAAPI 高度+淡入;reduced-motion 折叠为短淡入,design.md §4) ---- */
 const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)')
 
@@ -125,15 +136,16 @@ function onCheck(rel: string, ev: Event) {
 }
 
 /** 点视频行:选中(行高亮 + presence viewing)并进分析详情页。
- * 看板模式:滚动到对应行,不跳转。 */
-function onSelect(rel: string) {
+ * 看板模式:按当前筛选定位该视频所在页(跨页翻页 + 滚动高亮),不跳转。 */
+async function onSelect(rel: string) {
   ws.currentRel = rel
   const v = ws.videoByRel.get(rel) // O(1) 索引
   // 全量列表缺失时由文件名退 stem(同 legacy tree.js 合成逻辑)
   const stem = v ? v.stem : rel.split('/').pop()!.replace(/\.[^.]+$/, '')
   if (route.name === 'dashboard') {
-    // 看板模式:滚动到对应行,不跳转
-    dashboardStore.triggerScroll(stem)
+    // 看板模式:跨页定位(查所在页→翻页→滚动高亮);被当前筛选滤掉时提示
+    const ok = await dashboardStore.goToStem(stem)
+    if (!ok) message.warning('当前过滤条件下看不到该视频,可清除过滤后重试')
   } else {
     router.push({ name: 'detail', params: { stem }, query: { rel } })
   }
@@ -181,7 +193,8 @@ async function onDeleteReport(e: TreeEntry) {
 </script>
 
 <template>
-  <template v-for="row in visible" :key="row.e.rel">
+  <!-- i 为本层过滤+排序后的显示顺序(分片是前缀切片,索引一致):平铺工作区即全局序号,嵌套目录每层重计 -->
+  <template v-for="(row, i) in visible" :key="row.e.rel">
     <!-- 目录行 + 子层容器(包在同一 v-if 分支,保证 v-else-if 链只按类型分派) -->
     <template v-if="row.e.type === 'dir'">
       <div
@@ -223,6 +236,7 @@ async function onDeleteReport(e: TreeEntry) {
       @click="onSelect(row.e.rel)"
       @keydown.enter.prevent="onSelect(row.e.rel)"
     >
+      <span class="video-idx">{{ i + 1 }}</span>
       <input
         type="checkbox"
         :checked="ws.checked.has(row.e.rel)"
@@ -251,7 +265,11 @@ async function onDeleteReport(e: TreeEntry) {
         </button>
       </template>
       <template v-else>
-        <span class="badge" :class="row.status?.cls">
+        <!-- 已完成行徽标文字改显审核态,并追加 review-* 修饰类(其余状态维持原样) -->
+        <span
+          class="badge"
+          :class="[row.status?.cls, row.status?.cls === 'st-done' ? `review-${row.video?.review || 'unconfirmed'}` : '']"
+        >
           <svg
             v-if="row.status?.cls === 'st-done'"
             class="badge-check"
@@ -260,7 +278,7 @@ async function onDeleteReport(e: TreeEntry) {
           >
             <path d="M2.5 6.4 5 8.9 9.5 3.6" />
           </svg>
-          {{ row.status?.text }}
+          {{ row.status?.cls === 'st-done' ? tree.reviewLabelOf(row.video?.review) : row.status?.text }}
         </span>
         <button
           v-if="row.status?.cls === 'st-failed'"

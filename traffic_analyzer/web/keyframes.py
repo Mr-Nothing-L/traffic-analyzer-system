@@ -50,6 +50,7 @@ from traffic_analyzer.web.evidence import (
     _atomic_write_json,
     _file_sig,
     _read_json,
+    sft_json_path as evidence_sft_json_path,
 )
 from traffic_analyzer.web.evidence.locks import _put_locks
 
@@ -127,7 +128,11 @@ def kf_dir(workspace: Path, stem: str) -> Path:
 
 
 def sft_json_path(workspace: Path, stem: str) -> Path:
-    return workspace_mod.analysis_dir(workspace, stem) / f"{stem}.json"
+    """SFT 样本 JSON 路径:委托 evidence.sft_json_path(顶层优先,quarantine 回退)。
+
+    隔离样本的关键帧端点此前只认顶层,会报「该视频没有 SFT 标注」;
+    统一走共享解析后,能打开的样本就一定能维护关键帧。"""
+    return evidence_sft_json_path(workspace_mod.analysis_dir(workspace, stem), stem)
 
 
 def keyframe_filename(order: int, time_sec: float) -> str:

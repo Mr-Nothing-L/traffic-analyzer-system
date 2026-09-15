@@ -104,6 +104,16 @@
   flex: 0 0 auto;
 }
 
+/* 行首序号:本层过滤+排序后的显示顺序(浅灰小字;分片为前缀切片,索引一致) */
+.video-idx {
+  flex: 0 0 auto;
+  min-width: 18px;
+  text-align: right;
+  font-size: 11px;
+  color: var(--color-text2);
+  font-variant-numeric: tabular-nums;
+}
+
 .video-meta {
   flex: 1;
   min-width: 0;
@@ -161,6 +171,22 @@
 .badge.st-failed {
   background: var(--color-red-soft);
   color: var(--color-red);
+}
+
+/* 审核态修饰(叠加于 st-done 之上,须排在其后):已确认沿用绿色系,未确认中性灰,需复核暖色 */
+.badge.review-confirmed {
+  background: var(--color-sage-soft);
+  color: var(--color-sage);
+}
+
+.badge.review-unconfirmed {
+  background: var(--color-surface-3);
+  color: var(--color-text2);
+}
+
+.badge.review-needs_review {
+  background: var(--color-accent-soft);
+  color: var(--color-accent-hover); /* 暖色组合同 dashboard.css .dash-ev-chip-warm */
 }
 
 .badge-check {
