@@ -10,7 +10,9 @@ export class ApiError extends Error {
   }
 }
 
-export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
+/** 发起 /api 请求并统一处理网络/401/后端错误,返回原始 Response。
+ * JSON 响应走 apiFetch;文本/二进制响应(如文件下载)直接用本函数。 */
+export async function apiResponse(path: string, init?: RequestInit): Promise<Response> {
   let res: Response
   try {
     res = await fetch(`/api${path}`, {
@@ -36,6 +38,11 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
     }
     throw new ApiError(res.status, detail)
   }
+  return res
+}
+
+export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await apiResponse(path, init)
   if (res.status === 204) return undefined as T
   return (await res.json()) as T
 }

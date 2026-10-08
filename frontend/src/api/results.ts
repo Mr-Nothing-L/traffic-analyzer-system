@@ -2,7 +2,7 @@
  * 契约见 traffic_analyzer/web/evidence/*(results、乐观锁 PUT)与
  * frames.py / video_stream.py(meta/frame/stream)。
  * 媒体 URL 给 <video>/<img> src 用,需带 /api 前缀;apiFetch 的路径不带。 */
-import { apiFetch } from './client'
+import { apiFetch, apiResponse } from './client'
 
 /* ---------- 证据 JSON 结构(与 evidence_schema.py 对应,宽松可选) ---------- */
 export interface EvidenceRegion {
@@ -101,6 +101,14 @@ export function putSft<T>(stem: string, body: unknown): Promise<T & { file_sig?:
     method: 'PUT',
     body: JSON.stringify(body),
   })
+}
+
+/** 导出单视频 SFT 标注(GET /results/{stem}/sft/export):后端读取磁盘样本
+ * (顶层优先/quarantine 回退)清洗为训练契约字段,响应为单行 JSONL 文本
+ * 附件(见 web/evidence/sft_export.py)。返回文本,由调用方触发浏览器
+ * 下载;404 = 无标注,422 = 文件损坏。 */
+export function fetchSftJsonl(stem: string): Promise<string> {
+  return apiResponse(`/results/${enc(stem)}/sft/export`).then((r) => r.text())
 }
 
 /** 专家阶段定义(泳道缓行封顶用;404 时调用方回退内置封顶,同 legacy)。 */

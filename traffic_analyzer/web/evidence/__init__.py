@@ -46,6 +46,7 @@ description/action/event_attributes/attr_mentions,其余字段与磁盘版本
 (写后 fsync)并按 stem 加锁(409 在跑 infer 检查在锁内复查,消除
 TOCTOU)。_read_json 区分「文件不存在」(GET → null / PUT → 404)与
 「文件损坏」(GET → 500 / PUT → 422,绝不静默当作不存在)。
+sft_export.py 为 SFT 导出路由(只读:清洗训练版单行 JSONL 附件)。
 上游:web/app.py(挂载路由);frontend/dist 前端(结果查看与标注编辑)。
 下游:web/workspace.py(路径与 stem 校验)、web/jobs(在跑任务检查,
 jobs.post_infer 反向复用本包的 _put_locks 与 find_active_infer_job 消除
@@ -193,6 +194,7 @@ from traffic_analyzer.web.evidence import (  # noqa: E402,F401
     locks,
     results,
     sft_api,
+    sft_export,
 )
 from traffic_analyzer.web.evidence.evidence_put import put_evidence  # noqa: E402,F401
 from traffic_analyzer.web.evidence.locks import (  # noqa: E402,F401
@@ -206,9 +208,11 @@ from traffic_analyzer.web.evidence.results import (  # noqa: E402,F401
     get_results,
 )
 from traffic_analyzer.web.evidence.sft_api import put_sft  # noqa: E402,F401
+from traffic_analyzer.web.evidence.sft_export import export_sft_jsonl  # noqa: E402,F401
 
 __all__ = [
     "router",
+    "export_sft_jsonl",
     "find_active_infer_job",
     "get_config_events",
     "get_result_file",

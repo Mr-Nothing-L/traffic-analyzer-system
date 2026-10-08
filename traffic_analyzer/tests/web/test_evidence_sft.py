@@ -784,3 +784,132 @@ class TestSftPutOptionalFieldSemantics:
         disk = self._read_disk(tmp_path)
         assert "attr_mentions" not in disk
         assert "event_attributes" in disk
+
+
+# ---------------------------------------------------------------------------
+# SFT export(单视频清洗训练版,单行 JSONL 附件)
+# ---------------------------------------------------------------------------
+
+
+class TestSftExport:
+    _EXPORT_KEYS = {
+        "chunk",
+        "idx",
+        "action",
+        "description",
+        "start_timestamp",
+        "end_timestamp",
+        "chunk_name",
+        "event_attributes",
+        "attr_mentions",
+        "keyframes",
+    }
+
+    def _client(self, tmp_path: Path) -> TestClient:
+        workspace = _make_workspace(tmp_path)
+        _make_results(workspace, "v1")
+        (workspace / "analysis" / "v1" / "v1.json").write_text(
+            json.dumps(_sft_payload(), ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        return TestClient(create_app(workspace=str(workspace)))
+
+    def test_export_cleaned_jsonl_ok(self, tmp_path: Path) -> None:
+        """导出 = 训练契约键集合的单行 JSONL;工作台追溯字段被剥离。"""
+        client = self._client(tmp_path)
+        disk_payload = _sft_payload()
+        disk_payload["event_attributes"] = {
+            "2": {"lane_type": "应急车道", "direction": "去向", "vehicle_type": "小型车"}
+        }
+        disk_payload["attr_mentions"] = {"2": {"lane_type": ["应急车道"]}}
+        disk_payload["keyframes"] = [{"filename": "f_0001.jpg", "frame_index": 1, "time_sec": 0.5}]
+        disk_payload["last_edited_by"] = "alice"
+        disk_payload["last_edited_at"] = "2026-10-08T00:00:00+00:00"
+        (tmp_path / "analysis" / "v1" / "v1.json").write_text(
+            json.dumps(disk_payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        resp = client.get("/api/results/v1/sft/export")
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("application/x-ndjson")
+        assert "attachment" in resp.headers["content-disposition"]
+
+        # 单行 JSONL:一行一对象,尾随换行。
+        assert resp.text.endswith("\n")
+        assert resp.text.count("\n") == 1
+        sample = json.loads(resp.text)
+        assert set(sample.keys()) == self._EXPORT_KEYS
+        assert "last_edited_by" not in sample
+        assert "last_edited_at" not in sample
+        assert sample["action"] == [2]
+        assert sample["chunk_name"] == "v1.mp4"
+        assert sample["event_attributes"] == disk_payload["event_attributes"]
+        assert sample["keyframes"] == disk_payload["keyframes"]
+
+    def test_export_legacy_sample_backfills_defaults(self, tmp_path: Path) -> None:
+        """旧格式缺失的键补契约默认值,输出 schema 稳定;已有键原样保留。"""
+        workspace = _make_workspace(tmp_path)
+        _make_results(workspace, "v1")  # 样本仅 chunk/idx/action/description 四键
+        client = TestClient(create_app(workspace=str(workspace)))
+
+        resp = client.get("/api/results/v1/sft/export")
+        assert resp.status_code == 200
+        sample = json.loads(resp.text)
+        assert set(sample.keys()) == self._EXPORT_KEYS
+        assert sample["chunk"] == 0  # 磁盘已有值不覆盖
+        assert sample["action"] == [1]
+        assert sample["start_timestamp"] == 0.0
+        assert sample["chunk_name"] == ""
+        assert sample["event_attributes"] == {}
+        assert sample["attr_mentions"] == {}
+        assert sample["keyframes"] == []
+
+    def test_export_quarantine_fallback_ok(self, tmp_path: Path) -> None:
+        """样本仅存在于 quarantine/ 时经 sft_json_path 回退导出。"""
+        workspace = _make_workspace(tmp_path)
+        _make_results(workspace, "v1")
+        (workspace / "analysis" / "v1" / "v1.json").unlink()
+        quarantine = workspace / "analysis" / "v1" / "quarantine"
+        quarantine.mkdir()
+        (quarantine / "v1.json").write_text(
+            json.dumps(_sft_payload(), ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        client = TestClient(create_app(workspace=str(workspace)))
+
+        resp = client.get("/api/results/v1/sft/export")
+        assert resp.status_code == 200
+        assert json.loads(resp.text)["action"] == [2]
+
+    def test_export_missing_404(self, tmp_path: Path) -> None:
+        workspace = _make_workspace(tmp_path)
+        _make_results(workspace, "v1")
+        (workspace / "analysis" / "v1" / "v1.json").unlink()
+        client = TestClient(create_app(workspace=str(workspace)))
+        assert client.get("/api/results/v1/sft/export").status_code == 404
+
+    def test_export_corrupt_422(self, tmp_path: Path) -> None:
+        workspace = _make_workspace(tmp_path)
+        _make_results(workspace, "v1")
+        (workspace / "analysis" / "v1" / "v1.json").write_text("{broken", encoding="utf-8")
+        client = TestClient(create_app(workspace=str(workspace)))
+        assert client.get("/api/results/v1/sft/export").status_code == 422
+
+    def test_export_non_dict_422(self, tmp_path: Path) -> None:
+        workspace = _make_workspace(tmp_path)
+        _make_results(workspace, "v1")
+        (workspace / "analysis" / "v1" / "v1.json").write_text("[1, 2]", encoding="utf-8")
+        client = TestClient(create_app(workspace=str(workspace)))
+        assert client.get("/api/results/v1/sft/export").status_code == 422
+
+    def test_export_bad_stem_404(self, tmp_path: Path) -> None:
+        client = self._client(tmp_path)
+        assert client.get("/api/results/a..b/sft/export").status_code == 404
+
+    def test_export_content_disposition_encodes_filename(self, tmp_path: Path) -> None:
+        """非 ASCII stem 按 RFC 5987 编码进 filename*(浏览器据此命名)。"""
+        client = self._client(tmp_path)
+        resp = client.get("/api/results/v1/sft/export")
+        disposition = resp.headers["content-disposition"]
+        assert "filename*=UTF-8''v1.jsonl" in disposition
