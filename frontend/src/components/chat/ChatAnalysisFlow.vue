@@ -81,9 +81,14 @@ function fmtDur(ms: number | null): string {
   return `${Math.round(ms / 1000)}s`
 }
 
-function mkRow(s: FlowStep): Row {
+/** mkRow 实际读取的最小结构:FlowStep 与子代理分支({inner})的字段子集
+ * (后者无 name/label,模板也只渲染 state/dur,见 aflow-sub 分支)。 */
+type StepRowSource = Pick<FlowStep, 'durationMs' | 'ok'> &
+  Partial<Pick<FlowStep, 'label' | 'active' | 'retried'>>
+
+function mkRow(s: StepRowSource): Row {
   return {
-    label: s.label,
+    label: s.label ?? '',
     dur: fmtDur(s.durationMs),
     state: stateOf(s.ok, s.active),
     retried: s.retried === true,
