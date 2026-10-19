@@ -1,0 +1,510 @@
+/* 分析链路流程图(ChatAnalysisFlow + aflow/ 节点子组件)共享样式。
+ * 原 scoped 样式随节点拆分移出:类名全部 aflow- 前缀(无碰撞风险),
+ * :deep(.md/.think-line) 改写为普通后代选择器(语义等价——scoped 的
+ * :deep 仅去掉 data-v 约束)。由 ChatAnalysisFlow.vue 统一 import。 */
+
+.aflow {
+  margin: var(--space-xs) 0;
+  min-width: 0;
+}
+
+.aflow.realtime {
+  margin-top: var(--space-sm);
+}
+
+/* ---- 冻结态摘要按钮 ---- */
+.aflow-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--color-text2);
+  font-family: var(--font-pixel); /* 骨架文案 → 像素 */
+  font-size: var(--text-sm);
+  cursor: pointer;
+  text-align: left;
+}
+
+.aflow-summary:hover {
+  color: var(--color-accent);
+}
+
+.aflow-summary:focus-visible,
+.aflow-node-btn:focus-visible,
+.aflow-chip:focus-visible,
+.aflow-sub-head:focus-visible,
+.aflow-toolbar-btn:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+.aflow-caret {
+  flex: 0 0 auto;
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+
+.aflow-caret.open {
+  transform: rotate(90deg);
+}
+
+/* ---- 节点全部展开/折叠工具行 ---- */
+.aflow-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  font-family: var(--font-sans);
+  font-size: var(--text-xs);
+  color: var(--color-text2);
+}
+
+.aflow-toolbar-btn {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--color-text2);
+  font-family: inherit;
+  font-size: inherit;
+  cursor: pointer;
+}
+
+.aflow-toolbar-btn:hover {
+  color: var(--color-accent);
+}
+
+.aflow-toolbar-sep {
+  color: var(--color-text2);
+  opacity: 0.6;
+}
+
+/* ---- 阶段(纵向分组,引导线在步骤列上) ---- */
+.aflow-body {
+  margin-top: var(--space-xs);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  min-width: 0;
+}
+
+.aflow-phase-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  color: var(--color-accent);
+  font-family: var(--font-pixel);
+  font-size: var(--text-sm);
+}
+
+/* 步骤列:虚线引导线贯穿状态点 */
+.aflow-nodes {
+  position: relative;
+  margin: var(--space-xs) 0 0 calc(6px + var(--space-md));
+  padding-left: var(--space-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  min-width: 0;
+}
+
+.aflow-nodes::before {
+  content: '';
+  position: absolute;
+  left: 3px;
+  top: 5px;
+  bottom: 5px;
+  border-left: 1px dashed var(--color-border);
+}
+
+.aflow-node {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  min-width: 0;
+  font-family: var(--font-pixel); /* 步骤标签 = 骨架 → 像素 */
+  font-size: var(--text-sm);
+  color: var(--color-text2);
+}
+
+/* 主干步骤整行可点(button 复位,视觉与原步骤行一致) */
+.aflow-node-btn {
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.aflow-node-btn:hover {
+  color: var(--color-accent);
+}
+
+/* 展开态节点:标签走 accent 提示「当前看的是这条的明细」 */
+.aflow-node-btn.is-open .aflow-lbl {
+  color: var(--color-accent);
+}
+
+/* 节点明细:缩进对齐节点文字,与引导线区隔 */
+.aflow-node-wrap {
+  min-width: 0;
+}
+
+.aflow-detail {
+  margin: var(--space-xs) 0 0 var(--space-sm);
+}
+
+.aflow-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-sage); /* 默认=完成(sage) */
+  box-shadow: 0 0 0 2px var(--color-card); /* 与引导线之间留出纸面间隙 */
+}
+
+.is-fail .aflow-dot {
+  background: var(--color-red);
+}
+
+.is-fail .aflow-lbl {
+  color: var(--color-red);
+}
+
+.is-run .aflow-dot {
+  background: var(--color-blue);
+  animation: aflow-pulse 1.2s var(--ease-in-out) infinite;
+}
+
+@keyframes aflow-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.55);
+    opacity: 0.45;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .is-run .aflow-dot {
+    animation: none;
+  }
+}
+
+.aflow-lbl {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 耗时数值:纯文本 mono(如 96s) */
+.aflow-dur {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--color-text2);
+  font-weight: normal;
+}
+
+/* 失败步重试标记:低调虚线小标 */
+.aflow-retried {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+  padding: 1px var(--space-sm);
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text2);
+  font-size: var(--text-xs);
+}
+
+/* ---- 思考/说明节点:折叠头(▸ 标签 + 摘要/预览)+ 悬停显现复制 ---- */
+.aflow-think-row,
+.aflow-text-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  min-width: 0;
+}
+
+/* 折叠头内摘要占满剩余宽度截断;摘要/全文是内容文本 → sans(按钮继承像素只给标签) */
+.aflow-think-head,
+.aflow-text-head {
+  width: auto; /* 覆盖 .aflow-node-btn 的 100%:同行还有悬停显现的复制按钮 */
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.aflow-think-lbl,
+.aflow-text-lbl {
+  flex: 0 0 auto;
+}
+
+.aflow-think-head .think-line {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+  font-family: var(--font-sans);
+  font-size: var(--text-xs);
+}
+
+/* 说明折叠预览:前两行(超两行截断 + 省略号提示),内容文本 → sans */
+.aflow-text-preview {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  white-space: pre-line;
+  color: var(--color-text2);
+  font-family: var(--font-sans);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+  text-align: left;
+}
+
+.aflow-think-copy,
+.aflow-text-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--color-text2);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease-out);
+}
+
+.aflow-think-row:hover .aflow-think-copy,
+.aflow-think-row:focus-within .aflow-think-copy,
+.aflow-text-row:hover .aflow-text-copy,
+.aflow-text-row:focus-within .aflow-text-copy {
+  opacity: 1;
+}
+
+.aflow-think-copy:hover,
+.aflow-text-copy:hover {
+  color: var(--color-accent);
+}
+
+/* 思考/说明全文:说明文字 → sans,与节点文字缩进对齐 */
+.aflow-think-text {
+  margin: var(--space-xs) 0 0 var(--space-sm);
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--color-text2);
+  font-family: var(--font-sans);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+}
+
+/* 说明全文走 markdown(MdStream → .md 容器),样式与气泡正文同款 */
+.aflow-text-text {
+  margin: var(--space-xs) 0 0 var(--space-sm);
+  color: var(--color-text2);
+  font-family: var(--font-sans);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+  min-width: 0;
+}
+
+.aflow-text-text .md > :first-child {
+  margin-top: 0;
+}
+
+.aflow-text-text .md > :last-child {
+  margin-bottom: 0;
+}
+
+.aflow-text-text .md p,
+.aflow-text-text .md ul,
+.aflow-text-text .md ol,
+.aflow-text-text .md blockquote,
+.aflow-text-text .md pre,
+.aflow-text-text .md table {
+  margin: var(--space-xs) 0;
+}
+
+.aflow-text-text .md h1,
+.aflow-text-text .md h2,
+.aflow-text-text .md h3,
+.aflow-text-text .md h4 {
+  margin: var(--space-sm) 0 var(--space-xs);
+  font-size: var(--text-sm);
+}
+
+.aflow-text-text .md ul,
+.aflow-text-text .md ol {
+  padding-left: var(--space-lg);
+}
+
+.aflow-text-text .md code {
+  padding: 0 4px;
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  font-size: var(--text-sm);
+}
+
+.aflow-text-text .md pre {
+  padding: var(--space-sm);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  overflow-x: auto;
+}
+
+.aflow-text-text .md pre code {
+  padding: 0;
+  border: none;
+  background: none;
+}
+
+.aflow-text-text .md a {
+  color: var(--color-accent);
+}
+
+.aflow-text-text .md blockquote {
+  padding-left: var(--space-sm);
+  border-left: 2px solid var(--color-border);
+  color: var(--color-text2);
+}
+
+.aflow-text-text .md table {
+  border-collapse: collapse;
+}
+
+.aflow-text-text .md th,
+.aflow-text-text .md td {
+  padding: 2px var(--space-sm);
+  border: 1px solid var(--color-border);
+}
+
+/* ---- 并行批:引导线分叉点(中性灰)+ 横排小 chips ---- */
+.aflow-par {
+  display: block;
+}
+
+.aflow-par-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.dot-par {
+  background: var(--color-line-strong);
+}
+
+.aflow-par-tag {
+  flex: 0 0 auto;
+  padding: 1px var(--space-sm);
+  border-radius: var(--radius-sm);
+  background: var(--color-blue-soft);
+  color: var(--color-blue);
+  font-family: var(--font-pixel);
+  font-size: var(--text-xs);
+}
+
+.aflow-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  padding: 2px var(--space-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-2);
+  color: var(--color-text);
+  font-family: var(--font-pixel);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.aflow-chip:hover {
+  border-color: var(--color-accent);
+}
+
+.aflow-chip.is-open {
+  border-color: var(--color-accent);
+}
+
+.aflow-chip.is-fail {
+  border-color: var(--color-red);
+  background: var(--color-red-soft);
+  color: var(--color-red);
+}
+
+.aflow-chip.is-run {
+  border-color: var(--color-blue);
+}
+
+/* ---- 子代理分支节点 ---- */
+.aflow-sub {
+  display: block; /* 头部按钮 + 结论 + 明细纵向堆叠 */
+}
+
+.aflow-sub-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--color-text2);
+  font-family: var(--font-pixel);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  text-align: left;
+}
+
+.aflow-sub-head:hover {
+  color: var(--color-accent);
+}
+
+.aflow-task {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text2);
+  font-family: var(--font-sans); /* 任务描述是内容文本 → sans */
+  font-size: var(--text-xs);
+}
+
+.aflow-run-word {
+  flex: 0 0 auto;
+  color: var(--color-blue);
+  font-size: var(--text-xs);
+}
+
+/* 子结论:说明文字 → sans */
+.aflow-sub-concl {
+  margin: 2px 0 0 var(--space-lg);
+  color: var(--color-text2);
+  font-family: var(--font-sans);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+}
+
+/* 子代理明细:比主干多一层缩进,与结论对齐 */
+.aflow-sub-detail {
+  margin-left: var(--space-lg);
+}
