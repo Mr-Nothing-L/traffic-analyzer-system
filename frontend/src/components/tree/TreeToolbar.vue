@@ -9,6 +9,8 @@ import { useWorkspaceStore } from '../../stores/workspace'
 import { useTreeView } from '../../composables/useTree'
 import { getKfBatch, startKfBatch } from '../../api/keyframes'
 import type { BatchStatus } from '../../api/keyframes'
+import { exportSftBatch } from '../../api/results'
+import { ApiError } from '../../api/client'
 
 const ws = useWorkspaceStore()
 const { pendingRels, setPendingChecked } = useTreeView()
@@ -21,6 +23,9 @@ const kfOverwrite = ref(false)
 
 /** 批量删除报告进行中(防重复提交)。 */
 const deleteRunning = ref(false)
+
+/** 批量导出标注进行中(防重复提交)。 */
+const exporting = ref(false)
 
 /** 「待推理」勾选态:选中集恰好等于待推理集合时才点亮(精确匹配,
  * 与「全选」解耦——点全选不会连带点亮它);不做半选态。 */
@@ -150,6 +155,40 @@ async function runDeleteReports(rels: string[]) {
     deleteRunning.value = false
   }
 }
+
+/* ---- 批量导出标注:导出勾选集合的磁盘版 SFT 样本为合并 JSONL
+ * (与 dirty 草稿无关);无标注/损坏的由后端跳过并计数,诚实报告。 ---- */
+
+async function onExportSft() {
+  if (!ws.checked.size || exporting.value) return
+  const stems = [...ws.checked].map(stemOf)
+  exporting.value = true
+  try {
+    const r = await exportSftBatch(stems)
+    const url = URL.createObjectURL(new Blob([r.text], { type: 'application/x-ndjson' }))
+    const a = document.createElement('a')
+    a.href = url
+    const date = new Date().toISOString().slice(0, 10)
+    const wsName = (ws.path ?? '').split('/').filter(Boolean).pop() ?? 'workspace'
+    a.download = `${wsName}_${date}_sft.jsonl`
+    a.click()
+    URL.revokeObjectURL(url)
+    // 诚实文案:导出 N 条;有跳过时明确报告跳过数与原因
+    message.success(
+      r.skipped > 0
+        ? `导出 ${r.total} 条,跳过 ${r.skipped} 条(无标注/损坏)`
+        : `导出 ${r.total} 条`,
+    )
+  } catch (e) {
+    if (e instanceof ApiError && e.transport) {
+      message.error('导出失败:疑似网络/代理层错误,请重试')
+    } else {
+      message.error(`导出失败:${e instanceof Error ? e.message : String(e)}`)
+    }
+  } finally {
+    exporting.value = false
+  }
+}
 </script>
 
 <template>
@@ -217,6 +256,17 @@ async function runDeleteReports(rels: string[]) {
     >
       删除报告
     </n-button>
+    <n-button
+      size="small"
+      secondary
+      class="sft-export-btn"
+      title="导出选中视频的 SFT 标注为合并 JSONL(无标注/损坏的跳过)"
+      :disabled="!ws.checked.size || exporting"
+      :loading="exporting"
+      @click="onExportSft"
+    >
+      导出标注
+    </n-button>
   </div>
 </template>
 
@@ -276,6 +326,10 @@ async function runDeleteReports(rels: string[]) {
 }
 
 .report-del-btn {
+  flex: none;
+}
+
+.sft-export-btn {
   flex: none;
 }
 </style>

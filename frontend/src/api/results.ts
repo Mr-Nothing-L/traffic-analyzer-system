@@ -107,6 +107,27 @@ export function fetchSftJsonl(stem: string): Promise<string> {
   return apiResponse(`/results/${enc(stem)}/sft/export`).then((r) => r.text())
 }
 
+/** 批量导出结果:合并 JSONL 文本 + 诚实计数(响应头 X-Export-Total /
+ * X-Export-Skipped;跳过 = 无标注/损坏的 stem)。 */
+export interface SftBatchExportResult {
+  text: string
+  total: number
+  skipped: number
+}
+
+/** 批量导出勾选集合的 SFT 标注(POST /workspace/sft/export):每行与单视频
+ * 导出同构(共用后端投影函数);空集合/超上限 400,坏 stem 404。 */
+export function exportSftBatch(stems: string[]): Promise<SftBatchExportResult> {
+  return apiResponse('/workspace/sft/export', {
+    method: 'POST',
+    body: JSON.stringify({ stems }),
+  }).then(async (r) => ({
+    text: await r.text(),
+    total: Number(r.headers.get('X-Export-Total') ?? 0),
+    skipped: Number(r.headers.get('X-Export-Skipped') ?? 0),
+  }))
+}
+
 /** 专家阶段定义(泳道缓行封顶用;404 时调用方回退内置封顶,同 legacy)。 */
 export function getExpertPhases<T>(): Promise<T> {
   return apiFetch<T>('/expert-phases')

@@ -913,3 +913,93 @@ class TestSftExport:
         resp = client.get("/api/results/v1/sft/export")
         disposition = resp.headers["content-disposition"]
         assert "filename*=UTF-8''v1.jsonl" in disposition
+
+
+# ---------------------------------------------------------------------------
+# SFT 批量导出(POST /api/workspace/sft/export:合并 JSONL + 计数响应头)
+# ---------------------------------------------------------------------------
+
+
+class TestSftBatchExport:
+    def _client(self, tmp_path: Path) -> TestClient:
+        workspace = _make_workspace(tmp_path)
+        _make_results(workspace, "v1")
+        (workspace / "analysis" / "v1" / "v1.json").write_text(
+            json.dumps(_sft_payload(), ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        return TestClient(create_app(workspace=str(workspace)))
+
+    def test_batch_merge_matches_single_export(self, tmp_path: Path) -> None:
+        """批量导出的每一行与单视频导出逐字节同构(共用投影函数)。"""
+        workspace = _make_workspace(tmp_path)
+        _make_results(workspace, "v2")
+        (workspace / "analysis" / "v2" / "v2.json").write_text(
+            json.dumps(_sft_payload(), ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+        client = TestClient(create_app(workspace=str(workspace)))
+
+        single = client.get("/api/results/v2/sft/export")
+        batch = client.post("/api/workspace/sft/export", json={"stems": ["v2"]})
+        assert batch.status_code == 200
+        assert batch.text == single.text
+        assert batch.headers["X-Export-Total"] == "1"
+        assert batch.headers["X-Export-Skipped"] == "0"
+        assert batch.headers["content-type"].startswith("application/x-ndjson")
+
+    def test_batch_skips_missing_and_corrupt(self, tmp_path: Path) -> None:
+        """无标注/损坏/非对象样本跳过并计数,不影响其余行。"""
+        workspace = _make_workspace(tmp_path)
+        _make_results(workspace, "ok")
+        (workspace / "analysis" / "ok" / "ok.json").write_text(
+            json.dumps(_sft_payload(), ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+        _make_results(workspace, "corrupt")
+        (workspace / "analysis" / "corrupt" / "corrupt.json").write_text(
+            "{broken", encoding="utf-8"
+        )
+        _make_results(workspace, "gone")  # 有目录但无样本文件
+        (workspace / "analysis" / "gone" / "gone.json").unlink()
+        client = TestClient(create_app(workspace=str(workspace)))
+
+        resp = client.post(
+            "/api/workspace/sft/export", json={"stems": ["ok", "corrupt", "gone"]}
+        )
+        assert resp.status_code == 200
+        assert resp.headers["X-Export-Total"] == "1"
+        assert resp.headers["X-Export-Skipped"] == "2"
+        assert len(resp.text.splitlines()) == 1
+
+    def test_batch_empty_stems_400(self, tmp_path: Path) -> None:
+        client = self._client(tmp_path)
+        assert (
+            client.post("/api/workspace/sft/export", json={"stems": []}).status_code
+            == 400
+        )
+
+    def test_batch_over_limit_400(self, tmp_path: Path) -> None:
+        from traffic_analyzer.web.evidence.sft_export import MAX_BATCH_EXPORT_STEMS
+
+        client = self._client(tmp_path)
+        stems = ["v"] * (MAX_BATCH_EXPORT_STEMS + 1)
+        resp = client.post("/api/workspace/sft/export", json={"stems": stems})
+        assert resp.status_code == 400
+
+    def test_batch_bad_stem_404(self, tmp_path: Path) -> None:
+        """坏 stem(路径穿越形态)整单拒绝,不产出部分导出。"""
+        client = self._client(tmp_path)
+        assert (
+            client.post(
+                "/api/workspace/sft/export", json={"stems": ["v1", "a..b"]}
+            ).status_code
+            == 404
+        )
+
+    def test_batch_filename_contains_workspace_and_date(self, tmp_path: Path) -> None:
+        """附件文件名含工作区名与日期(前端另以本地命名兜底)。"""
+        from datetime import date
+
+        client = self._client(tmp_path)
+        resp = client.post("/api/workspace/sft/export", json={"stems": ["v1"]})
+        disposition = resp.headers["content-disposition"]
+        assert f"_{date.today().isoformat()}_sft.jsonl" in disposition
