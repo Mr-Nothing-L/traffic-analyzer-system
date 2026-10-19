@@ -27,6 +27,10 @@ export type BatchItemStatus = 'pending' | 'running' | 'ok' | 'failed' | 'skipped
 export interface BatchItemState {
   status: BatchItemStatus
   message?: string
+  /** ok 条目的结果(手动单发路径消费:file_sig 回写 SFT 编辑器乐观锁,
+   * picked 供完成提示;批量路径不消费)。 */
+  picked?: number[]
+  file_sig?: string | null
 }
 
 export interface BatchStatus {
@@ -65,7 +69,10 @@ export function reorderKf(stem: string, filenames: string[]): Promise<KeyframeMu
   })
 }
 
-export function autoPickKf(stem: string, overwrite: boolean): Promise<KeyframeMutation> {
+/** 提交后台智能挑选(POST /videos/{stem}/keyframes/auto_pick):后端登记
+ * 单 stem 批次并立即返回 id,VLM 调用与帧解码在后台线程执行;完成状态经
+ * getKfBatch 轮询(ok 条目携带 picked/file_sig,skipped/failed 携带 message)。 */
+export function autoPickKf(stem: string, overwrite: boolean): Promise<{ id: string }> {
   return apiFetch(`/videos/${enc(stem)}/keyframes/auto_pick`, {
     method: 'POST',
     body: JSON.stringify({ overwrite }),
