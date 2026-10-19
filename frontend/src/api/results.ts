@@ -3,6 +3,14 @@
  * frames.py / video_stream.py(meta/frame/stream)。
  * 媒体 URL 给 <video>/<img> src 用,需带 /api 前缀;apiFetch 的路径不带。 */
 import { apiFetch, apiResponse } from './client'
+import type { SftSample } from './contracts.gen'
+
+export type { SftSample }
+
+/** GET 响应的 sft_label(磁盘样本):契约形状由生成的 SftSample 承载
+ * (scripts/gen_frontend_contracts.py 从 evidence_schema.py 派生,禁手改)。
+ * SftLabel 为调用点兼容别名。 */
+export type SftLabel = SftSample
 
 /* ---------- 证据 JSON 结构(与 evidence_schema.py 对应,宽松可选) ---------- */
 export interface EvidenceRegion {
@@ -39,18 +47,6 @@ export interface Evidence {
   schema_version?: string
   video?: EvidenceVideoInfo
   events: EvidenceEvent[]
-}
-
-/** SFT 标注(json 结构以标注文档 v4.5 为准,只读展示仅需这些字段)。 */
-export interface SftLabel {
-  chunk?: string
-  idx?: number
-  action?: number[]
-  description?: string
-  start_timestamp?: string
-  end_timestamp?: string
-  chunk_name?: string
-  event_attributes?: Record<string, unknown>
 }
 
 /** GET /api/results/{stem} 响应。file_sig/evidence_sig 为乐观锁指纹。 */
