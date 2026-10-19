@@ -1,7 +1,11 @@
 """VLM sliding-window orchestration for suspect-target tracking.
 
 [文件说明]
-作用:track_suspects 的确定性编排核心。在可疑时段内默认 5fps 抽帧
+作用:track_suspects 的确定性编排核心(run_tracking 及窗吸收/状态辅助)。
+    采样与运动度量在 sampling.py,窗口 prompt 构造与应答解析在
+    window_llm.py,场景方位表决与车头朝向旁证在 scene_vote.py,致命异常
+    TrackingFailure 在 errors.py(均经本模块 re-export,既有引用面不变)。
+    在可疑时段内默认 5fps 抽帧
     (首个传播窗发现高速运动目标自适应升 10fps)、滑窗 5 帧/stride 4 调
     VLM(复用 core/vlm_engine 的 failover + .vlm_cache.db;传播窗关
     thinking 换低延迟,re-anchor 窗保留服务端默认);锚点 {box, timestamp}
@@ -25,15 +29,11 @@ import base64
 import bisect
 import json
 import logging
-import math
-import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
-
-import cv2
 
 from traffic_analyzer.models.llm import PromptTemplate
 from traffic_analyzer.toolserver.tracking import (
@@ -61,6 +61,37 @@ from traffic_analyzer.toolserver.tracking.render import (
 
 logger = logging.getLogger(__name__)
 
+# 拆分至子模块的实现经此 re-export:测试与 server 既有引用面(windows.<名字>)不变
+from traffic_analyzer.toolserver.tracking.errors import TrackingFailure
+from traffic_analyzer.toolserver.tracking.sampling import (
+    compute_env_flow,
+    disp_per_second,
+    extract_window_jpegs,
+    read_video_meta,
+    sampling_grid,
+    should_upgrade_fps,
+)
+from traffic_analyzer.toolserver.tracking.scene_vote import (
+    _as_unknown_scene,
+    _build_fallback_rationale,
+    _build_scene_rationale,
+    _parse_heading,
+    _query_heading,
+    _query_scene_side,
+    _scene_sample_frames,
+    _scene_vote_text,
+    _vote_scene_side,
+    build_scene_prompt,
+    parse_scene_response,
+)
+from traffic_analyzer.toolserver.tracking.window_llm import (
+    _collect_boxes,
+    _norm_box,
+    parse_window_json,
+    parse_window_response,
+    build_window_prompt,
+)
+
 # --- 编排参数(计划默认值) -----------------------------------------------
 
 DEFAULT_SAMPLE_FPS = 5.0
@@ -73,23 +104,10 @@ SPAN_MARGIN_S = 2.0         # 锚点前后扩展的上下文秒数
 DEFAULT_SPAN_S = 8.0        # 无 time_range 时锚点之后继续跟踪的时长
 MAX_WINDOW_CALLS = 40       # 单次请求 VLM 调用硬上限(控成本/兜底超时)
 TRACKING_MAX_WORKERS = 4    # 并发 VLM 调用上限(场景判定帧/车头朝向旁证)
-_JPEG_QUALITY = 80
-_SCALE_HINT_MAX = 2.0       # 坐标 <= 该值视为 0-1 输出,否则按 0-1000 解析
 
 _TEMPLATE_ID = "track_suspects_window"
-_SCENE_TEMPLATE_ID = "track_suspects_scene_side"
-_HEADING_TEMPLATE_ID = "vehicle_heading"
-
-# 车头朝向 closed question 的合法答案(中文→内部枚举)
-_HEADING_ANSWERS = {
-    "朝镜头": "toward",
-    "背镜头": "away",
-    "难以判断": "unknown",
-}
 
 
-class TrackingFailure(Exception):
-    """视频元信息不可读等致命失败:端点侧捕获并转成 failed:true 响应。"""
 
 
 @dataclass
@@ -119,660 +137,13 @@ class _SuspectState:
         return self.points[-1]["box"] if self.points else None
 
 
-# ---------------------------------------------------------------------------
-# 抽帧与网格
-# ---------------------------------------------------------------------------
 
 
-def read_video_meta(video_path: Path) -> Dict[str, Any]:
-    """读取 fps/帧数/分辨率;打不开或元数据非法时抛 TrackingFailure。"""
-    cap = cv2.VideoCapture(str(video_path))
-    try:
-        if not cap.isOpened():
-            raise TrackingFailure(f"video unreadable: {video_path}")
-        fps = float(cap.get(cv2.CAP_PROP_FPS))
-        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    finally:
-        cap.release()
-    if fps <= 0 or total <= 0:
-        raise TrackingFailure(f"invalid video metadata: {video_path}")
-    return {"fps": fps, "total": total, "width": w, "height": h}
 
 
-def sampling_grid(meta: Dict[str, Any], t0: float, t1: float, fps: float) -> List[int]:
-    """时间区间内的采样帧号网格(round 时间戳去重升序,尾帧钳制)。"""
-    total = meta["total"]
-    src_fps = meta["fps"]
-    if t1 <= t0:
-        return []
-    frames: List[int] = []
-    for k in range(int((t1 - t0) * fps) + 1):
-        ts = t0 + k / fps
-        idx = min(max(int(round(ts * src_fps)), 0), max(total - 1, 0))
-        if not frames or idx > frames[-1]:
-            frames.append(idx)
-    return frames
 
 
-def extract_window_jpegs(video_path: Path, frames: Sequence[int]) -> List[bytes]:
-    """按帧号顺序抽取 JPEG 字节序列(读不到的帧跳过)。"""
-    cap = cv2.VideoCapture(str(video_path))
-    out: List[bytes] = []
-    try:
-        for fi in frames:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, fi)
-            ok, frame = cap.read()
-            if not ok or frame is None:
-                continue
-            ok, buf = cv2.imencode(
-                ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, _JPEG_QUALITY]
-            )
-            if ok:
-                out.append(buf.tobytes())
-    finally:
-        cap.release()
-    return out
 
-
-# ---------------------------------------------------------------------------
-# Prompt 构造与响应解析(JSON 容错参考旧 llm_client.py)
-# ---------------------------------------------------------------------------
-
-
-def _fmt_box(box: Sequence[float]) -> str:
-    return "[" + ",".join(str(int(round(v * 1000))) for v in box[:4]) + "]"
-
-
-def build_window_prompt(
-    mode: str,
-    suspects: Sequence[Any],
-    n_frames: int,
-    expected_boxes: Dict[int, Optional[List[float]]],
-) -> str:
-    """构造单窗 prompt。mode 为 'propagate'(传播式)或 'reanchor'(重检测式)。
-
-    suspects 需含 index/letter/anchor 属性(_SuspectState 满足)。
-    """
-    lines: List[str] = [
-        f"以上是同一路口监控视频连续{n_frames}帧"
-        f"(帧0到帧{n_frames - 1},按时间顺序)。"
-    ]
-    if mode == "reanchor":
-        lines.append(
-            "请重新检测下列目标车辆:按文字描述与预期位置在整幅画面中重新定位,"
-            "不要假设给定框位仍然准确:"
-        )
-    else:
-        lines.append("请在各帧中持续跟踪下列目标车辆:")
-    for s in suspects:
-        line = f"目标{s.letter}:{s.anchor.description}。"
-        expected = expected_boxes.get(s.index)
-        if expected is not None:
-            if mode == "reanchor":
-                line += f"预期位置 bbox={_fmt_box(expected)}(匀速外推,可能有偏差)。"
-            else:
-                line += f"上一位置 bbox={_fmt_box(expected)}(0-1000 归一化),就近接续。"
-        lines.append(line)
-    lines.append(
-        "同时框出画面中 2~3 辆正常行驶的其他车辆作为参照车(参照车 id 从 1 开始)。"
-    )
-    lines.append(
-        '以 JSON 对象输出:'
-        '{"targets":[{"key":"A","found":true,"boxes":[{"frame":0,'
-        '"bbox":[x1,y1,x2,y2]}]}],"references":[{"id":1,"boxes":[{"frame":0,'
-        '"bbox":[x1,y1,x2,y2]}]}]}。'
-        "bbox 为 0-1000 归一化;目标某帧不可见则跳过该帧。只输出 JSON。"
-    )
-    return "\n".join(lines)
-
-
-_JSON_RE = re.compile(r"\{.*\}", re.S)
-
-
-def parse_window_json(text: str) -> Dict[str, Any]:
-    """从模型输出提取 JSON 对象(旧 llm_client.parse_json_object 的移植)。"""
-    m = _JSON_RE.search(text or "")
-    if not m:
-        raise ValueError(f"output has no JSON object: {(text or '')[:200]}")
-    data = json.loads(m.group(0))
-    if not isinstance(data, dict):
-        raise ValueError("top-level JSON is not an object")
-    return data
-
-
-def _norm_box(raw: Any) -> Optional[List[float]]:
-    """把模型输出的单个 bbox 归一化到 0-1 并做合法性检查(自动识别量纲)。
-
-    容错:模型偶尔把 bbox 输出为字符串(如 "[100,700,400,950]"),
-    这里统一先提取数字再归一化。
-    """
-    vals: Optional[List[float]] = None
-    if isinstance(raw, str):
-        try:
-            decoded = json.loads(raw)
-            if isinstance(decoded, list):
-                vals = [float(v) for v in decoded]
-        except (ValueError, TypeError):
-            nums = re.findall(r"-?\d+(?:\.\d+)?", raw)
-            vals = [float(v) for v in nums] if len(nums) == 4 else None
-        if vals is None:
-            return None
-    else:
-        try:
-            vals = [float(v) for v in raw]
-        except (TypeError, ValueError):
-            return None
-    if len(vals) != 4:
-        return None
-    scale = 1.0 if max(vals) <= _SCALE_HINT_MAX else 1000.0
-    x1, y1, x2, y2 = [min(max(v / scale, 0.0), 1.0) for v in vals]
-    if x2 - x1 <= 1e-6 or y2 - y1 <= 1e-6:
-        return None
-    return [x1, y1, x2, y2]
-
-
-def _collect_boxes(item: Dict[str, Any], n_frames: int) -> List[Dict[str, Any]]:
-    raw_boxes = item.get("boxes") or item.get("track") or []
-    boxes: List[Dict[str, Any]] = []
-    if not isinstance(raw_boxes, list):
-        return boxes
-    for rb in raw_boxes:
-        if not isinstance(rb, dict):
-            continue
-        try:
-            fi = int(rb.get("frame"))
-        except (TypeError, ValueError):
-            continue
-        if not (0 <= fi < n_frames):
-            continue
-        nb = _norm_box(rb.get("bbox"))
-        if nb is not None:
-            boxes.append({"frame": fi, "box": nb})
-    return boxes
-
-
-def parse_window_response(
-    resp: Any, suspects: Sequence[Any], n_frames: int
-) -> Tuple[Dict[int, List[Dict[str, Any]]], Dict[int, List[Dict[str, Any]]]]:
-    """解析一次 VLM 窗响应为归一化结构。
-
-    Returns:
-        (suspect_boxes, reference_boxes):suspect_boxes[index] =
-        [{frame_in_window, box}],reference_boxes[ref_id] 同构。
-        引擎已解析(parsed_data)优先;否则对 raw_text 做容错正则提取。
-    """
-    data: Optional[Dict[str, Any]]
-    parsed = getattr(resp, "parsed_data", None)
-    if isinstance(parsed, dict) and ("targets" in parsed or "references" in parsed):
-        data = parsed
-    else:
-        try:
-            data = parse_window_json(getattr(resp, "raw_text", "") or "")
-        except ValueError:
-            data = None
-    if data is None:
-        return {}, {}
-
-    key_to_idx = {s.letter.lower(): s.index for s in suspects}
-    idx_set = {s.index for s in suspects}
-    suspect_boxes: Dict[int, List[Dict[str, Any]]] = {}
-    raw_targets = data.get("targets")
-    if isinstance(raw_targets, list):
-        for item in raw_targets:
-            if not isinstance(item, dict):
-                continue
-            key = str(item.get("key") or item.get("name") or item.get("id") or "").lower()
-            idx = key_to_idx.get(key)
-            if idx is None and key.lstrip("-").isdigit():
-                cand = int(key)
-                if cand in idx_set:
-                    idx = cand
-            if idx is None and len(idx_set) == 1:
-                idx = next(iter(idx_set))
-            if idx is None:
-                continue
-            boxes = _collect_boxes(item, n_frames)
-            if boxes:
-                suspect_boxes.setdefault(idx, []).extend(boxes)
-    references: Dict[int, List[Dict[str, Any]]] = {}
-    raw_refs = data.get("references")
-    if isinstance(raw_refs, list):
-        for item in raw_refs:
-            if not isinstance(item, dict):
-                continue
-            try:
-                rid = int(item.get("id"))
-            except (TypeError, ValueError):
-                continue
-            boxes = _collect_boxes(item, n_frames)
-            if boxes:
-                references.setdefault(rid, []).extend(boxes)
-    return suspect_boxes, references
-
-
-# ---------------------------------------------------------------------------
-# 场景级中央隔离带方位判定(一次跟踪一次 VLM 调用)
-# ---------------------------------------------------------------------------
-
-
-def build_scene_prompt(suspects: Sequence[Any]) -> str:
-    """构造中央隔离带方位封闭提问 prompt。
-
-    用首窗首帧做单图提问,要求模型输出 JSON:
-    {"median_side": "left|right|unknown",
-     "per_target": [{"index": 0, "side": "coming|going|unknown", "rationale": "..."}]}
-    """
-    lines: List[str] = [
-        "以上是同一路口监控视频的一帧画面。请回答一个关于画面中央隔离带的封闭问题:",
-        "",
-        "画面中的**中央隔离带**(分隔双向车道的中央护栏/绿化带,**不是**道路两侧的护栏)"
-        "在画面哪一侧?如果中央隔离带不可见或无法判断,请直接回答 unknown。",
-        "",
-        "画面中标注的疑似目标:",
-    ]
-    for s in suspects:
-        lines.append(f"目标{s.letter}: {s.anchor.description}。")
-    lines.extend(
-        [
-            "",
-            "对每个目标回答两个问题:①它相对于中央隔离带位于哪一侧;②**该侧车道(与目标"
-            "同侧的全部车道)的法定/正常行驶方向**是朝镜头(coming)还是背镜头(going)。",
-            "第②问只允许依据道路结构(中央隔离带位置、车道布局)与**其他车辆**的流向"
-            "判断,**禁止**用目标车辆自身的朝向或运动方向作答——目标可能是违章车,"
-            "它的朝向不能代表车道方向。",
-            "",
-            "如果中央隔离带不可见(画面只拍到单向车道):不要直接答 unknown——"
-            "改为判断**画面内其他车辆的统一流向**:若其他车辆一致朝镜头驶来,整幅画面即"
-            "来向场景(coming);一致背向镜头驶离即去向场景(going);流向不一致或无法"
-            "判断时才回答 unknown,并在 rationale 注明依据(道路结构/其他车辆流向/不可判)。",
-            "",
-            "以 JSON 对象输出,不要任何解释:",
-            '{"median_side": "left|right|unknown", "per_target": ['
-            '{"index": 0, "side": "coming|going|unknown", "rationale": "...(须说明依据的是道路结构还是其他车辆流向)"}, '
-            '{"index": 1, ...}]}。',
-        ]
-    )
-    return "\n".join(lines)
-
-
-def _as_unknown_scene(
-    suspects: Sequence[Any], error: Optional[str] = None
-) -> Dict[str, Any]:
-    """构造统一 unknown 场景结果(解析失败/中央隔离带不可见/调用失败时使用)。"""
-    return {
-        "median_side": "unknown",
-        "per_target": {
-            s.index: {"side": "unknown", "rationale": None} for s in suspects
-        },
-        "parse_error": error,
-    }
-
-
-def parse_scene_response(
-    resp: Any, suspect_indices: Sequence[int]
-) -> Optional[Dict[str, Any]]:
-    """解析场景级中央隔离带响应,失败返回 None(调用方落 unknown)。"""
-    data: Optional[Dict[str, Any]] = getattr(resp, "parsed_data", None)
-    if not isinstance(data, dict):
-        try:
-            data = parse_window_json(getattr(resp, "raw_text", "") or "")
-        except ValueError:
-            return None
-    if not isinstance(data, dict):
-        return None
-
-    raw_text = getattr(resp, "raw_text", "") or ""
-    median_side = str(data.get("median_side", "unknown")).lower()
-    if median_side not in ("left", "right"):
-        median_side = "unknown"
-
-    idx_set = set(suspect_indices)
-    per_target: Dict[int, Dict[str, Any]] = {}
-    raw_targets = data.get("per_target") or data.get("targets") or []
-    if isinstance(raw_targets, list):
-        for item in raw_targets:
-            if not isinstance(item, dict):
-                continue
-            try:
-                idx = int(item.get("index"))
-            except (TypeError, ValueError):
-                continue
-            if idx not in idx_set:
-                continue
-            side = str(item.get("side", "unknown")).lower()
-            if side not in ("coming", "going"):
-                side = "unknown"
-            per_target[idx] = {
-                "side": side,
-                "rationale": (item.get("rationale") or None),
-            }
-
-    # 中央隔离带不可见时,仅当模型也没给出任何流向判定才强制全部 unknown;
-    # 单向机位下模型可仅凭其他车辆统一流向给出 coming/going(新兜底路径),
-    # 此时保留其判定(rationale 可审计)。
-    if median_side == "unknown" and all(
-        per_target.get(idx, {}).get("side", "unknown") == "unknown" for idx in idx_set
-    ):
-        per_target = {idx: {"side": "unknown", "rationale": None} for idx in idx_set}
-
-    return {
-        "median_side": median_side,
-        "per_target": per_target,
-        "raw_text": raw_text,
-    }
-
-
-def _scene_sample_frames(
-    grid: List[int], meta: Dict[str, Any], t0: float, t1: float
-) -> List[int]:
-    """在跟踪时段内均匀取 3 个采样帧(首/中/尾),复用现有采样网格。"""
-    if not grid:
-        return []
-    src_fps = meta["fps"]
-    targets = [t0, (t0 + t1) / 2.0, t1]
-    seen: set[int] = set()
-    chosen: List[int] = []
-    for ts in targets:
-        best = min(grid, key=lambda f: abs(f / src_fps - ts))
-        if best not in seen:
-            seen.add(best)
-            chosen.append(best)
-    return chosen
-
-
-def _vote_scene_side(
-    frame_results: List[Dict[str, Any]],
-    suspects: Sequence[_SuspectState],
-    events_all: List[Dict[str, Any]],
-) -> Dict[str, Any]:
-    """对多帧场景判定结果做多数表决。
-
-    - median_side: 仅 left/right 出现 ≥2 次时采用,否则 unknown。
-    - 每个目标的 side: coming/going 仅出现 ≥2 次时采用,否则 unknown。
-    - 出现 coming 与 going 同时存在且未形成多数(如 1+1+1)时记
-      {type: "scene_side_split"} 事件。
-    """
-    total = len(frame_results)
-    median_sides = [
-        fr["result"].get("median_side", "unknown") for fr in frame_results
-    ]
-    median_counts: Dict[str, int] = {"left": 0, "right": 0, "unknown": 0}
-    for s in median_sides:
-        median_counts[s if s in median_counts else "unknown"] += 1
-
-    ordered = [("left", median_counts["left"]), ("right", median_counts["right"])]
-    median_side, n_median = max(ordered, key=lambda x: x[1])
-    if n_median < 2:
-        median_side = "unknown"
-
-    per_target: Dict[int, Dict[str, Any]] = {}
-    per_target_votes: Dict[int, Dict[str, int]] = {}
-    for s in suspects:
-        idx = s.index
-        counts: Dict[str, int] = {"coming": 0, "going": 0, "unknown": 0}
-        rationales: List[Optional[str]] = []
-        sides: List[str] = []
-        for fr in frame_results:
-            target = fr["result"].get("per_target", {}).get(idx, {})
-            side = target.get("side", "unknown")
-            if side not in counts:
-                side = "unknown"
-            counts[side] += 1
-            sides.append(side)
-            rationales.append(target.get("rationale"))
-
-        counts["total"] = total
-        per_target_votes[idx] = counts
-        ordered_s = [("coming", counts["coming"]), ("going", counts["going"])]
-        side, n_side = max(ordered_s, key=lambda x: x[1])
-        if n_side < 2:
-            side = "unknown"
-
-        non_unknown = {x for x in sides if x != "unknown"}
-        if side == "unknown" and len(non_unknown) > 1:
-            events_all.append(
-                {
-                    "type": "scene_side_split",
-                    "frames": [fr["frame"] for fr in frame_results],
-                    "index": idx,
-                    "votes": counts.copy(),
-                }
-            )
-
-        chosen_rationale: Optional[str] = None
-        if side != "unknown":
-            for fr, r in zip(frame_results, rationales):
-                if (
-                    r
-                    and fr["result"].get("per_target", {}).get(idx, {}).get("side")
-                    == side
-                ):
-                    chosen_rationale = r
-                    break
-        per_target[idx] = {"side": side, "rationale": chosen_rationale}
-
-    frames_record: List[Dict[str, Any]] = []
-    for fr in frame_results:
-        res = fr["result"]
-        frames_record.append(
-            {
-                "frame": fr["frame"],
-                "median_side": res.get("median_side", "unknown"),
-                "per_target": {
-                    idx: res.get("per_target", {}).get(idx, {}).get("side", "unknown")
-                    for idx in [s.index for s in suspects]
-                },
-                "raw_response": res.get("raw_text")
-                or res.get("parse_error")
-                or None,
-            }
-        )
-
-    return {
-        "median_side": median_side,
-        "per_target": per_target,
-        "votes": {
-            "median": {**median_counts, "total": total},
-            "per_target": per_target_votes,
-        },
-        "frames": frames_record,
-    }
-
-
-def _query_scene_side(
-    engine: Any, frame_jpeg: bytes, suspects: Sequence[_SuspectState]
-) -> Dict[str, Any]:
-    """调用 VLM 对单帧做场景级中央隔离带方位判定。
-
-    失败/解析失败均返回统一 unknown 结构,不抛异常影响主流程。
-    """
-    prompt = build_scene_prompt(suspects)
-    template = PromptTemplate(
-        template_id=_SCENE_TEMPLATE_ID,
-        name="track_suspects scene side",
-        user_prompt=prompt,
-    )
-    try:
-        resp = engine.call(
-            template=template, images=[frame_jpeg], enable_thinking=False
-        )
-        if not getattr(resp, "success", False):
-            return _as_unknown_scene(
-                suspects,
-                error=getattr(resp, "error_message", None) or "vlm call failed",
-            )
-        result = parse_scene_response(resp, [s.index for s in suspects])
-        if result is None:
-            return _as_unknown_scene(suspects, error="scene side parse failed")
-        return result
-    except Exception as exc:
-        logger.warning("[track_suspects] scene side vlm call failed: %s", exc)
-        return _as_unknown_scene(suspects, error=str(exc))
-
-
-def _scene_vote_text(counts: Dict[str, int], side: str) -> str:
-    """生成表决口径文案,如「3/3 帧一致」或「2/3 帧」。"""
-    total = counts.get("total", 0)
-    n = counts.get(side, 0) if side != "unknown" else 0
-    if total == 0:
-        return "无有效帧"
-    if n == total and n > 0:
-        return f"{n}/{total}帧一致"
-    return f"{n}/{total}帧"
-
-
-def _build_scene_rationale(
-    median_side: str, final_side: str, vlm_rationale: Optional[str]
-) -> str:
-    """由中央隔离带侧别与目标车道生成 verdict 的括号内依据文案。"""
-    if median_side not in ("left", "right") or final_side not in (
-        "coming",
-        "going",
-    ):
-        return vlm_rationale or ""
-    side_text = {"left": "左", "right": "右"}
-    # 目标车道必在中央隔离带另一侧
-    target_relative = "right" if median_side == "left" else "left"
-    direction_text = "来向" if final_side == "coming" else "去向"
-    camera_text = "应靠近镜头" if final_side == "coming" else "应远离镜头"
-    return (
-        f"中央隔离带在画面{side_text[median_side]}侧,目标位于其{side_text[target_relative]}侧,"
-        f"该侧为{direction_text}车道,{camera_text}"
-    )
-
-
-def _build_fallback_rationale(final_side: str, source: str) -> str:
-    """anchor / infer / unknown 等非 scene 来源的车道依据文案。"""
-    direction_text = "来向" if final_side == "coming" else "去向"
-    camera_text = "应靠近镜头" if final_side == "coming" else "应远离镜头"
-    if source == "anchor":
-        return f"由锚点 side 指定为{direction_text}车道,{camera_text}"
-    if source == "infer":
-        return f"由描述关键词推断为{direction_text}车道,{camera_text}"
-    return camera_text
-
-
-# ---------------------------------------------------------------------------
-# 运动估计与环境流速
-# ---------------------------------------------------------------------------
-
-
-def disp_per_second(
-    p1: Dict[str, Any], p2: Dict[str, Any], src_fps: float
-) -> float:
-    """相邻两点中心的位移速率(归一化单位/秒),由实际帧差换算时间。"""
-    c1, c2 = bbox_center(p1["box"]), bbox_center(p2["box"])
-    disp = math.hypot(c2[0] - c1[0], c2[1] - c1[1])
-    dt = abs(int(p2["frame"]) - int(p1["frame"])) / src_fps if src_fps > 0 else 0.0
-    return disp / dt if dt > 0 else 0.0
-
-
-def should_upgrade_fps(pts: Sequence[Dict[str, Any]], src_fps: float) -> bool:
-    """相邻点位移速率超过缓行上限(SLOW_SPEED_RATIO × 对角线/秒)
-    即视为高速运动目标 → 升 10fps(帧号为原始帧号,按实际帧差换算时间)。"""
-    for p1, p2 in zip(pts, pts[1:]):
-        diag = max(box_diagonal(p2["box"]), 1e-6)
-        speed = disp_per_second(p1, p2, src_fps)
-        if speed > SLOW_SPEED_RATIO * diag:
-            return True
-    return False
-
-
-def compute_env_flow(
-    ref_tracks: List[List[Dict[str, Any]]], src_fps: float, sample_fps: float
-) -> Optional[float]:
-    """参照车速度中位数(归一化单位/秒);无有效连续位移返回 None。
-
-    只统计相邻采样步内的速度样本(断裂跨段的距离不代表真实速率);
-    帧号为原始帧号,名义采样步长 = src_fps / sample_fps。
-    """
-    step = max(1, round(src_fps / sample_fps))
-    speeds: List[float] = []
-    for pts in ref_tracks:
-        for p1, p2 in zip(pts, pts[1:]):
-            diff = abs(int(p2["frame"]) - int(p1["frame"]))  # type: ignore[arg-type]
-            if diff <= 0 or diff > 2 * step:
-                continue
-            speeds.append(disp_per_second(p1, p2, src_fps))
-    if not speeds:
-        return None
-    speeds.sort()
-    n = len(speeds)
-    mid = speeds[n // 2] if n % 2 else (speeds[n // 2 - 1] + speeds[n // 2]) / 2
-    return round(mid, 6)
-
-
-# ---------------------------------------------------------------------------
-# 车头朝向旁证(仅补充证据,不翻盘)
-# ---------------------------------------------------------------------------
-
-
-def _parse_heading(raw_text: str) -> str:
-    """从模型输出提取车头朝向:朝镜头/背镜头/难以判断。"""
-    text = (raw_text or "").strip()
-    # 简单关键词匹配,兼容 JSON 包装
-    for cn, value in _HEADING_ANSWERS.items():
-        if cn in text:
-            return value
-    # 容错:只看首尾关键字
-    if "朝" in text or "镜头" in text and "背" not in text:
-        return "toward"
-    if "背" in text:
-        return "away"
-    return "unknown"
-
-
-def _query_heading(
-    engine: Any, video_path: Path, track: Track, max_frames: int = 2
-) -> Optional[Dict[str, Any]]:
-    """对单条轨迹请求 1-2 张 best-frame 的车头朝向封闭问题。
-
-    返回 {"raw_answers": [...], "accepted": "toward"/"away"/"unknown",
-          "n_total": int, "n_consistent": int}。
-    调用失败或答案不一致均记为 unknown,不抛异常影响主流程。
-    """
-    try:
-        crops = best_frame_crops(video_path, track, max_frames=max_frames)
-    except Exception as exc:
-        logger.warning("[track_suspects] best-frame crop failed for heading: %s", exc)
-        return None
-    if not crops:
-        return None
-
-    raw_answers: List[str] = []
-    for crop in crops:
-        jpeg_bytes = base64.b64decode(crop["jpeg_base64"])
-        template = PromptTemplate(
-            template_id=_HEADING_TEMPLATE_ID,
-            name="vehicle heading",
-            user_prompt="图中目标车辆车头朝向?只答:朝镜头/背镜头/难以判断",
-        )
-        try:
-            resp = engine.call(
-                template=template, images=[jpeg_bytes], enable_thinking=False
-            )
-            ans = _parse_heading(getattr(resp, "raw_text", "") or "")
-        except Exception as exc:
-            logger.warning("[track_suspects] heading vlm call failed: %s", exc)
-            ans = "unknown"
-        raw_answers.append(ans)
-
-    non_unknown = [a for a in raw_answers if a != "unknown"]
-    if non_unknown and all(a == non_unknown[0] for a in non_unknown):
-        accepted = non_unknown[0]
-        n_consistent = len(non_unknown)
-    else:
-        accepted = "unknown"
-        n_consistent = 0
-
-    return {
-        "raw_answers": raw_answers,
-        "accepted": accepted,
-        "n_total": len(raw_answers),
-        "n_consistent": n_consistent,
-    }
 
 
 def _clipped_count(track: Track) -> int:
