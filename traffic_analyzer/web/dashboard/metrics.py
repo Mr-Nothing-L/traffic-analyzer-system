@@ -32,6 +32,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from fastapi import APIRouter, HTTPException, Request
 
 from traffic_analyzer.evaluation import extract_gt_from_filename
+from traffic_analyzer import contracts
 from traffic_analyzer.web import dashboard as _dashboard_pkg
 from traffic_analyzer.web import event_config
 from traffic_analyzer.web import evidence_api
@@ -126,7 +127,7 @@ def _read_video_payloads(
     out_dir = workspace_mod.analysis_dir(workspace, stem)
     try:
         sft = evidence_api._read_json(evidence_api.sft_json_path(out_dir, stem))
-        raw = evidence_api._read_json(out_dir / f"{stem}_raw.json")
+        raw = evidence_api._read_json(contracts.stem_raw_json(out_dir, stem))
     except evidence_api._CorruptJsonError:
         sft = raw = None
     return workspace_mod.has_results(workspace, stem), sft, raw
@@ -175,7 +176,9 @@ def _build_dashboard(workspace: Path) -> Dict[str, Any]:
         edited_at = sft.get("last_edited_at", "") if isinstance(sft, dict) else ""
         # 旧数据 last_edited_at 缺失时,用 _raw.json 的 mtime 作为编辑时间回退。
         if not edited_at and edited:
-            raw_path = workspace_mod.analysis_dir(workspace, stem) / f"{stem}_raw.json"
+            raw_path = contracts.stem_raw_json(
+                workspace_mod.analysis_dir(workspace, stem), stem
+            )
             if raw_path.exists():
                 edited_at = datetime.fromtimestamp(
                     raw_path.stat().st_mtime, tz=timezone.utc

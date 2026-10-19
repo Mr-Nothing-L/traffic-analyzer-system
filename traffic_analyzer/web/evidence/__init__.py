@@ -65,6 +65,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter
 
+from traffic_analyzer import contracts
 from traffic_analyzer.web import event_config
 
 router = APIRouter()
@@ -128,10 +129,10 @@ def sft_json_path(out_dir: Path, stem: str) -> Path:
     本函数——回退逻辑一旦分叉,就会出现「编辑器打得开、保存 404」这类
     只进不出的死数据(2026-09 实际发生过)。
     """
-    top = out_dir / f"{stem}.json"
+    top = contracts.sft_json(out_dir, stem)
     if top.is_file():
         return top
-    return out_dir / "quarantine" / f"{stem}.json"
+    return contracts.sft_quarantine_json(out_dir, stem)
 
 
 def _atomic_write_json(path: Path, payload: Any) -> None:

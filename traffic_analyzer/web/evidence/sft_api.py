@@ -27,6 +27,7 @@ from typing import Any, Dict
 
 from fastapi import HTTPException, Request
 
+from traffic_analyzer import contracts
 from traffic_analyzer.web import workspace as workspace_mod
 from traffic_analyzer.web.evidence import (
     _CorruptJsonError,
@@ -51,7 +52,7 @@ def put_sft(stem: str, body: SftSample, request: Request) -> Dict[str, Any]:
     # 并保存」即裁决通过(转正),隔离副本随之删除;未被人工碰过的可疑样本
     # 继续留在 quarantine,兜底价值不变。
     sft_path = sft_json_path(out_dir, stem)
-    target = out_dir / f"{stem}.json"
+    target = contracts.sft_json(out_dir, stem)
     with _put_locks[stem]:
         # 锁内复查 409:检查与写文件之间不能再插入新的 infer 任务(TOCTOU)。
         _reject_active_infer(request, stem)
@@ -103,7 +104,7 @@ def put_sft(stem: str, body: SftSample, request: Request) -> Dict[str, Any]:
         # <stem>_raw.json(dashboard 只读顶层,故固定写顶层不随隔离位置漂移;
         # 已存在则不覆盖,保持「首次编辑前的原始输出」语义);重推理成功时
         # 由 jobs 删除该快照。
-        raw_path = out_dir / f"{stem}_raw.json"
+        raw_path = contracts.stem_raw_json(out_dir, stem)
         if not raw_path.exists():
             shutil.copy(sft_path, raw_path)
         # 追溯字段只落盘;响应仍返回用户提交的 payload 本身。

@@ -20,6 +20,7 @@ from typing import Any, Dict
 
 from fastapi import HTTPException, Request
 
+from traffic_analyzer import contracts
 from traffic_analyzer.web import workspace as workspace_mod
 from traffic_analyzer.web.evidence import (
     _CorruptJsonError,
@@ -37,7 +38,9 @@ from traffic_analyzer.web.evidence_schema import Evidence
 def put_evidence(stem: str, body: Evidence, request: Request) -> Dict[str, Any]:
     workspace = workspace_mod.require_workspace(request)
     workspace_mod.validate_stem(stem)
-    evidence_path = workspace_mod.analysis_dir(workspace, stem) / f"{stem}_evidence.json"
+    evidence_path = contracts.evidence_json(
+        workspace_mod.analysis_dir(workspace, stem), stem
+    )
     with _put_locks[stem]:
         # 锁内复查 409:检查与写文件之间不能再插入新的 infer 任务(TOCTOU)。
         _reject_active_infer(request, stem)

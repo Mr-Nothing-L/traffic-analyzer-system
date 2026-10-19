@@ -23,7 +23,7 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, List, Optional
 
-from traffic_analyzer.utils.progress import LANE_EVENT_TYPES, ProgressEvent
+from traffic_analyzer.contracts import LANE_EVENT_TYPES, ProgressEvent
 
 TOTAL_STEPS = 5
 

@@ -17,7 +17,6 @@ web/progress.py 状态机(容忍截断/非法行:JSON 解析失败的行跳过,�
 
 from __future__ import annotations
 
-import json
 import os
 import tempfile
 import threading
@@ -25,6 +24,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict
 
+from traffic_analyzer import contracts
 from traffic_analyzer.web import progress as progress_mod
 
 # 进度文件轮询间隔(秒)。
@@ -82,9 +82,8 @@ def tail_progress_file(
             changed = False
             with lock:
                 for raw in lines:
-                    try:
-                        event = json.loads(raw)
-                    except ValueError:
+                    event = contracts.parse_progress_line(raw)
+                    if event is None:
                         continue  # 截断/非法行:容忍,跳过
                     changed = progress_mod.apply_event(job, event) or changed
             if changed:
@@ -93,11 +92,8 @@ def tail_progress_file(
             # 收尾:缓冲区里可能还有一行「写完但未换行」的完整 JSON(缺失
             # EOF 的容忍);真是崩溃截断的半行则解析失败、丢弃。
             if buf.strip():
-                try:
-                    event = json.loads(buf)
-                except ValueError:
-                    event = None
-                if isinstance(event, dict):
+                event = contracts.parse_progress_line(buf)
+                if event is not None:
                     with lock:
                         changed = progress_mod.apply_event(job, event)
                     if changed:

@@ -42,6 +42,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from traffic_analyzer.core.config_manager import ConfigManager
+from traffic_analyzer import contracts
 from traffic_analyzer.web import event_config
 from traffic_analyzer.web import frames as frames_mod
 from traffic_analyzer.web import workspace as workspace_mod
@@ -58,8 +59,9 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# analysis/<stem>/ 下的关键帧目录与命名契约(NN=两位序号承载顺序,sec 一位小数)
-KEYFRAME_DIR_NAME = "关键帧"
+# analysis/<stem>/ 下的关键帧目录与命名契约(NN=两位序号承载顺序,sec 一位小数);
+# 目录名常量在 traffic_analyzer.contracts(单一真相源),此处别名兼容既有引用。
+KEYFRAME_DIR_NAME = contracts.KEYFRAME_DIR_NAME
 _FILENAME_RE = re.compile(r"^\d{2}_t\d+(?:\.\d+)?s\.jpg$")
 # 候选帧数量与挑选数量约束(设计文档:10 帧候选挑 2-5)
 N_CANDIDATES = 10
@@ -124,7 +126,7 @@ def compute_candidates(meta: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def kf_dir(workspace: Path, stem: str) -> Path:
-    return workspace_mod.analysis_dir(workspace, stem) / KEYFRAME_DIR_NAME
+    return contracts.keyframe_dir(workspace_mod.analysis_dir(workspace, stem))
 
 
 def sft_json_path(workspace: Path, stem: str) -> Path:
@@ -429,7 +431,7 @@ def _batch_item(batch_id: str, stem: str, status: str, message: str = "") -> Non
 def _run_batch(workspace: Path, stems: List[str], overwrite: bool, batch_id: str) -> None:
     for stem in stems:
         adir = workspace_mod.analysis_dir(workspace, stem)
-        if not (adir / f"{stem}.json").is_file():
+        if not contracts.sft_json(adir, stem).is_file():
             _batch_item(batch_id, stem, "skipped", "无 SFT 标注")
             continue
         try:
