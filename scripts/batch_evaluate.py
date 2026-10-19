@@ -60,24 +60,16 @@ import yaml
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
-from traffic_analyzer.evaluation import extract_gt_from_filename
+from traffic_analyzer.evaluation import NORMAL_EVENT_ID, event_names, extract_gt_from_filename
 
 
 # ---------------------------------------------------------------------------
-# Event metadata (aligned with event_categories.yaml)
+# Event metadata (derived from event_categories.yaml)
 # ---------------------------------------------------------------------------
-# event_id 全局采用标注文档 v4.5 的 action 编号；9 = 正常占位，不对应任何事件。
+# 事件名单一真相源是 event_categories.yaml(evaluation.event_names 派生);
+# 9 = 正常占位不参与评估(--gt-mode filename 已自动跳过),此处排除。
 EVENT_NAMES: Dict[int, str] = {
-    1: "违法停车",
-    2: "应急车道占用",
-    3: "交通事故",
-    4: "高速公路行人出现",
-    5: "摩托车出现",
-    6: "严重拥堵",
-    7: "道路施工",
-    8: "车辆逆行/倒车",
-    10: "抛洒物",
-    11: "实线变道",
+    eid: name for eid, name in event_names().items() if eid != NORMAL_EVENT_ID
 }
 
 # 位宽：event_id 取值范围 1..11（含占位 9），数组按 0..11 开 12 格。
