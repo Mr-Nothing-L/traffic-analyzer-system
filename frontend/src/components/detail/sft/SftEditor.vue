@@ -10,6 +10,7 @@ import type { SftLabel as ApiSftLabel } from '../../../api/results'
 import type { SftLabel } from '../../../sft/types'
 import { useEvidenceStore } from '../../../stores/evidence'
 import { useSftStore } from '../../../stores/sft'
+import { useRetryAction } from '../../../composables/useRetryAction'
 import KeyframePanel from './KeyframePanel.vue'
 import SftAnswer from './SftAnswer.vue'
 import SftEventCard from './SftEventCard.vue'
@@ -19,6 +20,7 @@ const store = useSftStore()
 const evStore = useEvidenceStore()
 const message = useMessage()
 const dialog = useDialog()
+const { offerRetry } = useRetryAction()
 const savedFlash = ref(false) // 保存成功反馈:按钮短暂显示「已保存」(同 legacy flashSaveBtn)
 const unmatchedEl = ref<HTMLTextAreaElement | null>(null)
 
@@ -70,6 +72,11 @@ async function onSave() {
     })
     return
   }
+  if (r.transport) {
+    // 网络/代理层错误:非后端应用错误,提供显式重试入口(不静默自动重试)
+    offerRetry(onSave)
+    return
+  }
   message.error(`保存失败(${r.status ?? 0}):${r.message || '未知错误'}`)
 }
 
@@ -95,6 +102,10 @@ async function onExport() {
     a.click()
     URL.revokeObjectURL(url)
   } catch (e) {
+    if (e instanceof ApiError && e.transport) {
+      offerRetry(onExport)
+      return
+    }
     message.error(`导出失败:${e instanceof ApiError ? e.message : String(e)}`)
   } finally {
     exporting.value = false

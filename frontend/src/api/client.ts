@@ -1,12 +1,19 @@
 /** fetch 封装:统一错误(ApiError)、401 跳登录页(与 legacy 行为一致)。 */
 
 export class ApiError extends Error {
+  /** transport=true:错误来自网络/代理层而非后端应用——fetch 抛异常,或错误响应体
+   * 不是 `{detail}` 应用 JSON 结构(如裸 "Bad Request" 文本、代理 HTML 错误页)。
+   * 此类错误重试通常有效,UI 据此提供显式重试入口,不做静默自动重试。 */
+  public readonly transport: boolean
+
   constructor(
     public readonly status: number,
     message: string,
+    transport = false,
   ) {
     super(message)
     this.name = 'ApiError'
+    this.transport = transport
   }
 }
 
@@ -20,7 +27,7 @@ export async function apiResponse(path: string, init?: RequestInit): Promise<Res
       headers: { 'Content-Type': 'application/json', ...init?.headers },
     })
   } catch {
-    throw new ApiError(0, '网络错误,无法连接后端')
+    throw new ApiError(0, '网络错误,无法连接后端', true)
   }
   if (res.status === 401) {
     // 会话失效:整页跳登录,与 auth middleware 的 302 语义一致;
@@ -29,12 +36,16 @@ export async function apiResponse(path: string, init?: RequestInit): Promise<Res
     throw new ApiError(401, '未认证,已跳转登录页')
   }
   if (!res.ok) {
-    let detail = res.statusText
+    let detail: string | null = null
     try {
       const body = (await res.json()) as { detail?: unknown }
       if (body?.detail != null) detail = String(body.detail)
     } catch {
-      // 非 JSON 错误响应,保留 statusText
+      // 非 JSON 错误响应
+    }
+    if (detail == null) {
+      // 响应体不是应用 JSON 错误结构:判定为网络/代理层错误(transport)
+      throw new ApiError(res.status, res.statusText || `HTTP ${res.status}`, true)
     }
     throw new ApiError(res.status, detail)
   }

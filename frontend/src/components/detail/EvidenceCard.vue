@@ -5,6 +5,7 @@ import { computed, ref } from 'vue'
 import { NButton, NCard, useDialog, useMessage } from 'naive-ui'
 import type { VideoSource } from '../../api/results'
 import { useEvidenceStore } from '../../stores/evidence'
+import { useRetryAction } from '../../composables/useRetryAction'
 import EvidenceCanvas from './EvidenceCanvas.vue'
 import EvidenceTable from './EvidenceTable.vue'
 
@@ -12,6 +13,7 @@ const props = defineProps<{ stem: string; source: VideoSource }>()
 const store = useEvidenceStore()
 const message = useMessage()
 const dialog = useDialog()
+const { offerRetry } = useRetryAction()
 const savedFlash = ref(false) // 保存成功反馈:按钮短暂显示「已保存」(同 legacy flashSaveBtn)
 
 const events = computed(() => store.draft?.events ?? [])
@@ -40,6 +42,11 @@ async function onSave() {
         message.warning('他人已修改,已为你刷新')
       },
     })
+    return
+  }
+  if (r.transport) {
+    // 网络/代理层错误:非后端应用错误,提供显式重试入口(不静默自动重试)
+    offerRetry(onSave)
     return
   }
   message.error(`保存失败(${r.status}):${r.message}`)
