@@ -8,7 +8,7 @@ forward arguments).
 [文件说明]
 作用:FastAPI 应用工厂 create_app():装配 workspace/fs/jobs/evidence_api/frames/
 keyframes/video_stream/dashboard/auth/presence/realtime/llm_settings/agentproxy/
-rag 各路由,提供 /api/expert-phases
+rag/sftforge 各路由,提供 /api/expert-phases
 专家阶段定义接口,挂载 frontend/dist(/,Vue 3 SPA 构建产物,未构建时跳过)
 并为其禁用缓存,/v2/* 旧书签 301 重定向到对应 / 路径,在 no-cache 之后注册
 auth middleware(未配置 TRAFFIC_ANALYZER_USERS 时认证完全关闭),注册
@@ -19,8 +19,8 @@ server 子进程,失败仅降级,退出时 SIGTERM→SIGKILL);通过 TRAFFIC_ANA
 环境变量接收预设工作区(工厂模式无法转发参数)。
 上游:traffic_analyzer/cli.py 的 web 子命令(uvicorn "traffic_analyzer.web.app:create_app")。
 下游:web/ 下 workspace、fs、jobs、evidence_api、frames、keyframes、
-video_stream、dashboard、auth、presence、realtime、llm_settings、agentproxy
-路由模块;frontend/dist 前端构建产物。
+video_stream、dashboard、auth、presence、realtime、llm_settings、agentproxy、
+sftforge 路由模块;frontend/dist 前端构建产物。
 """
 
 from __future__ import annotations
@@ -52,6 +52,7 @@ from traffic_analyzer.web import (
     presence,
     rag,
     realtime,
+    sftforge,
     video_stream,
     workspace as workspace_mod,
 )
@@ -103,11 +104,13 @@ def create_app(workspace: Optional[str] = None) -> FastAPI:
         # Uvicorn runs this on SIGINT/SIGTERM (Ctrl+C): stop every queued or
         # running analyze child so no orphan keeps writing analysis/<stem>/.
         job_manager.shutdown()
+        app.state.sftforge.shutdown()
 
     app = FastAPI(title="Traffic Analyzer Web UI", lifespan=_lifespan)
     app.state.workspace = workspace_mod.WorkspaceState()
     app.state.jobs = job_manager
     app.state.realtime = bus
+    app.state.sftforge = sftforge.ForgeJobManager()
     # 认证配置(未配置 TRAFFIC_ANALYZER_USERS 时完全关闭)与在线状态名册。
     app.state.auth = auth.configure()
     app.state.presence = presence.PresenceStore()
@@ -147,6 +150,7 @@ def create_app(workspace: Optional[str] = None) -> FastAPI:
     app.include_router(llm_settings.router)
     app.include_router(agentproxy.router)
     app.include_router(rag.router)
+    app.include_router(sftforge.router)
     app.include_router(auth.router)
     app.include_router(presence.router)
     app.include_router(realtime.router)
