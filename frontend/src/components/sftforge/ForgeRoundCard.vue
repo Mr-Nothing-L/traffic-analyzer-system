@@ -1,11 +1,13 @@
 <script setup lang="ts">
 /** SFT Forge 单轮卡片:轮次号 + kind 徽标 + 目标事件标签 + 状态徽标
- * (进行中/已合并修改/未产生修改)+ prompt 折叠 + 响应段落(纠错目标事件的
- * 段落按 kind 配色高亮,即「修复段落 diff 高亮」;无 <think> 结构时回退原文)。
+ * (进行中/已合并修改/未产生修改)+ prompt 折叠 + 响应段落(JSON 主路径:
+ * forward 的 event_thoughts 逐事件段、纠错轮的 thinking+verdict 单段;
+ * 回退 <think> 文本切分;命中段落按 kind 配色高亮,即「修复段落 diff
+ * 高亮」;均不可解析时展示原文)。
  * 样式类在 styles/sftforge.css(ff-*),颜色全部 token。 */
 import { computed, ref } from 'vue'
 import type { ForgeRoundEntry } from '../../stores/sftforge'
-import { forgeKindCls, forgeKindLabel, thinkParagraphs } from '../../utils/sftforge'
+import { forgeKindCls, forgeKindLabel, responseSegments } from '../../utils/sftforge'
 
 const props = defineProps<{
   round: ForgeRoundEntry
@@ -22,9 +24,12 @@ const kindLabel = computed(() => forgeKindLabel(props.round.kind))
 const eventTags = computed(() =>
   props.round.event_ids.map((id) => props.eventNames[id] || `事件${id}`),
 )
-/** 段落视图:有 <think> 结构时按段落渲染并高亮目标事件段;否则空(回退原文)。 */
+/** 段落视图:JSON 主路径(event_thoughts 逐事件 / thinking+verdict 单段)
+ * 优先,回退 <think> 文本切分;均不可用为空(回退原文)。 */
 const paragraphs = computed(() =>
-  props.round.trace ? thinkParagraphs(props.round.trace.response, props.targetNames) : [],
+  props.round.trace
+    ? responseSegments(props.round.trace.response, props.targetNames, props.eventNames)
+    : [],
 )
 </script>
 
@@ -55,7 +60,8 @@ const paragraphs = computed(() =>
             class="ff-para"
             :class="p.hit ? `ff-para-hit-${kindCls}` : ''"
           >
-            <span v-if="p.hit" class="ff-para-label">修复段落 · {{ p.prefix }}</span>
+            <span v-if="p.hit && p.label" class="ff-para-label">修复段落 · {{ p.label }}</span>
+            <span v-else-if="p.label" class="ff-para-label">{{ p.label }}</span>
             {{ p.body }}
           </div>
         </template>

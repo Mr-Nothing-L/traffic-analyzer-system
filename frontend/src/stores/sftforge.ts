@@ -147,20 +147,39 @@ export const useSftForgeStore = defineStore('sftforge', () => {
     closeSource()
     const es = new EventSource(jobEventsUrl(id))
     source = es
-    es.addEventListener('round_started', (ev) =>
-      onRoundStarted(JSON.parse((ev as MessageEvent).data) as RoundStartedData),
-    )
-    es.addEventListener('round_completed', (ev) =>
-      onRoundCompleted(JSON.parse((ev as MessageEvent).data) as RoundCompletedData),
-    )
-    es.addEventListener('video_completed', (ev) =>
-      onVideoCompleted(JSON.parse((ev as MessageEvent).data) as ForgeVideoSummary),
-    )
+    // 事件 data 一律为 JSON(format_sse);解析失败跳过该条,不让单条坏数据中断流
+    const parseData = <T,>(ev: unknown): T | null => {
+      try {
+        return JSON.parse((ev as MessageEvent).data) as T
+      } catch {
+        return null
+      }
+    }
+    es.addEventListener('round_started', (ev) => {
+      const d = parseData<RoundStartedData>(ev)
+      if (d) onRoundStarted(d)
+    })
+    es.addEventListener('round_completed', (ev) => {
+      const d = parseData<RoundCompletedData>(ev)
+      if (d) onRoundCompleted(d)
+    })
+    es.addEventListener('video_completed', (ev) => {
+      const d = parseData<ForgeVideoSummary>(ev)
+      if (d) onVideoCompleted(d)
+    })
     es.addEventListener('job_completed', () => void finish(true))
     es.addEventListener('job_failed', (ev) => {
-      const d = JSON.parse((ev as MessageEvent).data) as JobFailedData
-      void finish(false, d.error)
+      const d = parseData<JobFailedData>(ev)
+      void finish(false, d?.error)
     })
+    // 兜底:CLOSED = 连接被永久关闭(非浏览器自动重连的 CONNECTING),
+    // 不置 failed 则 UI 假死在「进行中」;结果仍尝试拉 /result 对齐服务端真实状态
+    es.onerror = () => {
+      if (source !== es) return // 已主动断开或被新连接替换
+      if (es.readyState === EventSource.CLOSED) {
+        void finish(false, 'SSE 连接已断开;任务结果可能仍在服务端生成,请稍后用结果接口核对')
+      }
+    }
   }
 
   /** 创建任务并连接 SSE。返回 ok 供视图提示;错误文案入 error。 */

@@ -8,9 +8,12 @@ import {
   buildJsonlText,
   forgeKindCls,
   forgeKindLabel,
+  responseSegments,
   thinkParagraphs,
   videoBaseName,
 } from '../sftforge';
+
+const NAMES: Record<number, string> = { 1: '违法停车', 6: '交通拥堵' };
 
 describe('轮次 kind 徽标', () => {
   it('已知 kind 有中文标签与专属配色类', () => {
@@ -27,6 +30,62 @@ describe('轮次 kind 徽标', () => {
     expect(forgeKindCls('weird')).toBe('other');
   });
 });
+
+describe('JSON 主响应路径(responseSegments,生产端点实际输出)', () => {
+  it('forward JSON:event_thoughts 逐事件成段,present=true 的段落 hit', () => {
+    const resp = JSON.stringify({
+      weather: '晴',
+      time_of_day: '白天',
+      scene: '高速公路',
+      event_thoughts: [
+        { event_id: 1, present: true, thinking: '应急车道内停有一辆小型车。' },
+        { event_id: 6, present: false, thinking: '未观察到拥堵迹象。' },
+      ],
+    });
+    const segs = responseSegments(resp, new Set(), NAMES);
+    expect(segs).toHaveLength(2);
+    expect(segs[0]).toEqual({ label: '违法停车', body: '应急车道内停有一辆小型车。', hit: true });
+    expect(segs[1]).toEqual({ label: '交通拥堵', body: '未观察到拥堵迹象。', hit: false });
+  });
+
+  it('forward JSON:本轮纠错目标事件(中文名命中)即使 present=false 也 hit', () => {
+    const resp = JSON.stringify({
+      event_thoughts: [{ event_id: 6, present: true, thinking: '多车道出现拥堵。' }],
+    });
+    const segs = responseSegments(resp, new Set(['交通拥堵']), NAMES);
+    expect(segs[0].hit).toBe(true);
+  });
+
+  it('forward JSON 兼容 markdown 代码块包裹与未知事件 id 回退标签', () => {
+    const resp =
+      '```json\n' +
+      JSON.stringify({
+        event_thoughts: [{ event_id: 99, present: true, thinking: 'x。' }],
+      }) +
+      '\n```';
+    const segs = responseSegments(resp, new Set(), NAMES);
+    expect(segs).toEqual([{ label: '事件99', body: 'x。', hit: true }]);
+  });
+
+  it('纠错 JSON({thinking, verdict}):单段整体 hit,verdict 作 label', () => {
+    const resp = JSON.stringify({ thinking: '重新观察后确认存在拥堵…', verdict: '确认' });
+    const segs = responseSegments(resp, new Set(['交通拥堵']), NAMES);
+    expect(segs).toEqual([{ label: '确认', body: '重新观察后确认存在拥堵…', hit: true }]);
+  });
+
+  it('纠错 JSON 无 verdict 时 label 为 null', () => {
+    const resp = JSON.stringify({ thinking: '补充观察段落…' });
+    expect(responseSegments(resp, new Set(), NAMES)[0].label).toBeNull();
+  });
+
+  it('非 JSON 回退 <think> 切分;均不可解析返回空数组(展示原文)', () => {
+    const think = '<think>\n违法停车：应急车道内停有一辆小型车。\n</think>';
+    const segs = responseSegments(think, new Set(['违法停车']), NAMES);
+    expect(segs).toEqual([{ label: '违法停车', body: '违法停车：应急车道内停有一辆小型车。', hit: true }]);
+    expect(responseSegments('裸文本无标签', new Set(), NAMES)).toEqual([]);
+  });
+});
+
 
 describe('think 段落切分与目标段落高亮', () => {
   const text =

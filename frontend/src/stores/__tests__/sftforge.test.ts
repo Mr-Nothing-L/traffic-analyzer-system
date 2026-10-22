@@ -3,6 +3,8 @@
 // - SSE 事件落地:round_started 占位 running 卡,round_completed 回填 trace
 //   转 done;video_completed 落定摘要;事件幂等(重连回放不重复建卡);
 // - 终态:job_completed → done 并拉 /result;job_failed → failed 带错误文案;
+// - onerror 兜底:readyState=CLOSED 置 failed(不假死),CONNECTING 不动;
+//   事件 data 非 JSON 跳条不中断流;
 // - 事件名映射复用 /api/config/events,targetNamesOf 输出纠错目标中文名集合;
 // - 创建失败(400)入 error,不进入 running。
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -14,9 +16,12 @@ import type { ForgeResultPayload, RoundTrace } from '../../api/sftforge';
 type Listener = (ev: unknown) => void;
 class FakeEventSource {
   static instances: FakeEventSource[] = [];
+  static CLOSED = 2; // 与浏览器 EventSource.CLOSED 常量一致
   url: string;
   listeners = new Map<string, Listener[]>();
   closed = false;
+  readyState = 1; // OPEN
+  onerror: (() => void) | null = null;
   constructor(url: string) {
     this.url = url;
     FakeEventSource.instances.push(this);
@@ -201,6 +206,40 @@ describe('SSE 事件落地(幂等)', () => {
     await vi.waitFor(() => expect(store.status).toBe('failed'));
     expect(store.error).toBe('api_unavailable: boom');
     expect(es.closed).toBe(true);
+  });
+
+  it('onerror 且 readyState=CLOSED:failed 态提示断连(不假死),仍拉 result 对齐', async () => {
+    stubFetch();
+    const store = useSftForgeStore();
+    await store.start({ dir: '/data' });
+    const es = FakeEventSource.instances[0];
+    es.readyState = FakeEventSource.CLOSED;
+    es.onerror!();
+    await vi.waitFor(() => expect(store.status).toBe('failed'));
+    expect(store.error).toContain('SSE 连接已断开');
+    expect(store.error).toContain('结果可能仍在服务端生成');
+    expect(es.closed).toBe(true);
+  });
+
+  it('onerror 但 readyState 非 CLOSED(浏览器自动重连中):不改变状态', async () => {
+    stubFetch();
+    const store = useSftForgeStore();
+    await store.start({ dir: '/data' });
+    const es = FakeEventSource.instances[0];
+    es.readyState = 0; // CONNECTING
+    es.onerror!();
+    expect(store.status).toBe('running');
+  });
+
+  it('事件 data 非 JSON 时跳过该条,不中断流', async () => {
+    stubFetch();
+    const store = useSftForgeStore();
+    await store.start({ dir: '/data' });
+    const es = FakeEventSource.instances[0];
+    for (const fn of es.listeners.get('round_started') || []) fn({ data: 'not-json{{' });
+    expect(store.videos[0].rounds).toHaveLength(0);
+    es.emit('round_started', { video: '/data/a.mp4', round_no: 0, kind: 'forward', event_ids: [] });
+    expect(store.videos[0].rounds).toHaveLength(1);
   });
 });
 
