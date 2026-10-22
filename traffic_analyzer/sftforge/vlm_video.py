@@ -33,7 +33,6 @@ from traffic_analyzer.core.vlm_error_classifier import (
 )
 from traffic_analyzer.core.vlm_exceptions import (
     AllProvidersExhaustedError,
-    FatalAPIError,
     ProviderNotSupportedError,
 )
 from traffic_analyzer.models.schemas import LLMProviderConfig, LLMResponse
@@ -170,7 +169,7 @@ class VideoVLMCaller:
                 ],
             }
         )
-        response = self._clients[provider_idx].chat.completions.create(
+        create_kwargs = dict(
             model=cfg.model,
             max_tokens=cfg.max_tokens,
             temperature=cfg.temperature,
@@ -179,19 +178,32 @@ class VideoVLMCaller:
             # (probe 实测,见模块 docstring)。
             extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
-        text = ""
-        if response.choices:
-            text = (response.choices[0].message.content or "").strip()
-        if not text:
-            raise RuntimeError(
-                f"empty response content (provider={cfg.provider} model={cfg.model})"
+        # 空响应多为端点一次性抖动(隐藏 reasoning 耗尽 token 等),裸 RuntimeError
+        # 不可重试会直接进 quarantine,故在调用内做 1 次有界即时重试。
+        for empty_attempt in range(2):
+            response = self._clients[provider_idx].chat.completions.create(**create_kwargs)
+            text = ""
+            if response.choices:
+                text = (response.choices[0].message.content or "").strip()
+            if text:
+                return text
+            logger.warning(
+                "[VideoVLMCaller] EMPTY_RESPONSE | provider=%s model=%s attempt=%d/2",
+                cfg.provider, cfg.model, empty_attempt + 1,
             )
-        return text
+        raise RuntimeError(
+            f"empty response content (provider={cfg.provider} model={cfg.model})"
+        )
 
     def _execute_with_failover(
         self, system_prompt: str, user_prompt: str, data_uri: str
     ) -> tuple:
-        """逐 provider 重试 + failover;语义对齐 VLMInferenceEngine._execute_with_retry。"""
+        """逐 provider 重试 + failover;语义对齐 VLMInferenceEngine._execute_with_retry。
+
+        全停型错误(failover-trigger:401/配额/权限/5xx)在最后一个 provider 上
+        升级为 AllProvidersExhaustedError 终止批处理——若按普通错误上抛,整批
+        会被静默 quarantine 且断点续跑永久跳过这些视频。
+        """
         last_error: Optional[Exception] = None
         num_providers = len(self._providers)
 
@@ -208,14 +220,20 @@ class VideoVLMCaller:
                 except Exception as exc:  # noqa: BLE001
                     last_error = exc
                     if not _is_retryable_error(exc):
-                        if is_failover_trigger(exc) and provider_idx < num_providers - 1:
-                            logger.error(
-                                "[VideoVLMCaller] FAILOVER | from=%s to=%s reason=%s",
-                                cfg.provider,
-                                self._providers[provider_idx + 1].provider,
-                                exc,
-                            )
-                            break
+                        if is_failover_trigger(exc):
+                            if provider_idx < num_providers - 1:
+                                logger.error(
+                                    "[VideoVLMCaller] FAILOVER | from=%s to=%s reason=%s",
+                                    cfg.provider,
+                                    self._providers[provider_idx + 1].provider,
+                                    exc,
+                                )
+                                break
+                            # 全停型错误发生在最后一个 provider:升级终止批处理
+                            # (对齐 vlm_engine.py:698-707)。
+                            raise AllProvidersExhaustedError(
+                                f"All providers exhausted. Last error: {exc}"
+                            ) from exc
                         raise
                     if attempt < max_retries - 1:
                         wait_sec = min(2 ** attempt, 30)
@@ -231,13 +249,19 @@ class VideoVLMCaller:
 
             if last_error is not None:
                 if is_failover_trigger(last_error) and provider_idx < num_providers - 1:
+                    logger.error(
+                        "[VideoVLMCaller] FAILOVER | from=%s to=%s reason=%s",
+                        cfg.provider,
+                        self._providers[provider_idx + 1].provider,
+                        last_error,
+                    )
                     continue
                 if provider_idx == num_providers - 1:
-                    raise FatalAPIError(
+                    raise AllProvidersExhaustedError(
                         f"All providers exhausted. Last error: {last_error}"
                     ) from last_error
                 raise last_error
 
-        raise AllProvidersExhaustedError(
-            f"All providers exhausted. Last error: {last_error}"
-        )
+        # 控制流不可达:末位 provider 迭代必然 return 或 raise,
+        # 非末位 continue 后必进入下一迭代。
+        raise AssertionError("unreachable: failover loop exhausted without result")

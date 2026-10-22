@@ -18,7 +18,10 @@ from pathlib import Path
 from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 from traffic_analyzer.core.vlm_engine import VLMInferenceEngine
-from traffic_analyzer.core.vlm_exceptions import FatalAPIError
+from traffic_analyzer.core.vlm_exceptions import (
+    AllProvidersExhaustedError,
+    FatalAPIError,
+)
 from traffic_analyzer.evaluation import event_names
 from traffic_analyzer.models.schemas import EventCategory, PromptTemplate
 from traffic_analyzer.sftforge.gt import diff_predictions, gt_for_video
@@ -284,7 +287,10 @@ class SftForgeEngine:
         result.rounds.append(trace)
         try:
             response = self._caller(system, user, video_path)
-        except FatalAPIError:
+        except (FatalAPIError, AllProvidersExhaustedError):
+            # 全停型错误(API 不可用)必须上抛终止批处理,不能让整批被静默
+            # quarantine 并被断点续跑永久跳过(AllProvidersExhaustedError
+            # 并非 FatalAPIError 子类,需单独捕获)。
             raise
         except Exception as exc:  # noqa: BLE001
             trace.response = f"[ERROR] {type(exc).__name__}: {exc}"

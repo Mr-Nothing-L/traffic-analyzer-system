@@ -198,6 +198,14 @@ class TestQuarantine:
         assert result.match is False
         assert "[ERROR] RuntimeError" in result.rounds[1].response
 
+    def test_all_providers_exhausted_reraised(self) -> None:
+        """全停型错误必须上抛终止批处理,不得被吞成单视频 quarantine。"""
+        from traffic_analyzer.core.vlm_exceptions import AllProvidersExhaustedError
+
+        caller = FakeCaller([AllProvidersExhaustedError("all down")])
+        with pytest.raises(AllProvidersExhaustedError):
+            _engine(caller).run("01-02_Event_test_1.mp4")
+
 
 class TestSkip:
     def test_normal_09_skipped(self) -> None:

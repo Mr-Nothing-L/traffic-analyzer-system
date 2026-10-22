@@ -25,7 +25,10 @@ from typing import List, Optional
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from traffic_analyzer.core.config_manager import ConfigManager  # noqa: E402
-from traffic_analyzer.core.vlm_exceptions import FatalAPIError  # noqa: E402
+from traffic_analyzer.core.vlm_exceptions import (  # noqa: E402
+    AllProvidersExhaustedError,
+    FatalAPIError,
+)
 from traffic_analyzer.evaluation import event_names  # noqa: E402
 from traffic_analyzer.sftforge.engine import (  # noqa: E402
     TEMPLATE_CORRECT_MISSING,
@@ -190,7 +193,7 @@ def main() -> int:
                     _handle_result(result, next_index if result.match else None)
                     if result.match:
                         next_index += 1
-    except FatalAPIError as exc:
+    except (FatalAPIError, AllProvidersExhaustedError) as exc:
         logger.error("API 不可用,批处理终止(已完成的视频已落盘,可断点续跑): %s", exc)
         return 1
 
