@@ -3,6 +3,7 @@ import ChatView from '../views/ChatView.vue'
 import DashboardView from '../views/DashboardView.vue'
 import DetailView from '../views/DetailView.vue'
 import LoginView from '../views/LoginView.vue'
+import SftForgeView from '../views/SftForgeView.vue'
 import TreeView from '../views/TreeView.vue'
 import WelcomeView from '../views/WelcomeView.vue'
 
@@ -22,6 +23,7 @@ const router = createRouter({
         { path: 'video/:stem', name: 'detail', component: DetailView },
         { path: 'dashboard', name: 'dashboard', component: DashboardView },
         { path: 'chat', name: 'chat', component: ChatView },
+        { path: 'sftforge', name: 'sftforge', component: SftForgeView },
       ],
     },
   ],
