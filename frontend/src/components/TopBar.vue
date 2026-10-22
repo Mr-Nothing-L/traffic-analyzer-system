@@ -64,6 +64,7 @@ async function onLogout() {
     <span class="tb-spacer" />
     <ModelSwitcher />
     <n-button size="small" @click="router.push('/chat')">Agent模式</n-button>
+    <n-button size="small" @click="router.push('/sftforge')">SFT 生成</n-button>
     <n-button size="small" @click="router.push('/dashboard')">数据看板</n-button>
     <n-button
       type="primary"
