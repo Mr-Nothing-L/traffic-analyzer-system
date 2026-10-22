@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional
 
+from traffic_analyzer import contracts
 from traffic_analyzer.web import workspace as workspace_mod
 from traffic_analyzer.web.progress import TOTAL_STEPS
 
@@ -45,7 +46,7 @@ def build_infer_command(workspace: Path, video_rel: str, stem: str) -> List[str]
         sys.executable, "-m", "traffic_analyzer", "analyze",
         "--video", str(workspace / video_rel),
         "--format", "markdown",
-        "--output", str(out_dir / "report.md"),
+        "--output", str(contracts.report_md(out_dir)),
         "--sft-label",
         "--sft-output-dir", str(out_dir),
     ]
@@ -53,7 +54,7 @@ def build_infer_command(workspace: Path, video_rel: str, stem: str) -> List[str]
 
 def _discard_frozen_raw(workspace: Path, stem: str) -> None:
     """Delete the frozen ``<stem>_raw.json`` snapshot (best-effort)."""
-    raw_path = workspace_mod.analysis_dir(workspace, stem) / f"{stem}_raw.json"
+    raw_path = contracts.stem_raw_json(workspace_mod.analysis_dir(workspace, stem), stem)
     try:
         raw_path.unlink()
     except FileNotFoundError:

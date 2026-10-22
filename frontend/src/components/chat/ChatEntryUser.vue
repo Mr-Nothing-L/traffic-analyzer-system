@@ -10,7 +10,8 @@ const props = defineProps<{
   entry: AgentEntry
   copied: boolean
   busy: boolean
-  videoSrc?: string
+  /** null = 推不出预览地址(workspaceVideoSrc),回退路径 chip。 */
+  videoSrc?: string | null
   time: string
 }>()
 

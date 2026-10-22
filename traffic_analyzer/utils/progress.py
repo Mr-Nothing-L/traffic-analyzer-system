@@ -80,18 +80,14 @@ _LANE_NAME_WIDTH = 14
 # web 子进程模式下由 web/jobs 设置并尾随解析;未设置时所有 emit 为 no-op。
 PROGRESS_FILE_ENV = "TRAFFIC_ANALYZER_PROGRESS_FILE"
 
-# 所有合法的 JSONL 事件类型(发射端 utils/progress.py 与消费端 web/progress.py 共享)。
-PROGRESS_EVENT_TYPES: frozenset[str] = frozenset(
-    {"register", "start", "phase", "lane_done", "step", "done"}
+# 所有合法的 JSONL 事件类型、泳道子集与事件 dict 别名:协议权威定义在
+# traffic_analyzer/contracts.py(发射端与消费端共享),此处 re-export 供既有
+# 引用面保持稳定。
+from traffic_analyzer.contracts import (  # noqa: F401  # noqa: E402
+    LANE_EVENT_TYPES,
+    PROGRESS_EVENT_TYPES,
+    ProgressEvent,
 )
-
-# 泳道(专家/裁决)事件子集 —— web/progress.py 用它路由到 _apply_expert_progress。
-LANE_EVENT_TYPES: frozenset[str] = frozenset(
-    {"register", "start", "phase", "lane_done"}
-)
-
-# 单个事件 dict 的类型别名(消费端 apply_event 的 event 参数)。
-ProgressEvent = Dict[str, Any]
 
 
 def _emit_event(payload: Dict[str, Any]) -> None:

@@ -23,6 +23,7 @@ import yaml
 from fastapi import HTTPException, Query, Request
 from fastapi.responses import FileResponse
 
+from traffic_analyzer import contracts
 from traffic_analyzer.web import evidence as _pkg
 from traffic_analyzer.web import workspace as workspace_mod
 from traffic_analyzer.web.evidence import (
@@ -30,6 +31,7 @@ from traffic_analyzer.web.evidence import (
     _file_sig,
     _read_json,
     router,
+    sft_json_path,
 )
 
 
@@ -41,19 +43,14 @@ def get_results(stem: str, request: Request) -> Dict[str, Any]:
 
     report_md: Optional[str] = None
     try:
-        report_md = (out_dir / "report.md").read_text(encoding="utf-8")
+        report_md = contracts.report_md(out_dir).read_text(encoding="utf-8")
     except OSError:
         pass
 
     try:
-        sft_path = out_dir / f"{stem}.json"
-        if not sft_path.is_file():
-            # Fall back to quarantine/ (sample isolated due to ungroundable positives)
-            quarantined = out_dir / "quarantine" / f"{stem}.json"
-            if quarantined.is_file():
-                sft_path = quarantined
+        sft_path = sft_json_path(out_dir, stem)
         sft_label = _read_json(sft_path)
-        evidence = _read_json(out_dir / f"{stem}_evidence.json")
+        evidence = _read_json(contracts.evidence_json(out_dir, stem))
     except _CorruptJsonError as exc:
         raise HTTPException(
             status_code=500, detail=f"Corrupt analysis JSON for '{stem}': {exc}"
@@ -61,7 +58,7 @@ def get_results(stem: str, request: Request) -> Dict[str, Any]:
     # 原始推理 action(模型未修改前的 action 数组):前端据此区分「模型原始推理」与
     # 「人工修正后结果」,即使保存后 sft_label.action 被覆盖也能保持推理标记。
     raw_action = None
-    raw_path = out_dir / f"{stem}_raw.json"
+    raw_path = contracts.stem_raw_json(out_dir, stem)
     if raw_path.exists():
         try:
             raw_data = _read_json(raw_path)
@@ -75,9 +72,11 @@ def get_results(stem: str, request: Request) -> Dict[str, Any]:
         "evidence": evidence,
         "raw_action": raw_action,
         # 乐观锁指纹:当前 SFT json 内容 sha256 前 16;PUT 回传 base_sig 做冲突检测。
-        "file_sig": _file_sig(out_dir / f"{stem}.json"),
+        # 按解析后的实际文件算(隔离样本 = quarantine 副本),否则隔离样本
+        # file_sig 恒为 null,乐观锁被静默绕过。
+        "file_sig": _file_sig(sft_path),
         # 证据文件指纹:证据 PUT 的 base_sig 以此为准(与 SFT 分开,互不误伤)。
-        "evidence_sig": _file_sig(out_dir / f"{stem}_evidence.json"),
+        "evidence_sig": _file_sig(contracts.evidence_json(out_dir, stem)),
     }
 
 

@@ -42,6 +42,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from traffic_analyzer.core.config_manager import ConfigManager
+from traffic_analyzer import contracts
 from traffic_analyzer.web import event_config
 from traffic_analyzer.web import frames as frames_mod
 from traffic_analyzer.web import workspace as workspace_mod
@@ -50,6 +51,7 @@ from traffic_analyzer.web.evidence import (
     _atomic_write_json,
     _file_sig,
     _read_json,
+    sft_json_path as evidence_sft_json_path,
 )
 from traffic_analyzer.web.evidence.locks import _put_locks
 
@@ -57,8 +59,9 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# analysis/<stem>/ 下的关键帧目录与命名契约(NN=两位序号承载顺序,sec 一位小数)
-KEYFRAME_DIR_NAME = "关键帧"
+# analysis/<stem>/ 下的关键帧目录与命名契约(NN=两位序号承载顺序,sec 一位小数);
+# 目录名常量在 traffic_analyzer.contracts(单一真相源),此处别名兼容既有引用。
+KEYFRAME_DIR_NAME = contracts.KEYFRAME_DIR_NAME
 _FILENAME_RE = re.compile(r"^\d{2}_t\d+(?:\.\d+)?s\.jpg$")
 # 候选帧数量与挑选数量约束(设计文档:10 帧候选挑 2-5)
 N_CANDIDATES = 10
@@ -123,11 +126,15 @@ def compute_candidates(meta: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def kf_dir(workspace: Path, stem: str) -> Path:
-    return workspace_mod.analysis_dir(workspace, stem) / KEYFRAME_DIR_NAME
+    return contracts.keyframe_dir(workspace_mod.analysis_dir(workspace, stem))
 
 
 def sft_json_path(workspace: Path, stem: str) -> Path:
-    return workspace_mod.analysis_dir(workspace, stem) / f"{stem}.json"
+    """SFT 样本 JSON 路径:委托 evidence.sft_json_path(顶层优先,quarantine 回退)。
+
+    隔离样本的关键帧端点此前只认顶层,会报「该视频没有 SFT 标注」;
+    统一走共享解析后,能打开的样本就一定能维护关键帧。"""
+    return evidence_sft_json_path(workspace_mod.analysis_dir(workspace, stem), stem)
 
 
 def keyframe_filename(order: int, time_sec: float) -> str:
@@ -412,19 +419,28 @@ def batch_snapshot(batch_id: str) -> Optional[Dict[str, Any]]:
     return snapshot
 
 
-def _batch_item(batch_id: str, stem: str, status: str, message: str = "") -> None:
+def _batch_item(
+    batch_id: str,
+    stem: str,
+    status: str,
+    message: str = "",
+    extras: Optional[Dict[str, Any]] = None,
+) -> None:
     with _batch_lock:
         state = _batches.get(batch_id)
         if state is None:
             return
-        state["items"][stem] = {"status": status, "message": message}
+        item: Dict[str, Any] = {"status": status, "message": message}
+        if extras:
+            item.update(extras)
+        state["items"][stem] = item
         state["finished"] += 1
 
 
 def _run_batch(workspace: Path, stems: List[str], overwrite: bool, batch_id: str) -> None:
     for stem in stems:
         adir = workspace_mod.analysis_dir(workspace, stem)
-        if not (adir / f"{stem}.json").is_file():
+        if not contracts.sft_json(adir, stem).is_file():
             _batch_item(batch_id, stem, "skipped", "无 SFT 标注")
             continue
         try:
@@ -437,8 +453,10 @@ def _run_batch(workspace: Path, stems: List[str], overwrite: bool, batch_id: str
             continue
         _batch_item_running(batch_id, stem)
         try:
-            perform_auto_pick(workspace, stem, overwrite=overwrite)
-            _batch_item(batch_id, stem, "ok")
+            picks, _written, sig = perform_auto_pick(workspace, stem, overwrite=overwrite)
+            # 结果随条目携带(选中帧数 + 新 file_sig):手动单发路径据此刷新
+            # 列表并回写 SFT 编辑器的乐观锁指纹,批量路径不消费也不受影响。
+            _batch_item(batch_id, stem, "ok", "", {"picked": picks, "file_sig": sig})
         except KeyframeExistsError as exc:
             _batch_item(batch_id, stem, "skipped", str(exc))
         except Exception as exc:
@@ -564,18 +582,46 @@ def reorder_keyframes(stem: str, body: _OrderRequest, request: Request) -> Dict[
 
 
 @router.post("/api/videos/{stem}/keyframes/auto_pick")
-def auto_pick(stem: str, request: Request, body: Optional[_AutoPickRequest] = None) -> Dict[str, Any]:
+def auto_pick(
+    stem: str, request: Request, body: Optional[_AutoPickRequest] = None
+) -> Dict[str, Any]:
+    """提交后台智能挑选(单 stem 批次),立即返回批次 id,不阻塞请求线程。
+
+    手动单发此前在请求线程内做 VLM 调用与帧解码(一次可达数十秒,期间
+    请求挂起);现复用批量 auto_pick 的后台线程 + 内存状态模式,前端经
+    GET /api/keyframes/batch/{id} 轮询,完成后据条目结果(ok 携带 picked /
+    file_sig)刷新列表并回写乐观锁指纹。错误语义随之异步化:无标注/已有
+    关键帧(未覆盖)/LLM 失败不再同步 409/502/422,而是落进条目状态
+    (skipped/failed + message)。schedule_after_infer(推理后自动挑选)
+    仍是直调 perform_auto_pick 的 daemon 线程,行为不变。
+    """
     workspace = _require_sft_stem(request, stem)
     overwrite = bool(body and body.overwrite)
-    try:
-        picks, written, sig = perform_auto_pick(workspace, stem, overwrite=overwrite)
-    except KeyframeExistsError as exc:
-        raise HTTPException(status_code=409, detail=str(exc))
-    except KeyframeError as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
-    except _CorruptJsonError as exc:
-        raise HTTPException(status_code=422, detail=f"Existing SFT file is corrupt: {exc}")
-    return {"picked": picks, "keyframes": _with_order(written), "file_sig": sig}
+    batch_id = _start_batch(workspace, [stem], overwrite)
+    return {"id": batch_id}
+
+
+def _start_batch(workspace: Path, stems: List[str], overwrite: bool) -> str:
+    """登记批次状态并起后台线程执行(手动单发与批量路由共用)。"""
+    batch_id = uuid.uuid4().hex[:12]
+    state: Dict[str, Any] = {
+        "id": batch_id,
+        "total": len(stems),
+        "finished": 0,
+        "items": {s: {"status": "pending", "message": ""} for s in stems},
+    }
+    with _batch_lock:
+        # 只保留最近 N 批,防长驻进程内存无限增长
+        while len(_batches) >= _MAX_BATCHES_KEPT:
+            _batches.pop(next(iter(_batches)))
+        _batches[batch_id] = state
+    threading.Thread(
+        target=_run_batch,
+        args=(workspace, list(stems), overwrite, batch_id),
+        daemon=True,
+        name=f"keyframes-batch-{batch_id}",
+    ).start()
+    return batch_id
 
 
 @router.post("/api/keyframes/batch")
@@ -585,25 +631,7 @@ def start_batch(body: _BatchRequest, request: Request) -> Dict[str, Any]:
     workspace = workspace_mod.require_workspace(request)
     for stem in body.stems:
         workspace_mod.validate_stem(stem)
-    batch_id = uuid.uuid4().hex[:12]
-    state: Dict[str, Any] = {
-        "id": batch_id,
-        "total": len(body.stems),
-        "finished": 0,
-        "items": {s: {"status": "pending", "message": ""} for s in body.stems},
-    }
-    with _batch_lock:
-        # 只保留最近 N 批,防长驻进程内存无限增长
-        while len(_batches) >= _MAX_BATCHES_KEPT:
-            _batches.pop(next(iter(_batches)))
-        _batches[batch_id] = state
-    threading.Thread(
-        target=_run_batch,
-        args=(workspace, list(body.stems), body.overwrite, batch_id),
-        daemon=True,
-        name=f"keyframes-batch-{batch_id}",
-    ).start()
-    return {"id": batch_id}
+    return {"id": _start_batch(workspace, list(body.stems), body.overwrite)}
 
 
 @router.get("/api/keyframes/batch/{batch_id}")

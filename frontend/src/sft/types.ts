@@ -1,6 +1,10 @@
 // SFT 编辑器纯逻辑模块:类型定义
-// 对齐后端 traffic_analyzer/web/evidence_schema.py 的 SftSample 与
-// traffic_analyzer/config/event_options.yaml 的封闭枚举配置。
+// 样本契约字段由 api/contracts.gen.ts(scripts/gen_frontend_contracts.py 从
+// evidence_schema.py 生成,禁手改)承载;本文件在其上叠加编辑器专用的
+// 收窄(attr_mentions 的 MentionValue 形状)与草稿/载荷类型。
+// 结构化属性配置来源:traffic_analyzer/config/event_options.yaml。
+
+import type { SftSample } from '../api/contracts.gen'
 
 // 属性组定义(event_options.yaml 经 GET /api/config/events 下发)
 export interface AttrGroup {
@@ -26,16 +30,9 @@ export type MentionValue = string[] | Record<string, string[]>;
 // 事件的结构化属性值(单选 string / 多选 string[])
 export type EventAttrs = Record<string, string | string[]>;
 
-// SFT 样本(GET /api/results/{stem} 响应的 sft_label;字段与 SftSample 对齐)
-export interface SftLabel {
-  chunk: unknown;
-  idx: unknown;
-  action: number[];
-  description: string;
-  start_timestamp: unknown;
-  end_timestamp: unknown;
-  chunk_name: unknown;
-  event_attributes?: Record<string, Record<string, unknown>> | null;
+// SFT 样本(GET /api/results/{stem} 响应的 sft_label):契约形状 = 生成的
+// SftSample,attr_mentions 收窄为编辑器的 MentionValue 视图
+export interface SftLabel extends Omit<SftSample, 'attr_mentions'> {
   attr_mentions?: Record<string, Record<string, MentionValue>> | null;
 }
 
@@ -65,6 +62,10 @@ export interface SftDraft {
   mentionSpans: Record<number, DeclSpan[] | null>;
   unmatched: string[];
   env: Record<string, string>; // 天气/时间/场景
+  // 手动勾选检出插入骨架前的原文快照(纯内存,不进保存签名):取消勾选时仅当
+  // 文本与「骨架+快照原文」逐字符一致才撤销,防止误删模型/人工原文;
+  // 磁盘载入与模型检出事件无此标记,取消勾选不碰其文本
+  skeletonOrig?: Record<number, string>;
 }
 
 // 保存时重建的四字段(PUT body 的可编辑部分)

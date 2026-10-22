@@ -65,3 +65,23 @@ def event_name_index(path: Optional[Path] = None) -> Dict[str, int]:
     """
     path = path or _EVENT_CATEGORIES_YAML
     return _event_name_index_cached(str(path), _yaml_mtime_ns(path))
+
+
+@lru_cache(maxsize=8)
+def _event_id_names_cached(path: str, mtime_ns: int) -> Dict[int, str]:
+    data = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+    return {
+        int(cat["event_id"]): str(cat["name_zh"])
+        for cat in data.get("event_categories") or []
+        if "event_id" in cat and "name_zh" in cat
+    }
+
+
+def event_id_names(path: Optional[Path] = None) -> Dict[int, str]:
+    """event_id → 事件中文名(event_name_index 的逆视图)。
+
+    评估/报表等按编号检索事件名的调用方使用;同口径按 (路径, mtime) 缓存。
+    不含编号 9(正常指示位不是事件类别,见 ADR-0001)。
+    """
+    path = path or _EVENT_CATEGORIES_YAML
+    return _event_id_names_cached(str(path), _yaml_mtime_ns(path))

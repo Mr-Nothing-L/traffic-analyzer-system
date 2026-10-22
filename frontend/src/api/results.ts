@@ -2,7 +2,15 @@
  * 契约见 traffic_analyzer/web/evidence/*(results、乐观锁 PUT)与
  * frames.py / video_stream.py(meta/frame/stream)。
  * 媒体 URL 给 <video>/<img> src 用,需带 /api 前缀;apiFetch 的路径不带。 */
-import { apiFetch } from './client'
+import { apiFetch, apiResponse } from './client'
+import type { SftSample } from './contracts.gen'
+
+export type { SftSample }
+
+/** GET 响应的 sft_label(磁盘样本):契约形状由生成的 SftSample 承载
+ * (scripts/gen_frontend_contracts.py 从 evidence_schema.py 派生,禁手改)。
+ * SftLabel 为调用点兼容别名。 */
+export type SftLabel = SftSample
 
 /* ---------- 证据 JSON 结构(与 evidence_schema.py 对应,宽松可选) ---------- */
 export interface EvidenceRegion {
@@ -39,18 +47,6 @@ export interface Evidence {
   schema_version?: string
   video?: EvidenceVideoInfo
   events: EvidenceEvent[]
-}
-
-/** SFT 标注(json 结构以标注文档 v4.5 为准,只读展示仅需这些字段)。 */
-export interface SftLabel {
-  chunk?: string
-  idx?: number
-  action?: number[]
-  description?: string
-  start_timestamp?: string
-  end_timestamp?: string
-  chunk_name?: string
-  event_attributes?: Record<string, unknown>
 }
 
 /** GET /api/results/{stem} 响应。file_sig/evidence_sig 为乐观锁指纹。 */
@@ -101,6 +97,35 @@ export function putSft<T>(stem: string, body: unknown): Promise<T & { file_sig?:
     method: 'PUT',
     body: JSON.stringify(body),
   })
+}
+
+/** 导出单视频 SFT 标注(GET /results/{stem}/sft/export):后端读取磁盘样本
+ * (顶层优先/quarantine 回退)清洗为训练契约字段,响应为单行 JSONL 文本
+ * 附件(见 web/evidence/sft_export.py)。返回文本,由调用方触发浏览器
+ * 下载;404 = 无标注,422 = 文件损坏。 */
+export function fetchSftJsonl(stem: string): Promise<string> {
+  return apiResponse(`/results/${enc(stem)}/sft/export`).then((r) => r.text())
+}
+
+/** 批量导出结果:合并 JSONL 文本 + 诚实计数(响应头 X-Export-Total /
+ * X-Export-Skipped;跳过 = 无标注/损坏的 stem)。 */
+export interface SftBatchExportResult {
+  text: string
+  total: number
+  skipped: number
+}
+
+/** 批量导出勾选集合的 SFT 标注(POST /workspace/sft/export):每行与单视频
+ * 导出同构(共用后端投影函数);空集合/超上限 400,坏 stem 404。 */
+export function exportSftBatch(stems: string[]): Promise<SftBatchExportResult> {
+  return apiResponse('/workspace/sft/export', {
+    method: 'POST',
+    body: JSON.stringify({ stems }),
+  }).then(async (r) => ({
+    text: await r.text(),
+    total: Number(r.headers.get('X-Export-Total') ?? 0),
+    skipped: Number(r.headers.get('X-Export-Skipped') ?? 0),
+  }))
 }
 
 /** 专家阶段定义(泳道缓行封顶用;404 时调用方回退内置封顶,同 legacy)。 */

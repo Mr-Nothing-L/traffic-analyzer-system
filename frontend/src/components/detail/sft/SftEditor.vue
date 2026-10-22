@@ -4,10 +4,13 @@
  * 乐观锁 base_sig 取 GET 响应的 file_sig,409 弹「丢弃并刷新/保留我的修改」。 */
 import { nextTick, onUnmounted, ref, watch } from 'vue'
 import { NButton, NCard, useDialog, useMessage } from 'naive-ui'
+import { ApiError } from '../../../api/client'
+import { fetchSftJsonl } from '../../../api/results'
 import type { SftLabel as ApiSftLabel } from '../../../api/results'
 import type { SftLabel } from '../../../sft/types'
 import { useEvidenceStore } from '../../../stores/evidence'
 import { useSftStore } from '../../../stores/sft'
+import { useRetryAction } from '../../../composables/useRetryAction'
 import KeyframePanel from './KeyframePanel.vue'
 import SftAnswer from './SftAnswer.vue'
 import SftEventCard from './SftEventCard.vue'
@@ -17,6 +20,7 @@ const store = useSftStore()
 const evStore = useEvidenceStore()
 const message = useMessage()
 const dialog = useDialog()
+const { offerRetry } = useRetryAction()
 const savedFlash = ref(false) // 保存成功反馈:按钮短暂显示「已保存」(同 legacy flashSaveBtn)
 const unmatchedEl = ref<HTMLTextAreaElement | null>(null)
 
@@ -68,12 +72,44 @@ async function onSave() {
     })
     return
   }
+  if (r.transport) {
+    // 网络/代理层错误:非后端应用错误,提供显式重试入口(不静默自动重试)
+    offerRetry(onSave)
+    return
+  }
   message.error(`保存失败(${r.status ?? 0}):${r.message || '未知错误'}`)
 }
 
 function onReset() {
   store.resetLocal()
   message.success('已重置为磁盘版本')
+}
+
+const exporting = ref(false)
+
+/** 导出标注为单行 JSONL(后端读磁盘样本清洗为训练契约字段,见
+ * web/evidence/sft_export.py)。dirty 时按钮禁用:导出的必须与磁盘一致,
+ * 避免「改完没保存,导出的却是旧内容」的错位。 */
+async function onExport() {
+  if (exporting.value) return
+  exporting.value = true
+  try {
+    const text = await fetchSftJsonl(props.stem)
+    const url = URL.createObjectURL(new Blob([text], { type: 'application/x-ndjson' }))
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${props.stem}.jsonl`
+    a.click()
+    URL.revokeObjectURL(url)
+  } catch (e) {
+    if (e instanceof ApiError && e.transport) {
+      offerRetry(onExport)
+      return
+    }
+    message.error(`导出失败:${e instanceof ApiError ? e.message : String(e)}`)
+  } finally {
+    exporting.value = false
+  }
 }
 </script>
 
@@ -116,6 +152,16 @@ function onReset() {
           <span v-if="store.dirty" class="dirty-flag">● 未保存</span>
           <n-button size="small" quaternary :disabled="!store.dirty" @click="onReset">
             重置
+          </n-button>
+          <n-button
+            size="small"
+            quaternary
+            :disabled="store.dirty || exporting"
+            :loading="exporting"
+            :title="store.dirty ? '有未保存修改,请先保存再导出' : '下载单行 JSONL 标注文件'"
+            @click="onExport"
+          >
+            导出
           </n-button>
           <n-button
             size="small"

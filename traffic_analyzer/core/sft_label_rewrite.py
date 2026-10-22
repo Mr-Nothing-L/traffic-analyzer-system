@@ -39,6 +39,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
 
+from traffic_analyzer import contracts
 from traffic_analyzer.config.event_options import event_options_index
 from traffic_analyzer.core.pipeline_steps import PipelineStep
 from traffic_analyzer.core.verdict_format import (
@@ -675,7 +676,7 @@ class SftLabelRewriteStep(PipelineStep):
             resp_data, context.event_results
         )
         if ungrounded_positive:
-            target_dir: Union[str, Path] = Path(output_dir) / "quarantine"
+            target_dir: Union[str, Path] = Path(output_dir) / contracts.QUARANTINE_DIR_NAME
             logger.warning(
                 "[sft_label_rewrite] QUARANTINE | video=%s ungrounded_event_ids=%s | "
                 "positive event(s) not groundable in raw frames",

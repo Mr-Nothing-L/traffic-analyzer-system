@@ -8,18 +8,20 @@ import { getEventConfig, putSft } from '../api/results'
 import { buildPutPayload, initDraft, isDirty, signature } from '../sft/model'
 import type { EventDef, SftDraft, SftLabel, SftPutPayload } from '../sft/types'
 
-/** action 结果:组件据此弹提示;conflict=true 表示 409 乐观锁冲突。 */
+/** action 结果:组件据此弹提示;conflict=true 表示 409 乐观锁冲突;
+ * transport=true 表示网络/代理层错误(组件提供显式重试入口)。 */
 export interface SftSaveResult {
   ok: boolean
   conflict?: boolean
+  transport?: boolean
   status?: number
   message?: string
 }
 
-function errInfo(e: unknown): { status: number; message: string } {
+function errInfo(e: unknown): { status: number; message: string; transport: boolean } {
   return e instanceof ApiError
-    ? { status: e.status, message: e.message }
-    : { status: 0, message: e instanceof Error ? e.message : String(e) }
+    ? { status: e.status, message: e.message, transport: e.transport }
+    : { status: 0, message: e instanceof Error ? e.message : String(e), transport: false }
 }
 
 export const useSftStore = defineStore('sft', () => {
@@ -105,8 +107,8 @@ export const useSftStore = defineStore('sft', () => {
       // 保存期间用户继续编辑:保留草稿,savedSig 不动,dirty 由 computed 重算(同 legacy)
       return { ok: true }
     } catch (e) {
-      const { status, message } = errInfo(e)
-      return { ok: false, conflict: status === 409, status, message }
+      const { status, message, transport } = errInfo(e)
+      return { ok: false, conflict: status === 409, transport, status, message }
     } finally {
       saving.value = false
     }

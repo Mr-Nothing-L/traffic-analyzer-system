@@ -83,13 +83,17 @@ function formatTime(iso: string): string {
   } catch { return '' }
 }
 
-/** 侧边树点击视频 → 看板模式下滚动到对应行并高亮(由 dashboard.scrollToStem 驱动)。 */
+/** 侧边树点击视频 → 看板模式下滚动到对应行并高亮(由 dashboard.scrollToStem 驱动)。
+ * 持续描边(dash-row-target)保证跨页跳转后用户始终能看到目标行,闪烁仅为注意引导。 */
 watch(() => dash.scrollToStem, (stem) => {
   if (!stem) return
   nextTick(() => {
+    // 先清除上一个目标行的持续描边;旧行已随翻页销毁时选择器查不到,自然跳过
+    document.querySelector('.dash-row-target')?.classList.remove('dash-row-target')
     const el = document.querySelector(`tr[data-stem="${CSS.escape(stem)}"]`) as HTMLElement | null
     if (el) {
       el.scrollIntoView({ block: 'center', behavior: 'smooth' })
+      el.classList.add('dash-row-target')
       el.classList.add('dash-row-flash')
       setTimeout(() => el.classList.remove('dash-row-flash'), 2000)
     }
@@ -227,6 +231,10 @@ watch(() => dash.scrollToStem, (stem) => {
 }
 .dash-row-flash {
   animation: dash-flash 2s ease;
+}
+/* 跳转目标行持续描边:闪烁结束后仍可见(跨页跳转后定位用) */
+.dash-row-target {
+  box-shadow: inset 0 0 0 2px var(--color-accent);
 }
 @keyframes dash-flash {
   0% { background: var(--color-accent-soft); }

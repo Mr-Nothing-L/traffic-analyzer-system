@@ -38,7 +38,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 /** 建库 status 响应体工厂(契约 GET /api/rag/build/status)。 */
 function buildStatus(over: Partial<RagBuildStatus> = {}): RagBuildStatus {
-  return {
+  const base: RagBuildStatus = {
     running: false,
     done: 0,
     total: 0,
@@ -48,8 +48,9 @@ function buildStatus(over: Partial<RagBuildStatus> = {}): RagBuildStatus {
     last_error: null,
     partial: false,
     library: null,
-    ...over,
+    pending: null,
   };
+  return { ...base, ...over };
 }
 
 /** 建库端点 fetch 路由:statusResponses 依次作为 /rag/build/status 的响应;build 固定成功。 */

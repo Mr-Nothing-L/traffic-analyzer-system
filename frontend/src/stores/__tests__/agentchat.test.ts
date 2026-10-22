@@ -28,7 +28,7 @@ describe('工作区切换重置 agent 会话', () => {
   it('首次加载(null → 有值)不清空会话态', async () => {
     const { ws, agent } = await load();
     agent.sessionId = 's1';
-    agent.entries = [{ kind: 'user', text: 'hi' }];
+    agent.entries = [{ id: 'u1', kind: 'user', text: 'hi' }];
     agent.setPendingVideo({ path: 'a.mp4', name: 'a.mp4' });
     ws.path = '/ws/a';
     await nextTick();
@@ -42,7 +42,7 @@ describe('工作区切换重置 agent 会话', () => {
     ws.path = '/ws/a'; // 先落到初始工作区
     await nextTick();
     agent.sessionId = 's1';
-    agent.entries = [{ kind: 'user', text: 'hi' }];
+    agent.entries = [{ id: 'u1', kind: 'user', text: 'hi' }];
     agent.setPendingVideo({ path: 'a.mp4', name: 'a.mp4' });
     agent.sessions = [{ id: 's1', workspaceDir: '/ws/a' }];
     agent.status = 'done';
@@ -83,10 +83,10 @@ describe('工作区切换重置 agent 会话', () => {
     ws.path = '/ws/a';
     await nextTick();
     agent.sessionId = 's1';
-    agent.entries = [{ kind: 'user', text: 'hi' }];
+    agent.entries = [{ id: 'u1', kind: 'user', text: 'hi' }];
     // selectSession 会拉 history,这里不真调;直接模拟其结果(换 sessionId/entries)
     agent.sessionId = 's2';
-    agent.entries = [{ kind: 'user', text: 'from history' }];
+    agent.entries = [{ id: 'u1', kind: 'user', text: 'from history' }];
     await nextTick();
     expect(agent.sessionId).toBe('s2');
     expect(agent.entries).toHaveLength(1);
@@ -1000,7 +1000,7 @@ describe('openSession 跨工作区切换', () => {
     ws.path = '/ws/a';
     await nextTick();
     agent.sessionId = 's1';
-    agent.entries = [{ kind: 'user', text: 'hi' }];
+    agent.entries = [{ id: 'u1', kind: 'user', text: 'hi' }];
     agent.sessions = [
       { id: 's1', workspaceDir: '/ws/a' },
       { id: 's2', workspaceDir: '/ws/b', title: 'B 会话' },
@@ -1027,7 +1027,7 @@ describe('openSession 跨工作区切换', () => {
     ws.path = '/ws/a';
     await nextTick();
     agent.sessionId = 's1';
-    agent.entries = [{ kind: 'user', text: 'hi' }];
+    agent.entries = [{ id: 'u1', kind: 'user', text: 'hi' }];
     agent.sessions = [
       { id: 's1', workspaceDir: '/ws/a' },
       { id: 's2', workspaceDir: '/ws/gone' },
@@ -1362,7 +1362,7 @@ describe('快速跨工作区切换会话', () => {
       { id: 's3', workspaceDir: '/ws/a' },
     ];
     // POST /api/workspace 与 /history 都可控:精确交错两次跨工作区点击
-    const wsPosts: Array<(r: Response) => void> = [];
+    const wsPosts: Array<() => void> = [];
     const releases = new Map<string, (r: Response) => void>();
     const sessionList = [
       { id: 's2', workspaceDir: '/ws/b' },
@@ -1387,7 +1387,7 @@ describe('快速跨工作区切换会话', () => {
 
     // 第一次点击 s2@wsB:切工作区(完成)+ history 在途
     const p2 = agent.openSession('s2');
-    wsPosts[0]!(() => undefined);
+    wsPosts[0]!();
     await vi.waitFor(() => {
       expect(agent.status).toBe('connecting'); // selectSession('s2') 已发起
     });
@@ -1396,7 +1396,7 @@ describe('快速跨工作区切换会话', () => {
     await vi.waitFor(() => {
       expect(wsPosts.length).toBe(2); // s3 的 applyWorkspace 已发起
     });
-    wsPosts[1]!(() => undefined);
+    wsPosts[1]!();
     // s3 的 history 先落地:生效
     await vi.waitFor(() => {
       expect(releases.size).toBe(2);

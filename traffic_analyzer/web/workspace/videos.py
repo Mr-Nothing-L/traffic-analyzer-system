@@ -2,7 +2,10 @@
 
 [文件说明]
 作用:工作区视频发现(list_videos,任意深度,跳过点目录与 PRUNED_DIR_NAMES
-产出目录)及其进程内缓存版 list_videos_cached(key=workspace 路径,长 TTL +
+产出目录;每项附 review 审核态:has_results 时读 analysis/review_states.json
+的 status,缺失/非法默认 unconfirmed,无报告为 None——审核态经函数内延迟
+导入 dashboard.review._load_review_states 读取,避免 workspace 与 dashboard
+包模块级循环依赖)及其进程内缓存版 list_videos_cached(key=workspace 路径,长 TTL +
 主动失效,见 _VIDEOS_CACHE_TTL_SEC;/api/workspace/videos 与 dashboard 聚合
 共用;失效统一走 invalidate_caches:workspace 变更 / infer 完成 / review /
 SFT / 证据 PUT),GET /api/workspace/videos 路由,以及分析报告删除路由
@@ -49,9 +52,15 @@ def list_videos(workspace: Path) -> List[Dict[str, Any]]:
 
     Each entry carries the workspace-relative path (``rel``) used by the
     frontend as its unique key; ``has_results`` follows the flat
-    ``analysis/<stem>/`` contract for every depth.
+    ``analysis/<stem>/`` contract for every depth. ``review`` mirrors the
+    dashboard review status when ``has_results`` (read from
+    ``analysis/review_states.json``, missing/invalid → ``unconfirmed``);
+    otherwise ``None``.
     """
     videos: List[Dict[str, Any]] = []
+    # 审核态整体只读一次(首个有报告的视频才读盘):缺失/损坏 → {}(与
+    # metrics._build_dashboard 同源);list_videos 另有长 TTL 进程内缓存。
+    review_states: Optional[Dict[str, Any]] = None
     root = workspace.resolve()
     for dirpath, dirnames, filenames in os.walk(root):
         # 点目录与产出目录(PRUNED_DIR_NAMES)原地剔除,os.walk 不再下钻。
@@ -83,6 +92,27 @@ def list_videos(workspace: Path) -> List[Dict[str, Any]]:
                 # 且 os.walk(followlinks=False) 不下钻链接目录、root 已 resolve,
                 # 路径不可能逃逸工作区,无需逐文件 resolve。
                 st = lst
+            has = has_results(workspace, path.stem)
+            review: Optional[str] = None
+            if has:
+                if review_states is None:
+                    # 函数内延迟导入:dashboard.review 顶层 import web.workspace,
+                    # 而本模块经 workspace/__init__ 聚合导出,模块级引入会形成
+                    # 包级循环依赖(workspace ↔ dashboard);审核态语义与
+                    # metrics._build_dashboard 行合并保持一致。
+                    from traffic_analyzer.web.dashboard.review import (
+                        REVIEW_STATUSES,
+                        _load_review_states,
+                    )
+
+                    review_states = _load_review_states(workspace)
+                entry = review_states.get(path.stem)
+                review = (
+                    entry.get("status")
+                    if isinstance(entry, dict)
+                    and entry.get("status") in REVIEW_STATUSES
+                    else "unconfirmed"
+                )
             videos.append(
                 {
                     "name": name,
@@ -90,7 +120,8 @@ def list_videos(workspace: Path) -> List[Dict[str, Any]]:
                     "rel": path.relative_to(root).as_posix(),
                     "size": st.st_size,
                     "mtime": st.st_mtime,
-                    "has_results": has_results(workspace, path.stem),
+                    "has_results": has,
+                    "review": review,
                 }
             )
     videos.sort(key=lambda v: v["rel"])

@@ -1,7 +1,13 @@
 <script setup lang="ts">
 /** 事件文本富文本框(contenteditable):仅声明提及渲染为 token 分段,可自由编辑。
  * spike 结论(phase5):输入期间只回写纯文本、不更新分段,Vue 声明式渲染不丢光标;
- * 分段仅在挂载 / blur / chip 变更(refresh)时重算,与 legacy renderTokens 时机一致。 */
+ * 分段仅在挂载 / blur / chip 变更(refresh)时重算,与 legacy renderTokens 时机一致。
+ * spike 结论的失效条件(2026-09-08 修复):人工编辑让浏览器直接删除 token span
+ * 后,vdom 与真实 DOM 结构性分歧,blur 时的增量 patch(patchKeyedChildren)会把
+ * 新分段写进游离节点、卸载存活文本节点,导致文本框视觉清空(草稿数据完好)。
+ * 修复:refresh 一律整段重挂载(renderKey 自增驱动 div 重建),不与浏览器改过的
+ * DOM 做增量对账;refresh 只发生在 blur/chip 变更/外部重建等本就该丢光标的时机。
+ * TODO(后续重构):长期方案是 textarea + 高亮 overlay,彻底移除 contenteditable。 */
 import { h, nextTick, onMounted, ref, watch } from 'vue'
 import type { FunctionalComponent } from 'vue'
 import { useMessage } from 'naive-ui'
@@ -16,6 +22,7 @@ const message = useMessage()
 
 const el = ref<HTMLElement | null>(null)
 const segs = ref<TokenSegment[]>([])
+const renderKey = ref(0) // 整段重挂载键:refresh 自增,强制重建 contenteditable(见文件头)
 let goneSig = '' // 已提醒过的「提及被删」签名(同 legacy mentionGoneSig 去重)
 
 // 文本框自适应高度:随内容增长,超过上限后出现滚动条(同 legacy autoGrow)
@@ -40,8 +47,9 @@ function computeSegs(): TokenSegment[] {
   return tokenizeSpans(declaredSpans(d, props.ev, text), text)
 }
 
-// 声明式 token 分段渲染:h() 数组子节点,无模板空白注入;segs 未变时 patch 跳过,
-// 输入造成的 DOM 分歧不会被外部重渲染抹掉(spike 验证)。
+// 声明式 token 分段渲染:h() 数组子节点,无模板空白注入。
+// 注意:不做增量 patch——contenteditable 可能被浏览器人工编辑改结构,
+// 重渲染一律靠 renderKey 整段重建(见文件头修复说明)。
 const TokenSegs: FunctionalComponent<{ segs: TokenSegment[] }> = (p) =>
   p.segs.map((s, i) =>
     s.group
@@ -90,9 +98,10 @@ function onBlur() {
   goneSig = sig
 }
 
-/** 外部重渲染(chip 变更 / 初始化):重算分段;pulseGroup 非空时该组 token 短暂脉冲。 */
+/** 外部重渲染(chip 变更 / blur / 外部重建):整段重挂载;pulseGroup 非空时该组 token 短暂脉冲。 */
 function refresh(pulseGroup?: string) {
   segs.value = computeSegs()
+  renderKey.value += 1 // 弃用旧 DOM(可能被浏览器人工编辑过),整棵重建
   nextTick(() => {
     autoGrow()
     const t = el.value
@@ -130,6 +139,7 @@ defineExpose({ refresh })
 
 <template>
   <div
+    :key="renderKey"
     ref="el"
     class="sft-ev-text sft-richtext"
     contenteditable="true"

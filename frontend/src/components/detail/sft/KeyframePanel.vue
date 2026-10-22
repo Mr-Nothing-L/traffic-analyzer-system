@@ -2,18 +2,21 @@
 /** SFT 详情卡·关键帧面板:上排 10 张候选帧(hover 右上角「+」加入),下排事件
  * 关键帧(hover「−」删除、HTML5 原生拖拽排序、「智能挑选」)。增删改即时调 API,
  * 响应里的新 file_sig 回写 sft store 乐观锁指纹(store.stem 未变时),避免后续
- * 文本保存 409。图片点击放大由 NImage/NImageGroup 自带,不加依赖。 */
+ * 文本保存 409。图片点击放大由 NImage/NImageGroup 自带,不加依赖。
+ * 「智能挑选」为后台任务:提交即返回批次 id,前端轮询;完成(ok)后刷新列表
+ * 并回写 file_sig,失败/跳过诚实提示(不阻塞页面)。 */
 import { ref, watch } from 'vue'
 import { NButton, NImage, NImageGroup, useDialog, useMessage } from 'naive-ui'
 import {
   addKf,
   autoPickKf,
   deleteKf,
+  getKfBatch,
   getKfCandidates,
   getKfList,
   reorderKf,
 } from '../../../api/keyframes'
-import type { CandidateFrame, KeyframeEntry } from '../../../api/keyframes'
+import type { BatchStatus, CandidateFrame, KeyframeEntry } from '../../../api/keyframes'
 import { frameUrl, resultFileUrl } from '../../../api/results'
 import { useSftStore } from '../../../stores/sft'
 
@@ -103,16 +106,45 @@ async function onDrop(to: number) {
   }
 }
 
-/* ---- 智能挑选:已有关键帧时先确认覆盖 ---- */
+/* ---- 智能挑选:后台任务(提交即返回),轮询完成;已有关键帧时先确认覆盖 ---- */
 const picking = ref(false)
+
+/** 轮询单发挑选批次直至终态:ok → 回写 file_sig + 刷新列表;skipped/failed →
+ * 诚实提示原因。轮询 1s/次、上限 10 分钟(单次挑选远短于此)。 */
+async function pollPick(id: string) {
+  const stem = props.stem
+  for (let i = 0; i < 600; i++) {
+    let st: BatchStatus
+    try {
+      st = await getKfBatch(id)
+    } catch {
+      return // 批次不存在(web 重启):静默放弃轮询
+    }
+    const item = st.items[stem]
+    if (!item || item.status === 'pending' || item.status === 'running') {
+      await new Promise((r) => setTimeout(r, 1000))
+      continue
+    }
+    if (item.status === 'ok') {
+      if (item.file_sig && store.stem === props.stem) store.baseSig = item.file_sig
+      await reload()
+      message.success(`智能挑选完成:选中 ${item.picked?.length ?? 0} 帧`)
+    } else if (item.status === 'skipped') {
+      message.warning(`智能挑选已跳过:${item.message || '已有关键帧'}`)
+    } else {
+      message.error(`智能挑选失败:${item.message || '未知原因'}`)
+    }
+    return
+  }
+  message.error('智能挑选超时:任务仍在后台运行,稍后刷新查看结果')
+}
 
 function onAutoPick() {
   const run = async () => {
     picking.value = true
     try {
-      const r = await autoPickKf(props.stem, true)
-      applyMutation(r)
-      message.success(`智能挑选完成:选中 ${r.picked?.length ?? r.keyframes.length} 帧`)
+      const { id } = await autoPickKf(props.stem, true)
+      await pollPick(id)
     } catch (e) {
       message.error(`智能挑选失败:${errText(e)}`)
     } finally {

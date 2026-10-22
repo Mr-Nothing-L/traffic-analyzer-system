@@ -60,14 +60,18 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 from traffic_analyzer.core.config_manager import ConfigManager
-from traffic_analyzer.evaluation import EVENT_NAMES, extract_gt_from_filename
+from traffic_analyzer.evaluation import NORMAL_EVENT_ID, event_names, extract_gt_from_filename
 
 
 # ---------------------------------------------------------------------------
-# Event metadata
+# Event metadata (derived from event_categories.yaml)
 # ---------------------------------------------------------------------------
-# EVENT_NAMES 由 traffic_analyzer.evaluation 从 event_categories.yaml(SSOT)
-# 懒加载派生;event_id 全局采用标注文档 v4.5 的 action 编号,9 = 正常占位。
+# 事件名单一真相源是 event_categories.yaml(evaluation.event_names 派生,
+# 复用 web/event_config 的 (路径, mtime) 缓存);9 = 正常占位不参与评估
+# (--gt-mode filename 已自动跳过),此处排除。
+EVENT_NAMES: Dict[int, str] = {
+    eid: name for eid, name in event_names().items() if eid != NORMAL_EVENT_ID
+}
 # 位宽：event_id 取值范围 1..11（含占位 9），数组按 0..11 开 12 格。
 NUM_EVENTS = 12
 

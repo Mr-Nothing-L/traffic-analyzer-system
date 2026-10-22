@@ -37,6 +37,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from traffic_analyzer import contracts
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -256,7 +258,9 @@ def has_results(workspace: Path, stem: str) -> bool:
     (samples whose positive events couldn't be grounded in raw frames).
     """
     adir = analysis_dir(workspace, stem)
-    return (adir / f"{stem}.json").is_file() or (adir / "quarantine" / f"{stem}.json").is_file()
+    return contracts.sft_json(adir, stem).is_file() or contracts.sft_quarantine_json(
+        adir, stem
+    ).is_file()
 
 
 def find_video(workspace: Path, stem: str) -> Optional[Path]:
