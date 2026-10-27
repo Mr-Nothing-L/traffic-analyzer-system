@@ -3,7 +3,8 @@
 [文件说明]
 作用:web 层 SFT Forge 包。service.py 为 ForgeJobManager(后台线程执行
   引擎、事件存储/回放式订阅)与 build_engine 真实引擎装配点;routes.py
-  为 /api/sftforge/jobs 三个端点;本模块聚合导出,保持
+  为 /api/sftforge/jobs 三个端点 + /api/sftforge/store 读/删端点;store.py
+  为终态结果按工作区持久化(.agent/sftforge/latest_result.json);本模块聚合导出,保持
   ``from traffic_analyzer.web import sftforge`` 与 ``sftforge.router``/
   ``sftforge.ForgeJobManager``/``sftforge.build_engine`` 的用法
   (build_engine 经包命名空间导出,测试 monkeypatch

@@ -55,15 +55,13 @@
 .ff-dir-input:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 1px; }
 .ff-form-error { font-size: var(--text-md); color: var(--color-red); padding: 0 18px 14px; }
 
-/* ---------- 进度区:左视频列表 + 右轮次时间线 ---------- */
-.ff-progress { display: flex; gap: var(--space-md); max-width: 1280px; align-items: flex-start; }
+/* ---------- 进度区:左视频索引 + 右视频卡片(行高/间距对齐) ---------- */
+.ff-progress { display: flex; gap: var(--space-md); max-width: 1280px; align-items: flex-start; margin-bottom: var(--space-lg); }
 .ff-videos {
   flex: 0 0 300px;
-  background: var(--color-card);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
-  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
 }
 .ff-video-row {
   display: flex;
@@ -71,14 +69,12 @@
   gap: var(--space-sm);
   width: 100%;
   padding: 10px 14px;
-  border: none;
-  border-bottom: 1px solid var(--color-border);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
   background: var(--color-card);
-  cursor: pointer;
+  box-shadow: var(--shadow);
   text-align: left;
-  transition: background var(--dur-fast) var(--ease-out);
 }
-.ff-video-row:hover { background: var(--color-hover-bg); }
 .ff-video-row.on { background: var(--color-accent-soft); }
 .ff-video-name {
   flex: 1;
@@ -120,23 +116,61 @@
 .ff-badge-wait { background: var(--color-surface-3); color: var(--color-text2); border-color: var(--color-border); }
 .ff-badge-run { background: var(--color-accent-soft); color: var(--color-accent); border-color: var(--color-accent); }
 .ff-badge-match { background: var(--color-sage-soft); color: var(--color-sage); border-color: var(--color-sage); }
+.ff-badge-fixed { background: var(--color-blue-soft); color: var(--color-blue); border-color: var(--color-blue); }
 .ff-badge-quar { background: var(--color-red-soft); color: var(--color-red); border-color: var(--color-red); }
 .ff-badge-skip { background: var(--color-surface-4); color: var(--color-gold); border-color: var(--color-gold); }
 .ff-badge-patched { background: var(--color-sage-soft); color: var(--color-sage); border-color: var(--color-sage); }
 .ff-badge-nopatch { background: var(--color-surface-3); color: var(--color-text2); border-color: var(--color-border); }
+.ff-badge-initial { background: var(--color-blue-soft); color: var(--color-blue); border-color: var(--color-blue); }
 
-/* ---------- 轮次卡 ---------- */
-.ff-round { border: 1px solid var(--color-border); border-radius: var(--radius); background: var(--color-card); box-shadow: var(--shadow); }
+/* ---------- 单视频卡片(全部轮次折叠在一张卡内) ---------- */
+.ff-video-card {
+  background: var(--color-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+.ff-video-card-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  width: 100%;
+  padding: 10px 14px;
+  border: none;
+  background: var(--color-surface-2);
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--dur-fast) var(--ease-out);
+}
+.ff-video-card-head:hover { background: var(--color-hover-bg); }
+.ff-video-toggle { font-family: var(--font-pixel); font-size: var(--text-sm); color: var(--color-text2); }
+.ff-video-card-body {
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  border-top: 1px solid var(--color-border);
+}
+
+/* ---------- 轮次小节(嵌在视频卡内,非独立卡片) ---------- */
+.ff-round { border: 1px solid var(--color-border); border-radius: var(--radius); background: var(--color-card); }
 .ff-round-head {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: var(--space-sm);
+  width: 100%;
   padding: 10px 14px;
+  border: none;
   border-bottom: 1px solid var(--color-border);
   background: var(--color-surface-2);
   border-radius: var(--radius) var(--radius) 0 0;
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--dur-fast) var(--ease-out);
 }
+.ff-round-head:hover { background: var(--color-hover-bg); }
 .ff-round-no { font-family: var(--font-pixel); font-size: var(--text-md); font-weight: 650; }
 .ff-tag {
   font-family: var(--font-pixel);
@@ -196,21 +230,99 @@
 .ff-para-hit-forward { border-left-color: var(--color-blue); background: var(--color-blue-soft); }
 .ff-para-label { font-family: var(--font-pixel); font-size: var(--text-xs); color: var(--color-text2); display: block; margin-bottom: 2px; }
 
-/* ---------- 结果区:统计 chip + quarantine + JSONL ---------- */
-.ff-stats { display: flex; gap: var(--space-sm); flex-wrap: wrap; padding: 14px 18px; border-bottom: 1px solid var(--color-border); }
-.ff-stat {
-  font-family: var(--font-pixel);
-  font-size: var(--text-md);
-  padding: 8px 14px;
+/* 流式增量块(生成中实时渲染)与思考过程文本 */
+.ff-stream-block { display: flex; flex-direction: column; gap: 2px; }
+.ff-pre-reasoning { border-left: 3px solid var(--color-accent); }
+
+/* 初稿(批量链路)步骤进度区 */
+.ff-draft {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border: 1px dashed var(--color-border);
   border-radius: var(--radius-sm);
-  border: 1px solid var(--color-border);
+  padding: 8px 12px;
   background: var(--color-surface-2);
-  color: var(--color-text);
 }
-.ff-stat b { font-size: var(--text-xl); margin-left: 6px; }
-.ff-stat-match b { color: var(--color-sage); }
-.ff-stat-quar b { color: var(--color-red); }
-.ff-stat-skip b { color: var(--color-gold); }
+.ff-draft-line { font-family: var(--font-mono); font-size: var(--text-sm); line-height: 1.6; color: var(--color-text2); }
+.ff-draft-hit { color: var(--color-sage); }
+.ff-draft-bad { color: var(--color-red); }
+
+/* ---------- 最终结论视图(图 2 的 SFT 标注风格,只读) ---------- */
+.ff-final { display: flex; flex-direction: column; gap: var(--space-sm); border-top: 1px dashed var(--color-border); padding-top: var(--space-sm); }
+.ff-final-title { font-family: var(--font-pixel); font-size: var(--text-md); font-weight: 650; color: var(--color-text); }
+.ff-final-event { border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-card); }
+/* 状态着色:检出=sage 绿,纠错修订=accent 橙,未检出=灰 */
+.ff-final-event.on { border-color: var(--color-sage); background: var(--color-sage-soft); }
+.ff-final-event.fixed { border-color: var(--color-accent); background: var(--color-accent-soft); }
+.ff-final-event.off { background: var(--color-surface-2); }
+.ff-final-event-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--color-border);
+}
+.ff-final-event-name { font-family: var(--font-pixel); font-size: var(--text-md); font-weight: 650; }
+.ff-final-fix-tag {
+  font-family: var(--font-pixel);
+  font-size: var(--text-xs);
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--color-accent);
+  color: var(--color-card);
+}
+.ff-final-check { font-family: var(--font-pixel); font-size: var(--text-xs); color: var(--color-text2); }
+.ff-final-check.on { color: var(--color-sage); }
+.ff-final-event-body {
+  font-family: var(--font-sans);
+  font-size: var(--text-md);
+  line-height: 1.7;
+  padding: 8px 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.ff-final-field { font-size: var(--text-md); line-height: 1.6; display: flex; gap: var(--space-sm); }
+.ff-final-label {
+  font-family: var(--font-pixel);
+  font-size: var(--text-sm);
+  color: var(--color-text2);
+  flex: 0 0 64px;
+}
+.ff-final-class {
+  font-family: var(--font-sans);
+  font-size: var(--text-md);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 4px 12px;
+  background: var(--color-surface-5);
+}
+.ff-final-class-id { font-family: var(--font-pixel); font-size: var(--text-xs); color: var(--color-accent); margin-right: var(--space-sm); }
+
+/* 结果面板内每视频的最终结论折叠卡(默认折叠) */
+.ff-final-video {
+  margin: 0 18px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-card);
+  overflow: hidden;
+}
+.ff-final-video-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  width: 100%;
+  padding: 10px 14px;
+  border: none;
+  background: var(--color-surface-2);
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--dur-fast) var(--ease-out);
+}
+.ff-final-video-head:hover { background: var(--color-hover-bg); }
+.ff-final-video .ff-final { padding: 12px 14px; border-top: 1px solid var(--color-border); }
+
+/* ---------- 结果区:quarantine + JSONL ---------- */
 .ff-quar-row {
   display: flex;
   align-items: baseline;
@@ -222,4 +334,4 @@
 .ff-quar-row:last-child { border-bottom: none; }
 .ff-quar-name { font-family: var(--font-mono); font-size: var(--text-sm); color: var(--color-text); }
 .ff-quar-reason { color: var(--color-text2); }
-.ff-jsonl-actions { display: flex; gap: var(--space-sm); align-items: center; padding: 14px 18px 0; }
+.ff-jsonl-actions { display: flex; gap: var(--space-sm); align-items: center; padding: 14px 18px; }

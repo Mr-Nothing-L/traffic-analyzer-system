@@ -1,5 +1,7 @@
 // SFT Forge 面板纯逻辑测试(utils/sftforge.ts):
 // - kind 徽标:三类已知 kind 有中文标签与专属配色类,未知 kind 原样回退;
+// - 结果徽标(forgeOutcomeBadge):skipped→已跳过、非 match→不一致、
+//   match 按 r0_match 区分 一致/修改后一致,历史缺字段以 rounds 回退;
 // - think 段落切分:空行分段、「事件名:」前缀识别、目标事件段落 hit 标记
 //   (与 sft/model.parseSftDescription 同口径);无 <think> 回退空数组;
 // - 路径末段文件名、JSONL 导出文本(逐行 JSON,末尾换行)。
@@ -8,6 +10,8 @@ import {
   buildJsonlText,
   forgeKindCls,
   forgeKindLabel,
+  forgeOutcomeBadge,
+  parseFinalOutput,
   responseSegments,
   thinkParagraphs,
   videoBaseName,
@@ -87,6 +91,60 @@ describe('JSON 主响应路径(responseSegments,生产端点实际输出)', () =
 });
 
 
+describe('结果徽标(forgeOutcomeBadge,三处视图统一口径)', () => {
+  it('skipped → 已跳过;非 match → 不一致', () => {
+    expect(forgeOutcomeBadge({ match: false, skipped: true })).toEqual({
+      text: '已跳过',
+      cls: 'ff-badge-skip',
+    });
+    expect(forgeOutcomeBadge({ match: false, skipped: false, r0_match: false })).toEqual({
+      text: '不一致',
+      cls: 'ff-badge-quar',
+    });
+  });
+
+  it('match + r0_match=true → 一致;r0_match=false → 修改后一致', () => {
+    expect(forgeOutcomeBadge({ match: true, skipped: false, r0_match: true })).toEqual({
+      text: '一致',
+      cls: 'ff-badge-match',
+    });
+    expect(forgeOutcomeBadge({ match: true, skipped: false, r0_match: false })).toEqual({
+      text: '修改后一致',
+      cls: 'ff-badge-fixed',
+    });
+  });
+
+  it('历史缺 r0_match:rounds 有 R0 之后的 patched 轮 → 修改后一致,否则一致', () => {
+    const summary = { match: true, skipped: false };
+    expect(
+      forgeOutcomeBadge(summary, [
+        { round_no: 0, patched: false },
+        { round_no: 1, patched: true },
+      ]),
+    ).toEqual({ text: '修改后一致', cls: 'ff-badge-fixed' });
+    // 仅 R0 自身 patched(盲推即落定)不算修订
+    expect(forgeOutcomeBadge(summary, [{ round_no: 0, patched: true }])).toEqual({
+      text: '一致',
+      cls: 'ff-badge-match',
+    });
+    expect(forgeOutcomeBadge(summary, [])).toEqual({ text: '一致', cls: 'ff-badge-match' });
+    expect(forgeOutcomeBadge(summary)).toEqual({ text: '一致', cls: 'ff-badge-match' });
+  });
+
+  it('r0_match 为 null 视同缺字段走 rounds 回退;显式字段优先于 rounds', () => {
+    const rounds = [{ round_no: 1, patched: true }];
+    expect(forgeOutcomeBadge({ match: true, skipped: false, r0_match: null }, rounds)).toEqual({
+      text: '修改后一致',
+      cls: 'ff-badge-fixed',
+    });
+    // 显式 true 优先:即使 rounds 显示有修订也按 R0 一致
+    expect(forgeOutcomeBadge({ match: true, skipped: false, r0_match: true }, rounds)).toEqual({
+      text: '一致',
+      cls: 'ff-badge-match',
+    });
+  });
+});
+
 describe('think 段落切分与目标段落高亮', () => {
   const text =
     '<think>\n违法停车：应急车道内停有一辆小型车。\n\n交通拥堵：多车道出现拥堵。\n\n未发现其他事件。\n</think>\n<answer>\n最终结论:…\n</answer>';
@@ -126,5 +184,40 @@ describe('文件名与 JSONL 导出', () => {
         '{"index":1,"video":"/b.mp4","output":"<think>x</think>"}\n',
     );
     expect(buildJsonlText([])).toBe('');
+  });
+});
+
+describe('最终结论解析(parseFinalOutput,merger 重建的规范文本)', () => {
+  const OUTPUT =
+    '<think>\n' +
+    '违法停车：去向一侧应急车道内停有一辆小型车。结论：构成违法停车。\n\n' +
+    '交通拥堵：扫描全画面，车流正常，不满足拥堵判定条件。\n' +
+    '</think>\n\n' +
+    '<answer>\n' +
+    '天气：晴天\n' +
+    '时间：白天\n' +
+    '场景：高速公路双向主路场景。\n' +
+    '最终结论：本视频块检出以下事件。\n' +
+    'class1: 违法停车\n' +
+    '</answer>';
+
+  it('逐事件块 + 检出状态 + ANSWER 字段', () => {
+    const view = parseFinalOutput(OUTPUT, NAMES);
+    expect(view.events).toHaveLength(2);
+    expect(view.events[0]).toMatchObject({ id: 1, name: '违法停车', present: true });
+    expect(view.events[0].body).toContain('构成违法停车');
+    expect(view.events[1]).toMatchObject({ id: 6, name: '交通拥堵', present: false });
+    expect(view.weather).toBe('晴天');
+    expect(view.timeOfDay).toBe('白天');
+    expect(view.scene).toBe('高速公路双向主路场景。');
+    expect(view.conclusion).toBe('本视频块检出以下事件。');
+    expect(view.classes).toEqual([{ id: 1, name: '违法停车' }]);
+  });
+
+  it('answer 缺失时字段为空,事件块仍可解析', () => {
+    const view = parseFinalOutput('<think>\n违法停车：段落。\n</think>', NAMES);
+    expect(view.events).toHaveLength(1);
+    expect(view.weather).toBe('');
+    expect(view.classes).toEqual([]);
   });
 });

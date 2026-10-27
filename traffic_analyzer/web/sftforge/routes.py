@@ -5,7 +5,9 @@
   后台线程执行引擎)、GET /api/sftforge/jobs/{job_id}/events(SSE:先回放
   历史事件再收增量,round_started/round_completed/video_completed/
   job_completed|job_failed,终态事件后关流)、GET /api/sftforge/jobs/
-  {job_id}/result(训练 JSONL 行 + 汇总统计 + quarantine 列表)。
+  {job_id}/result(训练 JSONL 行 + 汇总统计 + quarantine 列表)、
+  GET/DELETE /api/sftforge/store(当前工作区持久化结果的读/删,任务终态
+  由 service 落盘,见 store.py)。
   引擎经 service.build_engine 装配,测试 monkeypatch
   traffic_analyzer.web.sftforge.build_engine 注入 fake engine。
 上游:web/app.py(挂载 router,app.state.sftforge = ForgeJobManager)。
@@ -16,14 +18,16 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from traffic_analyzer.web.sftforge import service as service_mod
+from traffic_analyzer.web.sftforge import store as store_mod
 from traffic_analyzer.web.sftforge.service import TERMINAL_EVENTS, format_sse
+from traffic_analyzer.web.workspace import require_workspace
 
 router = APIRouter()
 
@@ -37,6 +41,9 @@ class CreateForgeJobRequest(BaseModel):
     dir: Optional[str] = None
     videos: Optional[List[str]] = None
     max_rounds: int = Field(default=2, ge=0, le=10)
+    thinking: Literal["off", "low", "medium", "high"] = "medium"
+    # 初稿链路:pipeline=批量推理链路(专家+裁决+改写);prompt=单次 forward
+    draft: Literal["pipeline", "prompt"] = "pipeline"
 
 
 def _manager(request: Request) -> service_mod.ForgeJobManager:
@@ -75,7 +82,7 @@ def _resolve_videos(body: CreateForgeJobRequest) -> List[Path]:
 @router.post("/api/sftforge/jobs")
 def post_sftforge_job(body: CreateForgeJobRequest, request: Request) -> Dict[str, Any]:
     videos = _resolve_videos(body)
-    job_id = _manager(request).submit(videos, body.max_rounds)
+    job_id = _manager(request).submit(videos, body.max_rounds, body.thinking, body.draft)
     return {"job_id": job_id, "videos": [str(v) for v in videos]}
 
 
@@ -118,3 +125,19 @@ def get_sftforge_result(job_id: int, request: Request) -> Dict[str, Any]:
     if job is None:
         raise HTTPException(status_code=404, detail=f"Unknown sftforge job id: {job_id}")
     return service_mod.job_result_payload(job)
+
+
+@router.get("/api/sftforge/store")
+def get_sftforge_store(request: Request) -> Dict[str, Any]:
+    """读当前工作区的持久化结果(任务终态落盘;无缓存 404)。"""
+    payload = store_mod.load_result(require_workspace(request))
+    if payload is None:
+        raise HTTPException(status_code=404, detail="No stored sftforge result")
+    return payload
+
+
+@router.delete("/api/sftforge/store")
+def delete_sftforge_store(request: Request) -> Dict[str, Any]:
+    """删除当前工作区的持久化结果缓存(无缓存也算成功:目标状态一致)。"""
+    deleted = store_mod.delete_result(require_workspace(request))
+    return {"deleted": deleted}

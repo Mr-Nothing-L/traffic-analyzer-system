@@ -43,6 +43,7 @@ from traffic_analyzer.sftforge.exporter import (  # noqa: E402
     write_trace_json,
 )
 from traffic_analyzer.sftforge.models import VideoForgeResult  # noqa: E402
+from traffic_analyzer.sftforge.draft import PipelineDraftProvider  # noqa: E402
 from traffic_analyzer.sftforge.vlm_video import VideoVLMCaller, load_providers  # noqa: E402
 
 logger = logging.getLogger("sft_forge")
@@ -97,6 +98,18 @@ def main() -> int:
     src.add_argument("--dir", help="视频目录(取其中全部 *.mp4)")
     src.add_argument("--list-file", help="视频路径清单文件,每行一个")
     parser.add_argument("--max-rounds", type=int, default=2, help="最大纠错轮次(默认 2)")
+    parser.add_argument(
+        "--thinking",
+        choices=("off", "low", "medium", "high"),
+        default="medium",
+        help="思考档位(默认 medium;off=关闭隐藏 reasoning)",
+    )
+    parser.add_argument(
+        "--draft",
+        choices=("pipeline", "prompt"),
+        default="pipeline",
+        help="初稿链路(默认 pipeline=批量推理链路;prompt=单次 forward 盲推)",
+    )
     parser.add_argument("--out", required=True, help="训练 JSONL 输出路径")
     parser.add_argument("--trace-dir", default=None, help="逐轮 trace 目录(默认 <out目录>/traces)")
     parser.add_argument("--workers", type=int, default=1, help="并发视频数(默认 1)")
@@ -148,13 +161,17 @@ def main() -> int:
     }
     names = event_names(Path(args.config_dir) / "event_categories.yaml")
     providers = load_providers(args.env_file, args.config_dir)
-    caller = VideoVLMCaller(providers)
+    caller = VideoVLMCaller(providers, thinking=args.thinking)
+    draft_provider = None
+    if args.draft == "pipeline":
+        draft_provider = PipelineDraftProvider(args.config_dir, env_file=args.env_file)
     engine = SftForgeEngine(
         caller=caller,
         templates=templates,
         categories=manager.get_event_categories(),
         max_rounds=args.max_rounds,
         names=names,
+        draft_provider=draft_provider,
     )
 
     next_index = _next_index(out_path)

@@ -17,6 +17,39 @@ export function forgeKindCls(kind: string): string {
   return FORGE_KIND_META[kind]?.cls ?? 'other'
 }
 
+/* ---------- 结果徽标(一致/修改后一致/不一致/已跳过,三处视图统一口径) ---------- */
+
+/** 视频结果徽标:text 展示文案,cls 配色类(styles/sftforge.css ff-badge-*)。 */
+export interface ForgeOutcomeBadge {
+  text: string
+  cls: string
+}
+
+/** 回退判定所需的轮次最小信息(修订是否发生在 R0 之后)。 */
+export interface ForgeRoundPatchInfo {
+  round_no: number
+  patched: boolean
+}
+
+/** 视频结果 → 状态徽标:
+ * skipped → 已跳过;非 match → 不一致;
+ * match 时按 r0_match 区分:R0 已一致 → 一致,R0 不一致(RN 最终一致)→ 修改后一致;
+ * 历史结果缺 r0_match 字段时回退 rounds.some(round_no>0 && patched)
+ * (有 R0 之后的修订轮即视为「修改后一致」)。 */
+export function forgeOutcomeBadge(
+  summary: { match: boolean; skipped: boolean; r0_match?: boolean | null },
+  rounds?: ReadonlyArray<ForgeRoundPatchInfo>,
+): ForgeOutcomeBadge {
+  if (summary.skipped) return { text: '已跳过', cls: 'ff-badge-skip' }
+  if (!summary.match) return { text: '不一致', cls: 'ff-badge-quar' }
+  const r0 =
+    summary.r0_match != null
+      ? summary.r0_match
+      : !(rounds ?? []).some((r) => r.round_no > 0 && r.patched)
+  if (r0 === false) return { text: '修改后一致', cls: 'ff-badge-fixed' }
+  return { text: '一致', cls: 'ff-badge-match' }
+}
+
 /** think 段落:prefix 为「事件名:」前缀(无则 null),body 为整段原文。 */
 export interface ThinkParagraph {
   prefix: string | null
@@ -122,6 +155,70 @@ export function responseSegments(
 export function videoBaseName(path: string): string {
   const parts = String(path || '').split('/').filter(Boolean)
   return parts.length ? parts[parts.length - 1] : path
+}
+
+/* ---------- 最终结论(final_output 的 <think>/<answer> 规范文本,见 sftforge/merger.py) ---------- */
+
+/** 最终结论的事件块:段落正文 + 是否检出(在 answer class 列表中)。 */
+export interface FinalEventBlock {
+  /** 事件 id(经事件名反查;未知名为 null)。 */
+  id: number | null
+  name: string
+  present: boolean
+  body: string
+}
+
+export interface FinalAnswerView {
+  events: FinalEventBlock[]
+  weather: string
+  timeOfDay: string
+  scene: string
+  conclusion: string
+  classes: { id: number | null; name: string }[]
+}
+
+/** 解析训练行 output(<think>10 段 + <answer>天气/时间/场景/最终结论/classN)
+ * 为最终结论视图模型;answer 缺失时字段为空字符串/空数组(调用方判空展示)。 */
+export function parseFinalOutput(
+  output: string,
+  eventNames: Record<number, string>,
+): FinalAnswerView {
+  const idByName = new Map<string, number>()
+  for (const [id, name] of Object.entries(eventNames)) idByName.set(name, Number(id))
+
+  const am = String(output || '').match(/<answer>([\s\S]*?)<\/answer>/)
+  const answerLines = (am ? am[1] : '')
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean)
+  const fieldOf = (label: string): string => {
+    const line = answerLines.find((l) => l.startsWith(`${label}：`))
+    return line ? line.slice(label.length + 1).trim() : ''
+  }
+  const classes: { id: number | null; name: string }[] = []
+  for (const line of answerLines) {
+    const cm = line.match(/^class(\d+)[：:]\s*(.+)$/)
+    if (cm) classes.push({ id: Number(cm[1]), name: cm[2].trim() })
+  }
+  const presentNames = new Set(classes.map((c) => c.name))
+
+  const events: FinalEventBlock[] = thinkParagraphs(output, new Set()).map((p) => {
+    const name = p.prefix ?? ''
+    return {
+      id: name ? (idByName.get(name) ?? null) : null,
+      name: name || '未知事件',
+      present: presentNames.has(name),
+      body: p.body,
+    }
+  })
+  return {
+    events,
+    weather: fieldOf('天气'),
+    timeOfDay: fieldOf('时间'),
+    scene: fieldOf('场景'),
+    conclusion: fieldOf('最终结论'),
+    classes,
+  }
 }
 
 /** 训练行数组 → JSONL 文本(每行一个 JSON 对象,与原 lora 训练文件格式一致)。 */

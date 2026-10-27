@@ -110,7 +110,9 @@ def create_app(workspace: Optional[str] = None) -> FastAPI:
     app.state.workspace = workspace_mod.WorkspaceState()
     app.state.jobs = job_manager
     app.state.realtime = bus
-    app.state.sftforge = sftforge.ForgeJobManager()
+    app.state.sftforge = sftforge.ForgeJobManager(
+        workspace_getter=app.state.workspace.get
+    )
     # 认证配置(未配置 TRAFFIC_ANALYZER_USERS 时完全关闭)与在线状态名册。
     app.state.auth = auth.configure()
     app.state.presence = presence.PresenceStore()

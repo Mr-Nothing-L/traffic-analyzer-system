@@ -6,7 +6,8 @@
 #   sft_forge_correct_missing 漏检纠错:告知该事件经人工标注确认存在,要求重新
 #                             观察并输出该事件的肯定思考;
 #   sft_forge_review_extra    误检复核:附事件定义与首轮思考要求严格复核,
-#                             verdict=confirm / false_positive。
+#                             verdict=confirm / false_positive;09 正常真值按
+#                             空事件集合进入此复核,使用专用证据要求文案。
 # 模型输出为结构化 JSON(与 sft_rewrite.yaml 同模式:该端点 qwen3.8 在
 # enable_thinking=False 时 chat template 预填 <think></think>,不会输出字面
 # 标签,<think>/<answer> 训练格式由 sftforge/merger.py 代码重建,段落正文保持
@@ -82,7 +83,7 @@ prompt_templates:
       判定定义:
       {{ event_definition }}
 
-      请重新完整观看视频,重点寻找该事件的可见证据,然后输出该类事件的思考素材:
+      请重新完整观看视频,重点寻找该事件的可见证据(特别注意远处、画面深处的小目标,以及应急车道/导流区等边缘区域),然后输出该类事件的思考素材:
       - 先写一句概要(位置+事件主体),然后按「观察：…分析：…结论：…」三段展开(观察=目标外观/位置/类型;分析=时序变化与周围车流关系;结论=该类事件小结)。
 
       输出 JSON 格式(仅返回一个 JSON 对象,不要 Markdown 代码块):
@@ -103,13 +104,22 @@ prompt_templates:
     user_prompt: |
       输入为一段完整的高速公路监控视频(非抽帧)。
 
+      {% if normal_ground_truth %}
+      经人工复核,本视频为 class09 正常,即 class1~8、class10、class11 均未发生。
+      你的首轮分析检出了 class{{ event_id }} {{ event_name }},与“正常”真值冲突。请将该检出作为疑似误报,重新完整观看视频并严格复核。
+      {% else %}
       你的首轮分析检出了以下事件,但人工标注真值中不存在该类事件,请复核是否属于误报:
+      {% endif %}
       事件:class{{ event_id }} {{ event_name }}
       判定定义:
       {{ event_definition }}
 
       首轮分析中该类事件的思考:
       {{ first_round_segment }}
+
+      {% if normal_ground_truth %}
+      正常样本复核要求:逐项核对事件定义中的主体、位置、时序变化和排除条件。不得仅凭“看起来像”“可能是”、单一瞬间或局部外观维持检出;证据不足或不完整时输出 false_positive。只有全部必要条件均有清晰可见的证据时才输出 confirm。不得为了维护首轮结论而强行确认,也不得编造画面细节。
+      {% endif %}
 
       请重新完整观看视频,严格对照判定定义逐条复核首轮思考中的证据,然后输出:
       - verdict:"confirm"(复核后事件确实成立)或 "false_positive"(确属误报,应予剔除);

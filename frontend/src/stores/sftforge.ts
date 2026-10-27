@@ -12,15 +12,19 @@ import { ApiError } from '../api/client'
 import { getEventConfig } from '../api/results'
 import {
   createForgeJob,
+  deleteStoredForgeResult,
   fetchForgeResult,
+  fetchStoredForgeResult,
   jobEventsUrl,
 } from '../api/sftforge'
 import type {
   CreateForgeJobRequest,
+  DraftStepData,
   ForgeResultPayload,
   ForgeVideoSummary,
   JobFailedData,
   RoundCompletedData,
+  RoundDeltaData,
   RoundStartedData,
   RoundTrace,
 } from '../api/sftforge'
@@ -28,19 +32,25 @@ import type { EventDef } from '../sft/types'
 
 export type ForgeStatus = 'idle' | 'running' | 'done' | 'failed'
 
-/** 单视频的一轮:running=已开推待回填;done=trace 已到(含 prompt/response)。 */
+/** 单视频的一轮:running=已开推待回填;done=trace 已到(含 prompt/response)。
+ * streamReasoning/streamResponse 为流式增量缓冲(round_delta 事件追加,
+ * round_completed 回填 trace 后清空)。 */
 export interface ForgeRoundEntry {
   round_no: number
   kind: string
   event_ids: number[]
   state: 'running' | 'done'
   trace: RoundTrace | null
+  streamReasoning: string
+  streamResponse: string
 }
 
-/** 单视频进度:逐轮卡片 + 完成摘要(match/quarantine 徽标来源)。 */
+/** 单视频进度:逐轮卡片 + 初稿步骤(批量链路)+ 完成摘要(match/quarantine 徽标来源)。 */
 export interface ForgeVideoState {
   video: string
   rounds: ForgeRoundEntry[]
+  /** 初稿(批量链路)步骤进度事件(draft_step;空数组=非批量链路或未到初稿)。 */
+  draftSteps: DraftStepData[]
   summary: ForgeVideoSummary | null
 }
 
@@ -77,7 +87,7 @@ export const useSftForgeStore = defineStore('sftforge', () => {
   function videoStateOf(video: string): ForgeVideoState {
     let v = videos.value.find((x) => x.video === video)
     if (!v) {
-      v = { video, rounds: [], summary: null }
+      v = { video, rounds: [], draftSteps: [], summary: null }
       videos.value.push(v)
     }
     return v
@@ -94,7 +104,36 @@ export const useSftForgeStore = defineStore('sftforge', () => {
       event_ids: [...d.event_ids],
       state: 'running',
       trace: null,
+      streamReasoning: '',
+      streamResponse: '',
     })
+  }
+
+  /** 流式增量:reasoning/response 追加;reset 清空(重试/failover 作废重推)。
+   * 回放时 delta 先于 started 到达也容忍(就地占位)。 */
+  function onRoundDelta(d: RoundDeltaData) {
+    const v = videoStateOf(d.video)
+    let entry = v.rounds.find((r) => r.round_no === d.round_no && r.kind === d.kind)
+    if (!entry) {
+      entry = {
+        round_no: d.round_no,
+        kind: d.kind,
+        event_ids: [],
+        state: 'running',
+        trace: null,
+        streamReasoning: '',
+        streamResponse: '',
+      }
+      v.rounds.push(entry)
+    }
+    if (d.field === 'reset') {
+      entry.streamReasoning = ''
+      entry.streamResponse = ''
+    } else if (d.field === 'reasoning') {
+      entry.streamReasoning += d.text
+    } else if (d.field === 'response') {
+      entry.streamResponse += d.text
+    }
   }
 
   function onRoundCompleted(d: RoundCompletedData) {
@@ -105,6 +144,8 @@ export const useSftForgeStore = defineStore('sftforge', () => {
       entry.state = 'done'
       entry.trace = t
       entry.event_ids = [...t.event_ids]
+      entry.streamReasoning = ''
+      entry.streamResponse = ''
     } else {
       // 重连回放只拿到 completed(极端乱序)也落地为完成态卡片
       v.rounds.push({
@@ -113,12 +154,22 @@ export const useSftForgeStore = defineStore('sftforge', () => {
         event_ids: [...t.event_ids],
         state: 'done',
         trace: t,
+        streamReasoning: '',
+        streamResponse: '',
       })
     }
   }
 
   function onVideoCompleted(d: ForgeVideoSummary) {
     videoStateOf(d.video).summary = d
+  }
+
+  /** 初稿(批量链路)步骤进度:按内容去重(回放不产生重复行),追加到视频。 */
+  function onDraftStep(d: DraftStepData) {
+    const v = videoStateOf(d.video)
+    const key = `${d.type}|${d.lane || ''}|${d.label || ''}|${d.step ?? ''}|${d.result || ''}`
+    if (v.draftSteps.some((s) => `${s.type}|${s.lane || ''}|${s.label || ''}|${s.step ?? ''}|${s.result || ''}` === key)) return
+    v.draftSteps.push(d)
   }
 
   function closeSource() {
@@ -159,6 +210,14 @@ export const useSftForgeStore = defineStore('sftforge', () => {
       const d = parseData<RoundStartedData>(ev)
       if (d) onRoundStarted(d)
     })
+    es.addEventListener('round_delta', (ev) => {
+      const d = parseData<RoundDeltaData>(ev)
+      if (d) onRoundDelta(d)
+    })
+    es.addEventListener('draft_step', (ev) => {
+      const d = parseData<DraftStepData>(ev)
+      if (d) onDraftStep(d)
+    })
     es.addEventListener('round_completed', (ev) => {
       const d = parseData<RoundCompletedData>(ev)
       if (d) onRoundCompleted(d)
@@ -193,7 +252,7 @@ export const useSftForgeStore = defineStore('sftforge', () => {
       reset()
       jobId.value = r.job_id
       // 先占位视频列表(创建响应即最终处理清单),轮次随 SSE 生长
-      videos.value = r.videos.map((v) => ({ video: v, rounds: [], summary: null }))
+      videos.value = r.videos.map((v) => ({ video: v, rounds: [], draftSteps: [], summary: null }))
       status.value = 'running'
       connect(r.job_id)
       return true
@@ -204,6 +263,78 @@ export const useSftForgeStore = defineStore('sftforge', () => {
     } finally {
       posting.value = false
     }
+  }
+
+  /** 路由切换回来后兜底:任务仍在跑但 SSE 已断(浏览器/网络原因)时重连,
+   * 服务端回放历史事件(见 routes.py),状态无感续上。已连接或不在跑则 no-op。 */
+  function ensureConnected() {
+    if (status.value === 'running' && jobId.value != null && !source) {
+      connect(jobId.value)
+    }
+  }
+
+  /** 从工作区持久化结果恢复视图(服务重启/重进面板;缓存由任务终态落盘,
+   * 重新推理覆盖)。仅 idle 且无视频时尝试;无缓存(404)/读取失败静默 no-op。
+   * 轮次以最小 trace 回填(prompt/response 未持久化,展开仅见轮次头与
+   * patched 徽标;「第 N 轮修正」标注所需的 patched/event_ids 齐全)。 */
+  async function restore(): Promise<boolean> {
+    if (status.value !== 'idle' || videos.value.length) return false
+    let stored
+    try {
+      stored = await fetchStoredForgeResult()
+    } catch {
+      return false
+    }
+    try {
+      await ensureEventNames()
+    } catch {
+      // 事件名加载失败不阻塞恢复:标签回退「事件{id}」(组件已有兜底)
+    }
+    videos.value = (stored.videos || []).map((v) => ({
+      video: v.video,
+      draftSteps: [],
+      summary: v,
+      rounds: (stored.rounds?.[v.video] || []).map((r) => ({
+        round_no: r.round_no,
+        kind: r.kind,
+        event_ids: [...r.event_ids],
+        state: 'done' as const,
+        trace: {
+          round_no: r.round_no,
+          kind: r.kind,
+          event_ids: [...r.event_ids],
+          prompt: '',
+          response: '',
+          patched: r.patched,
+        },
+        streamReasoning: '',
+        streamResponse: '',
+      })),
+    }))
+    result.value = {
+      job_id: stored.job_id,
+      status: stored.status,
+      error: stored.error,
+      stats: stored.stats,
+      videos: stored.videos,
+      jsonl: stored.jsonl,
+      quarantine: stored.quarantine,
+    }
+    status.value = stored.status === 'failed' ? 'failed' : 'done'
+    error.value = stored.error
+    return true
+  }
+
+  /** 删除工作区持久化缓存并清空视图(结果面板「删除缓存」按钮)。 */
+  async function clearStored(): Promise<void> {
+    try {
+      await deleteStoredForgeResult()
+    } catch {
+      // 删除失败则缓存仍在(下次进面板会复活),不能清空视图——只上报错误
+      error.value = '删除缓存失败,请重试'
+      return
+    }
+    reset()
   }
 
   /** 清空任务状态并断开 SSE(新建任务/离开页面)。 */
@@ -233,9 +364,14 @@ export const useSftForgeStore = defineStore('sftforge', () => {
     targetNamesOf,
     start,
     reset,
+    ensureConnected,
+    restore,
+    clearStored,
     // 测试与视图复用的纯落地逻辑(组件不直接调,经 SSE 回调驱动)
     onRoundStarted,
+    onRoundDelta,
     onRoundCompleted,
     onVideoCompleted,
+    onDraftStep,
   }
 })

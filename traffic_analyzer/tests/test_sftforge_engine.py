@@ -2,15 +2,20 @@
 
 覆盖:正向全对直接命中、漏检 correct_missing 补段落、误报 review_extra
 复核剔除、误报复核确认后保守保留至多轮结束、达 max_rounds 仍不一致→
-match=False+quarantine 原因、09 正常视频跳过、forward 解析失败。
+match=False+quarantine 原因、09 正常真值直接一致/误报剔除/确认后隔离、
+真实 YAML 的正常与普通复核 Prompt 分支、forward 解析失败、
+r0_match 字段(R0 直接一致/纠错后一致/失败保持 None)。
 """
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Dict, List
 
 import pytest
+import yaml
 
+from traffic_analyzer.core.vlm_engine import VLMInferenceEngine
 from traffic_analyzer.models.schemas import EventCategory, PromptTemplate
 from traffic_analyzer.sftforge.engine import (
     TEMPLATE_CORRECT_MISSING,
@@ -18,6 +23,8 @@ from traffic_analyzer.sftforge.engine import (
     TEMPLATE_REVIEW_EXTRA,
     SftForgeEngine,
 )
+from traffic_analyzer.sftforge.models import CallerResult
+from traffic_analyzer.sftforge.draft import DraftResult, DraftError
 from traffic_analyzer.sftforge.parser import parse_output
 
 NAMES = {
@@ -52,7 +59,7 @@ def _templates() -> Dict[str, PromptTemplate]:
         ),
         TEMPLATE_REVIEW_EXTRA: PromptTemplate(
             template_id=TEMPLATE_REVIEW_EXTRA, name="re",
-            user_prompt="复核 {{ event_name }}:{{ event_definition }}|{{ first_round_segment }}",
+            user_prompt="复核 {{ event_name }}:{{ event_definition }}|{{ first_round_segment }}|正常={{ normal_ground_truth }}",
         ),
     }
 
@@ -110,6 +117,103 @@ class TestForwardAllCorrect:
         assert len(result.rounds) == 1
         assert result.rounds[0].kind == "forward"
         assert result.rounds[0].round_no == 0
+
+
+class TestCallerResultReasoning:
+    """caller 返回 CallerResult 时,reasoning 落进 RoundTrace;裸 str 兼容。"""
+
+    def test_reasoning_recorded_on_trace(self) -> None:
+        raw = _make_output({1: "观察：静止。", 2: "观察：占用。"}, [1, 2])
+        caller = FakeCaller([CallerResult(text=raw, reasoning="隐藏推理:先扫应急车道…")])
+        result = _engine(caller).run("01-02_Event_test_1.mp4")
+        trace = result.rounds[0]
+        assert trace.reasoning == "隐藏推理:先扫应急车道…"
+        assert trace.response == raw
+
+    def test_plain_str_caller_leaves_reasoning_empty(self) -> None:
+        raw = _make_output({1: "观察：静止。", 2: "观察：占用。"}, [1, 2])
+        caller = FakeCaller([raw])
+        result = _engine(caller).run("01-02_Event_test_1.mp4")
+        assert result.rounds[0].reasoning == ""
+
+
+class TestOnDeltaHook:
+    """on_delta 钩子:绑定 video/round_no/kind 上下文透传给 caller。"""
+
+    def test_deltas_carry_round_context(self) -> None:
+        raw = _make_output({1: "观察：静止。", 2: "观察：占用。"}, [1, 2])
+
+        def caller(system: str, user: str, video_path, on_delta=None):
+            assert on_delta is not None
+            on_delta("reasoning", "思")
+            on_delta("response", "答")
+            return raw
+
+        deltas: List[tuple] = []
+        engine = SftForgeEngine(
+            caller=caller,
+            templates=_templates(),
+            categories=_categories(),
+            max_rounds=2,
+            names=NAMES,
+            on_delta=lambda info, field, text: deltas.append((info, field, text)),
+        )
+        result = engine.run("01-02_Event_test_1.mp4")
+        assert result.match is True
+        assert [(d[1], d[2]) for d in deltas] == [("reasoning", "思"), ("response", "答")]
+        info = deltas[0][0]
+        assert info["round_no"] == 0 and info["kind"] == "forward"
+        assert str(info["video"]).endswith("01-02_Event_test_1.mp4")
+
+
+class TestDraftProviderMode:
+    """draft_provider 注入时,R0 走批量链路初稿(不调 forward caller)。"""
+
+    def _engine_with_draft(self, draft_provider, on_draft_step=None) -> SftForgeEngine:
+        # FakeCaller 空队列:任何 forward 调用都会断言失败,证明 R0 未走 caller
+        return SftForgeEngine(
+            caller=FakeCaller([]),
+            templates=_templates(),
+            categories=_categories(),
+            max_rounds=2,
+            names=NAMES,
+            draft_provider=draft_provider,
+            on_draft_step=on_draft_step,
+        )
+
+    def test_draft_text_used_as_forward(self) -> None:
+        raw = _make_output({1: "观察：静止。", 2: "观察：占用。"}, [1, 2])
+        draft = DraftResult(output=raw, classes=[1, 2])
+        result = self._engine_with_draft(lambda vp, on_step=None: draft).run(
+            "01-02_Event_test_1.mp4"
+        )
+        assert result.match is True
+        assert result.rounds[0].kind == "forward"
+        assert "批量推理链路" in result.rounds[0].prompt
+        assert result.rounds[0].response == raw
+
+    def test_draft_failure_marks_reason(self) -> None:
+        def failing(vp, on_step=None):
+            raise DraftError("pipeline_quarantine: 隔离")
+
+        result = self._engine_with_draft(failing).run("01-02_Event_test_1.mp4")
+        assert result.match is False
+        assert result.reason == "draft_failed"
+        assert "pipeline_quarantine" in result.rounds[0].response
+
+    def test_on_draft_step_receives_video(self) -> None:
+        raw = _make_output({1: "观察：静止。", 2: "观察：占用。"}, [1, 2])
+        steps: List[dict] = []
+
+        def provider(vp, on_step=None):
+            assert on_step is not None
+            on_step({"type": "step", "step": 1, "total": 4, "name": "视频预处理"})
+            return DraftResult(output=raw, classes=[1, 2])
+
+        engine = self._engine_with_draft(provider, on_draft_step=steps.append)
+        engine.run("01-02_Event_test_1.mp4")
+        assert steps[0]["type"] == "step"
+        assert str(steps[0]["video"]).endswith("01-02_Event_test_1.mp4")
 
 
 class TestMissingCorrection:
@@ -207,17 +311,150 @@ class TestQuarantine:
             _engine(caller).run("01-02_Event_test_1.mp4")
 
 
-class TestSkip:
-    def test_normal_09_skipped(self) -> None:
-        caller = FakeCaller([])
-        result = _engine(caller).run("09_Event_test_1.mp4")
-        assert result.skipped is True
-        assert caller.calls == []  # 跳过不发任何 VLM 调用
+def _render_actual_review_prompt(normal_ground_truth: bool) -> str:
+    prompt_path = Path(__file__).resolve().parents[1] / "config" / "prompts" / "sft_forge.yaml"
+    data = yaml.safe_load(prompt_path.read_text(encoding="utf-8"))
+    raw = next(t for t in data["prompt_templates"] if t["template_id"] == TEMPLATE_REVIEW_EXTRA)
+    _, user = VLMInferenceEngine.render_prompt(
+        PromptTemplate(**raw),
+        {
+            "event_id": 1,
+            "event_name": "违法停车",
+            "event_definition": "机动车静止停放",
+            "first_round_segment": "观察：疑似违停。",
+            "normal_ground_truth": normal_ground_truth,
+        },
+    )
+    return user
 
+
+class TestNormalGroundTruth:
+    def test_normal_review_prompt_branch(self) -> None:
+        user = _render_actual_review_prompt(True)
+        assert "class09 正常" in user
+        assert "正常样本复核要求" in user
+        assert "证据不足或不完整时输出 false_positive" in user
+
+    def test_regular_review_prompt_unchanged(self) -> None:
+        user = _render_actual_review_prompt(False)
+        assert "人工标注真值中不存在该类事件" in user
+        assert "正常样本复核要求" not in user
+        assert "class09 正常" not in user
+
+    def test_normal_09_match_without_correction(self) -> None:
+        raw = _make_output(
+            {1: "扫描各车道，车辆均持续行驶。", 2: "扫描应急车道，未见占用。"}, []
+        )
+        caller = FakeCaller([raw])
+        result = _engine(caller).run("09_Event_test_1.mp4")
+
+        assert result.match is True
+        assert result.skipped is False
+        assert result.gt == [9]
+        assert [t.kind for t in result.rounds] == ["forward"]
+        out = parse_output(result.final_output, NAMES)
+        assert out.classes == []
+        assert "未检出任何事件，交通状况正常" in result.final_output
+
+    def test_normal_09_false_positive_dropped(self) -> None:
+        forward = _make_output(
+            {1: "观察：面包车静止。结论：构成违法停车。", 2: "扫描应急车道，未见占用。"},
+            [1],
+        )
+        review = '{"verdict": "false_positive", "thinking": "经复核，该车持续行驶，原违停检出为误报。"}'
+        caller = FakeCaller([forward, review])
+        result = _engine(caller).run("09_Event_test_1.mp4")
+
+        assert result.match is True
+        assert result.skipped is False
+        assert result.gt == [9]
+        assert [t.kind for t in result.rounds] == ["forward", "review_extra"]
+        out = parse_output(result.final_output, NAMES)
+        assert out.classes == []
+        assert "误报" in out.paragraphs[1]
+        assert "未检出任何事件，交通状况正常" in result.final_output
+        assert "正常=True" in caller.calls[1][1]
+
+    def test_normal_09_confirmed_extra_quarantined(self) -> None:
+        forward = _make_output(
+            {1: "观察：面包车静止。结论：构成违法停车。", 2: "扫描应急车道，未见占用。"},
+            [1],
+        )
+        review = '{"verdict": "confirm", "thinking": "观察：面包车持续静止。结论：复核后仍构成违法停车。"}'
+        caller = FakeCaller([forward, review])
+        result = _engine(caller).run("09_Event_test_1.mp4")
+
+        assert result.match is False
+        assert result.skipped is False
+        assert result.gt == [9]
+        assert "extra=[1]" in (result.reason or "")
+        assert [t.kind for t in result.rounds] == ["forward", "review_extra"]
+
+
+class TestSkip:
     def test_unparseable_filename_skipped(self) -> None:
         caller = FakeCaller([])
         result = _engine(caller).run("no_gt_prefix.mp4")
         assert result.skipped is True
+
+
+class TestR0Match:
+    """r0_match:区分「直接一致」(True)与「修改后一致」(False);失败/跳过为 None。"""
+
+    def test_r0_match_true_when_forward_matches(self) -> None:
+        raw = _make_output({1: "观察：静止。", 2: "观察：占用。"}, [1, 2])
+        caller = FakeCaller([raw])
+        result = _engine(caller).run("01-02_Event_test_1.mp4")
+        assert result.match is True
+        assert result.r0_match is True
+
+    def test_r0_match_false_when_corrected_to_match(self) -> None:
+        forward = _make_output({1: "观察：静止。", 2: "未见占用。"}, [1])
+        correction = "应急车道占用：观察：一辆白色面包车静止于应急车道。结论：构成占用。"
+        caller = FakeCaller([forward, correction])
+        result = _engine(caller).run("01-02_Event_test_1.mp4")
+        assert result.match is True
+        assert result.r0_match is False
+
+    def test_r0_match_false_when_final_mismatch(self) -> None:
+        forward = _make_output({1: "观察：静止。", 2: "未见占用。"}, [1])
+        # correct_missing 返回空 → 无法补齐,终不一致
+        caller = FakeCaller([forward, ""])
+        result = _engine(caller).run("01-02_Event_test_1.mp4")
+        assert result.match is False
+        assert result.r0_match is False
+
+    def test_r0_match_none_on_forward_call_failure(self) -> None:
+        caller = FakeCaller([RuntimeError("boom")])
+        result = _engine(caller).run("01-02_Event_test_1.mp4")
+        assert result.reason == "forward_call_failed"
+        assert result.r0_match is None
+
+    def test_r0_match_none_on_forward_parse_failure(self) -> None:
+        caller = FakeCaller(["这不是合法的样本输出"])
+        result = _engine(caller).run("01-02_Event_test_1.mp4")
+        assert result.r0_match is None
+
+    def test_r0_match_none_on_draft_failure(self) -> None:
+        def failing(vp, on_step=None):
+            raise DraftError("pipeline_quarantine: 隔离")
+
+        engine = SftForgeEngine(
+            caller=FakeCaller([]),
+            templates=_templates(),
+            categories=_categories(),
+            max_rounds=2,
+            names=NAMES,
+            draft_provider=failing,
+        )
+        result = engine.run("01-02_Event_test_1.mp4")
+        assert result.reason == "draft_failed"
+        assert result.r0_match is None
+
+    def test_r0_match_none_when_skipped(self) -> None:
+        result = _engine(FakeCaller([])).run("no_gt_prefix.mp4")
+        assert result.skipped is True
+        assert result.r0_match is None
 
 
 # ---------------------------------------------------------------------------

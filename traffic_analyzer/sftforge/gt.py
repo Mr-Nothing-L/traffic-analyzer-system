@@ -2,8 +2,9 @@
 
 [文件说明]
 作用:复用 evaluation.extract_gt_from_filename 从视频文件名前缀解析真值事件
-  集合;09(正常)与无法解析的文件名返回 None 由上层跳过;diff_predictions
-  给出 missing(真值有而推理无)与 extra(推理有而真值无)两个方向。
+  集合;无法解析或 09 与其他事件混标时返回 None 由上层跳过。09(正常)是有效
+  真值,在 diff_predictions 中按“期望事件集合为空”处理,给出 missing
+  (真值有而推理无)与 extra(推理有而真值无)两个方向。
 上游:sftforge/engine.py、scripts/sft_forge.py。
 下游:traffic_analyzer/evaluation/__init__.py。
 """
@@ -16,13 +17,16 @@ from traffic_analyzer.evaluation import NORMAL_EVENT_ID, extract_gt_from_filenam
 
 
 def gt_for_video(filename: str, names: Optional[Dict[int, str]] = None) -> Optional[Set[int]]:
-    """解析文件名真值;返回 None 表示该视频应跳过(09 正常或无法解析)。"""
+    """解析文件名真值;仅无法解析或 09 与其他事件混标时返回 None。"""
     gt = extract_gt_from_filename(filename, names)
-    if not gt or NORMAL_EVENT_ID in gt:
+    if not gt or (NORMAL_EVENT_ID in gt and gt != {NORMAL_EVENT_ID}):
         return None
     return gt
 
 
 def diff_predictions(pred: Set[int], gt: Set[int]) -> Tuple[List[int], List[int]]:
-    """(missing, extra):missing=真值有而推理未检出;extra=推理检出而真值无。"""
-    return sorted(gt - pred), sorted(pred - gt)
+    """(missing, extra);09 正常真值等价于期望事件集合为空。"""
+    pred_events = set(pred) - {NORMAL_EVENT_ID}
+    if gt == {NORMAL_EVENT_ID}:
+        return [], sorted(pred_events)
+    return sorted(set(gt) - pred_events), sorted(pred_events - set(gt))

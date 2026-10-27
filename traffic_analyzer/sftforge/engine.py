@@ -22,11 +22,11 @@ from traffic_analyzer.core.vlm_exceptions import (
     AllProvidersExhaustedError,
     FatalAPIError,
 )
-from traffic_analyzer.evaluation import event_names
+from traffic_analyzer.evaluation import NORMAL_EVENT_ID, event_names
 from traffic_analyzer.models.schemas import EventCategory, PromptTemplate
 from traffic_analyzer.sftforge.gt import diff_predictions, gt_for_video
 from traffic_analyzer.sftforge.merger import merge_output
-from traffic_analyzer.sftforge.models import RoundTrace, VideoForgeResult
+from traffic_analyzer.sftforge.models import CallerResult, RoundTrace, VideoForgeResult
 from traffic_analyzer.sftforge.parser import (
     DEFAULT_EVENT_ORDER,
     OutputParseError,
@@ -46,6 +46,10 @@ TEMPLATE_REVIEW_EXTRA = "sft_forge_review_extra"
 # caller 协议:渲染后的 system/user prompt + 视频路径 → 响应文本。
 VideoCaller = Callable[[str, str, Union[str, Path]], str]
 
+# 流式增量回调:(info, field, text);info 含 video/round_no/kind,
+# field ∈ reasoning/response/reset(reset 时前端清空该轮流式缓冲)。
+DeltaHook = Callable[[Dict[str, object], str, str], None]
+
 
 class SftForgeEngine:
     """单视频多轮纠错 SFT label 生成引擎(线程安全:状态全部在栈上)。"""
@@ -57,6 +61,9 @@ class SftForgeEngine:
         categories: Sequence[EventCategory],
         max_rounds: int = 2,
         names: Optional[Dict[int, str]] = None,
+        on_delta: Optional[DeltaHook] = None,
+        draft_provider: Optional[Callable[..., Any]] = None,
+        on_draft_step: Optional[Callable[[Dict[str, object]], None]] = None,
     ) -> None:
         missing = {
             tid for tid in (TEMPLATE_FORWARD, TEMPLATE_CORRECT_MISSING, TEMPLATE_REVIEW_EXTRA)
@@ -68,6 +75,11 @@ class SftForgeEngine:
         self._templates = templates
         self._max_rounds = max(0, max_rounds)
         self._names = names if names is not None else event_names()
+        self._on_delta = on_delta
+        # 初稿来源:None=单次 forward prompt(快速);注入时=批量推理链路
+        # (sftforge/draft.py PipelineDraftProvider),初稿 prompt 与生产同源。
+        self._draft_provider = draft_provider
+        self._on_draft_step = on_draft_step
         active = sorted(
             (c for c in categories if c.is_active), key=lambda c: c.event_id
         )
@@ -90,23 +102,19 @@ class SftForgeEngine:
         gt = gt_for_video(path.name, self._names)
         if gt is None:
             result.skipped = True
-            result.reason = "正常视频(09)或文件名无法解析真值,跳过"
+            result.reason = "文件名无法解析真值或09与其他事件混标,跳过"
             logger.info("[sftforge] SKIP | video=%s", path.name)
             return result
         result.gt = sorted(gt)
+        normal_ground_truth = gt == {NORMAL_EVENT_ID}
 
-        # ---- Round 0: forward 盲推(不注入真值) ----
-        forward_resp = self._call(
-            result,
-            round_no=0,
-            kind="forward",
-            event_ids=[],
-            template_id=TEMPLATE_FORWARD,
-            context_vars={"event_definitions": self._event_definitions_text()},
-            video_path=path,
-        )
+        # ---- Round 0: 初稿(draft_provider 给出时走批量推理链路,否则单次
+        # forward prompt 盲推;两者均不注入真值) ----
+        forward_resp = self._forward(result, path)
         if forward_resp is None:
-            result.reason = "forward_call_failed"
+            result.reason = (
+                "draft_failed" if self._draft_provider is not None else "forward_call_failed"
+            )
             return result
         # 主路径为 JSON 响应(端点可靠输出);文本 <think>/<answer> 格式保留为回退。
         try:
@@ -126,6 +134,10 @@ class SftForgeEngine:
         final_output = merge_output(
             current, {}, current.classes, self._names, self._event_order
         )
+        # R0 一致性:区分「直接一致」与「纠错后一致」(初稿失败已在上方返回,
+        # 保持 None)。
+        r0_missing, r0_extra = diff_predictions(set(current.classes), gt)
+        result.r0_match = not r0_missing and not r0_extra
 
         # ---- Round 1..max_rounds: 双向纠错 ----
         for round_no in range(1, self._max_rounds + 1):
@@ -146,7 +158,9 @@ class SftForgeEngine:
                     added.add(eid)
 
             for eid in extra:
-                negative_segment = self._review_extra(result, round_no, eid, current, path)
+                negative_segment = self._review_extra(
+                    result, round_no, eid, current, path, normal_ground_truth
+                )
                 if negative_segment is not None:
                     # 误报:以否定段落替换原段落(保持 10 事件段落完整),并从结论剔除
                     patches[eid] = negative_segment
@@ -225,6 +239,7 @@ class SftForgeEngine:
         event_id: int,
         current,
         path: Path,
+        normal_ground_truth: bool = False,
     ) -> Optional[str]:
         """误报复核:确认误报时返回否定段落(替换原段落并从结论剔除),否则 None。"""
         response = self._call(
@@ -238,6 +253,7 @@ class SftForgeEngine:
                 "event_name": self._names.get(event_id, f"event_{event_id}"),
                 "event_definition": self._definitions.get(event_id, ""),
                 "first_round_segment": current.paragraphs.get(event_id, ""),
+                "normal_ground_truth": normal_ground_truth,
             },
             video_path=path,
         )
@@ -267,6 +283,42 @@ class SftForgeEngine:
     # Internals
     # ------------------------------------------------------------------
 
+    def _forward(self, result: VideoForgeResult, video_path: Path) -> Optional[str]:
+        """Round 0 初稿:draft_provider 注入时走批量推理链路,否则单次 forward
+        prompt 盲推。返回初稿文本(规范 <think>/<answer> 或 forward JSON),
+        失败记 trace 返回 None。"""
+        if self._draft_provider is None:
+            return self._call(
+                result,
+                round_no=0,
+                kind="forward",
+                event_ids=[],
+                template_id=TEMPLATE_FORWARD,
+                context_vars={"event_definitions": self._event_definitions_text()},
+                video_path=video_path,
+            )
+        trace = RoundTrace(
+            round_no=0,
+            kind="forward",
+            prompt="(批量推理链路: 抽帧预处理→事件专家→裁决→SFT改写)",
+        )
+        result.rounds.append(trace)
+        on_step = None
+        if self._on_draft_step is not None:
+            on_step = lambda payload: self._on_draft_step(  # noqa: E731
+                {**payload, "video": str(video_path)}
+            )
+        try:
+            draft = self._draft_provider(video_path, on_step=on_step)
+        except Exception as exc:  # noqa: BLE001
+            trace.response = f"[ERROR] {type(exc).__name__}: {exc}"
+            logger.error(
+                "[sftforge] DRAFT_ERROR | video=%s | %s", video_path.name, exc
+            )
+            return None
+        trace.response = draft.output
+        return draft.output
+
     def _call(
         self,
         result: VideoForgeResult,
@@ -286,7 +338,20 @@ class SftForgeEngine:
         )
         result.rounds.append(trace)
         try:
-            response = self._caller(system, user, video_path)
+            if self._on_delta is not None:
+                info: Dict[str, object] = {
+                    "video": str(video_path),
+                    "round_no": round_no,
+                    "kind": kind,
+                }
+                raw = self._caller(
+                    system,
+                    user,
+                    video_path,
+                    on_delta=lambda field, text: self._on_delta(info, field, text),
+                )
+            else:
+                raw = self._caller(system, user, video_path)
         except (FatalAPIError, AllProvidersExhaustedError):
             # 全停型错误(API 不可用)必须上抛终止批处理,不能让整批被静默
             # quarantine 并被断点续跑永久跳过(AllProvidersExhaustedError
@@ -299,6 +364,11 @@ class SftForgeEngine:
                 video_path.name, kind, event_ids, exc,
             )
             return None
+        # caller 协议:CallerResult(text, reasoning);兼容裸 str 返回的旧 caller
+        if isinstance(raw, CallerResult):
+            response, trace.reasoning = raw.text, raw.reasoning
+        else:
+            response = raw
         trace.response = response
         return response
 

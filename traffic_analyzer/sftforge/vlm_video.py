@@ -6,8 +6,11 @@
   配置体系(LLMProviderConfig 列表)、重试/failover 错误分类
   (vlm_error_classifier)与 DiskCache 磁盘缓存(cache key 含视频字节
   SHA-256,跨进程断点续跑可命中)。
-  端点实测(probe_sft_forge_video.py):qwen3.8 思考模型需
-  enable_thinking=False,否则隐藏 reasoning 会烧穿 max_tokens 返回空内容。
+  端点实测(probe_sft_forge_video.py):qwen3.8 为思考模型。thinking 档位
+  经 chat_template_kwargs 注入:off=enable_thinking False;low/medium/high
+  =enable_thinking True + reasoning_effort(high 映射 vLLM 的 xhigh),
+  开启时 max_tokens 抬到 >=8192 防隐藏 reasoning 烧穿预算,并捕获响应的
+  reasoning_content 供 Web 面板展示(不进训练 label)。
 上游:sftforge/engine.py(caller 注入)、scripts/sft_forge.py(CLI 构造)。
 下游:core/vlm_error_classifier.py、core/vlm_cache.py(DiskCache)、
   core/config_manager.py(provider 解析)、models/schemas.py(LLMResponse)。
@@ -20,7 +23,7 @@ import hashlib
 import logging
 import time
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import Callable, List, Optional, Union
 
 import httpx
 import openai
@@ -36,10 +39,19 @@ from traffic_analyzer.core.vlm_exceptions import (
     ProviderNotSupportedError,
 )
 from traffic_analyzer.models.schemas import LLMProviderConfig, LLMResponse
+from traffic_analyzer.sftforge.models import CallerResult
 
 logger = logging.getLogger(__name__)
 
 _OPENAI_COMPATIBLE_PROVIDERS = ("aliyun", "openai")
+
+# thinking 档位 → vLLM chat_template_kwargs.reasoning_effort
+# (档位名对齐 agent/src/llm/provider.ts:服务端支持 low/medium/xhigh)。
+_THINKING_MODES = ("off", "low", "medium", "high")
+_REASONING_EFFORT = {"low": "low", "medium": "medium", "high": "xhigh"}
+# thinking 开启时的 max_tokens 下限:隐藏 reasoning 也消耗预算
+# (probe 实测缺省 4096 会被烧穿返回空内容)。
+_THINKING_MIN_MAX_TOKENS = 8192
 
 
 def load_providers(
@@ -72,16 +84,23 @@ def load_providers(
 class VideoVLMCaller:
     """视频直传 chat caller;签名与 engine 注入协议一致:
 
-    ``caller(system_prompt, user_prompt, video_path) -> str``
+    ``caller(system_prompt, user_prompt, video_path) -> CallerResult``
     """
 
     def __init__(
         self,
         providers: List[LLMProviderConfig],
         disk_cache_path: Optional[str] = None,
+        thinking: str = "medium",
     ) -> None:
         if not providers:
             raise ProviderNotSupportedError("至少需要一个 provider 配置")
+        thinking = thinking.lower().strip()
+        if thinking not in _THINKING_MODES:
+            raise ValueError(
+                f"thinking 必须为 {_THINKING_MODES} 之一,收到: {thinking}"
+            )
+        self._thinking = thinking
         self._providers: List[LLMProviderConfig] = []
         self._clients: List[openai.OpenAI] = []
         for cfg in providers:
@@ -117,27 +136,41 @@ class VideoVLMCaller:
     # Public API
     # ------------------------------------------------------------------
 
-    def __call__(self, system_prompt: str, user_prompt: str, video_path: Union[str, Path]) -> str:
-        """对视频发一次 chat 请求,返回响应文本(带缓存与重试/failover)。"""
+    def __call__(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        video_path: Union[str, Path],
+        on_delta: Optional[Callable[[str, str], None]] = None,
+    ) -> CallerResult:
+        """对视频发一次 chat 请求,返回 CallerResult(带缓存与重试/failover)。
+
+        on_delta(field, text):给出时走 stream=True 流式调用,逐 chunk 回调
+        reasoning/response 增量(field ∈ reasoning/response);重试/failover
+        重新开始前回调 field=reset(前端应清空该轮流式缓冲)。
+        """
         video_bytes = Path(video_path).read_bytes()
         video_sha = hashlib.sha256(video_bytes).hexdigest()
         b64 = base64.b64encode(video_bytes).decode()
         data_uri = f"data:video/mp4;base64,{b64}"
 
-        # cache key 含视频字节 SHA-256:同视频同 prompt 跨进程命中,
-        # 视频内容变化(重编码/替换)自动失效。
+        # cache key 含视频字节 SHA-256 + thinking 档位:同视频同 prompt 同档位
+        # 跨进程命中;视频内容变化或档位切换自动失效。
         cache_key = hashlib.sha256(
-            f"sftforge-video:{video_sha}\nsys:{system_prompt}\nuser:{user_prompt}".encode()
+            f"sftforge-video:{video_sha}\nthinking:{self._thinking}\nsys:{system_prompt}\nuser:{user_prompt}".encode()
         ).hexdigest()
         if self._disk_cache is not None:
             for cfg in self._providers:
                 cached = self._disk_cache.get(cache_key, cfg.provider, cfg.model)
                 if cached is not None:
                     logger.debug("[VideoVLMCaller] DISK HIT key=%s...", cache_key[:16])
-                    return cached.raw_text
+                    return CallerResult(
+                        text=cached.raw_text,
+                        reasoning=str(cached.parsed_data.get("reasoning", "")),
+                    )
 
-        text, served_idx = self._execute_with_failover(
-            system_prompt, user_prompt, data_uri
+        (text, reasoning), served_idx = self._execute_with_failover(
+            system_prompt, user_prompt, data_uri, on_delta
         )
         if self._disk_cache is not None:
             cfg = self._providers[served_idx]
@@ -145,17 +178,33 @@ class VideoVLMCaller:
                 cache_key,
                 cfg.provider,
                 cfg.model,
-                LLMResponse(success=True, raw_text=text, model=cfg.model, provider=cfg.provider),
+                LLMResponse(
+                    success=True,
+                    raw_text=text,
+                    parsed_data={"reasoning": reasoning},
+                    model=cfg.model,
+                    provider=cfg.provider,
+                ),
             )
-        return text
+        return CallerResult(text=text, reasoning=reasoning)
 
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
 
     def _execute_once(
-        self, provider_idx: int, system_prompt: str, user_prompt: str, data_uri: str
-    ) -> str:
+        self,
+        provider_idx: int,
+        system_prompt: str,
+        user_prompt: str,
+        data_uri: str,
+        on_delta: Optional[Callable[[str, str], None]] = None,
+    ) -> tuple:
+        """单次调用,返回 (text, reasoning);reasoning 为隐藏通道文本(可空)。
+
+        on_delta 给出时走 stream=True 流式:逐 chunk 回调 reasoning/response
+        增量,聚合后返回;空响应重试前回调 reset。
+        """
         cfg = self._providers[provider_idx]
         messages = []
         if system_prompt:
@@ -169,24 +218,42 @@ class VideoVLMCaller:
                 ],
             }
         )
+        if self._thinking == "off":
+            template_kwargs: dict = {"enable_thinking": False}
+            max_tokens = cfg.max_tokens
+        else:
+            template_kwargs = {
+                "enable_thinking": True,
+                "reasoning_effort": _REASONING_EFFORT[self._thinking],
+            }
+            # 隐藏 reasoning 同吃 max_tokens,抬下限防烧穿(见模块 docstring)
+            max_tokens = max(cfg.max_tokens, _THINKING_MIN_MAX_TOKENS)
         create_kwargs = dict(
             model=cfg.model,
-            max_tokens=cfg.max_tokens,
+            max_tokens=max_tokens,
             temperature=cfg.temperature,
             messages=messages,
-            # qwen3 思考模型:关闭隐藏 reasoning,防止烧穿 max_tokens 返回空内容
-            # (probe 实测,见模块 docstring)。
-            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+            extra_body={"chat_template_kwargs": template_kwargs},
         )
         # 空响应多为端点一次性抖动(隐藏 reasoning 耗尽 token 等),裸 RuntimeError
         # 不可重试会直接进 quarantine,故在调用内做 1 次有界即时重试。
         for empty_attempt in range(2):
-            response = self._clients[provider_idx].chat.completions.create(**create_kwargs)
-            text = ""
-            if response.choices:
-                text = (response.choices[0].message.content or "").strip()
+            if empty_attempt > 0 and on_delta is not None:
+                on_delta("reset", "")
+            if on_delta is not None:
+                text, reasoning = self._stream_once(
+                    provider_idx, dict(create_kwargs, stream=True), on_delta
+                )
+            else:
+                response = self._clients[provider_idx].chat.completions.create(**create_kwargs)
+                text, reasoning = "", ""
+                if response.choices:
+                    message = response.choices[0].message
+                    text = (message.content or "").strip()
+                    # vLLM qwen3 思考模型经 reasoning_content 返回隐藏通道文本
+                    reasoning = (getattr(message, "reasoning_content", None) or "").strip()
             if text:
-                return text
+                return text, reasoning
             logger.warning(
                 "[VideoVLMCaller] EMPTY_RESPONSE | provider=%s model=%s attempt=%d/2",
                 cfg.provider, cfg.model, empty_attempt + 1,
@@ -195,14 +262,43 @@ class VideoVLMCaller:
             f"empty response content (provider={cfg.provider} model={cfg.model})"
         )
 
+    def _stream_once(
+        self,
+        provider_idx: int,
+        create_kwargs: dict,
+        on_delta: Callable[[str, str], None],
+    ) -> tuple:
+        """流式调用:逐 chunk 回调增量并聚合 (text, reasoning)。"""
+        stream = self._clients[provider_idx].chat.completions.create(**create_kwargs)
+        text_parts: List[str] = []
+        reasoning_parts: List[str] = []
+        for chunk in stream:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            reasoning_delta = (getattr(delta, "reasoning_content", None) or "")
+            if reasoning_delta:
+                reasoning_parts.append(reasoning_delta)
+                on_delta("reasoning", reasoning_delta)
+            content_delta = (getattr(delta, "content", None) or "")
+            if content_delta:
+                text_parts.append(content_delta)
+                on_delta("response", content_delta)
+        return "".join(text_parts).strip(), "".join(reasoning_parts).strip()
+
     def _execute_with_failover(
-        self, system_prompt: str, user_prompt: str, data_uri: str
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        data_uri: str,
+        on_delta: Optional[Callable[[str, str], None]] = None,
     ) -> tuple:
         """逐 provider 重试 + failover;语义对齐 VLMInferenceEngine._execute_with_retry。
 
         全停型错误(failover-trigger:401/配额/权限/5xx)在最后一个 provider 上
         升级为 AllProvidersExhaustedError 终止批处理——若按普通错误上抛,整批
-        会被静默 quarantine 且断点续跑永久跳过这些视频。
+        会被静默 quarantine 且断点续跑永久跳过这些视频。failover 切换 provider
+        前回调 reset(前一 provider 的流式部分输出作废)。
         """
         last_error: Optional[Exception] = None
         num_providers = len(self._providers)
@@ -215,7 +311,7 @@ class VideoVLMCaller:
             for attempt in range(max_retries):
                 try:
                     return self._execute_once(
-                        provider_idx, system_prompt, user_prompt, data_uri
+                        provider_idx, system_prompt, user_prompt, data_uri, on_delta
                     ), provider_idx
                 except Exception as exc:  # noqa: BLE001
                     last_error = exc
@@ -228,6 +324,8 @@ class VideoVLMCaller:
                                     self._providers[provider_idx + 1].provider,
                                     exc,
                                 )
+                                if on_delta is not None:
+                                    on_delta("reset", "")
                                 break
                             # 全停型错误发生在最后一个 provider:升级终止批处理
                             # (对齐 vlm_engine.py:698-707)。
@@ -245,6 +343,8 @@ class VideoVLMCaller:
                             wait_sec,
                             exc,
                         )
+                        if on_delta is not None:
+                            on_delta("reset", "")
                         time.sleep(wait_sec)
 
             if last_error is not None:
@@ -255,6 +355,8 @@ class VideoVLMCaller:
                         self._providers[provider_idx + 1].provider,
                         last_error,
                     )
+                    if on_delta is not None:
+                        on_delta("reset", "")
                     continue
                 if provider_idx == num_providers - 1:
                     raise AllProvidersExhaustedError(

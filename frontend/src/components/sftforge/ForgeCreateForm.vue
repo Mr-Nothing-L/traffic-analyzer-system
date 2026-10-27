@@ -14,6 +14,18 @@ const message = useMessage()
 const mode = ref<'checked' | 'dir'>('checked')
 const dirPath = ref('')
 const maxRounds = ref(2)
+const thinking = ref<'off' | 'low' | 'medium' | 'high'>('medium')
+const thinkingOptions = [
+  { value: 'off', label: '关闭' },
+  { value: 'low', label: '低' },
+  { value: 'medium', label: '中' },
+  { value: 'high', label: '高' },
+] as const
+const draft = ref<'pipeline' | 'prompt'>('pipeline')
+const draftOptions = [
+  { value: 'pipeline', label: '批量链路' },
+  { value: 'prompt', label: '快速单发' },
+] as const
 
 const checkedCount = computed(() => ws.checked.size)
 const canSubmit = computed(() => {
@@ -30,8 +42,15 @@ async function submit() {
             .filter((v) => ws.checked.has(v.rel))
             .map((v) => `${ws.path}/${v.rel}`),
           max_rounds: maxRounds.value,
+          thinking: thinking.value,
+          draft: draft.value,
         }
-      : { dir: dirPath.value.trim(), max_rounds: maxRounds.value }
+      : {
+          dir: dirPath.value.trim(),
+          max_rounds: maxRounds.value,
+          thinking: thinking.value,
+          draft: draft.value,
+        }
   const ok = await forge.start(body)
   if (ok) message.success(`已创建 SFT 生成任务 #${forge.jobId}`)
   else if (forge.error) message.error(forge.error)
@@ -87,6 +106,34 @@ async function submit() {
         size="small"
         style="width: 90px"
       />
+      <span class="ff-label">思考档位</span>
+      <span class="ff-seg" role="tablist" aria-label="思考档位">
+        <button
+          v-for="opt in thinkingOptions"
+          :key="opt.value"
+          class="ff-seg-btn"
+          :class="{ on: thinking === opt.value }"
+          :disabled="forge.running"
+          role="tab"
+          @click="thinking = opt.value"
+        >
+          {{ opt.label }}
+        </button>
+      </span>
+      <span class="ff-label">初稿链路</span>
+      <span class="ff-seg" role="tablist" aria-label="初稿链路">
+        <button
+          v-for="opt in draftOptions"
+          :key="opt.value"
+          class="ff-seg-btn"
+          :class="{ on: draft === opt.value }"
+          :disabled="forge.running"
+          role="tab"
+          @click="draft = opt.value"
+        >
+          {{ opt.label }}
+        </button>
+      </span>
       <n-button
         type="primary"
         size="small"

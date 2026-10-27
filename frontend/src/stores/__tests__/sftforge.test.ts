@@ -10,7 +10,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createPinia, setActivePinia } from 'pinia';
 import { useSftForgeStore } from '../sftforge';
-import type { ForgeResultPayload, RoundTrace } from '../../api/sftforge';
+import type { ForgeResultPayload, ForgeStoredResult, RoundTrace } from '../../api/sftforge';
 
 /* ---- fake EventSource:捕获监听,测试手动派发命名事件 ---- */
 type Listener = (ev: unknown) => void;
@@ -75,8 +75,11 @@ function resultPayload(over: Partial<ForgeResultPayload> = {}): ForgeResultPaylo
   };
 }
 
-/** 按 URL 路由的 fake fetch:config/events + jobs 创建 + result。 */
-function stubFetch(resultBody: ForgeResultPayload = resultPayload()) {
+/** 按 URL 路由的 fake fetch:config/events + jobs 创建 + result + store 读/删。 */
+function stubFetch(
+  resultBody: ForgeResultPayload = resultPayload(),
+  storedBody?: ForgeStoredResult,
+) {
   const calls: string[] = [];
   vi.stubGlobal(
     'fetch',
@@ -93,6 +96,14 @@ function stubFetch(resultBody: ForgeResultPayload = resultPayload()) {
         return jsonResponse({ job_id: 7, videos: ['/data/a.mp4', '/data/b.mp4'] });
       }
       if (url === '/api/sftforge/jobs/7/result') return jsonResponse(resultBody);
+      if (url === '/api/sftforge/store' && init?.method === 'DELETE') {
+        return jsonResponse({ deleted: true });
+      }
+      if (url === '/api/sftforge/store') {
+        return storedBody
+          ? jsonResponse(storedBody)
+          : jsonResponse({ detail: 'No stored sftforge result' }, 404);
+      }
       throw new Error('unexpected url: ' + url);
     }),
   );
@@ -176,6 +187,73 @@ describe('SSE 事件落地(幂等)', () => {
     expect(store.videos[0].rounds).toHaveLength(1);
   });
 
+  it('round_delta 流式增量:追加 → reset 清空 → completed 回填后清缓冲', async () => {
+    stubFetch();
+    const store = useSftForgeStore();
+    await store.start({ dir: '/data' });
+    const es = FakeEventSource.instances[0];
+
+    es.emit('round_started', { video: '/data/a.mp4', round_no: 0, kind: 'forward', event_ids: [] });
+    es.emit('round_delta', { video: '/data/a.mp4', round_no: 0, kind: 'forward', field: 'reasoning', text: '思1' });
+    es.emit('round_delta', { video: '/data/a.mp4', round_no: 0, kind: 'forward', field: 'reasoning', text: '思2' });
+    es.emit('round_delta', { video: '/data/a.mp4', round_no: 0, kind: 'forward', field: 'response', text: '答1' });
+    let r = store.videos[0].rounds[0];
+    expect(r.streamReasoning).toBe('思1思2');
+    expect(r.streamResponse).toBe('答1');
+
+    // reset(重试/failover 作废):两个缓冲都清空
+    es.emit('round_delta', { video: '/data/a.mp4', round_no: 0, kind: 'forward', field: 'reset', text: '' });
+    r = store.videos[0].rounds[0];
+    expect(r.streamReasoning).toBe('');
+    expect(r.streamResponse).toBe('');
+
+    // 重建增量,completed 回填 trace 后清缓冲转 done
+    es.emit('round_delta', { video: '/data/a.mp4', round_no: 0, kind: 'forward', field: 'response', text: '答' });
+    es.emit('round_completed', { video: '/data/a.mp4', trace: trace({ round_no: 0, kind: 'forward', event_ids: [] }) });
+    r = store.videos[0].rounds[0];
+    expect(r.state).toBe('done');
+    expect(r.streamReasoning).toBe('');
+    expect(r.streamResponse).toBe('');
+  });
+
+  it('round_delta 先于 round_started 到达(乱序)也就地占位', async () => {
+    stubFetch();
+    const store = useSftForgeStore();
+    await store.start({ dir: '/data' });
+    store.onRoundDelta({ video: '/data/a.mp4', round_no: 1, kind: 'correct_missing', field: 'reasoning', text: '思' });
+    const v = store.videos[0];
+    expect(v.rounds).toHaveLength(1);
+    expect(v.rounds[0].state).toBe('running');
+    expect(v.rounds[0].streamReasoning).toBe('思');
+  });
+
+  it('draft_step 初稿步骤:追加并按内容去重(回放不产生重复行)', async () => {
+    stubFetch();
+    const store = useSftForgeStore();
+    await store.start({ dir: '/data' });
+    const es = FakeEventSource.instances[0];
+    const step = { video: '/data/a.mp4', type: 'step', step: 1, total: 4, name: '视频预处理' };
+    es.emit('draft_step', step);
+    es.emit('draft_step', step); // 回放重复
+    es.emit('draft_step', { video: '/data/a.mp4', type: 'lane_done', lane: '违法停车', result: 'detected' });
+    const v = store.videos[0];
+    expect(v.draftSteps).toHaveLength(2);
+    expect(v.draftSteps[1].lane).toBe('违法停车');
+  });
+
+  it('ensureConnected:已连接时不重复建连(路由返回无感续上)', async () => {
+    stubFetch();
+    const store = useSftForgeStore();
+    await store.start({ dir: '/data' });
+    expect(FakeEventSource.instances).toHaveLength(1);
+    store.ensureConnected();
+    expect(FakeEventSource.instances).toHaveLength(1);
+    // 任务数据仍在(不重置):轮次事件落地后路由往返不丢失
+    FakeEventSource.instances[0].emit('round_started', { video: '/data/a.mp4', round_no: 0, kind: 'forward', event_ids: [] });
+    store.ensureConnected();
+    expect(store.videos[0].rounds).toHaveLength(1);
+  });
+
   it('video_completed 落定摘要;job_completed 终态关流并拉 result', async () => {
     const calls = stubFetch();
     const store = useSftForgeStore();
@@ -195,6 +273,27 @@ describe('SSE 事件落地(幂等)', () => {
     expect(calls).toContain('/api/sftforge/jobs/7/result GET');
     expect(store.result?.stats.match).toBe(1);
     expect(store.result?.jsonl).toHaveLength(1);
+  });
+
+  it('新字段透传:summary.r0_match 落定;result stats.corrected 保留', async () => {
+    const payload = resultPayload({
+      stats: { match: 1, quarantine: 0, skipped: 0, corrected: 1 },
+      videos: [
+        { video: '/data/a.mp4', match: true, skipped: false, reason: null, gt: [1, 6], rounds: 2, r0_match: false },
+      ],
+    });
+    stubFetch(payload);
+    const store = useSftForgeStore();
+    await store.start({ dir: '/data' });
+    const es = FakeEventSource.instances[0];
+
+    es.emit('video_completed', { video: '/data/a.mp4', match: true, skipped: false, reason: null, gt: [1, 6], rounds: 2, r0_match: false });
+    expect(store.videos[0].summary?.r0_match).toBe(false);
+
+    es.emit('job_completed', { stats: { match: 1, quarantine: 0, skipped: 0, corrected: 1 } });
+    await vi.waitFor(() => expect(store.result).not.toBeNull());
+    expect(store.result?.stats.corrected).toBe(1);
+    expect(store.result?.videos[0].r0_match).toBe(false);
   });
 
   it('job_failed:failed 态带错误文案,仍尝试拉 result 取服务端 error', async () => {
@@ -250,5 +349,105 @@ describe('纠错目标事件名集合', () => {
     await store.start({ dir: '/data' });
     const names = store.targetNamesOf([1, 6, 99]);
     expect([...names].sort()).toEqual(['交通拥堵', '违法停车']);
+  });
+});
+
+describe('工作区持久化恢复(restore/clearStored)', () => {
+  function storedPayload(over: Partial<ForgeStoredResult> = {}): ForgeStoredResult {
+    return {
+      ...resultPayload(),
+      saved_at: '2026-10-22T10:00',
+      rounds: {
+        '/data/a.mp4': [
+          { round_no: 0, kind: 'forward', event_ids: [], patched: false },
+          { round_no: 1, kind: 'correct_missing', event_ids: [6], patched: true },
+        ],
+      },
+      ...over,
+    };
+  }
+
+  it('idle 空视图:GET store 恢复视频列表(折叠卡)+ 结果面板数据', async () => {
+    stubFetch(resultPayload(), storedPayload());
+    const store = useSftForgeStore();
+    const ok = await store.restore();
+    expect(ok).toBe(true);
+    expect(store.status).toBe('done');
+    expect(store.result?.stats.match).toBe(1);
+    expect(store.result?.jsonl).toHaveLength(1);
+    // 视频列表:摘要落定(徽标数据源),轮次以最小 trace 回填(done 态折叠卡)
+    expect(store.videos).toHaveLength(1);
+    const v = store.videos[0];
+    expect(v.summary?.match).toBe(true);
+    expect(v.rounds).toHaveLength(2);
+    expect(v.rounds[0].state).toBe('done');
+    // 「第 N 轮修正」标注数据源:patched/event_ids 经回填 trace 可读
+    expect(v.rounds[1].trace?.patched).toBe(true);
+    expect([...store.targetNamesOf(v.rounds[1].event_ids)]).toEqual(['交通拥堵']);
+    // 事件名已加载(结果面板真值/标签展示)
+    expect(store.eventNames[6]).toBe('交通拥堵');
+  });
+
+  it('缓存含 r0_match 新字段:恢复后摘要与结果透传(徽标数据源)', async () => {
+    const stored = storedPayload();
+    stored.videos = [{ ...stored.videos[0], r0_match: false }];
+    stored.stats = { ...stored.stats, corrected: 1 };
+    stubFetch(resultPayload(), stored);
+    const store = useSftForgeStore();
+    expect(await store.restore()).toBe(true);
+    expect(store.videos[0].summary?.r0_match).toBe(false);
+    expect(store.result?.videos[0].r0_match).toBe(false);
+    expect(store.result?.stats.corrected).toBe(1);
+  });
+
+  it('历史缓存缺 r0_match:恢复后字段为空,rounds patched 可供视图回退判定', async () => {
+    stubFetch(resultPayload(), storedPayload());
+    const store = useSftForgeStore();
+    expect(await store.restore()).toBe(true);
+    const v = store.videos[0];
+    expect(v.summary?.r0_match).toBeUndefined();
+    // 回退判定数据源:round_no>0 且 patched 的轮次在回填 trace 中可读
+    expect(v.rounds.some((r) => r.round_no > 0 && r.trace?.patched)).toBe(true);
+  });
+
+  it('failed 终态缓存:恢复为 failed 并带错误文案', async () => {    stubFetch(
+      resultPayload(),
+      storedPayload({ status: 'failed', error: 'api_unavailable: boom' }),
+    );
+    const store = useSftForgeStore();
+    expect(await store.restore()).toBe(true);
+    expect(store.status).toBe('failed');
+    expect(store.error).toBe('api_unavailable: boom');
+  });
+
+  it('无缓存(404):静默 no-op,保持 idle', async () => {
+    stubFetch();
+    const store = useSftForgeStore();
+    expect(await store.restore()).toBe(false);
+    expect(store.status).toBe('idle');
+    expect(store.videos).toHaveLength(0);
+    expect(store.result).toBeNull();
+  });
+
+  it('任务在跑/已有视频:restore 不覆盖现有状态', async () => {
+    const calls = stubFetch(resultPayload(), storedPayload());
+    const store = useSftForgeStore();
+    await store.start({ dir: '/data' });
+    expect(await store.restore()).toBe(false);
+    expect(store.status).toBe('running');
+    expect(store.videos.map((v) => v.video)).toEqual(['/data/a.mp4', '/data/b.mp4']);
+    expect(calls).not.toContain('/api/sftforge/store GET');
+  });
+
+  it('clearStored:DELETE 后清空视图回 idle', async () => {
+    const calls = stubFetch(resultPayload(), storedPayload());
+    const store = useSftForgeStore();
+    await store.restore();
+    expect(store.status).toBe('done');
+    await store.clearStored();
+    expect(calls).toContain('/api/sftforge/store DELETE');
+    expect(store.status).toBe('idle');
+    expect(store.videos).toHaveLength(0);
+    expect(store.result).toBeNull();
   });
 });

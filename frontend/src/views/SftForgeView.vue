@@ -1,40 +1,30 @@
 <script setup lang="ts">
 /** SFT 生成面板(右上角独立入口,工作台主区视图):
- * 创建任务卡(勾选视频/指定目录 + max_rounds)→ 连接逐任务 SSE 展示
- * 进度:左侧视频列表(等待/进行中/一致/隔离/跳过徽标 + 轮数),右侧选中
- * 视频的逐轮时间线卡(ForgeRoundCard);终态展示结果面板(统计 + JSONL)。
+ * 创建任务卡(勾选视频/指定目录 + max_rounds + 思考档位)→ 连接逐任务 SSE
+ * 展示进度:左侧视频状态索引,右侧每视频一张可折叠卡片(ForgeVideoCard,
+ * 全部轮次 + 流式思考 + 最终结论都在卡内;进行中展开、完成自动折叠);
+ * 终态展示结果面板(统计 + JSONL)。
  * 状态在 stores/sftforge.ts,组件只接线。 */
-import { computed, onUnmounted, ref } from 'vue'
+import { computed, onMounted } from 'vue'
 import { NButton } from 'naive-ui'
 import { useRouter } from 'vue-router'
 import ForgeCreateForm from '../components/sftforge/ForgeCreateForm.vue'
 import ForgeResultPanel from '../components/sftforge/ForgeResultPanel.vue'
-import ForgeRoundCard from '../components/sftforge/ForgeRoundCard.vue'
+import ForgeVideoCard from '../components/sftforge/ForgeVideoCard.vue'
 import UiIcon from '../components/UiIcon.vue'
 import { useSftForgeStore } from '../stores/sftforge'
 import type { ForgeVideoState } from '../stores/sftforge'
-import { videoBaseName } from '../utils/sftforge'
+import { forgeOutcomeBadge, videoBaseName } from '../utils/sftforge'
 
 const forge = useSftForgeStore()
 const router = useRouter()
 
-const selected = ref<string | null>(null)
-
-/** 选中视频:用户手选优先;默认跟随最新有轮次活动的视频(纠错过程自动呈现)。 */
-const current = computed<ForgeVideoState | null>(() => {
-  if (selected.value) {
-    const v = forge.videos.find((x) => x.video === selected.value)
-    if (v) return v
-  }
-  const active = [...forge.videos].reverse().find((v) => v.rounds.length > 0)
-  return active ?? forge.videos[0] ?? null
-})
-
 function videoBadge(v: ForgeVideoState): { text: string; cls: string } {
   if (v.summary) {
-    if (v.summary.skipped) return { text: '已跳过', cls: 'ff-badge-skip' }
-    if (v.summary.match) return { text: '一致', cls: 'ff-badge-match' }
-    return { text: '隔离', cls: 'ff-badge-quar' }
+    return forgeOutcomeBadge(
+      v.summary,
+      v.rounds.map((r) => ({ round_no: r.round_no, patched: !!r.trace?.patched })),
+    )
   }
   if (v.rounds.length) return { text: '进行中', cls: 'ff-badge-run' }
   return { text: '等待', cls: 'ff-badge-wait' }
@@ -49,8 +39,13 @@ const statusText = computed(() => {
   return ''
 })
 
-// 离开面板断开 SSE(服务端任务继续,重进可经新任务重建;事件回放由服务端支持)
-onUnmounted(() => forge.reset())
+// store 跨路由存活:离开面板不重置(结果保留,SSE 保持连接);
+// 回来时若连接已断则重连(服务端回放历史,无感续上);
+// 服务重启后内存为空(idle 无视频)则从工作区持久化缓存恢复上次结果
+onMounted(() => {
+  forge.ensureConnected()
+  void forge.restore()
+})
 </script>
 
 <template>
@@ -69,35 +64,26 @@ onUnmounted(() => forge.reset())
 
     <div v-if="forge.videos.length" class="ff-progress">
       <div class="ff-videos" role="listbox" aria-label="任务视频列表">
-        <button
+        <span
           v-for="v in forge.videos"
           :key="v.video"
           class="ff-video-row"
-          :class="{ on: current?.video === v.video }"
           role="option"
-          :aria-selected="current?.video === v.video"
           :title="v.video"
-          @click="selected = v.video"
         >
           <span class="ff-video-name">{{ videoBaseName(v.video) }}</span>
           <span v-if="v.rounds.length" class="ff-video-meta">{{ v.rounds.length }} 轮</span>
           <span class="ff-badge" :class="videoBadge(v).cls">{{ videoBadge(v).text }}</span>
-        </button>
+        </span>
       </div>
       <div class="ff-timeline">
-        <template v-if="current">
-          <div v-if="current.summary?.reason" class="ff-card-sub">
-            {{ current.summary.skipped ? '跳过原因' : '隔离原因' }}:{{ current.summary.reason }}
-          </div>
-          <ForgeRoundCard
-            v-for="r in current.rounds"
-            :key="`${r.round_no}-${r.kind}`"
-            :round="r"
-            :target-names="forge.targetNamesOf(r.event_ids)"
-            :event-names="forge.eventNames"
-          />
-          <div v-if="!current.rounds.length" class="ff-empty">等待轮次事件…</div>
-        </template>
+        <ForgeVideoCard
+          v-for="v in forge.videos"
+          :key="v.video"
+          :video-state="v"
+          :event-names="forge.eventNames"
+          :target-names-of="forge.targetNamesOf"
+        />
       </div>
     </div>
 

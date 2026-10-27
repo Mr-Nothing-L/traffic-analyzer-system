@@ -99,8 +99,11 @@ class TestGt:
             1, 2, 4, 5, 6, 11,
         }
 
-    def test_normal_09_skipped(self) -> None:
-        assert gt_for_video("09_Event_2048_xxx.mp4", NAMES) is None
+    def test_normal_09_is_valid(self) -> None:
+        assert gt_for_video("09_Event_2048_xxx.mp4", NAMES) == {9}
+
+    def test_normal_mixed_with_event_is_invalid(self) -> None:
+        assert gt_for_video("01-09_Event_2048_xxx.mp4", NAMES) is None
 
     def test_unparseable_skipped(self) -> None:
         assert gt_for_video("random_name.mp4", NAMES) is None
@@ -108,3 +111,9 @@ class TestGt:
     def test_diff(self) -> None:
         assert diff_predictions({1, 3}, {1, 2}) == ([2], [3])
         assert diff_predictions({1, 2}, {1, 2}) == ([], [])
+
+    def test_diff_normal_uses_empty_event_set(self) -> None:
+        assert diff_predictions(set(), {9}) == ([], [])
+        assert diff_predictions({9}, {9}) == ([], [])
+        assert diff_predictions({1, 2}, {9}) == ([], [1, 2])
+        assert diff_predictions({1, 9}, {9}) == ([], [1])
